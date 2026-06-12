@@ -5121,6 +5121,8 @@ zink_image_copy_buffer(struct pipe_context *pctx,
 
    zink_copy_image_buffer(zink_context(pctx), zink_resource(pdst), zink_resource(psrc),
                           buffer_offset, stride, layer_stride, level, box, 0);
+   if (zink_resource(img)->fb_bind_count)
+      zink_context(pctx)->rp_tc_info_updated = true;
 }
 
 static void
@@ -5270,6 +5272,8 @@ zink_resource_copy_region(struct pipe_context *pctx,
                      dst->obj->image, dst->layout,
                      1, &region);
       zink_cmd_debug_marker_end(ctx, cmdbuf, marker);
+      if (dst->fb_bind_count)
+         ctx->rp_tc_info_updated = true;
    } else if (dst->base.b.target == PIPE_BUFFER &&
               src->base.b.target == PIPE_BUFFER) {
       zink_copy_buffer(ctx, dst, src, dstx, src_box->x, src_box->width, false);
