@@ -375,9 +375,12 @@ zink_blit(struct pipe_context *pctx,
       if (resolve == info->dst.resource) {
          zink_batch_no_rp_safe(ctx);
          ctx->awaiting_resolve = false;
+         ctx->rp_tc_info_updated = true;
          return;
       }
    }
+   if (dst->fb_bind_count)
+      ctx->rp_tc_info_updated = true;
 
    if (zink_is_swapchain(dst)) {
       if (!zink_kopper_acquire(ctx, dst, UINT64_MAX))
