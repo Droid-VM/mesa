@@ -1829,6 +1829,13 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_device_memory_report",
 #endif
 #ifdef LINUX_GUEST_BUILD
+        // Required by Zink: the nullDescriptor feature lives in VK_EXT_robustness2 /
+        // VK_KHR_robustness2. The host Turnip driver advertises these, but this guest
+        // allowlist was dropping them (host 151 exts -> guest 81), so zink saw no
+        // robustness2 and aborted device creation. Only passes through if the host
+        // actually advertises them (intersection below).
+        "VK_EXT_robustness2",
+        "VK_KHR_robustness2",
         // Passthrough if available on host. Will otherwise be emulated by guest
         "VK_EXT_image_drm_format_modifier",
         "VK_KHR_external_memory_fd",
@@ -4095,7 +4102,17 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
             }
-        } else if (hasDedicatedBuffer) {
+        } else {
+            // Zero-copy: any exportDmabuf allocation that does not have a
+            // dedicated image must still be backed by an exportable VirtGpu
+            // resource. This covers both a dedicated buffer AND allocations with
+            // no dedicated resource at all -- e.g. the WSI dma-buf sync-file
+            // capability probe in wsi_common_drm.c
+            // (wsi_drm_check_dma_buf_sync_file_import_export) which allocates a
+            // 4096-byte VkExportMemoryAllocateInfo(DMA_BUF) memory and then calls
+            // vkGetMemoryFdKHR on it. Without a blob, on_vkGetMemoryFdKHR fails
+            // ("does not have a resource available for export"), the probe fails,
+            // and WSI silently drops back from explicit dma-buf sync.
             uint32_t virglFormat = VIRGL_FORMAT_R8_UNORM;
             const uint32_t target = PIPE_BUFFER;
             uint32_t bind = VIRGL_BIND_LINEAR;
@@ -4149,20 +4166,16 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
             }
-        } else {
-            mesa_logw(
-                "VkDeviceMemory is not exportable (VkExportMemoryAllocateInfo). Requires "
-                "VkMemoryDedicatedAllocateInfo::image to create external resource.");
         }
     }
 
     if (bufferBlob) {
-        if (hasDedicatedBuffer) {
-            importBufferInfo.buffer = bufferBlob->getResourceHandle();
-            vk_append_struct(&structChainIter, &importBufferInfo);
-        } else {
+        if (hasDedicatedImage) {
             importCbInfo.colorBuffer = bufferBlob->getResourceHandle();
             vk_append_struct(&structChainIter, &importCbInfo);
+        } else {
+            importBufferInfo.buffer = bufferBlob->getResourceHandle();
+            vk_append_struct(&structChainIter, &importBufferInfo);
         }
     }
 #endif
@@ -7003,11 +7016,16 @@ void ResourceTracker::on_vkUpdateDescriptorSetWithTemplate(
 
                 // TODO(b/355497683): move this into gfxstream_vk_UpdateDescriptorSetWithTemplate().
 #if DETECT_OS_LINUX || defined(VK_USE_PLATFORM_ANDROID_KHR)
-                // Convert mesa to internal for objects in the user buffer
+                // Convert mesa to internal for objects in the user buffer.
+                // buffer may legitimately be VK_NULL_HANDLE when the device advertises the
+                // robustness2 nullDescriptor feature (zink binds null descriptors); the
+                // VK_FROM_HANDLE then yields a NULL wrapper, so guard the unwrap instead of
+                // dereferencing it (was an unconditional ->internal_object -> SIGSEGV).
                 VkDescriptorBufferInfo* internalBufferInfo =
                     (VkDescriptorBufferInfo*)(((uint8_t*)bufferInfos) + currBufferInfoOffset);
                 VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, internalBufferInfo->buffer);
-                internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+                internalBufferInfo->buffer =
+                    gfxstream_buffer ? gfxstream_buffer->internal_object : VK_NULL_HANDLE;
 #endif
                 currBufferInfoOffset += sizeof(VkDescriptorBufferInfo);
             }

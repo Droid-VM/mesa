@@ -91,6 +91,12 @@ SUPPORTED_FEATURES = [
     "VK_KHR_descriptor_update_template",
     "VK_EXT_depth_clip_enable",
     "VK_EXT_robustness2",
+    # In Vulkan >=1.4 vk.xml, VK_EXT_robustness2's feature struct is an alias of
+    # the promoted VK_KHR_robustness2 struct (the canonical one). Without the KHR
+    # extension here, cereal emits the struct typedef but NOT its marshaling /
+    # pNext-sType routing, so the robustness2 feature (nullDescriptor) is silently
+    # dropped on the guest<->host wire and Zink rejects the device.
+    "VK_KHR_robustness2",
     "VK_KHR_multiview",
     "VK_EXT_blend_operation_advanced",
     "VK_EXT_frame_boundary",
