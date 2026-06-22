@@ -3330,13 +3330,35 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
          ctx->dynamic_fb.attachments[PIPE_MAX_COLOR_BUFS + 1].resolveMode = 0;
       }
    }
+   struct zink_resource *resolves[] = {
+      zink_resource(ctx->fb_state.resolve),
+      zink_resource(ctx->dynamic_fb.tc_info.resolve[1]),
+   };
+   if (!resolves[0])
+      resolves[0] = zink_resource(ctx->dynamic_fb.tc_info.resolve[0]);
    if (use_tc_info && ctx->dynamic_fb.tc_info.has_resolve) {
-      struct zink_resource *resolves[] = {
-         zink_resource(ctx->fb_state.resolve),
-         zink_resource(ctx->dynamic_fb.tc_info.resolve[1]),
-      };
-      if (!resolves[0])
-         resolves[0] = zink_resource(ctx->dynamic_fb.tc_info.resolve[0]);
+      bool has_depth_invalidate = (!ctx->dynamic_fb.info.pDepthAttachment ||
+                                    ctx->dynamic_fb.info.pDepthAttachment->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) &&
+                                    (!ctx->dynamic_fb.info.pStencilAttachment ||
+                                    ctx->dynamic_fb.info.pStencilAttachment->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+      bool has_invalidate = (!resolves[1] || has_depth_invalidate) && (!resolves[0] || ctx->dynamic_fb.attachments[0].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+      if (ctx->dynamic_fb.tc_info.resolve_geometry.x != ctx->dynamic_fb.info.renderArea.offset.x ||
+          ctx->dynamic_fb.tc_info.resolve_geometry.y != ctx->dynamic_fb.info.renderArea.offset.y ||
+          ctx->dynamic_fb.tc_info.resolve_geometry.width != ctx->dynamic_fb.info.renderArea.extent.width ||
+          ctx->dynamic_fb.tc_info.resolve_geometry.height != ctx->dynamic_fb.info.renderArea.extent.height ||
+          ctx->dynamic_fb.tc_info.resolve_geometry.depth != ctx->dynamic_fb.info.layerCount) {
+         /* partial resolve: this is viable if invalidating, otherwise can't inline the resolve */
+         if (has_invalidate) {
+            ctx->dynamic_fb.info.renderArea.offset.x = ctx->dynamic_fb.tc_info.resolve_geometry.x;
+            ctx->dynamic_fb.info.renderArea.offset.y = ctx->dynamic_fb.tc_info.resolve_geometry.y;
+            ctx->dynamic_fb.info.renderArea.extent.width = ctx->dynamic_fb.tc_info.resolve_geometry.width;
+            ctx->dynamic_fb.info.renderArea.extent.height = ctx->dynamic_fb.tc_info.resolve_geometry.height;
+         } else {
+            ctx->dynamic_fb.tc_info.has_resolve = false;
+         }
+      }
+   }
+   if (use_tc_info && ctx->dynamic_fb.tc_info.has_resolve) {
       for (unsigned i = 0; i < ARRAY_SIZE(resolves); i++) {
          struct zink_resource *res = resolves[i];
          if (!res) {
@@ -3353,7 +3375,9 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
             zink_resource_object_init_mutable(ctx, res);
          struct pipe_surface tmpl = {
             .format = format,
-            .texture = &res->base.b
+            .texture = &res->base.b,
+            .first_layer = ctx->dynamic_fb.tc_info.resolve_geometry.z,
+            .last_layer = ctx->dynamic_fb.tc_info.resolve_geometry.depth - 1,
          };
          if (zink_is_swapchain(res)) {
             if (!zink_kopper_acquire(ctx, res, UINT64_MAX)) {
@@ -3378,6 +3402,7 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
             ctx->dynamic_fb.attachments[idx + 1].resolveImageView = surf->image_view;
          }
          zink_resource_reference(&ctx->fb_resolve[i], res);
+
       }
    }
    ctx->zsbuf_unused = !zsbuf_used;
