@@ -211,3 +211,26 @@ void gfxstream_vk_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
                                           pCounterBuffers ? internal_pCounterBuffers.data() : NULL,
                                           pCounterBufferOffsets, true /* do lock */);
 }
+
+// Push-descriptor-with-template is unrolled guest-side into a typed
+// vkCmdPushDescriptorSet (write-array): the untyped pData cannot be decoded on
+// the host, where it previously crashed the whole VMM. Excluded from autogen
+// (see functable.py NON_AUTOGEN_ENTRYPOINTS); the KHR alias shares the impl.
+void gfxstream_vk_CmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void* pData) {
+    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetWithTemplateKHR");
+    VK_FROM_HANDLE(gfxstream_vk_command_buffer, gfxstream_commandBuffer, commandBuffer);
+    auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(
+        gfxstream_commandBuffer->internal_object);
+    gfxstream::vk::ResourceTracker::get()->on_vkCmdPushDescriptorSetWithTemplate(
+        vkEnc, gfxstream_commandBuffer->internal_object, descriptorUpdateTemplate, layout, set,
+        pData);
+}
+
+void gfxstream_vk_CmdPushDescriptorSetWithTemplate(
+    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void* pData) {
+    gfxstream_vk_CmdPushDescriptorSetWithTemplateKHR(commandBuffer, descriptorUpdateTemplate,
+                                                     layout, set, pData);
+}

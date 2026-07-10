@@ -427,6 +427,13 @@ class ResourceTracker {
         const VkAllocationCallbacks* pAllocator,
         VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate);
 
+    // Unroll a push-descriptor template into a typed vkCmdPushDescriptorSet on the
+    // encoder (host cannot decode the untyped pData). Guest-side, mirrors the
+    // handle conversion of on_vkUpdateDescriptorSetWithTemplate.
+    void on_vkCmdPushDescriptorSetWithTemplate(void* context, VkCommandBuffer commandBuffer,
+                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+                                               VkPipelineLayout layout, uint32_t set,
+                                               const void* pData);
     void on_vkUpdateDescriptorSetWithTemplate(void* context, VkDevice device,
                                               VkDescriptorSet descriptorSet,
                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
@@ -813,6 +820,9 @@ class ResourceTracker {
         VkBufferView* bufferViews;
         std::vector<uint8_t> inlineUniformBlockBuffer;
         std::vector<uint32_t> inlineUniformBlockBytesPerBlocks;  // bytes per uniform block
+        // Bind point recorded at create time; only meaningful for push-descriptor
+        // templates, where CmdPushDescriptorSetWithTemplate has no bind-point arg.
+        VkPipelineBindPoint pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     };
 
     struct VkFence_Info {

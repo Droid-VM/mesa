@@ -125,6 +125,10 @@ NON_AUTOGEN_ENTRYPOINTS = [
     "vkResetCommandPool",
     # Transform feedback
     "vkCmdBeginTransformFeedbackEXT",
+    # Push descriptor with template: untyped pData is not host-decodable, so the
+    # guest unrolls it into a typed vkCmdPushDescriptorSet (write-array) here.
+    "vkCmdPushDescriptorSetWithTemplate",
+    "vkCmdPushDescriptorSetWithTemplateKHR",
     # Special cases to handle struct translations in the pNext chain
     # TODO: Make a codegen module (use deepcopy as reference) to make this more robust
     "vkAllocateMemory",

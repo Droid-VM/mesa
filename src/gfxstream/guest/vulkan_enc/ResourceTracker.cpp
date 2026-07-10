@@ -1830,6 +1830,15 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         // Passthrough if available on host. Will otherwise be emulated by guest
         "VK_EXT_image_drm_format_modifier",
         "VK_KHR_external_memory_fd",
+        // Required by Minecraft 26.2's official Vulkan backend (host Turnip
+        // advertises all three; intersection below keeps them host-gated).
+        // NOTE: VK_KHR_push_descriptor is withheld for now — exposing it makes
+        // zink use vkCmdPushDescriptorSetWithTemplateKHR, and the host gfxstream
+        // sub-decoder crashes unmarshalling that op (template pData path). Host
+        // decode must be fixed before re-adding it.
+        // "VK_KHR_push_descriptor",
+        "VK_EXT_multi_draw",
+        "VK_EXT_vertex_attribute_divisor",
 #endif
         // Vulkan 1.1
         // "VK_KHR_16bit_storage",
@@ -1902,6 +1911,31 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
 
         if (hostRes != VK_SUCCESS) {
             return hostRes;
+        }
+    }
+
+    // VK_KHR_push_descriptor is opt-in per process: the host sub-decoder cannot
+    // yet unmarshal vkCmdPushDescriptorSetWithTemplate (untyped pData needs the
+    // template layout; codegen consumes 1 byte and desyncs the stream), and zink
+    // uses exactly that path, killing the VM. Plain write-array pushes decode
+    // fine, so apps that only use those (e.g. Minecraft) may enable it via env.
+    // VK_KHR_push_descriptor is now always safe: the guest unrolls
+    // vkCmdPushDescriptorSetWithTemplate into a typed vkCmdPushDescriptorSet
+    // (host cannot decode the untyped pData), and the host sub-decoder drops any
+    // raw push-template op instead of crashing. No env gate needed.
+    allowedExtensionNames.push_back("VK_KHR_push_descriptor");
+
+    // Debug: which MC-required exts did the host actually hand us?
+    {
+        static bool once = false;
+        if (!once) {
+            once = true;
+            const char* checks[] = {"VK_KHR_push_descriptor", "VK_EXT_multi_draw",
+                                    "VK_EXT_vertex_attribute_divisor"};
+            for (const char* c : checks) {
+                fprintf(stderr, "HOSTEXT %s: %d\n", c, getHostDeviceExtensionIndex(c));
+            }
+            fprintf(stderr, "HOSTEXT total=%zu\n", mHostDeviceExtensions.size());
         }
     }
 
@@ -6701,6 +6735,7 @@ VkResult ResourceTracker::initDescriptorUpdateTemplateBuffers(
     }
 
     auto& info = it->second;
+    info.pipelineBindPoint = pCreateInfo->pipelineBindPoint;
     uint32_t inlineUniformBlockBufferSize = 0;
 
     for (uint32_t i = 0; i < pCreateInfo->descriptorUpdateEntryCount; ++i) {
@@ -6799,6 +6834,102 @@ VkResult ResourceTracker::on_vkCreateDescriptorUpdateTemplate(
     if (input_result != VK_SUCCESS) return input_result;
 
     return initDescriptorUpdateTemplateBuffers(pCreateInfo, *pDescriptorUpdateTemplate);
+}
+
+void ResourceTracker::on_vkCmdPushDescriptorSetWithTemplate(
+    void* context, VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate, VkPipelineLayout layout, uint32_t set,
+    const void* pData) {
+    VkEncoder* enc = (VkEncoder*)context;
+    uint8_t* userBuffer = (uint8_t*)pData;
+    if (!userBuffer) return;
+
+    uint32_t entryCount = 0;
+    VkDescriptorUpdateTemplateEntry* entries = nullptr;
+    VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    {
+        std::unique_lock<std::recursive_mutex> lock(mLock);
+        auto it = info_VkDescriptorUpdateTemplate.find(descriptorUpdateTemplate);
+        if (it == info_VkDescriptorUpdateTemplate.end()) return;
+        entryCount = it->second.templateEntryCount;
+        entries = it->second.templateEntries;
+        bindPoint = it->second.pipelineBindPoint;
+    }
+    if (!entries) return;
+
+    // Per-entry typed storage; reserved so the vectors never reallocate (keeps the
+    // .data() pointers stored in each VkWriteDescriptorSet valid until the call).
+    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<std::vector<VkDescriptorImageInfo>> imageStore;
+    std::vector<std::vector<VkDescriptorBufferInfo>> bufferStore;
+    std::vector<std::vector<VkBufferView>> bufferViewStore;
+    writes.reserve(entryCount);
+    imageStore.reserve(entryCount);
+    bufferStore.reserve(entryCount);
+    bufferViewStore.reserve(entryCount);
+
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        const auto& entry = entries[i];
+        VkDescriptorType descType = entry.descriptorType;
+        size_t offset = entry.offset;
+        size_t stride = entry.stride;
+        uint32_t descCount = entry.descriptorCount;
+
+        VkWriteDescriptorSet w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = VK_NULL_HANDLE;  // ignored for push descriptors
+        w.dstBinding = entry.dstBinding;
+        w.dstArrayElement = entry.dstArrayElement;
+        w.descriptorCount = descCount;
+        w.descriptorType = descType;
+
+        if (isDescriptorTypeImageInfo(descType)) {
+            if (!stride) stride = sizeof(VkDescriptorImageInfo);
+            imageStore.emplace_back(descCount);
+            auto& store = imageStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride,
+                       sizeof(VkDescriptorImageInfo));
+            }
+            w.pImageInfo = store.data();
+        } else if (isDescriptorTypeBufferInfo(descType)) {
+            if (!stride) stride = sizeof(VkDescriptorBufferInfo);
+            bufferStore.emplace_back(descCount);
+            auto& store = bufferStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride,
+                       sizeof(VkDescriptorBufferInfo));
+#if DETECT_OS_LINUX || defined(VK_USE_PLATFORM_ANDROID_KHR)
+                // Convert mesa buffer wrapper to internal; VK_NULL_HANDLE stays null
+                // (robustness2 nullDescriptor), mirroring the update-template path.
+                VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, store[j].buffer);
+                store[j].buffer =
+                    gfxstream_buffer ? gfxstream_buffer->internal_object : VK_NULL_HANDLE;
+#endif
+            }
+            w.pBufferInfo = store.data();
+        } else if (isDescriptorTypeBufferView(descType)) {
+            if (!stride) stride = sizeof(VkBufferView);
+            bufferViewStore.emplace_back(descCount);
+            auto& store = bufferViewStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride, sizeof(VkBufferView));
+            }
+            w.pTexelBufferView = store.data();
+        } else {
+            // Inline uniform block / unknown: not yet unrolled. Skip rather than
+            // push a malformed write (would corrupt the guest's own rendering only).
+            mesa_logw("gfxstream: push-template descriptor type %d not unrolled, skipping\n",
+                      descType);
+            continue;
+        }
+        writes.push_back(w);
+    }
+
+    if (writes.empty()) return;
+    enc->vkCmdPushDescriptorSet(commandBuffer, bindPoint, layout, set,
+                                static_cast<uint32_t>(writes.size()), writes.data(),
+                                true /* do lock */);
 }
 
 void ResourceTracker::on_vkUpdateDescriptorSetWithTemplate(
