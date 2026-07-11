@@ -1841,7 +1841,9 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_vertex_attribute_divisor",
 #endif
         // Vulkan 1.1
-        // "VK_KHR_16bit_storage",
+        // llama.cpp/ggml requires the extension unconditionally once the core-1.1
+        // storageBuffer16BitAccess feature reports true; host turnip has it.
+        "VK_KHR_16bit_storage",
         "VK_KHR_device_group",
         "VK_KHR_device_group_creation",
         "VK_KHR_external_fence_capabilities",
