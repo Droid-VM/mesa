@@ -199,7 +199,14 @@ VirtGpuResourceMappingPtr DrmVirtGpuResource::createMapping() {
         return nullptr;
     }
 
-    mesa_logw("GFXSTREAM_MAP: mapped %llu bytes at %p", (unsigned long long)mSize, ptr);
+#if defined(MAP_FIXED_NOREPLACE)
+    // Only trace the high (fallback) mapping when the low-VA experiment is on,
+    // to correlate with GFXSTREAM_MAP_LOW; otherwise stay silent (every
+    // host-visible mapping goes through here).
+    if (gfxstreamLowVaEnabled()) {
+        mesa_logw("GFXSTREAM_MAP: high mapping %llu bytes at %p", (unsigned long long)mSize, ptr);
+    }
+#endif
     return std::make_shared<DrmVirtGpuResourceMapping>(shared_from_this(), ptr, mSize);
 }
 
