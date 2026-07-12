@@ -9,6 +9,7 @@
 #include <xf86drm.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -96,6 +97,42 @@ VirtGpuResourceMappingPtr DrmVirtGpuResource::createMapping() {
         return nullptr;
     }
 
+    // DroidVM experiment (GFXSTREAM_MAP_LOW=1): place host-visible mappings in
+    // the low 4GB so a 32-bit WoW64/FEX caller can hold the pointer (wine
+    // win32u rejects >4GB maps as "does not fit 32-bit pointer"). Managed bump
+    // allocator with MAP_FIXED_NOREPLACE; only accept a mapping that lands
+    // exactly at the requested low hint, otherwise fall through to the normal
+    // kernel-placed (high) mapping. Default off -> zero effect on 64-bit apps.
+#if defined(MAP_FIXED_NOREPLACE)
+    static const bool sMapLow = [] {
+        const char* e = getenv("GFXSTREAM_MAP_LOW");
+        return e && e[0] == '1';
+    }();
+    if (sMapLow) {
+        static std::mutex sLowMutex;
+        static uintptr_t sLowNext = 0x40000000ULL;  // 1GB: above typical program image
+        const uintptr_t kLowTop = 0xF0000000ULL;     // keep under 4GB with headroom
+        const uintptr_t aligned = (mSize + 0xFFF) & ~uintptr_t(0xFFF);
+        std::lock_guard<std::mutex> lk(sLowMutex);
+        for (int tries = 0; tries < 128 && sLowNext + aligned < kLowTop; ++tries) {
+            void* hint = reinterpret_cast<void*>(sLowNext);
+            void* got = mmap(hint, mSize, PROT_WRITE | PROT_READ,
+                             MAP_SHARED | MAP_FIXED_NOREPLACE, mDeviceHandle, map.offset);
+            if (got != MAP_FAILED && reinterpret_cast<uintptr_t>(got) == sLowNext) {
+                sLowNext += aligned;
+                mesa_logw("GFXSTREAM_MAP_LOW: mapped %llu bytes at %p (low)",
+                          (unsigned long long)mSize, got);
+                return std::make_shared<DrmVirtGpuResourceMapping>(shared_from_this(),
+                                                                   static_cast<uint8_t*>(got), mSize);
+            }
+            if (got != MAP_FAILED) munmap(got, mSize);  // landed off-hint: reject
+            sLowNext += aligned;                         // step past the occupied slot
+        }
+        mesa_logw("GFXSTREAM_MAP_LOW: no free low slot (size=%llu), falling back to high",
+                  (unsigned long long)mSize);
+    }
+#endif
+
     uint8_t* ptr = static_cast<uint8_t*>(
         mmap(nullptr, mSize, PROT_WRITE | PROT_READ, MAP_SHARED, mDeviceHandle, map.offset));
 
@@ -104,6 +141,7 @@ VirtGpuResourceMappingPtr DrmVirtGpuResource::createMapping() {
         return nullptr;
     }
 
+    mesa_logw("GFXSTREAM_MAP: mapped %llu bytes at %p", (unsigned long long)mSize, ptr);
     return std::make_shared<DrmVirtGpuResourceMapping>(shared_from_this(), ptr, mSize);
 }
 
