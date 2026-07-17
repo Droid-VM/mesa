@@ -186,8 +186,12 @@ struct tu_physical_device
    struct tu_memory_heap heap;
 
    struct vk_sync_type syncobj_type;
+   /* virtio only: syncobj wrapped with a userspace-fence poll fast path;
+    * installed as sync_types[0] so fences/binary semaphores use it while
+    * timeline semaphores keep using syncobj_type. */
+   struct vk_sync_type poll_sync_type;
    struct vk_sync_timeline_type timeline_type;
-   const struct vk_sync_type *sync_types[3];
+   const struct vk_sync_type *sync_types[4];
 
    uint32_t device_count;
 };

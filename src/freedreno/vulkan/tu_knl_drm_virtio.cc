@@ -452,6 +452,227 @@ virtio_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
                         timeout_ns);
 }
 
+/* Poll-first client sync waits
+ *
+ * Every submit already makes the GPU write its seqno to
+ * global_bo->userspace_fence (see setup_fence_cmds), and tu-internal waits
+ * use that via tu_wait_fence().  Client fence/semaphore waits however go
+ * through vk_drm_syncobj -> DRM_IOCTL_SYNCOBJ_WAIT -> a real sleep that is
+ * only woken once the host completion (fence poll thread -> add_used ->
+ * completion vIRQ -> guest dma_fence signal) has run its course, which on
+ * the virtio/KGSL native context costs a wakeup chain per frame.
+ *
+ * tu_virtio_sync wraps vk_drm_syncobj: the submit path records which queue
+ * seqno will signal the sync, and the wait entrypoint first polls the
+ * userspace fence (plus a short bounded spin) before falling back to the
+ * regular syncobj wait.  The GPU write happens at the end of the same
+ * cmdstream that the syncobj's dma_fence completes with, so "userspace fence
+ * reached the seqno" implies the submit's GPU work is done - the only thing
+ * skipped is the host->guest signal plumbing, which no longer needs to be
+ * waited for.
+ *
+ * Every payload-changing entrypoint (reset/move/import/CPU signal)
+ * invalidates the record, so dma-buf-imported payloads (WSI acquire fences)
+ * and anything else not signaled by our own submits always take the
+ * fallback.  The record is also only written while the device has a single
+ * queue: userspace_fence is one device-global slot, so with multiple queues
+ * writing it the compare would be meaningless.
+ *
+ * .finish is deliberately kept as the base vk_drm_syncobj_finish so that
+ * vk_sync_type_is_drm_syncobj() (and thus vk_sync_as_drm_syncobj()) keeps
+ * treating these syncs as plain drm syncobjs, e.g. on the submit path.
+ */
+
+struct tu_virtio_sync {
+   struct vk_drm_syncobj drm; /* must be first */
+   /* seqno of the queue submit that will signal this sync; valid only while
+    * owner is non-NULL.  Written on the submit path, read by waiters; the
+    * client's external-sync rules order those accesses. */
+   struct tu_queue *owner;
+   uint32_t submit_seqno;
+};
+
+static inline struct tu_virtio_sync *
+to_tu_virtio_sync(struct vk_sync *sync)
+{
+   return (struct tu_virtio_sync *)sync;
+}
+
+static inline void
+tu_virtio_sync_invalidate(struct vk_sync *sync)
+{
+   p_atomic_set(&to_tu_virtio_sync(sync)->owner, (struct tu_queue *)NULL);
+}
+
+static const struct vk_sync_type *
+tu_virtio_sync_base_type(struct vk_device *device)
+{
+   struct tu_device *dev = container_of(device, struct tu_device, vk);
+   return &dev->physical_device->syncobj_type;
+}
+
+static VkResult
+tu_virtio_sync_signal(struct vk_device *device, struct vk_sync *sync,
+                      uint64_t value)
+{
+   tu_virtio_sync_invalidate(sync);
+   return tu_virtio_sync_base_type(device)->signal(device, sync, value);
+}
+
+static VkResult
+tu_virtio_sync_signal_many(struct vk_device *device, uint32_t signal_count,
+                           const struct vk_sync_signal *signals)
+{
+   for (uint32_t i = 0; i < signal_count; i++)
+      tu_virtio_sync_invalidate(signals[i].sync);
+   return tu_virtio_sync_base_type(device)->signal_many(device, signal_count,
+                                                        signals);
+}
+
+static VkResult
+tu_virtio_sync_reset(struct vk_device *device, struct vk_sync *sync)
+{
+   tu_virtio_sync_invalidate(sync);
+   return tu_virtio_sync_base_type(device)->reset(device, sync);
+}
+
+static VkResult
+tu_virtio_sync_reset_many(struct vk_device *device, uint32_t sync_count,
+                          struct vk_sync *const *syncs)
+{
+   for (uint32_t i = 0; i < sync_count; i++)
+      tu_virtio_sync_invalidate(syncs[i]);
+   return tu_virtio_sync_base_type(device)->reset_many(device, sync_count,
+                                                       syncs);
+}
+
+static VkResult
+tu_virtio_sync_move(struct vk_device *device, struct vk_sync *dst,
+                    struct vk_sync *src)
+{
+   /* dst takes src's payload (which our record doesn't describe) and src is
+    * reset; neither record survives. */
+   tu_virtio_sync_invalidate(dst);
+   if (src->type == dst->type)
+      tu_virtio_sync_invalidate(src);
+   return tu_virtio_sync_base_type(device)->move(device, dst, src);
+}
+
+static VkResult
+tu_virtio_sync_import_opaque_fd(struct vk_device *device,
+                                struct vk_sync *sync, int fd)
+{
+   tu_virtio_sync_invalidate(sync);
+   return tu_virtio_sync_base_type(device)->import_opaque_fd(device, sync, fd);
+}
+
+static VkResult
+tu_virtio_sync_import_sync_file(struct vk_device *device,
+                                struct vk_sync *sync, int sync_file)
+{
+   tu_virtio_sync_invalidate(sync);
+   return tu_virtio_sync_base_type(device)->import_sync_file(device, sync,
+                                                             sync_file);
+}
+
+static int64_t
+tu_poll_spin_ns(void)
+{
+   /* The spin window needs to cover the time from wait-start to the GPU's
+    * userspace-fence write, or the spin is wasted AND the full syncobj-sleep
+    * wakeup chain is paid on top - the behavior is all-or-nothing per scene.
+    * Sweep on vkmark (FPS at 75/150/200/300/500 us):
+    *   clear  2934 / 4108 / 8848 / 9142 / 8998
+    *   vertex 5441 / 5969 / 9301 / 10434 / 10495
+    * and 300us also covers the ~200us frames of effect2d (5680 -> 9747) that
+    * 200us misses; beyond 300us it is flat.  Full-suite score 7783 (200us)
+    * vs 9462 (300us).  Worst case a missed wait burns the whole window
+    * before sleeping, which at GPU-bound frame times is noise. */
+   static int64_t spin_ns = -1;
+   if (spin_ns < 0)
+      spin_ns = (int64_t)debug_get_num_option("TU_POLL_SPIN_US", 300) * 1000;
+   return spin_ns;
+}
+
+static VkResult
+tu_virtio_sync_wait_many(struct vk_device *device, uint32_t wait_count,
+                         const struct vk_sync_wait *waits,
+                         enum vk_sync_wait_flags wait_flags,
+                         uint64_t abs_timeout_ns)
+{
+   struct tu_device *dev = container_of(device, struct tu_device, vk);
+   const struct vk_sync_type *base = &dev->physical_device->syncobj_type;
+   const struct vk_sync_type *poll_type = &dev->physical_device->poll_sync_type;
+
+   if ((wait_flags & VK_SYNC_WAIT_PENDING) || wait_count == 0 ||
+       !dev->global_bo_map)
+      return base->wait_many(device, wait_count, waits, wait_flags,
+                             abs_timeout_ns);
+
+   /* Only take the fast path when every wait maps to a recorded seqno; a
+    * single unpollable entry sends the whole wait down the fallback (for
+    * WAIT_ANY a pollable subset could legally satisfy the wait early, but
+    * mixed waits are not a per-frame pattern worth the complexity). */
+   for (uint32_t i = 0; i < wait_count; i++) {
+      if (waits[i].sync->type != poll_type ||
+          !p_atomic_read(&to_tu_virtio_sync(waits[i].sync)->owner))
+         return base->wait_many(device, wait_count, waits, wait_flags,
+                                abs_timeout_ns);
+   }
+
+   int64_t spin_end = os_time_get_nano() + tu_poll_spin_ns();
+   if (abs_timeout_ns < INT64_MAX && (int64_t)abs_timeout_ns < spin_end)
+      spin_end = (int64_t)abs_timeout_ns;
+
+   for (;;) {
+      uint32_t cur = dev->global_bo_map->userspace_fence;
+      bool all = true, any = false;
+
+      for (uint32_t i = 0; i < wait_count; i++) {
+         if (!fence_before(cur, to_tu_virtio_sync(waits[i].sync)->submit_seqno))
+            any = true;
+         else
+            all = false;
+      }
+
+      if ((wait_flags & VK_SYNC_WAIT_ANY) ? any : all)
+         return VK_SUCCESS;
+
+      if (os_time_get_nano() >= spin_end)
+         break;
+
+#ifdef __aarch64__
+      __asm__ volatile("yield");
+#endif
+   }
+
+   return base->wait_many(device, wait_count, waits, wait_flags,
+                          abs_timeout_ns);
+}
+
+static struct vk_sync_type
+tu_virtio_get_poll_sync_type(const struct vk_sync_type *base)
+{
+   struct vk_sync_type type = *base;
+
+   type.size = sizeof(struct tu_virtio_sync);
+   /* Timeline points would need their own point->seqno mapping; timeline
+    * semaphores keep using the base type instead. */
+   type.features = (enum vk_sync_features)
+      (type.features & ~VK_SYNC_FEATURE_TIMELINE);
+   type.get_value = NULL;
+   type.signal = tu_virtio_sync_signal;
+   type.signal_many = tu_virtio_sync_signal_many;
+   type.reset = tu_virtio_sync_reset;
+   type.reset_many = tu_virtio_sync_reset_many;
+   type.move = tu_virtio_sync_move;
+   type.import_opaque_fd = tu_virtio_sync_import_opaque_fd;
+   type.import_sync_file = tu_virtio_sync_import_sync_file;
+   type.wait_many = tu_virtio_sync_wait_many;
+
+   return type;
+}
+
 static VkResult
 tu_free_zombie_vma_locked(struct tu_device *dev, bool wait)
 {
@@ -1172,6 +1393,28 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       goto fail_submit;
    }
 
+   /* Record the seqno on poll-type signal syncs so CPU waits can take the
+    * userspace-fence fast path.  Only valid while this queue is the sole
+    * writer of global_bo->userspace_fence. */
+   {
+      unsigned queue_count = 0;
+      for (unsigned i = 0; i < TU_MAX_QUEUE_FAMILIES; i++)
+         queue_count += queue->device->queue_count[i];
+
+      if (queue_count == 1) {
+         const struct vk_sync_type *poll_type =
+            &queue->device->physical_device->poll_sync_type;
+
+         for (uint32_t i = 0; i < signal_count; i++) {
+            if (signals[i].sync->type == poll_type) {
+               struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+               s->submit_seqno = fence;
+               p_atomic_set(&s->owner, queue);
+            }
+         }
+      }
+   }
+
 #if HAVE_PERFETTO
    clocks = tu_perfetto_end_submit(queue, queue->device->submit_count,
                                    start_ts, NULL);
@@ -1365,9 +1608,20 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
    if (!(device->syncobj_type.features & VK_SYNC_FEATURE_TIMELINE))
       device->timeline_type = vk_sync_timeline_get_type(&device->syncobj_type);
 
-   device->sync_types[0] = &device->syncobj_type;
-   device->sync_types[1] = &device->timeline_type.sync;
-   device->sync_types[2] = NULL;
+   device->poll_sync_type = tu_virtio_get_poll_sync_type(&device->syncobj_type);
+
+   /* Fences and binary semaphores pick the poll-first wrapper; timeline
+    * semaphores fall through to the plain syncobj type.  TU_NO_POLL_FIRST=1
+    * reverts to the plain type for A/B comparison. */
+   {
+      unsigned st = 0;
+      if (!debug_get_bool_option("TU_NO_POLL_FIRST", false) &&
+          (device->poll_sync_type.features & VK_SYNC_FEATURE_CPU_WAIT))
+         device->sync_types[st++] = &device->poll_sync_type;
+      device->sync_types[st++] = &device->syncobj_type;
+      device->sync_types[st++] = &device->timeline_type.sync;
+      device->sync_types[st] = NULL;
+   }
 
    device->heap.size = tu_get_system_heap_size(device);
    device->heap.used = 0u;
