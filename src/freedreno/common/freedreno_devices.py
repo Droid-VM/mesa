@@ -1202,6 +1202,8 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0x43051400, name="FD750"), # virtio guest, patch level 0
+        GPUId(chip_id=0xffff43051400, name="FD750"),
         GPUId(chip_id=0x43051401, name="FD750"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43051401, name="FD750"), # Default no-speedbin fallback
     ], A6xxGPUInfo(
