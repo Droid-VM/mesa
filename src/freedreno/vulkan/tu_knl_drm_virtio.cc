@@ -54,6 +54,13 @@ struct tu_virtio_device {
    struct tu_userspace_fence_cmds *fence_cmds;
    struct tu_bo *fence_cmds_mem;
 
+   /* Holds the fence of the most recent real submit (appended as an extra
+    * out-syncobj on every EXECBUFFER).  Empty submits (e.g. the WSI present
+    * submit: no commands, semaphore-only) are then resolved guest-locally by
+    * SYNCOBJ_TRANSFER from this instead of a host round-trip.  0 if
+    * unavailable (vtest, create failure) which disables the fast path. */
+   uint32_t last_submit_syncobj;
+
    /**
     * Processing zombie VMAs is a two step process, first we clear the iova
     * and then we close the handles.  But to minimize waste of virtqueue
@@ -199,6 +206,9 @@ virtio_device_init(struct tu_device *dev)
 
    vdev->vdrm = vdrm_device_connect(fd, VIRTGPU_DRM_CONTEXT_MSM);
 
+   if (fd >= 0 && drmSyncobjCreate(fd, 0, &vdev->last_submit_syncobj))
+      vdev->last_submit_syncobj = 0;
+
    p_atomic_set(&vdev->next_blob_id, 1);
    vdev->shmem = to_msm_shmem(vdev->vdrm->shmem);
 
@@ -219,6 +229,9 @@ virtio_device_finish(struct tu_device *dev)
    struct tu_virtio_device *vdev = dev->vdev;
 
    u_vector_finish(&vdev->zombie_vmas_stage_2);
+
+   if (vdev->last_submit_syncobj)
+      drmSyncobjDestroy(dev->fd, vdev->last_submit_syncobj);
 
    vdrm_device_close(vdev->vdrm);
 
@@ -671,6 +684,128 @@ tu_virtio_get_poll_sync_type(const struct vk_sync_type *base)
    type.wait_many = tu_virtio_sync_wait_many;
 
    return type;
+}
+
+static bool
+tu_virtio_single_queue(struct tu_device *dev)
+{
+   unsigned queue_count = 0;
+   for (unsigned i = 0; i < TU_MAX_QUEUE_FAMILIES; i++)
+      queue_count += dev->queue_count[i];
+   return queue_count == 1;
+}
+
+/* Empty-submit fast path
+ *
+ * The per-frame WSI present submit (wsi_common.c QueuePresent) carries no
+ * command buffer: it waits the client's render-complete semaphores (same
+ * queue, so already ordered) and signals the swapchain per-image fence plus
+ * the dma_buf/present semaphores.  Pushing that through EXECBUFFER costs a
+ * kick, a host GPU_COMMAND+TIMESTAMP_EVENT pair and a completion vIRQ per
+ * frame - half of the entire per-frame host traffic.
+ *
+ * Since every real submit parks its fence in vdev->last_submit_syncobj, an
+ * empty submit whose waits are all known-ordered behind this queue's already
+ * submitted work can be resolved entirely guest-side: give each signal target
+ * the previous submit's fence via SYNCOBJ_TRANSFER.  Signal-ordering
+ * semantics are preserved (the transferred fence signals no earlier than any
+ * same-queue wait could require; at worst it signals later than strictly
+ * needed, which the poll-first fast path absorbs).
+ */
+
+static bool
+tu_empty_submit_disabled(void)
+{
+   static int no_skip = -1;
+   if (no_skip < 0)
+      no_skip = debug_get_bool_option("TU_NO_EMPTY_SUBMIT", false);
+   return no_skip;
+}
+
+static bool
+tu_empty_submit_can_skip(struct tu_queue *queue,
+                         struct tu_msm_queue_submit *submit,
+                         struct vk_sync_wait *waits, uint32_t wait_count,
+                         struct vk_sync_signal *signals, uint32_t signal_count,
+                         struct tu_u_trace_submission_data *u_trace_data)
+{
+   if (tu_empty_submit_disabled())
+      return false;
+
+   struct tu_device *dev = queue->device;
+
+   if (dev->fd < 0 || !dev->vdev->last_submit_syncobj)
+      return false;
+
+   /* last_submit_syncobj is device-global: with more than one queue it may
+    * hold another queue's (unordered) fence, so only skip when this queue is
+    * provably the only one. */
+   if (!tu_virtio_single_queue(dev))
+      return false;
+
+   /* Nothing real submitted yet: no fence to inherit */
+   if (queue->fence <= 0)
+      return false;
+
+   if (u_trace_data)
+      return false;
+
+   if (submit->commands.size || submit->binds.size)
+      return false;
+
+   /* All waits must be provably ordered behind already-submitted work of
+    * this queue: recorded poll-type syncs signaled by this queue.  Anything
+    * else (dma-buf imports, cross-queue, timeline waits) takes the normal
+    * path. */
+   const struct vk_sync_type *poll_type =
+      &dev->physical_device->poll_sync_type;
+   for (uint32_t i = 0; i < wait_count; i++) {
+      if (waits[i].sync->type != poll_type)
+         return false;
+      if (p_atomic_read(&to_tu_virtio_sync(waits[i].sync)->owner) != queue)
+         return false;
+   }
+
+   /* All signal targets must be drm syncobjs we can TRANSFER into */
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (!vk_sync_as_drm_syncobj(signals[i].sync))
+         return false;
+   }
+
+   return true;
+}
+
+static VkResult
+tu_empty_submit_fastpath(struct tu_queue *queue,
+                         struct vk_sync_signal *signals, uint32_t signal_count)
+{
+   struct tu_device *dev = queue->device;
+   struct tu_virtio_device *vdev = dev->vdev;
+   const struct vk_sync_type *poll_type =
+      &dev->physical_device->poll_sync_type;
+   bool single_queue = tu_virtio_single_queue(dev);
+
+   for (uint32_t i = 0; i < signal_count; i++) {
+      struct vk_drm_syncobj *dst = vk_sync_as_drm_syncobj(signals[i].sync);
+
+      /* dst_point = signal_value handles both binary (0) and timeline
+       * targets; binary->timeline transfer is supported by the kernel. */
+      int ret = drmSyncobjTransfer(dev->fd, dst->syncobj,
+                                   signals[i].signal_value,
+                                   vdev->last_submit_syncobj, 0, 0);
+      if (ret) {
+         return vk_device_set_lost(&dev->vk,
+                                   "empty-submit syncobj transfer failed: %m");
+      }
+
+      if (single_queue && signals[i].sync->type == poll_type) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+         s->submit_seqno = queue->fence;
+         p_atomic_set(&s->owner, queue);
+      }
+   }
+
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -1246,7 +1381,14 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    struct drm_virtgpu_execbuffer_syncobj *in_syncobjs, *out_syncobjs;
    uint64_t gpu_offset = 0;
    int ring_idx = queue->priority + 1;
+   uint32_t num_out_syncobjs = 0;
    struct vdrm_execbuf_params params;
+
+   if (tu_empty_submit_can_skip(queue, submit, waits, wait_count,
+                                signals, signal_count,
+                                u_trace_submission_data))
+      return tu_empty_submit_fastpath(queue, signals, signal_count);
+
 #if HAVE_PERFETTO
    struct tu_perfetto_clocks clocks;
    uint64_t start_ts = tu_perfetto_begin_submit();
@@ -1296,10 +1438,11 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       goto fail_in_syncobjs;
    }
 
-   /* Allocate with signal timeline semaphores considered */
+   /* Allocate with signal timeline semaphores considered, plus one slot for
+    * the last-submit tracking syncobj (empty-submit fast path). */
    out_syncobjs = (struct drm_virtgpu_execbuffer_syncobj *) vk_zalloc(
       &queue->device->vk.alloc,
-      signal_count * sizeof(*out_syncobjs), 8,
+      (signal_count + 1) * sizeof(*out_syncobjs), 8,
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 
    if (out_syncobjs == NULL) {
@@ -1317,6 +1460,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       };
    }
 
+   num_out_syncobjs = signal_count;
    for (uint32_t i = 0; i < signal_count; i++) {
       struct vk_sync *sync = signals[i].sync;
 
@@ -1327,10 +1471,21 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       };
    }
 
+   /* Park this submit's fence in the tracking syncobj so a later empty
+    * submit can inherit it without a host round-trip.  Gated behind the same
+    * env as the skip so TU_NO_EMPTY_SUBMIT=1 is a complete revert for A/B. */
+   if (vdev->last_submit_syncobj && !tu_empty_submit_disabled()) {
+      out_syncobjs[num_out_syncobjs++] = (struct drm_virtgpu_execbuffer_syncobj) {
+         .handle = vdev->last_submit_syncobj,
+         .flags = 0,
+         .point = 0,
+      };
+   }
+
    if (wait_count)
       flags |= MSM_SUBMIT_SYNCOBJ_IN;
 
-   if (signal_count)
+   if (num_out_syncobjs)
       flags |= MSM_SUBMIT_SYNCOBJ_OUT;
 
    mtx_lock(&queue->device->bo_mutex);
@@ -1381,7 +1536,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       .in_syncobjs = in_syncobjs,
       .out_syncobjs = out_syncobjs,
       .num_in_syncobjs = wait_count,
-      .num_out_syncobjs = signal_count,
+      .num_out_syncobjs = num_out_syncobjs,
    };
 
    ret = vdrm_execbuf(vdev->vdrm, &params);
@@ -1396,21 +1551,15 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    /* Record the seqno on poll-type signal syncs so CPU waits can take the
     * userspace-fence fast path.  Only valid while this queue is the sole
     * writer of global_bo->userspace_fence. */
-   {
-      unsigned queue_count = 0;
-      for (unsigned i = 0; i < TU_MAX_QUEUE_FAMILIES; i++)
-         queue_count += queue->device->queue_count[i];
+   if (tu_virtio_single_queue(queue->device)) {
+      const struct vk_sync_type *poll_type =
+         &queue->device->physical_device->poll_sync_type;
 
-      if (queue_count == 1) {
-         const struct vk_sync_type *poll_type =
-            &queue->device->physical_device->poll_sync_type;
-
-         for (uint32_t i = 0; i < signal_count; i++) {
-            if (signals[i].sync->type == poll_type) {
-               struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
-               s->submit_seqno = fence;
-               p_atomic_set(&s->owner, queue);
-            }
+      for (uint32_t i = 0; i < signal_count; i++) {
+         if (signals[i].sync->type == poll_type) {
+            struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+            s->submit_seqno = fence;
+            p_atomic_set(&s->owner, queue);
          }
       }
    }
