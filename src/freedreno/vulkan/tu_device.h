@@ -473,6 +473,8 @@ struct tu_device
    uint32_t submit_count;
 
    /* Address space and global fault count for this local_fd with DRM backend */
+   uint64_t va_start;
+   uint64_t va_size;
    uint64_t fault_count;
 
    /* Temporary storage for multisampled attachments backed by a

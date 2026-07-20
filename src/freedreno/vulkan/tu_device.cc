@@ -2876,6 +2876,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    device->instance = physical_device->instance;
    device->physical_device = physical_device;
    device->device_idx = device->physical_device->device_count++;
+   device->va_start = physical_device->va_start;
+   device->va_size = physical_device->va_size;
 
    result = tu_drm_device_init(device);
    if (result != VK_SUCCESS) {
@@ -2914,8 +2916,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    if (physical_device->has_set_iova) {
       mtx_init(&device->vma_mutex, mtx_plain);
-      util_vma_heap_init(&device->vma, physical_device->va_start,
-                         ROUND_DOWN_TO(physical_device->va_size, os_page_size));
+      util_vma_heap_init(&device->vma, device->va_start,
+                         ROUND_DOWN_TO(device->va_size, os_page_size));
    }
 
    if (TU_DEBUG(BOS))
