@@ -1131,6 +1131,11 @@ virtio_bo_init(struct tu_device *dev,
       goto fail;
    }
 
+   if (lazy_vma) {
+      lazy_vma->msm.backs_lazy_bo = true;
+      bo->lazy = true;
+   }
+
    *out_bo = bo;
    if (lazy_vma)
       lazy_vma->msm.backs_lazy_bo = true;
@@ -1332,9 +1337,8 @@ static void
 virtio_sparse_vma_finish(struct tu_device *dev,
                          struct tu_sparse_vma *vma)
 {
-   /* For has_set_iova, if a lazy BO was mapped into this sparse VMA
-    * the allocation will be handed off to the zombie VMA mechanism.
-    */
+   /* A lazy backing BO transfers this reservation to the zombie VMA path,
+    * which releases it only after the last GPU fence has retired. */
    if (!vma->msm.backs_lazy_bo) {
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, vma->msm.iova, vma->msm.size);
