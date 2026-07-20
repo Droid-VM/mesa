@@ -205,6 +205,25 @@ virtio_device_init(struct tu_device *dev)
    dev->fd = fd;
 
    vdev->vdrm = vdrm_device_connect(fd, VIRTGPU_DRM_CONTEXT_MSM);
+   if (!vdev->vdrm) {
+      u_vector_finish(&vdev->zombie_vmas_stage_2);
+      vk_free(&instance->vk.alloc, vdev);
+      dev->vdev = NULL;
+      close(fd);
+      return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                               "failed to connect virtio DRM context");
+   }
+
+   /* The physical-device probe uses a short-lived vdrm context.  Query the
+    * slice again on the real VkDevice context, otherwise every device keeps
+    * allocating from the probe context's slice and defeats host isolation. */
+   uint64_t va_start = 0, va_size = 0;
+   if (!tu_drm_get_param(vdev->vdrm, MSM_PARAM_VA_START, &va_start) &&
+       va_start &&
+       !tu_drm_get_param(vdev->vdrm, MSM_PARAM_VA_SIZE, &va_size) && va_size) {
+      dev->va_start = va_start;
+      dev->va_size = va_size;
+   }
 
    if (fd >= 0 && drmSyncobjCreate(fd, 0, &vdev->last_submit_syncobj))
       vdev->last_submit_syncobj = 0;
@@ -1671,6 +1690,17 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
 
    bool has_raytracing = tu_drm_get_raytracing(vdrm);
 
+   /* DroidVM KGSL nctx: host hands each context a disjoint VA slice via
+    * GET_PARAM (capset va is global; concurrent guest processes would
+    * otherwise overlap iovas in the host's shared VBO). Query before close. */
+   {
+      uint64_t vs = 0, vz = 0;
+      if (!tu_drm_get_param(vdrm, MSM_PARAM_VA_START, &vs) && vs &&
+          !tu_drm_get_param(vdrm, MSM_PARAM_VA_SIZE, &vz) && vz) {
+         caps.u.msm.va_start = vs;
+         caps.u.msm.va_size = vz;
+      }
+   }
    vdrm_device_close(vdrm);
 
    mesa_logd("wire_format_version: %u", caps.wire_format_version);
