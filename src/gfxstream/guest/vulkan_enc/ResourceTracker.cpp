@@ -6458,7 +6458,14 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
                 }
 #endif
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
+                // Taking a sync-fd-backed signal semaphore OUT of the submit only makes sense when
+                // this build can signal that fd itself afterwards -- the goldfish design is
+                // "prune -> vkQueueWaitIdle -> goldfish_sync_signal(fd)", and both of the other
+                // halves live under the platform guards below. On a virtio-gpu guest the local
+                // signal is compiled out, so pruning here would leave the semaphore signalled by
+                // NOBODY: not the host (removed from the submit) and not us. Keep the semaphore in
+                // the submit and let the host signal it normally.
+#if defined(VK_USE_PLATFORM_FUCHSIA) || GFXSTREAM_ENABLE_GUEST_GOLDFISH
                 if (semInfo.syncFd.value_or(-1) >= 0) {
                     post_wait_sync_fds.push_back(semInfo.syncFd.value());
                     signalSemsToRemove.push_back(semaphore);
