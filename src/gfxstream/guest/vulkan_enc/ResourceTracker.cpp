@@ -6657,6 +6657,18 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
 
     VkResult waitIdleRes = VK_SUCCESS;
+    // Only stall the queue if this build actually signals something afterwards. Everything inside
+    // the block below is Fuchsia-only (zx_object_signal) or goldfish-only (goldfish_sync_signal);
+    // on a virtio-gpu guest both are compiled out, so this became a full pipeline stall plus a
+    // synchronous host round trip on every submit with nothing to do once it returned. The sync
+    // fds are signalled by the virtio-gpu fence path instead -- goldfish_sync_signal is specific
+    // to the goldfish transport.
+    //
+    // Measured (Adreno 8 Elite, gfxstream + virtio-gpu): this vkQueueWaitIdle sat in the WSI
+    // present path of every frame, and the guest burned ~89% of its CPU time spinning in
+    // sched_yield() inside AddressSpaceStream::ensureType1Finished() waiting for the reply --
+    // while the host GPU idled at ~15% busy.
+#if defined(VK_USE_PLATFORM_FUCHSIA) || GFXSTREAM_ENABLE_GUEST_GOLDFISH
     if (externalFenceFdToSignal >= 0 || !post_wait_events.empty() || !post_wait_sync_fds.empty()) {
         auto hostConn = ResourceTracker::threadingCallbacks.hostConnectionGetFunc();
         auto vkEncoder = ResourceTracker::threadingCallbacks.vkEncoderGetFunc(hostConn);
@@ -6688,6 +6700,9 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
         }
     }
+#else
+    (void)externalFenceFdToSignal;
+#endif
     return waitIdleRes;
 }
 
