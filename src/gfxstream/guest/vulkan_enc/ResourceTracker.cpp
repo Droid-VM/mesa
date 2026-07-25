@@ -4747,7 +4747,15 @@ VkResult ResourceTracker::on_vkCreateSampler(void* context, VkResult, VkDevice d
     VkSamplerCreateInfo localCreateInfo = vk_make_orphan_copy(*pCreateInfo);
 
     vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&localCreateInfo);
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(VK_USE_PLATFORM_FUCHSIA)
+    // The create info is orphaned above (the encoder only serializes pNext structs it knows), so
+    // every struct we care about has to be re-appended explicitly. Neither of the two below is
+    // Android- or Fuchsia-specific -- VkSamplerYcbcrConversionInfo is core 1.1 and custom border
+    // colour is VK_EXT_custom_border_color, which we advertise unconditionally and zink requires --
+    // so gating them on those platforms silently dropped them on a Linux guest. Dropping the custom
+    // border colour struct is a spec violation on its own: zink sets borderColor to
+    // VK_BORDER_COLOR_*_CUSTOM_EXT, so the host then samples an undefined border
+    // (GL_CLAMP_TO_BORDER renders with the wrong colour). Both structs are in the encoder's
+    // marshalling tables, so forwarding them is safe.
     VkSamplerYcbcrConversionInfo localVkSamplerYcbcrConversionInfo;
     const VkSamplerYcbcrConversionInfo* samplerYcbcrConversionInfo =
         vk_find_struct_const(pCreateInfo, SAMPLER_YCBCR_CONVERSION_INFO);
@@ -4766,7 +4774,6 @@ VkResult ResourceTracker::on_vkCreateSampler(void* context, VkResult, VkDevice d
             vk_make_orphan_copy(*samplerCustomBorderColorCreateInfo);
         vk_append_struct(&structChainIter, &localVkSamplerCustomBorderColorCreateInfo);
     }
-#endif
 
     VkSamplerReductionModeCreateInfo localVkSamplerReductionModeCreateInfo;
     const VkSamplerReductionModeCreateInfo* samplerReductionModeCreateInfo =
@@ -7529,9 +7536,15 @@ VkResult ResourceTracker::on_vkCreateImageView(void* context, VkResult input_res
     (void)input_result;
 
     VkImageViewCreateInfo localCreateInfo = vk_make_orphan_copy(*pCreateInfo);
+    // The chain iterator used to live inside the Android guard, so on a Linux guest the orphan copy
+    // above dropped the ENTIRE pNext chain. Everything re-appended below is platform-agnostic and
+    // present in the encoder's marshalling tables. VkImageViewUsageCreateInfo especially matters:
+    // zink attaches it to narrow a view's usage when the format features don't allow the image's
+    // full usage, so dropping it makes the host see the wider usage and legitimately fail or
+    // mis-create the view.
+    vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&localCreateInfo);
 
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
-    vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&localCreateInfo);
     if (pCreateInfo->format == VK_FORMAT_UNDEFINED) {
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
@@ -7540,6 +7553,8 @@ VkResult ResourceTracker::on_vkCreateImageView(void* context, VkResult input_res
             localCreateInfo.format = vk_format_from_fourcc(it->second.externalFourccFormat);
         }
     }
+#endif
+
     VkSamplerYcbcrConversionInfo localVkSamplerYcbcrConversionInfo;
     const VkSamplerYcbcrConversionInfo* samplerYcbcrConversionInfo = vk_find_struct_const(pCreateInfo, SAMPLER_YCBCR_CONVERSION_INFO);
     if (samplerYcbcrConversionInfo) {
@@ -7548,7 +7563,14 @@ VkResult ResourceTracker::on_vkCreateImageView(void* context, VkResult input_res
             vk_append_struct(&structChainIter, &localVkSamplerYcbcrConversionInfo);
         }
     }
-#endif
+
+    VkImageViewUsageCreateInfo localVkImageViewUsageCreateInfo;
+    const VkImageViewUsageCreateInfo* imageViewUsageCreateInfo =
+        vk_find_struct_const(pCreateInfo, IMAGE_VIEW_USAGE_CREATE_INFO);
+    if (imageViewUsageCreateInfo) {
+        localVkImageViewUsageCreateInfo = vk_make_orphan_copy(*imageViewUsageCreateInfo);
+        vk_append_struct(&structChainIter, &localVkImageViewUsageCreateInfo);
+    }
 
     return enc->vkCreateImageView(device, &localCreateInfo, pAllocator, pView, true /* do lock */);
 }
