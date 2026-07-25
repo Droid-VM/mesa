@@ -18,6 +18,12 @@ if with_platform_wayland
     gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_WAYLAND'
 endif
 
+# Same condition mesa's common WSI uses to build wsi_common_display.c: a guest with a
+# KMS-capable DRM device (virtio-gpu) can present straight to it, no compositor involved.
+if system_has_kms_drm and not with_platform_android
+    gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_DISPLAY'
+endif
+
 files_vulkan_gfxstream = files_lib_vulkan_gfxstream + files_lib_vulkan_enc
 files_vulkan_gfxstream += gfxstream_vk_entrypoints
 files_vulkan_gfxstream += gfxstream_guest_vk_autogen
