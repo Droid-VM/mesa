@@ -454,10 +454,21 @@ void AddressSpaceStream::ensureType1Finished() {
     uint32_t currAvailRead =
         ring_buffer_available_read(m_context.to_host, 0);
 
+    // Wake the consumer once if it has parked itself, the way ensureConsumerFinishing() does.
+    // This wait sits at the head of every writeFullyAsync() -- the path a command buffer takes
+    // to the host -- and spinning alone will never bring back a consumer that is asleep. Once
+    // is the operative word: a ping is a virtio round trip, so pinging per iteration turns the
+    // wait into a storm of them.
+    bool pingedHost = false;
     while (currAvailRead) {
         backoff();
         ring_buffer_yield();
         currAvailRead = ring_buffer_available_read(m_context.to_host, 0);
+        if (!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+            *(m_context.host_state) != ASG_HOST_STATE_RENDERING) {
+            notifyAvailable();
+            pingedHost = true;
+        }
         if (isInError()) {
             return;
         }
