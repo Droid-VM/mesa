@@ -156,10 +156,22 @@ _mesa_trace_scope_begin_name(const char *name)
    return scope;
 }
 
+/* Whether any tracing backend was compiled in. Without one, every _MESA_TRACE_* macro below is
+ * already a no-op -- but the formatting done to produce a name for them is not, and it happens
+ * first.
+ */
+#if defined(HAVE_PERFETTO) || defined(HAVE_GPUVIS) || defined(HAVE_SYSPROF) || \
+   (DETECT_OS_ANDROID && !defined(__cplusplus))
+#define _MESA_TRACE_HAVE_BACKEND 1
+#else
+#define _MESA_TRACE_HAVE_BACKEND 0
+#endif
+
 __attribute__((format(printf, 1, 2)))
 static inline void *
 _mesa_trace_scope_begin(const char *format, ...)
 {
+#if _MESA_TRACE_HAVE_BACKEND
    char name[_MESA_TRACE_SCOPE_MAX_NAME_LENGTH];
    va_list args;
 
@@ -170,6 +182,16 @@ _mesa_trace_scope_begin(const char *format, ...)
    assert(len < _MESA_TRACE_SCOPE_MAX_NAME_LENGTH);
 
    return _mesa_trace_scope_begin_name(name);
+#else
+   /* Formatting a name nobody will read is not free at the rates these sit on. gfxstream's guest
+    * encoder puts MESA_TRACE_SCOPE("vkCmdDrawIndexed") and friends on the per-draw path, which
+    * Minecraft drives at ~90k calls/s each for draws, vertex binds and index binds -- sampling the
+    * render thread caught it inside __vsnprintf_chk twice in twelve stacks. The name is a string
+    * literal in nearly every one of these call sites, so the whole vsnprintf is discarded work.
+    */
+   (void)format;
+   return NULL;
+#endif
 }
 
 static inline void *
