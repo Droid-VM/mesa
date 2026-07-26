@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "AddressSpaceStream.h"
+#include <time.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -128,6 +129,100 @@ int AddressSpaceStream::commitBuffer(size_t size)
     }
 }
 
+namespace {
+
+// Where the guest's time goes while it is not making progress.
+//
+// The guest render thread spends roughly half its time in the transport, and "in the transport"
+// covers three different waits that need different fixes, so lumping them together says nothing:
+//
+//   reply   -- blocked in read() for a host answer to a call that carries a return value. Costs a
+//              full round trip, and the fix is to stop needing the answer.
+//   type1   -- draining the small-command ring before the global transfer_mode can be flipped.
+//              Cost is proportional to what is queued, and the fix is a per-transfer mode.
+//   type3   -- draining a large transfer the same way.
+//
+// Enabled by GFXSTREAM_STREAM_PROFILE=1, reported every GFXSTREAM_STREAM_PROFILE_SEC seconds
+// (default 10) per thread, since each guest thread has its own ring and they do not share a
+// bottleneck.
+struct StreamWaitProfile {
+    struct Bucket {
+        uint64_t nanos = 0;
+        uint64_t count = 0;
+        uint64_t maxNanos = 0;
+        void add(uint64_t dt) {
+            nanos += dt;
+            ++count;
+            if (dt > maxNanos) maxNanos = dt;
+        }
+    };
+    Bucket reply, type1, type3;
+    uint64_t lastReport = 0;
+    double reportSec = 10.0;
+    bool enabled = false;
+    bool init = false;
+};
+
+thread_local StreamWaitProfile tStreamProf;
+
+uint64_t streamProfNow() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+}
+
+// 0 when disabled, so the caller pays one compare and no clock read.
+uint64_t streamProfBegin() {
+    StreamWaitProfile& p = tStreamProf;
+    if (!p.init) {
+        p.init = true;
+        const char* env = getenv("GFXSTREAM_STREAM_PROFILE");
+        p.enabled = env && env[0] != '0';
+        if (const char* sec = getenv("GFXSTREAM_STREAM_PROFILE_SEC")) {
+            const double v = atof(sec);
+            if (v > 0.0) p.reportSec = v;
+        }
+        if (p.enabled) p.lastReport = streamProfNow();
+    }
+    return p.enabled ? streamProfNow() : 0;
+}
+
+void streamProfReport(StreamWaitProfile& p, uint64_t now) {
+    const double elapsed = (now - p.lastReport) / 1e9;
+    if (elapsed < p.reportSec) return;
+    p.lastReport = now;
+    const uint64_t total = p.reply.nanos + p.type1.nanos + p.type3.nanos;
+    if (!total) return;
+    mesa_logi(
+        "STREAMPROF tid-local over %.1fs: waiting %.1fms/s (%.1f%% of the thread) -- "
+        "reply %.1fms/s (n=%.0f/s avg=%lluus max=%lluus) "
+        "type1-drain %.1fms/s (n=%.0f/s avg=%lluus max=%lluus) "
+        "type3-drain %.1fms/s (n=%.0f/s avg=%lluus max=%lluus)",
+        elapsed, total / elapsed / 1e6, 100.0 * total / elapsed / 1e9,
+        p.reply.nanos / elapsed / 1e6, p.reply.count / elapsed,
+        (unsigned long long)(p.reply.count ? p.reply.nanos / p.reply.count / 1000 : 0),
+        (unsigned long long)(p.reply.maxNanos / 1000),
+        p.type1.nanos / elapsed / 1e6, p.type1.count / elapsed,
+        (unsigned long long)(p.type1.count ? p.type1.nanos / p.type1.count / 1000 : 0),
+        (unsigned long long)(p.type1.maxNanos / 1000),
+        p.type3.nanos / elapsed / 1e6, p.type3.count / elapsed,
+        (unsigned long long)(p.type3.count ? p.type3.nanos / p.type3.count / 1000 : 0),
+        (unsigned long long)(p.type3.maxNanos / 1000));
+    p.reply = {};
+    p.type1 = {};
+    p.type3 = {};
+}
+
+void streamProfEnd(StreamWaitProfile::Bucket StreamWaitProfile::*which, uint64_t start) {
+    if (!start) return;
+    StreamWaitProfile& p = tStreamProf;
+    const uint64_t now = streamProfNow();
+    (p.*which).add(now - start);
+    streamProfReport(p, now);
+}
+
+}  // namespace
+
 const unsigned char *AddressSpaceStream::readFully(void *ptr, size_t totalReadSize)
 {
 
@@ -160,9 +255,11 @@ const unsigned char *AddressSpaceStream::readFully(void *ptr, size_t totalReadSi
 
     if (!remaining) return userReadBuf;
 
-    // Read up to kReadSize bytes if all buffered read has been consumed.
+    // Read up to kReadSize bytes if all buffered read has been consumed. Everything past this
+    // point is the guest blocked on the host: time it as the "reply" bucket.
     size_t maxRead = m_readLeft ? 0 : kReadSize;
     ssize_t actual = 0;
+    const uint64_t replyWaitStart = streamProfBegin();
 
     if (maxRead) {
         actual = speculativeRead(m_readBuf, maxRead);
@@ -203,6 +300,7 @@ const unsigned char *AddressSpaceStream::readFully(void *ptr, size_t totalReadSi
         }
     }
 
+    streamProfEnd(&StreamWaitProfile::reply, replyWaitStart);
     resetBackoff();
     return userReadBuf;
 }
@@ -450,6 +548,7 @@ void AddressSpaceStream::ensureConsumerFinishing() {
 
 void AddressSpaceStream::ensureType1Finished() {
     MESA_TRACE_SCOPE("ensureType1Finished");
+    const uint64_t drainStart = streamProfBegin();
 
     uint32_t currAvailRead =
         ring_buffer_available_read(m_context.to_host, 0);
@@ -470,13 +569,16 @@ void AddressSpaceStream::ensureType1Finished() {
             pingedHost = true;
         }
         if (isInError()) {
+            streamProfEnd(&StreamWaitProfile::type1, drainStart);
             return;
         }
     }
+    streamProfEnd(&StreamWaitProfile::type1, drainStart);
 }
 
 void AddressSpaceStream::ensureType3Finished() {
     MESA_TRACE_SCOPE("ensureType3Finished");
+    const uint64_t drainStart = streamProfBegin();
     uint32_t availReadLarge =
         ring_buffer_available_read(
             m_context.to_host_large_xfer.ring,
@@ -493,9 +595,11 @@ void AddressSpaceStream::ensureType3Finished() {
             notifyAvailable();
         }
         if (isInError()) {
+            streamProfEnd(&StreamWaitProfile::type3, drainStart);
             return;
         }
     }
+    streamProfEnd(&StreamWaitProfile::type3, drainStart);
 }
 
 int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
