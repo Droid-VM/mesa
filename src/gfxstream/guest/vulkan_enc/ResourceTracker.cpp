@@ -4621,6 +4621,83 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
     }
 #endif
 
+    // Every vkCreateImage costs a full round trip: the host has to answer with a handle and the
+    // memory requirements, so the guest blocks. Minecraft drives this at ~447/s, which is 58% of
+    // all the guest's synchronous waits -- more than every fence and semaphore call combined.
+    // Whether that can be avoided depends on how many distinct image shapes are behind those
+    // calls, since identical create info yields identical requirements. Report the distribution
+    // under GFXSTREAM_IMAGE_TRACE=1.
+    {
+        static const bool kImageTrace = [] {
+            const char* env = getenv("GFXSTREAM_IMAGE_TRACE");
+            return env && env[0] != '0';
+        }();
+        if (kImageTrace) {
+            struct Shape {
+                uint32_t format, w, h, d, mips, layers, usage, tiling, flags, samples;
+                bool operator==(const Shape& o) const {
+                    return format == o.format && w == o.w && h == o.h && d == o.d &&
+                           mips == o.mips && layers == o.layers && usage == o.usage &&
+                           tiling == o.tiling && flags == o.flags && samples == o.samples;
+                }
+            };
+            struct ShapeHash {
+                size_t operator()(const Shape& s) const {
+                    size_t h = 1469598103934665603ull;
+                    for (uint32_t v : {s.format, s.w, s.h, s.d, s.mips, s.layers, s.usage,
+                                       s.tiling, s.flags, s.samples}) {
+                        h = (h ^ v) * 1099511628211ull;
+                    }
+                    return h;
+                }
+            };
+            static std::mutex sMutex;
+            static std::unordered_map<Shape, uint64_t, ShapeHash> sShapes;
+            static uint64_t sTotal = 0;
+            static auto sLast = std::chrono::steady_clock::now();
+
+            const Shape shape{(uint32_t)pCreateInfo->format,
+                              pCreateInfo->extent.width,
+                              pCreateInfo->extent.height,
+                              pCreateInfo->extent.depth,
+                              pCreateInfo->mipLevels,
+                              pCreateInfo->arrayLayers,
+                              (uint32_t)pCreateInfo->usage,
+                              (uint32_t)pCreateInfo->tiling,
+                              (uint32_t)pCreateInfo->flags,
+                              (uint32_t)pCreateInfo->samples};
+            std::lock_guard<std::mutex> lock(sMutex);
+            ++sShapes[shape];
+            ++sTotal;
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - sLast).count();
+            if (elapsed >= 10.0) {
+                sLast = now;
+                std::vector<std::pair<Shape, uint64_t>> rows(sShapes.begin(), sShapes.end());
+                std::sort(rows.begin(), rows.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::string top;
+                for (size_t i = 0; i < rows.size() && i < 5; ++i) {
+                    const Shape& sh = rows[i].first;
+                    top += "\n    fmt=" + std::to_string(sh.format) + " " +
+                           std::to_string(sh.w) + "x" + std::to_string(sh.h) +
+                           " mips=" + std::to_string(sh.mips) +
+                           " layers=" + std::to_string(sh.layers) +
+                           " usage=0x" + std::to_string(sh.usage) +
+                           " tiling=" + std::to_string(sh.tiling) + " -> " +
+                           std::to_string(rows[i].second) + " (" +
+                           std::to_string(rows[i].second * 100 / sTotal) + "%)";
+                }
+                mesa_logi("IMAGETRACE over %.1fs: %llu vkCreateImage (%.0f/s), %zu distinct "
+                          "shapes;%s",
+                          elapsed, (unsigned long long)sTotal, sTotal / elapsed, sShapes.size(),
+                          top.c_str());
+                sShapes.clear();
+                sTotal = 0;
+            }
+        }
+    }
+
     VkResult res;
     VkMemoryRequirements memReqs;
 
