@@ -150,10 +150,21 @@ struct StreamWaitProfile {
         uint64_t nanos = 0;
         uint64_t count = 0;
         uint64_t maxNanos = 0;
+        // Where the wait time sits, not just its mean. A reply wait made of queueing behind
+        // other work spreads roughly evenly from zero up to however long that work takes; one
+        // made of a fixed cost (a wakeup, a doorbell round trip) clusters at that cost. The mean
+        // is the same in both cases and the fix is not: the first wants the call to stop waiting,
+        // the second wants the wakeup to be cheaper.
+        static constexpr uint64_t kEdgesUs[6] = {25, 50, 100, 200, 400, 800};
+        uint64_t hist[7] = {};
         void add(uint64_t dt) {
             nanos += dt;
             ++count;
             if (dt > maxNanos) maxNanos = dt;
+            const uint64_t us = dt / 1000;
+            size_t i = 0;
+            while (i < 6 && us >= kEdgesUs[i]) ++i;
+            ++hist[i];
         }
     };
     Bucket reply, type1, type3;
@@ -193,6 +204,13 @@ void streamProfReport(StreamWaitProfile& p, uint64_t now) {
     p.lastReport = now;
     const uint64_t total = p.reply.nanos + p.type1.nanos + p.type3.nanos;
     if (!total) return;
+    char replyHist[160];
+    snprintf(replyHist, sizeof(replyHist),
+             " reply-us <25:%llu <50:%llu <100:%llu <200:%llu <400:%llu <800:%llu 800+:%llu",
+             (unsigned long long)p.reply.hist[0], (unsigned long long)p.reply.hist[1],
+             (unsigned long long)p.reply.hist[2], (unsigned long long)p.reply.hist[3],
+             (unsigned long long)p.reply.hist[4], (unsigned long long)p.reply.hist[5],
+             (unsigned long long)p.reply.hist[6]);
     mesa_logi(
         "STREAMPROF tid-local over %.1fs: waiting %.1fms/s (%.1f%% of the thread) -- "
         "reply %.1fms/s (n=%.0f/s avg=%lluus max=%lluus) "
@@ -208,6 +226,7 @@ void streamProfReport(StreamWaitProfile& p, uint64_t now) {
         p.type3.nanos / elapsed / 1e6, p.type3.count / elapsed,
         (unsigned long long)(p.type3.count ? p.type3.nanos / p.type3.count / 1000 : 0),
         (unsigned long long)(p.type3.maxNanos / 1000));
+    mesa_logi("STREAMPROF%s", replyHist);
     p.reply = {};
     p.type1 = {};
     p.type3 = {};
