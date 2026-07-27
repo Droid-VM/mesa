@@ -59,6 +59,28 @@ VkResult gfxstream_vk_ResetCommandPool(VkDevice device, VkCommandPool commandPoo
     VkResult vkResetCommandPool_VkResult_return = (VkResult)0;
     {
         auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
+        // The synchronous form blocks for a reply that is VK_SUCCESS unless the device is out of
+        // memory. Measured on Minecraft: 626 calls/s, each waiting ~160us for an answer the host
+        // produces in 10us -- the rest is queueing, 13% of it behind a command-buffer replay of
+        // 4000+ commands that takes 3ms to decode. That came to ~150ms/s of guest render thread
+        // spent waiting, against a host that was only 29% busy.
+        //
+        // Send it and move on. Out-of-memory still reaches the host's usual reporting path; what
+        // is given up is the guest learning about it at this exact call, which no caller acts on.
+        // Requires a host that knows the opcode, hence the escape hatch: both sides ship together
+        // here, but a mismatch is a decode failure rather than something diagnosable.
+        static const bool kAsyncPoolReset = [] {
+            const char* env = getenv("GFXSTREAM_ASYNC_POOL_RESET");
+            return !env || env[0] != '0';
+        }();
+        if (kAsyncPoolReset) {
+            vkEnc->vkResetCommandPoolAsyncGOOGLE(gfxstream_device->internal_object,
+                                                 gfxstream_commandPool->internal_object, flags,
+                                                 true /* do lock */);
+            gfxstream::vk::ResourceTracker::get()->resetCommandPoolStagingInfo(
+                gfxstream_commandPool->internal_object);
+            return VK_SUCCESS;
+        }
         vkResetCommandPool_VkResult_return = vkEnc->vkResetCommandPool(
             gfxstream_device->internal_object, gfxstream_commandPool->internal_object, flags,
             true /* do lock */);
