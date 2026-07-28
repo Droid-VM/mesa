@@ -493,6 +493,16 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
 
     size_t actuallyRead = 0;
 
+    // Wake the consumer once if it has parked, the same way ensureType1Finished() does.
+    //
+    // Normally unnecessary: the host is mid-command when it owes a reply, so it is not parked. But
+    // if it ever does park with a reply outstanding, nothing here brings it back -- this loop only
+    // spins, and there is no host-to-guest doorbell. That turns a recoverable desync into a hang:
+    // observed after a stream corruption, gnome-shell burned 580% sys in backoff() while every
+    // host render thread slept, and only a full VM restart cleared it. A single ping costs one
+    // virtio round trip on a path that is already stuck, and makes the failure survivable.
+    bool pingedHost = false;
+
     while (!actuallyRead) {
 
         uint32_t readAvail =
@@ -503,6 +513,11 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
         if (!readAvail) {
             ring_buffer_yield();
             backoff();
+            if (!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+                *(m_context.host_state) != ASG_HOST_STATE_RENDERING) {
+                notifyAvailable();
+                pingedHost = true;
+            }
             continue;
         }
 
