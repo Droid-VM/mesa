@@ -207,6 +207,12 @@ TRIVIAL_TRANSFORMED_TYPES = [
 NON_TRIVIAL_TRANSFORMED_TYPES = [
     "VkExternalMemoryProperties",
     "VkImageCreateInfo",
+    # DroidVM: the guest-alloc pool's occupancy is only knowable in the guest, where the kernel
+    # driver that owns the allocator lives. Listing the parent -- not the budget struct itself --
+    # hands ResourceTracker the heap table and the chained budget together; the budget alone would
+    # need the heap layout from a cache that is not necessarily populated at that point. Non-trivial
+    # because there is a real implementation: the trivial list generates an empty one.
+    "VkPhysicalDeviceMemoryProperties2",
 ]
 
 TRANSFORMED_TYPES = TRIVIAL_TRANSFORMED_TYPES + NON_TRIVIAL_TRANSFORMED_TYPES

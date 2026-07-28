@@ -580,6 +580,10 @@ class ResourceTracker {
                                                          uint32_t);
     void transformImpl_VkImageCreateInfo_fromhost(const VkImageCreateInfo*, uint32_t);
     void transformImpl_VkImageCreateInfo_tohost(const VkImageCreateInfo*, uint32_t);
+    void transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
+        VkPhysicalDeviceMemoryProperties2*, uint32_t);
+    void transformImpl_VkPhysicalDeviceMemoryProperties2_tohost(VkPhysicalDeviceMemoryProperties2*,
+                                                                uint32_t);
 
 #define DEFINE_TRANSFORMED_TYPE_PROTOTYPE(type)          \
     void transformImpl_##type##_tohost(type*, uint32_t); \

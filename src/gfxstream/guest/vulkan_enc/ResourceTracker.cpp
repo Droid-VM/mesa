@@ -2338,6 +2338,65 @@ void ResourceTracker::on_vkGetPhysicalDeviceMemoryProperties2(
     on_vkGetPhysicalDeviceMemoryProperties(nullptr, physdev, &out->memoryProperties);
 }
 
+// VK_EXT_memory_budget for the guest-alloc pool.
+//
+// What the host filled in describes its own heaps and the phone's capacity, and in guest-alloc
+// mode neither is what bounds this guest: its host-visible memory is sub-allocated from a pool
+// this kernel owns. The host cannot answer it -- crosvm only ever sees one scatter list per blob,
+// so gfxstream's budget override stands down -- and the figures have to be collected here, where
+// the allocator is. Without them a client honouring this extension is told several GiB against a
+// pool of one, and allocates until the pool hard-fails instead of backing off.
+//
+// A fromhost transform rather than on_vkGetPhysicalDeviceMemoryProperties2, which is dead code:
+// the generated encoder forwards this call straight to the host and only runs transforms on the
+// reply. Hung off the parent struct so the heap table arrives with the budget -- reading it from
+// the cached copy instead would abort() when that cache has not been filled yet.
+//
+// Left exactly as it arrived in every other backing mode: the query returns false when there is no
+// such pool, and the host's own override already covers host-alloc and runtime-share.
+void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
+    VkPhysicalDeviceMemoryProperties2* pProps, uint32_t count) {
+    VirtGpuDevice* instance = VirtGpuDevice::getInstance();
+    if (!instance) return;
+
+    VirtGpuGuestPoolInfo poolInfo;
+    if (!instance->getGuestPoolInfo(&poolInfo)) return;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT* budget = nullptr;
+        for (auto* s = reinterpret_cast<VkBaseOutStructure*>(pProps[i].pNext); s; s = s->pNext) {
+            if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+                budget = reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(s);
+                break;
+            }
+        }
+        if (!budget) continue;
+
+        const VkPhysicalDeviceMemoryProperties& props = pProps[i].memoryProperties;
+        for (uint32_t h = 0; h < props.memoryHeapCount; ++h) {
+            bool hostVisible = false;
+            for (uint32_t t = 0; t < props.memoryTypeCount; ++t) {
+                if (props.memoryTypes[t].heapIndex == h &&
+                    (props.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    hostVisible = true;
+                    break;
+                }
+            }
+            if (!hostVisible) continue;
+
+            // budget - usage is read as "what I can still get", so usage comes from the largest
+            // allocation that can actually succeed, not from bytes handed out. The two agree while
+            // the allocator can scatter, and diverge the moment it cannot.
+            budget->heapBudget[h] = std::min(poolInfo.totalBytes, props.memoryHeaps[h].size);
+            budget->heapUsage[h] = std::min(poolInfo.totalBytes - poolInfo.largestFreeBytes,
+                                            budget->heapBudget[h]);
+        }
+    }
+}
+
+void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_tohost(
+    VkPhysicalDeviceMemoryProperties2*, uint32_t) {}
+
 VkResult ResourceTracker::on_vkCreateInstance(void* context, VkResult input_result,
                                               const VkInstanceCreateInfo* createInfo,
                                               const VkAllocationCallbacks*, VkInstance* pInstance) {

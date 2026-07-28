@@ -172,6 +172,14 @@ class VirtGpuResourceMapping {
     virtual uint8_t* asRawPtr(void) = 0;
 };
 
+struct VirtGpuGuestPoolInfo {
+    uint64_t totalBytes;
+    uint64_t usedBytes;
+    /* The largest allocation that can currently succeed, which is not always total - used: an
+     * allocator that must return one contiguous run is limited by its biggest free run. */
+    uint64_t largestFreeBytes;
+};
+
 class VirtGpuDevice {
   public:
    static VirtGpuDevice* getInstance(enum VirtGpuCapset capset = kCapsetNone,
@@ -197,6 +205,18 @@ class VirtGpuDevice {
 
    virtual bool getDrmInfo(VirtGpuDrmInfo* /*drmInfo*/) { return false; }
    virtual bool getPciBusInfo(VirtGpuPciBusInfo* /*pciBusInfo*/) { return false; }
+
+   /* How full the guest-alloc pool is, for VK_EXT_memory_budget.
+    *
+    * In guest-alloc mode the kernel driver owns the allocator, so the host cannot answer this:
+    * crosvm only ever sees one scatter list per blob and gfxstream's budget override stands
+    * down, leaving the guest to be told whatever the host driver reports for the phone's system
+    * heap -- several GiB against a pool that may be one. Queried live rather than cached with
+    * the other params, since two of the three figures move with every allocation.
+    *
+    * False when there is no such pool (any other backing mode, or a kernel without the
+    * queries), which leaves the reply as it arrived. */
+   virtual bool getGuestPoolInfo(VirtGpuGuestPoolInfo* /*poolInfo*/) { return false; }
 
   private:
    enum VirtGpuCapset mCapset;
