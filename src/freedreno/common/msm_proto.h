@@ -124,6 +124,19 @@ struct msm_ccmd_gem_new_req {
 DEFINE_CAST(vdrm_ccmd_req, msm_ccmd_gem_new_req)
 
 /*
+ * GUEST-ALLOC (DroidVM): the guest already owns this BO's pages.
+ *
+ * Set in msm_ccmd_gem_new_req::flags to say "do not allocate anything -- the pages arrive
+ * separately, as the dma-buf the VMM builds from the blob's guest iovecs".  The host records
+ * the iova and flags when this ccmd runs, and completes the object when the matching
+ * RESOURCE_CREATE_BLOB hands it that dma-buf.
+ *
+ * Kept in step with virglrenderer's copy of this header; the bit is high so it cannot collide
+ * with msm's own low DRM_MSM_BO_* flags, and the host masks it off before KGSL sees it.
+ */
+#define MSM_BO_GUEST_ALLOC 0x80000000
+
+/*
  * MSM_CCMD_GEM_SET_IOVA
  *
  * Set the buffer iova (for imported BOs).  Also used to release the iova

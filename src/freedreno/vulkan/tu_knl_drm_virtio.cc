@@ -1077,6 +1077,14 @@ virtio_bo_init(struct tu_device *dev,
       req.flags |= MSM_BO_WC;
    }
 
+   /* DroidVM guest-alloc: tell the host not to allocate anything for this BO -- the guest
+    * kernel backs the blob from its own pool and the VMM hands the host a dma-buf over those
+    * pages. vdrm sets the blob flags that make that happen; this is the half the host's msm
+    * command stream needs, because GEM_NEW arrives before the pages do and would otherwise
+    * allocate a second, unused backing. */
+   if (vdev->vdrm->supports_guest_alloc)
+      req.flags |= MSM_BO_GUEST_ALLOC;
+
    uint32_t blob_flags = 0;
    if (mem_property & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
       blob_flags |= VIRTGPU_BLOB_FLAG_USE_MAPPABLE;

@@ -16,6 +16,19 @@
 #include "util/perf/cpu_trace.h"
 
 
+/*
+ * DroidVM guest-alloc extensions to the virtio-gpu uAPI. Neither is upstream, so define them
+ * here rather than requiring a matching kernel header at build time: on a kernel that lacks
+ * them GETPARAM returns 0 and the flag is never sent, which is exactly the fallback wanted.
+ * The values match the guest driver's virtgpu_drv.h.
+ */
+#ifndef VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE
+#define VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE 0x0008
+#endif
+#ifndef VIRTGPU_PARAM_CREATE_GUEST_HANDLE
+#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
+#endif
+
 #define SHMEM_SZ 0x4000
 
 #define virtgpu_ioctl(fd, name, args...) ({                          \
@@ -157,9 +170,22 @@ virtgpu_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
                   struct vdrm_ccmd_req *req)
 {
    struct virtgpu_device *vgdev = to_virtgpu_device(vdev);
+   /*
+    * DroidVM guest-alloc: HOST3D_GUEST asks for both storages -- the guest kernel backs the
+    * blob from its own drm_buddy pool and still carries our ctx_id/blob_id, so the host context
+    * can match the pages to the GEM_NEW that described them. CREATE_GUEST_HANDLE is what makes
+    * the VMM turn those pages into the dma-buf the host backend imports.
+    *
+    * Plain HOST3D otherwise: without a guest pool the guest has nothing to allocate from, and
+    * asking for guest storage would only fail later, in the host, as a blob whose iovecs cover
+    * nothing.
+    */
+   const bool guest_alloc = vdev->supports_guest_alloc;
    struct drm_virtgpu_resource_create_blob args = {
-         .blob_mem   = VIRTGPU_BLOB_MEM_HOST3D,
-         .blob_flags = blob_flags,
+         .blob_mem   = guest_alloc ? VIRTGPU_BLOB_MEM_HOST3D_GUEST
+                                   : VIRTGPU_BLOB_MEM_HOST3D,
+         .blob_flags = blob_flags |
+                       (guest_alloc ? VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE : 0),
          .blob_hints = blob_hints,
          .size       = size,
          .cmd_size   = req->len,
@@ -417,6 +443,12 @@ vdrm_virtgpu_connect(int fd, uint32_t context_type)
     */
    if (get_param(fd, VIRTGPU_PARAM_CROSS_DEVICE))
       vdev->supports_cross_device = true;
+
+   /* DroidVM guest-alloc. Optional in both directions: an older kernel does not know the
+    * param and returns 0, and a VMM without a guest pool leaves the feature unnegotiated, so
+    * this stays false and every allocation keeps the host-allocating path. */
+   if (get_param(fd, VIRTGPU_PARAM_CREATE_GUEST_HANDLE))
+      vdev->supports_guest_alloc = true;
 
    return vdev;
 }
