@@ -46,6 +46,11 @@
 #include "tu_tracepoints.h"
 #include "tu_wsi.h"
 
+#ifdef TU_HAS_VIRTIO
+/* DroidVM guest-alloc pool accounting; see tu_get_guest_pool_budget(). */
+#include "vdrm.h"
+#endif
+
 #ifdef TU_WSI_PLATFORM
 #include "wsi_common.h"
 #endif
@@ -2119,11 +2124,49 @@ tu_get_system_heap_size(struct tu_physical_device *physical_device)
    return available_ram;
 }
 
+/*
+ * DroidVM guest-alloc: what is left in the guest's virtio-gpu pool, plus what we already hold.
+ *
+ * The pool is device-wide. A compositor, a browser and a game all carve out of the same one, so
+ * heap.used -- which only counts this process -- can say "plenty left" right up to the moment an
+ * allocation fails; and the system-memory estimate below is answering about the wrong memory
+ * entirely, since free guest RAM says nothing about a pool that was reserved at boot. Only the
+ * kernel knows the shared figure.
+ *
+ * Adding heap.used back is what VkPhysicalDeviceMemoryBudgetPropertiesEXT asks for: heapBudget is
+ * how much this process may have allocated in total, not how much more it may ask for, and it is
+ * paired with a heapUsage that counts only us.
+ *
+ * Returns false on every backend without a pool, leaving the caller on the estimate.
+ */
+static bool
+tu_get_guest_pool_budget(struct tu_physical_device *physical_device,
+                         VkDeviceSize *budget)
+{
+#ifdef TU_HAS_VIRTIO
+   uint64_t total, used;
+
+   if (!physical_device->guest_pool_size ||
+       !vdrm_guest_pool_stats(physical_device->local_fd, &total, &used, NULL))
+      return false;
+
+   *budget = p_atomic_read(&physical_device->heap.used) +
+             (used < total ? total - used : 0);
+   return true;
+#else
+   return false;
+#endif
+}
+
 static inline VkDeviceSize
 tu_get_budget_memory(struct tu_physical_device *physical_device)
 {
    uint64_t heap_size = physical_device->heap.size;
    uint64_t heap_used = p_atomic_read(&physical_device->heap.used);
+   VkDeviceSize pool_budget;
+
+   if (tu_get_guest_pool_budget(physical_device, &pool_budget))
+      return pool_budget;
 
    /*
     * Let's not incite the app to starve the system: report at most 90% of

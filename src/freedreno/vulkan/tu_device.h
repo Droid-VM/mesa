@@ -185,6 +185,14 @@ struct tu_physical_device
 
    struct tu_memory_heap heap;
 
+   /* DroidVM guest-alloc (virtio only): bytes in the guest's virtio-gpu pool, which is what
+    * actually backs every BO on that route -- so it, not guest RAM, is the heap size. Zero on
+    * every other backend and on a VMM that allocates host-side; heap.size then keeps its
+    * os_get_gpu_heap_size() value. Non-zero also means heap.used undercounts, because the pool
+    * is shared with every other process on the device, so the budget must come from the kernel
+    * rather than from our own accounting. */
+   uint64_t guest_pool_size;
+
    struct vk_sync_type syncobj_type;
    /* virtio only: syncobj wrapped with a userspace-fence poll fast path;
     * installed as sync_types[0] so fences/binary semaphores use it while

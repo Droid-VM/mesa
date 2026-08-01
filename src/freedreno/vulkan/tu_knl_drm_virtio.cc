@@ -1814,7 +1814,18 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
       device->sync_types[st] = NULL;
    }
 
-   device->heap.size = tu_get_system_heap_size(device);
+   /* DroidVM guest-alloc: when the VMM gave this guest a pool, every BO is backed out of it and
+    * nothing else, so the pool is the heap -- report its size rather than a fraction of guest
+    * RAM. Those are not the same number and the difference is not slack: a client that sizes its
+    * suballocator against guest RAM (zink does) asks for hundreds of MiB the pool can never
+    * satisfy, and gets ENOMEM out of the very first big allocation. Still capped by the address
+    * space, same as the system-heap path. */
+   if (vdrm_guest_pool_stats(fd, &device->guest_pool_size, NULL, NULL)) {
+      device->heap.size = device->va_size ? MIN2(device->guest_pool_size, device->va_size)
+                                          : device->guest_pool_size;
+   } else {
+      device->heap.size = tu_get_system_heap_size(device);
+   }
    device->heap.used = 0u;
    device->heap.flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 
