@@ -28,6 +28,11 @@
 #ifndef VIRTGPU_PARAM_CREATE_GUEST_HANDLE
 #define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
 #endif
+#ifndef VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB
+#define VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB 0x1000
+#define VIRTGPU_PARAM_GUEST_POOL_USED_KIB 0x1001
+#define VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB 0x1002
+#endif
 
 #define SHMEM_SZ 0x4000
 
@@ -390,6 +395,40 @@ get_param(int fd, uint64_t param)
 
    const int ret = virtgpu_ioctl(fd, VIRTGPU_GETPARAM, &args);
    return ret ? 0 : val;
+}
+
+/*
+ * DroidVM guest-alloc: how much memory actually backs this device's buffers.
+ *
+ * On this route the guest kernel carves BO pages out of a fixed pool the VMM handed it, so the
+ * amount of memory a driver may hand out has nothing to do with how much RAM the guest has --
+ * asking the system, as os_get_gpu_heap_size() does, overstates it by however much of guest RAM
+ * is not in the pool, and understates the pressure because the pool is shared with every other
+ * process on this device.
+ *
+ * Takes the fd rather than a vdrm_device because the interesting caller is driver probe, which
+ * has an fd long before it connects. Cheap: the values live in the guest driver, so there is no
+ * round trip to the host and this is safe to call per query.
+ *
+ * Returns false when there is no pool -- old kernel, or a VMM that allocates host-side -- and
+ * leaves the outputs untouched, which is the signal to fall back to the system heap size.
+ */
+bool
+vdrm_guest_pool_stats(int fd, uint64_t *total, uint64_t *used, uint64_t *largest_free)
+{
+   uint64_t total_kib = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB);
+
+   if (!total_kib)
+      return false;
+
+   if (total)
+      *total = total_kib << 10;
+   if (used)
+      *used = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_USED_KIB) << 10;
+   if (largest_free)
+      *largest_free = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB) << 10;
+
+   return true;
 }
 
 struct vdrm_device * vdrm_virtgpu_connect(int fd, uint32_t context_type);
