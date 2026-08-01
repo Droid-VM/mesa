@@ -36,6 +36,9 @@ enum tu_mem_sync_op {
    TU_MEM_SYNC_CACHE_FROM_GPU,
 };
 
+/* See tu_bo::dump_bo_list_idx. */
+#define TU_DUMP_BO_NOT_LISTED 0u
+
 struct tu_bo {
    uint32_t gem_handle;
 #ifdef TU_HAS_VIRTIO
@@ -48,6 +51,11 @@ struct tu_bo {
    int32_t refcnt;
 
    uint32_t submit_bo_list_idx;
+   /* One-based index into tu_device::dump_bo_list, or TU_DUMP_BO_NOT_LISTED.
+    *
+    * Biased so that zero means "not listed", because a tu_bo is memset to zero both when its
+    * slot is released (tu_bo_make_zombie) and on every BO-init failure path -- a sentinel that
+    * is not zero does not survive that, and comes back looking like a valid index. */
    uint32_t dump_bo_list_idx;
 
 #ifdef TU_HAS_KGSL
