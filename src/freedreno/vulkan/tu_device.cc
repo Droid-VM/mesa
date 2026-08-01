@@ -4625,7 +4625,7 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 void
 tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
 {
-   bo->dump_bo_list_idx = ~0;
+   bo->dump_bo_list_idx = TU_DUMP_BO_NOT_LISTED;
 
    if (!FD_RD_DUMP(ENABLE))
       return;
@@ -4633,7 +4633,7 @@ tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
    mtx_lock(&dev->bo_mutex);
    uint32_t idx =
       util_dynarray_num_elements(&dev->dump_bo_list, struct tu_bo *);
-   bo->dump_bo_list_idx = idx;
+   bo->dump_bo_list_idx = idx + 1;
    util_dynarray_append(&dev->dump_bo_list, bo);
    mtx_unlock(&dev->bo_mutex);
 }
@@ -4641,15 +4641,24 @@ tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
 void
 tu_dump_bo_del(struct tu_device *dev, struct tu_bo *bo)
 {
-   if (bo->dump_bo_list_idx != ~0) {
-      mtx_lock(&dev->bo_mutex);
-      struct tu_bo *exchanging_bo =
-         util_dynarray_pop(&dev->dump_bo_list, struct tu_bo *);
-      *util_dynarray_element(&dev->dump_bo_list, struct tu_bo *,
-                             bo->dump_bo_list_idx) = exchanging_bo;
-      exchanging_bo->dump_bo_list_idx = bo->dump_bo_list_idx;
-      mtx_unlock(&dev->bo_mutex);
+   if (bo->dump_bo_list_idx == TU_DUMP_BO_NOT_LISTED)
+      return;
+
+   uint32_t idx = bo->dump_bo_list_idx - 1;
+
+   mtx_lock(&dev->bo_mutex);
+   struct tu_bo *exchanging_bo =
+      util_dynarray_pop(&dev->dump_bo_list, struct tu_bo *);
+   /* Removing the last element pops the BO we are removing, and there is no
+    * longer a slot at idx to swap it into. */
+   if (exchanging_bo != bo) {
+      *util_dynarray_element(&dev->dump_bo_list, struct tu_bo *, idx) =
+         exchanging_bo;
+      exchanging_bo->dump_bo_list_idx = idx + 1;
    }
+   mtx_unlock(&dev->bo_mutex);
+
+   bo->dump_bo_list_idx = TU_DUMP_BO_NOT_LISTED;
 }
 
 void
