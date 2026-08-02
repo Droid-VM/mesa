@@ -85,7 +85,7 @@ jobs:
             -Dplatforms=x11,wayland \
             -Dvulkan-drivers=gfxstream,freedreno \
             -Dfreedreno-kmds=msm,virtio \
-            -Dgallium-drivers=zink \
+            -Dgallium-drivers=zink,freedreno \
             -Dopengl=true \
             -Dgbm=enabled \
             -Dglx=dri \
