@@ -520,6 +520,17 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
             if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
                  *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
                 deepWaitWantsPing()) {
+                // A wait this deep is already broken. Say which command it is for, once per
+                // stream: paired with the host's record of what that stream last decoded, it
+                // separates a command that never arrived from one that was answered into the
+                // void -- and from the guest alone the two look identical.
+                if (!m_reportedDeepWait) {
+                    m_reportedDeepWait = true;
+                    mesa_logw(
+                        "gfxstream: no reply to opcode %u; ring has %u bytes, host_state=%u",
+                        m_lastSentOpcode, ring_buffer_available_read(m_context.to_host, 0),
+                        *(m_context.host_state));
+                }
                 notifyAvailable();
                 pingedHost = true;
             }
@@ -654,6 +665,13 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
         bufferOffset,
         (uint32_t)size,
     };
+
+    // The head of what is being sent, kept so a wait that never ends can name the command it is
+    // waiting for. Two loads and a store, no lock: this is the hot path.
+    if (size >= 8) {
+        const uint8_t* head = (const uint8_t*)(m_buf + bufferOffset);
+        memcpy(&m_lastSentOpcode, head, sizeof(uint32_t));
+    }
 
     // What this stream actually handed the ring, for its first few transfers. The host keeps the
     // matching record of what it took out; a stream that starts mid-packet has to disagree with
