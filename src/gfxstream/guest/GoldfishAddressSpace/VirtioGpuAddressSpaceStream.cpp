@@ -5,6 +5,8 @@
 
 #include "VirtioGpuAddressSpaceStream.h"
 
+#include <unistd.h>
+
 #include <errno.h>
 
 #include "util/log.h"
@@ -133,6 +135,25 @@ AddressSpaceStream* createVirtioGpuAddressSpaceStream(enum VirtGpuCapset capset)
     context.ring_config->transfer_mode = 1;
     context.ring_config->host_consumed_pos = 0;
     context.ring_config->guest_write_pos = 0;
+
+    // flush_interval is published by the host when it creates its consumer, and the stream below
+    // reads it as its write step. Reading it too early gives zero, and a stream with a zero write
+    // step never uses the ring at all -- every allocation takes the temporary-buffer path and
+    // leaves through the large-transfer ring, while the write cursor never advances. Nothing in
+    // the setup sequence orders the two, so wait for it rather than assume it.
+    {
+        int waited = 0;
+        while (!__atomic_load_n(&context.ring_config->flush_interval, __ATOMIC_ACQUIRE)) {
+            if (++waited > 20000) {
+                mesa_loge("gfxstream: host never published a flush interval for this stream");
+                return nullptr;
+            }
+            usleep(100);
+        }
+        if (waited) {
+            mesa_logw("gfxstream: waited %d00us for the host to publish the ring config", waited);
+        }
+    }
 
     struct address_space_ops ops = {
         .open = virtgpu_address_space_open,
