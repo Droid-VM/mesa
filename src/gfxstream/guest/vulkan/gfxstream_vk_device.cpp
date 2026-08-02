@@ -198,17 +198,21 @@ static void get_device_extensions(VkPhysicalDevice physDevInternal,
                     deviceExts->extensions[j] = true;
                 }
             }
-            // ZC-EXTDBG: what robustness-related extensions does the host forward?
-            for (uint32_t i = 0; i < numDeviceExts; i++) {
-                if (strstr(extProps[i].extensionName, "robust") ||
-                    strstr(extProps[i].extensionName, "Robust")) {
-                    fprintf(stderr, "ZC-EXTDBG: host advertises [%s]\n",
-                            extProps[i].extensionName);
+            // Which robustness extensions the host forwards. Behind a switch for the same
+            // reason as the one in ResourceTracker: this is an ICD, and its stderr is the
+            // application's.
+            if (getenv("GFXSTREAM_EXT_TRACE")) {
+                for (uint32_t i = 0; i < numDeviceExts; i++) {
+                    if (strstr(extProps[i].extensionName, "robust") ||
+                        strstr(extProps[i].extensionName, "Robust")) {
+                        fprintf(stderr, "ZC-EXTDBG: host advertises [%s]\n",
+                                extProps[i].extensionName);
+                    }
                 }
+                fprintf(stderr,
+                        "ZC-EXTDBG: hostCount=%u matched EXT_robustness2=%d KHR_robustness2=%d\n",
+                        numDeviceExts, deviceExts->EXT_robustness2, deviceExts->KHR_robustness2);
             }
-            fprintf(stderr,
-                    "ZC-EXTDBG: hostCount=%u matched EXT_robustness2=%d KHR_robustness2=%d\n",
-                    numDeviceExts, deviceExts->EXT_robustness2, deviceExts->KHR_robustness2);
         }
     }
 }

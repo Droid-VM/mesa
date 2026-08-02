@@ -1940,10 +1940,12 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
     // raw push-template op instead of crashing. No env gate needed.
     allowedExtensionNames.push_back("VK_KHR_push_descriptor");
 
-    // Debug: which MC-required exts did the host actually hand us?
+    // Which of the extensions this route depends on the host actually handed us. Behind a switch
+    // because an ICD writing to stderr writes into every application that loads it.
     {
+        static const bool trace = getenv("GFXSTREAM_EXT_TRACE") != nullptr;
         static bool once = false;
-        if (!once) {
+        if (trace && !once) {
             once = true;
             const char* checks[] = {"VK_KHR_push_descriptor", "VK_EXT_multi_draw",
                                     "VK_EXT_vertex_attribute_divisor"};
