@@ -429,9 +429,10 @@ int AddressSpaceStream::writeFullyAsync(const void* buf, size_t size) {
 
         uint32_t hostState = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-        if (!pingedHost &&
-            hostState != ASG_HOST_STATE_CAN_CONSUME &&
-            hostState != ASG_HOST_STATE_RENDERING) {
+        if ((!pingedHost &&
+             hostState != ASG_HOST_STATE_CAN_CONSUME &&
+             hostState != ASG_HOST_STATE_RENDERING) ||
+            deepWaitWantsPing()) {
             pingedHost = true;
             notifyAvailable();
         }
@@ -513,8 +514,9 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
         if (!readAvail) {
             ring_buffer_yield();
             backoff();
-            if (!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
-                *(m_context.host_state) != ASG_HOST_STATE_RENDERING) {
+            if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+                 *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
+                deepWaitWantsPing()) {
                 notifyAvailable();
                 pingedHost = true;
             }
@@ -597,8 +599,9 @@ void AddressSpaceStream::ensureType1Finished() {
         backoff();
         ring_buffer_yield();
         currAvailRead = ring_buffer_available_read(m_context.to_host, 0);
-        if (!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
-            *(m_context.host_state) != ASG_HOST_STATE_RENDERING) {
+        if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+             *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
+            deepWaitWantsPing()) {
             notifyAvailable();
             pingedHost = true;
         }
@@ -710,8 +713,32 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
     return 0;
 }
 
+// Shared with deepWaitWantsPing(), which needs to know when backoff() has stopped spinning and
+// started sleeping.
+static const uint32_t kBackoffItersThreshold = 50000000;
+
+// Ask for another ping, roughly once a second, but only once the wait is deep.
+//
+// The wait loops ping the host once when it looks parked. Once is right for the common case and
+// wrong for the one that matters: the ping can be lost, the host can park again after it, and the
+// state word can say CAN_CONSUME or RENDERING while the thread that would consume is asleep -- in
+// which case the guarded one-shot never fires at all. There is no host-to-guest doorbell, so
+// nothing else ends the wait, and a missed wakeup becomes a permanent hang. Observed on KDE:
+// plasmashell parked in vkCreateSemaphore inside kopper_acquire while every host render thread
+// slept at 0% CPU, and the desktop never drew.
+//
+// Rate is the whole design. backoff() spins for its first 50M turns and only then starts sleeping
+// up to 1ms a turn, so gating on that keeps every ping out of the fast path; one per ~1000 sleeping
+// turns is about a second. Pinging per iteration was tried and is much worse than not pinging --
+// each one is a virtio round trip, and it cost Minecraft two thirds of its frame rate.
+bool AddressSpaceStream::deepWaitWantsPing() {
+    if (m_backoffIters <= kBackoffItersThreshold) return false;
+    if (++m_deepWaitPingCountdown < 1000) return false;
+    m_deepWaitPingCountdown = 0;
+    return true;
+}
+
 void AddressSpaceStream::backoff() {
-    static const uint32_t kBackoffItersThreshold = 50000000;
     static const uint32_t kBackoffFactorDoublingIncrement = 50000000;
     ++m_backoffIters;
 
