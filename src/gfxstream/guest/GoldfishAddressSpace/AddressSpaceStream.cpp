@@ -517,6 +517,20 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
             if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
                  *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
                 deepWaitWantsPing()) {
+                // A wait this deep is already broken, so say enough to tell apart the two ways it
+                // can be: bytes still sitting in the to-host ring mean the host is not consuming,
+                // an empty one means it consumed the command and owes a reply that never came.
+                // Piggybacked on the ping so it inherits its rate limit.
+                mesa_logw(
+                    "gfxstream: reply wait stuck: to_host=%u large_xfer_out=%u "
+                    "from_host_large_xfer=%u host_state=%u transfer_size=%u",
+                    ring_buffer_available_read(m_context.to_host, 0),
+                    ring_buffer_available_read(m_context.to_host_large_xfer.ring,
+                                               &m_context.to_host_large_xfer.view),
+                    ring_buffer_available_read(m_context.from_host_large_xfer.ring,
+                                               &m_context.from_host_large_xfer.view),
+                    *(m_context.host_state),
+                    __atomic_load_n(&m_context.ring_config->transfer_size, __ATOMIC_ACQUIRE));
                 notifyAvailable();
                 pingedHost = true;
             }
