@@ -84,6 +84,7 @@ private:
 
     size_t m_ringStorageSize;
     uint32_t m_resourceId = 0;
+    uint32_t m_reportedXfers = 0;
 };
 
 #endif
