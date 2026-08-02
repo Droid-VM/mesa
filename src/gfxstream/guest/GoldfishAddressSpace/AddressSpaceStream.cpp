@@ -4,8 +4,6 @@
  */
 #include "AddressSpaceStream.h"
 
-#include <mutex>
-#include <set>
 #include <time.h>
 
 #include <errno.h>
@@ -117,60 +115,10 @@ void* AddressSpaceStream::allocBuffer(size_t minSize) {
 }
 
 
-// Which packets actually leave the guest. The host keeps a matching census of what its decoder
-// sees, and the two together are the only way to tell a command that was never sent from one that
-// was sent and never answered -- the guest looks identical in both cases, parked in a read with a
-// drained ring. Bounded: one line per distinct opcode.
-static void noteSentPacket(const unsigned char* buf, size_t size) {
-    static std::mutex sMutex;
-    static std::set<uint32_t> sMismatched;
-    static thread_local uint32_t sPrevCommitLastOpcode = 0;
-    // A buffer holds whole packets and nothing else, so the declared lengths must add up to
-    // exactly its size. A command whose length field is short by even four bytes -- a count_ that
-    // disagrees with its reservedmarshal_ -- leaves the host decoding every later packet from the
-    // wrong offset, waiting for a body that is really the next header, with no error on either
-    // side. Naming the packet here is the only place the arithmetic is still checkable.
-    size_t off = 0;
-    uint32_t lastOpcode = 0, lastLen = 0;
-    while (size - off >= 8) {
-        uint32_t opcode, packetLen;
-        memcpy(&opcode, buf + off, sizeof(uint32_t));
-        memcpy(&packetLen, buf + off + 4, sizeof(uint32_t));
-        if (packetLen < 8 || packetLen > size - off) {
-            std::lock_guard<std::mutex> lock(sMutex);
-            if (sMismatched.insert(opcode).second) {
-                mesa_logw(
-                    "gfxstream: PACKET-LEN-BUG: opcode=%u declares %u bytes but only %zu remain "
-                    "(buffer %zu, previous opcode=%u len=%u)",
-                    opcode, packetLen, size - off, size, lastOpcode, lastLen);
-            }
-            return;
-        }
-        lastOpcode = opcode;
-        lastLen = packetLen;
-        off += packetLen;
-    }
-    if (off != size) {
-        std::lock_guard<std::mutex> lock(sMutex);
-        if (sMismatched.insert(lastOpcode).second) {
-            char hex[3 * 24 + 1];
-            size_t n = size - off < 24 ? size - off : 24;
-            for (size_t i = 0; i < n; ++i) snprintf(hex + 3 * i, 4, "%02x ", buf[off + i]);
-            hex[3 * n] = 0;
-            mesa_logw(
-                "gfxstream: PACKET-LEN-BUG: buffer of %zu bytes ends %zu bytes past its last "
-                "packet, last opcode=%u declared len=%u, previous commit ended with opcode=%u, "
-                "trailing bytes=[%s]",
-                size, size - off, lastOpcode, lastLen, sPrevCommitLastOpcode, hex);
-        }
-    }
-    if (lastOpcode) sPrevCommitLastOpcode = lastOpcode;
-}
 
 int AddressSpaceStream::commitBuffer(size_t size)
 {
     if (size == 0) return 0;
-    noteSentPacket(m_usingTmpBuf ? m_tmpBuf : (unsigned char*)m_writeStart, size);
 
     if (m_usingTmpBuf) {
         writeFully(m_tmpBuf, size);
@@ -529,7 +477,6 @@ const unsigned char *AddressSpaceStream::commitBufferAndReadFully(
     size_t writeSize, void *userReadBufPtr, size_t totalReadSize) {
 
     if (m_usingTmpBuf) {
-        noteSentPacket(m_tmpBuf, writeSize);
         writeFully(m_tmpBuf, writeSize);
         m_usingTmpBuf = false;
         m_tmpBufXferSize = 0;
@@ -573,20 +520,6 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
             if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
                  *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
                 deepWaitWantsPing()) {
-                // A wait this deep is already broken, so say enough to tell apart the two ways it
-                // can be: bytes still sitting in the to-host ring mean the host is not consuming,
-                // an empty one means it consumed the command and owes a reply that never came.
-                // Piggybacked on the ping so it inherits its rate limit.
-                mesa_logw(
-                    "gfxstream: reply wait stuck: to_host=%u large_xfer_out=%u "
-                    "from_host_large_xfer=%u host_state=%u transfer_size=%u",
-                    ring_buffer_available_read(m_context.to_host, 0),
-                    ring_buffer_available_read(m_context.to_host_large_xfer.ring,
-                                               &m_context.to_host_large_xfer.view),
-                    ring_buffer_available_read(m_context.from_host_large_xfer.ring,
-                                               &m_context.from_host_large_xfer.view),
-                    *(m_context.host_state),
-                    __atomic_load_n(&m_context.ring_config->transfer_size, __ATOMIC_ACQUIRE));
                 notifyAvailable();
                 pingedHost = true;
             }
