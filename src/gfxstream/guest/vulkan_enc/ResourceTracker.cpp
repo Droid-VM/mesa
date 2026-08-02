@@ -4075,6 +4075,14 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
     VirtGpuResourcePtr bufferBlob = nullptr;
     int importedFd = -1;
+    // A guest-pool-backed export: the memory is guest pages, so no colorbuffer import is sent,
+    // and the completion below maps the blob directly instead of asking the host for a pointer.
+    bool guestBlobExport = false;
+    uint64_t guestBlobExportSize = 0;
+    uint64_t guestBlobExportId = 0;
+    VkCreateBlobGOOGLE guestBlobCreateInfo;
+    memset(&guestBlobCreateInfo, 0, sizeof(guestBlobCreateInfo));
+    guestBlobCreateInfo.sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
 #if defined(LINUX_GUEST_BUILD)
     // Check for import first; this takes precedence over exportDmabuf in creating the
     // VirtGpuResource
@@ -4094,6 +4102,25 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         // As per the Vulkan spec, the ownership of this FD has been transferred
         // to the implementation
         importedFd = importFdInfoPtr->fd;
+
+        // Importing one of our own guest-pool exports (a GBM bo bound again in another context of
+        // the same process): there is no colorbuffer to name, but the blob id resolves host-side
+        // to the same udmabuf, so bind through the create-blob chain instead.
+        {
+            std::lock_guard<std::recursive_mutex> lock(mLock);
+            auto guestIt = mGuestBlobExports.find(bufferBlob->getResourceHandle());
+            if (guestIt != mGuestBlobExports.end()) {
+                guestBlobExport = true;
+                guestBlobExportId = guestIt->second.blobId;
+                guestBlobExportSize = guestIt->second.size;
+            }
+        }
+        if (guestBlobExport) {
+            guestBlobCreateInfo.blobId = guestBlobExportId;
+            guestBlobCreateInfo.blobMem = kBlobMemGuest;
+            guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+            vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+        }
     } else if (exportDmabuf) {
         VirtGpuDevice* instance = VirtGpuDevice::getInstance();
         hasDedicatedImage =
@@ -4144,7 +4171,51 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
             const uint32_t target = PIPE_TEXTURE_2D;
             uint32_t bind = VIRGL_BIND_RENDER_TARGET;
 
-            if (mCaps.vulkanCapset.alwaysBlob) {
+            if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                // Same rule as the branch below: on a protected VM an exportable HOST_VISIBLE
+                // allocation must be guest pages, whatever the capset says about blobs.
+                struct VirtGpuCreateBlob createBlob = {};
+                struct VirtGpuExecBuffer exec = {};
+                struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
+                VirtGpuDevice* instance = VirtGpuDevice::getInstance();
+
+                guestBlobCreateInfo.blobId =
+                    (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                createBlob.blobMem = kBlobMemGuest;
+                createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                   kBlobFlagCrossDevice;
+                createBlob.blobId = guestBlobCreateInfo.blobId;
+                createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                bufferBlob = instance->createBlob(createBlob);
+                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+                placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
+                exec.command = static_cast<void*>(&placeholderCmd);
+                exec.command_size = sizeof(placeholderCmd);
+                exec.flags = kRingIdx;
+                exec.ring_idx = 1;
+                if (instance->execBuffer(exec, bufferBlob.get())) {
+                    mesa_loge("Failed to execbuffer for guest-blob export wait.");
+                    return VK_ERROR_OUT_OF_HOST_MEMORY;
+                }
+                bufferBlob->wait();
+
+                guestBlobExport = true;
+                guestBlobExportSize = createBlob.size;
+                guestBlobExportId = guestBlobCreateInfo.blobId;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mLock);
+                    GuestBlobExport rec;
+                    rec.blobId = guestBlobCreateInfo.blobId;
+                    rec.size = createBlob.size;
+                    mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                }
+            } else if (mCaps.vulkanCapset.alwaysBlob) {
                 struct gfxstreamResourceCreate3d create3d = {};
                 struct VirtGpuExecBuffer exec = {};
                 struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
@@ -4220,6 +4291,51 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
                 struct VirtGpuCreateBlob createBlob = {};
 
+                // On a protected VM, host-owned memory can never be mapped back into the
+                // guest: registering the host pointer means runtime-sharing pages the GPU
+                // driver owns, and the hypervisor refuses them. So an exportable allocation
+                // that is also HOST_VISIBLE -- a compositor's GBM scanout buffer -- must live
+                // in guest-shared pages from the start: a dedicated guest-pool blob, imported
+                // host-side as the image's memory via udmabuf. The GPU renders into the same
+                // pages the guest CPU (and the display path) reads.
+                if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                    guestBlobCreateInfo.blobId =
+                    (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                    guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                    guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                    vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                    createBlob.blobMem = kBlobMemGuest;
+                    createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                       kBlobFlagCrossDevice;
+                    createBlob.blobId = guestBlobCreateInfo.blobId;
+                    createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                    bufferBlob = instance->createBlob(createBlob);
+                    if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+                    placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
+                    exec.command = static_cast<void*>(&placeholderCmd);
+                    exec.command_size = sizeof(placeholderCmd);
+                    exec.flags = kRingIdx;
+                    exec.ring_idx = 1;
+                    if (instance->execBuffer(exec, bufferBlob.get())) {
+                        mesa_loge("Failed to execbuffer for guest-blob export wait.");
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                    bufferBlob->wait();
+
+                    guestBlobExport = true;
+                    guestBlobExportSize = createBlob.size;
+                    guestBlobExportId = guestBlobCreateInfo.blobId;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mLock);
+                        GuestBlobExport rec;
+                        rec.blobId = guestBlobCreateInfo.blobId;
+                        rec.size = createBlob.size;
+                        mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                    }
+                } else {
                 create3d.hdr.opCode = GFXSTREAM_RESOURCE_CREATE_3D;
                 create3d.bind = bind;
                 create3d.target = target;
@@ -4237,6 +4353,7 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
                 bufferBlob = instance->createBlob(createBlob);
                 if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                 exec.command = static_cast<void*>(&placeholderCmd);
@@ -4264,7 +4381,27 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         }
     }
 
-    if (bufferBlob) {
+    // Which road each allocation takes, once per distinct shape. The scanout path involves
+    // three different owners (kernel blob, host colorbuffer, imported fd) and a binding that
+    // silently lands in the wrong one produces pixels the display never sees -- with no error
+    // anywhere. This is the only place all the branches meet.
+    {
+        static std::once_flag sAllocRouteOnce[4];
+        int route = importedFd >= 0 ? 0 : (bufferBlob ? 1 : (requestedMemoryIsHostVisible ? 2 : 3));
+        std::call_once(sAllocRouteOnce[route], [&] {
+            mesa_logw(
+                "gfxstream: ALLOC-ROUTE[%s]: size=%llu res=%u hostVisible=%d dedicatedImage=%d",
+                route == 0   ? "import-fd"
+                : route == 1 ? "export-blob"
+                : route == 2 ? "host-visible"
+                             : "plain-host",
+                (unsigned long long)finalAllocInfo.allocationSize,
+                bufferBlob ? bufferBlob->getResourceHandle() : 0, requestedMemoryIsHostVisible,
+                dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
+        });
+    }
+
+    if (bufferBlob && !guestBlobExport) {
         if (hasDedicatedImage) {
             importCbInfo.colorBuffer = bufferBlob->getResourceHandle();
             vk_append_struct(&structChainIter, &importCbInfo);
@@ -4283,6 +4420,31 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
         setDeviceMemoryInfo(device, *pMemory, 0, nullptr, finalAllocInfo.memoryTypeIndex, ahw,
                             isImport, vmo_handle, bufferBlob, importedFd);
+
+        if (guestBlobExport && bufferBlob) {
+            // Guest pages: map them here and now, exactly as the coherent route would. The size
+            // recorded is the blob's, so vkMapMemory bounds checks hold.
+            auto mapping = bufferBlob->createMapping();
+            if (!mapping) {
+                mesa_loge("guest-blob export: failed to map the blob");
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+            auto coherentMemory = std::make_shared<CoherentMemory>(
+                mapping, guestBlobExportSize, device, *pMemory);
+            uint8_t* ptr = nullptr;
+            uint64_t offset = 0;
+            coherentMemory->subAllocate(finalAllocInfo.allocationSize, &ptr, offset);
+            {
+                std::lock_guard<std::recursive_mutex> lock(mLock);
+                auto& info = info_VkDeviceMemory[*pMemory];
+                info.allocationSize = finalAllocInfo.allocationSize;
+                info.coherentMemorySize = guestBlobExportSize;
+                info.coherentMemoryOffset = offset;
+                info.coherentMemory = coherentMemory;
+                info.blobId = guestBlobExportId;
+                info.ptr = ptr;
+            }
+        }
 
         uint64_t memoryObjectId = (uint64_t)(void*)*pMemory;
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
@@ -4424,25 +4586,72 @@ VkResult ResourceTracker::on_vkMapMemory(void* context, VkResult host_result, Vk
     }
     auto& deviceMemoryInfo = deviceMemoryInfoIt->second;
 
-    if (deviceMemoryInfo.blobId && !deviceMemoryInfo.coherentMemory &&
-        !mCaps.params[kParamCreateGuestHandle]) {
+    // The CreateGuestHandle capability must not gate this fallback. On a stack that mixes
+    // guest-pool memory (plain host-visible) with host-owned colorbuffer memory (exportable,
+    // dedicated-image), the second kind arrives here with a blobId and no mapping, and this
+    // HOST3D map-through-the-BAR path is the only way the guest can ever see its bytes. Gating
+    // it on "no guest handles anywhere" made every gbm_bo_map on an exportable buffer fail with
+    // MEMORY_MAP_FAILED -- which a compositor experiences as its readability probe failing, its
+    // screenshots reading back zeros, and any CPU-side buffer fill silently never happening.
+    // Memory that IS guest-handle-backed sets ptr at allocation time and never reaches this
+    // branch, so the capability tells us nothing here.
+    if (!deviceMemoryInfo.ptr && !deviceMemoryInfo.coherentMemory) {
+        // Memory allocated down the export path (host-owned colorbuffer backing a dedicated,
+        // exportable image -- a compositor's scanout buffer) reaches here with neither a mapping
+        // nor a blob id: blobId is only filled in by the coherent-memory route. The host can
+        // still hand us one -- vkGetMemoryHostAddressInfoGOOGLE mints a host blob id, exports
+        // the memory under it, and returns it -- and from there the ordinary HOST3D
+        // map-through-the-BAR path works. Without this, every gbm_bo_map on such a buffer fails
+        // with MEMORY_MAP_FAILED, which a compositor experiences as its readability probe
+        // failing, its screenshots reading back zeros, and CPU-side buffer fills silently never
+        // happening.
+        //
         // NOTE: must not hold lock while calling into the encoder.
         lock.unlock();
         VkEncoder* enc = (VkEncoder*)context;
-        VkResult vkResult = enc->vkGetBlobGOOGLE(device, memory, /*doLock*/ false);
-        if (vkResult != VK_SUCCESS) {
-            mesa_loge("%s: Failed to vkGetBlobGOOGLE().", __func__);
-            return vkResult;
+        uint64_t hostReportedSize = 0;
+        if (!deviceMemoryInfo.blobId) {
+            uint64_t hostAddr = 0, hostmemId = 0;
+            VkResult vkResult = enc->vkGetMemoryHostAddressInfoGOOGLE(
+                device, memory, &hostAddr, &hostReportedSize, &hostmemId, /*doLock*/ false);
+            if (vkResult != VK_SUCCESS || !hostmemId) {
+                mesa_loge("%s: Failed to vkGetMemoryHostAddressInfoGOOGLE (%d, id=%llu).",
+                          __func__, vkResult, (unsigned long long)hostmemId);
+                return VK_ERROR_MEMORY_MAP_FAILED;
+            }
+            lock.lock();
+            deviceMemoryInfo.blobId = hostmemId;
+            lock.unlock();
+        } else {
+            VkResult vkResult = enc->vkGetBlobGOOGLE(device, memory, /*doLock*/ false);
+            if (vkResult != VK_SUCCESS) {
+                mesa_loge("%s: Failed to vkGetBlobGOOGLE().", __func__);
+                return vkResult;
+            }
         }
         lock.lock();
 
         // NOTE: deviceMemoryInfoIt potentially invalidated but deviceMemoryInfo still okay.
 
+        // coherentMemorySize is only set by the coherent route; for the export route the mapping
+        // has to cover the allocation itself, page-aligned as every blob must be.
+        // The export route records no allocationSize guest-side, so the authoritative size is
+        // the one the host just reported for the blob it minted. Everything must stay page-
+        // aligned; a zero here becomes a zero-size GEM object and a baffling ENOSPC.
+        uint64_t mapSize = deviceMemoryInfo.coherentMemorySize
+                               ? deviceMemoryInfo.coherentMemorySize
+                               : (hostReportedSize ? ((hostReportedSize + 4095) & ~4095ull)
+                                                   : ((deviceMemoryInfo.allocationSize + 4095) & ~4095ull));
+        if (!mapSize) {
+            mesa_loge("%s: no usable size for HOST3D map blob (blobId=%llu).", __func__,
+                      (unsigned long long)deviceMemoryInfo.blobId);
+            return VK_ERROR_MEMORY_MAP_FAILED;
+        }
         struct VirtGpuCreateBlob createBlob = {};
         createBlob.blobMem = kBlobMemHost3d;
         createBlob.flags = kBlobFlagMappable;
         createBlob.blobId = deviceMemoryInfo.blobId;
-        createBlob.size = deviceMemoryInfo.coherentMemorySize;
+        createBlob.size = mapSize;
 
         auto blob = VirtGpuDevice::getInstance()->createBlob(createBlob);
         if (!blob) {
