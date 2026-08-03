@@ -4129,7 +4129,11 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
 
                 bufferBlob = instance->createBlob(createBlob);
-                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                 exec.command = static_cast<void*>(&placeholderCmd);
@@ -4196,7 +4200,11 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 }
 
                 bufferBlob = instance->createBlob(createBlob);
-                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
                 if (guestBlobExport) {
                     std::lock_guard<std::recursive_mutex> lock(mLock);
                     GuestBlobExport rec;
@@ -4278,7 +4286,11 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                     createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
 
                     bufferBlob = instance->createBlob(createBlob);
-                    if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    if (!bufferBlob) {
+                        mesa_loge("gfxstream: ALLOC-FAIL createBlob(guest-pool) size=%llu",
+                                  (unsigned long long)createBlob.size);
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
 
                     placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                     exec.command = static_cast<void*>(&placeholderCmd);
@@ -4318,7 +4330,11 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 createBlob.size = width;
 
                 bufferBlob = instance->createBlob(createBlob);
-                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
                 }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
@@ -4382,7 +4398,22 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         input_result =
             enc->vkAllocateMemory(device, &finalAllocInfo, pAllocator, pMemory, true /* do lock */);
 
-        if (input_result != VK_SUCCESS) _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(input_result);
+        if (input_result != VK_SUCCESS) {
+            // zink reports only "couldn't allocate memory: heap=N size=N", which says nothing
+            // about which of the four allocation shapes was in flight. Without this the same
+            // message covers a host refusal, a blob that was never created, and a memory type
+            // the host rejects -- three different bugs.
+            mesa_loge(
+                "gfxstream: ALLOC-FAIL host result=%d size=%llu typeIndex=%u guestBlobExport=%d "
+                "blobRes=%u hostVisible=%d dedicatedImage=%d dedicatedBuffer=%d importedFd=%d",
+                (int)input_result, (unsigned long long)finalAllocInfo.allocationSize,
+                finalAllocInfo.memoryTypeIndex, (int)guestBlobExport,
+                bufferBlob ? bufferBlob->getResourceHandle() : 0, (int)requestedMemoryIsHostVisible,
+                (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
+                (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
+                importedFd);
+            _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(input_result);
+        }
 
         setDeviceMemoryInfo(device, *pMemory, 0, nullptr, finalAllocInfo.memoryTypeIndex, ahw,
                             isImport, vmo_handle, bufferBlob, importedFd);
