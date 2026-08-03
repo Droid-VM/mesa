@@ -167,7 +167,12 @@ uint64_t GeneratePseudoUniqueId() {
 DEFINE_RESOURCE_TRACKING_CLASS(CreateMapping, CREATE_MAPPING_IMPL_FOR_TYPE)
 DEFINE_RESOURCE_TRACKING_CLASS(DestroyMapping, DESTROY_MAPPING_IMPL_FOR_TYPE)
 
-static uint32_t* sSeqnoPtr = nullptr;
+// Thread-local, paired with the thread-local counter it points at. sFallbackSeqno catches any
+// thread that encodes without having gone through getVulkanEncoder(): there is no such path today,
+// but a null dereference here would take the VMM down, and making a process-global thread-local
+// has done exactly that before (see the sFeatureBits attempt).
+static thread_local uint32_t* sSeqnoPtr = nullptr;
+static uint32_t sFallbackSeqno = 0;
 
 // static
 uint32_t ResourceTracker::streamFeatureBits = 0;
@@ -8642,13 +8647,15 @@ void ResourceTracker::setSeqnoPtr(uint32_t* seqnoptr) { sSeqnoPtr = seqnoptr; }
 
 // static
 ALWAYS_INLINE_GFXSTREAM uint32_t ResourceTracker::nextSeqno() {
-    uint32_t res = __atomic_add_fetch(sSeqnoPtr, 1, __ATOMIC_SEQ_CST);
+    uint32_t* ptr = sSeqnoPtr ? sSeqnoPtr : &sFallbackSeqno;
+    uint32_t res = __atomic_add_fetch(ptr, 1, __ATOMIC_SEQ_CST);
     return res;
 }
 
 // static
 ALWAYS_INLINE_GFXSTREAM uint32_t ResourceTracker::getSeqno() {
-    uint32_t res = __atomic_load_n(sSeqnoPtr, __ATOMIC_SEQ_CST);
+    uint32_t* ptr = sSeqnoPtr ? sSeqnoPtr : &sFallbackSeqno;
+    uint32_t res = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
     return res;
 }
 

@@ -19,7 +19,13 @@
 #include "vk_sync_dummy.h"
 #include "vk_util.h"
 
-uint32_t gSeqno = 0;
+// Per thread, not per process. The host's counterpart is created per virtio context and starts at
+// zero, and every guest thread that touches Vulkan gets its own ASG ring -- so its own context, so
+// its own host counter. A single process-wide sequence number therefore hands each of those
+// counters numbers that are already far past them, and the host waits for values that went by
+// before its counter existed. That is the whole of "seqno loop stuck": not a lost increment, two
+// different notions of whose sequence this is.
+thread_local uint32_t gSeqno = 0;
 uint32_t gNoRenderControlEnc = 0;
 
 static gfxstream::vk::VkEncoder* getVulkanEncoder(GfxStreamConnectionManager* mgr) {
@@ -30,6 +36,11 @@ static gfxstream::vk::VkEncoder* getVulkanEncoder(GfxStreamConnectionManager* mg
             return nullptr;
         }
     }
+
+    // Here, not in SetupInstanceForProcess: that runs once for the whole process, so every thread
+    // after the first would otherwise be left pointing at the first thread's counter (or, with a
+    // thread-local pointer, at nothing).
+    gfxstream::vk::ResourceTracker::get()->setSeqnoPtr(&gSeqno);
 
     gfxstream::vk::VkEncoder* vkEncoder =
         (gfxstream::vk::VkEncoder*)mgr->getEncoder(GFXSTREAM_CONNECTION_VULKAN);
