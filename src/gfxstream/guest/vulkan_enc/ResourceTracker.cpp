@@ -4231,13 +4231,42 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
                 createBlob.blobCmd = reinterpret_cast<uint8_t*>(&create3d);
                 createBlob.blobCmdSize = sizeof(create3d);
+                // Same rule as the image side: an exportable HOST_VISIBLE allocation cannot be
+                // host-owned on a protected VM, so back it with guest pages.
+                if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                    guestBlobCreateInfo.blobId =
+                        (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                    guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                    guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                    vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                    createBlob.blobCmd = nullptr;
+                    createBlob.blobCmdSize = 0;
+                    createBlob.blobMem = kBlobMemGuest;
+                    createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                       kBlobFlagCrossDevice;
+                    createBlob.blobId = guestBlobCreateInfo.blobId;
+                    createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                    guestBlobExport = true;
+                    guestBlobExportSize = createBlob.size;
+                    guestBlobExportId = guestBlobCreateInfo.blobId;
+                } else {
                 createBlob.blobMem = kBlobMemHost3d;
                 createBlob.flags = kBlobFlagShareable | kBlobFlagCrossDevice;
                 createBlob.blobId = create3d.blobId;
                 createBlob.size = finalAllocInfo.allocationSize;
+                }
 
                 bufferBlob = instance->createBlob(createBlob);
                 if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (guestBlobExport) {
+                    std::lock_guard<std::recursive_mutex> lock(mLock);
+                    GuestBlobExport rec;
+                    rec.blobId = guestBlobExportId;
+                    rec.size = guestBlobExportSize;
+                    mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                 exec.command = static_cast<void*>(&placeholderCmd);
