@@ -748,9 +748,27 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
     return 0;
 }
 
-// Shared with deepWaitWantsPing(), which needs to know when backoff() has stopped spinning and
-// started sleeping.
-static const uint32_t kBackoffItersThreshold = 50000000;
+// How long a guest thread spins before it starts sleeping, waiting for a reply the host has not
+// produced yet.
+//
+// Upstream's value here is fifty million, which on this device is seconds of a vCPU held at 100%
+// by a thread that is doing nothing. That is paid by the host as well -- a spinning vCPU is a
+// crosvm thread burning a core the render threads need -- and it is why a wedged client shows up
+// as the phone at 100% with nothing being computed.
+//
+// A few tens of thousands is enough to cover the case the spin exists for: a reply already on its
+// way. Past that, sleeping is the honest answer.
+static uint32_t backoffSpinsBeforeSleep() {
+    static const uint32_t kSpins = [] {
+        if (const char* e = getenv("GFXSTREAM_GUEST_BACKOFF_SPINS")) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(e, &end, 10);
+            if (end != e) return static_cast<uint32_t>(v);
+        }
+        return 20000u;
+    }();
+    return kSpins;
+}
 
 // Ask for another ping, roughly once a second, but only once the wait is deep.
 //
@@ -767,28 +785,43 @@ static const uint32_t kBackoffItersThreshold = 50000000;
 // turns is about a second. Pinging per iteration was tried and is much worse than not pinging --
 // each one is a virtio round trip, and it cost Minecraft two thirds of its frame rate.
 bool AddressSpaceStream::deepWaitWantsPing() {
-    if (m_backoffIters <= kBackoffItersThreshold) return false;
-    if (++m_deepWaitPingCountdown < 1000) return false;
-    m_deepWaitPingCountdown = 0;
+    if (m_backoffIters <= backoffSpinsBeforeSleep()) return false;
+    // Once a second by the clock, not once per thousand turns. The turn count only meant a second
+    // while the spin phase was fifty million long; tie the rate to that and shortening the spin
+    // silently turns a ping a second into hundreds, and each one is a virtio round trip -- pinging
+    // per iteration was measured to cost Minecraft two thirds of its frame rate.
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+    if (m_lastPingNs && now - m_lastPingNs < 1000000000ull) return false;
+    m_lastPingNs = now;
     return true;
 }
 
 void AddressSpaceStream::backoff() {
-    static const uint32_t kBackoffFactorDoublingIncrement = 50000000;
     ++m_backoffIters;
+    const uint32_t spinLimit = backoffSpinsBeforeSleep();
+    if (m_backoffIters <= spinLimit) {
+        return;
+    }
 
-    if (m_backoffIters > kBackoffItersThreshold) {
-        usleep(m_backoffFactor);
-        uint32_t itersSoFarAfterThreshold = m_backoffIters - kBackoffItersThreshold;
-        if (itersSoFarAfterThreshold > kBackoffFactorDoublingIncrement) {
-            m_backoffFactor = m_backoffFactor << 1;
-            if (m_backoffFactor > 1000) m_backoffFactor = 1000;
-            m_backoffIters = kBackoffItersThreshold;
-        }
+    usleep(static_cast<useconds_t>(m_backoffFactor));
+
+    // Grow the sleep quickly, and cap it. The doubling used to need fifty million sleeping turns
+    // to trigger, which with a short spin phase means it never triggers at all and the thread
+    // sleeps one microsecond at a time forever -- and a one microsecond sleep is a timer armed and
+    // an interrupt taken, tens of thousands a second per waiting thread. That exact shape, on the
+    // host side of the same transport, held this phone at 100% with 289k timer interrupts a second
+    // and nothing being computed.
+    if (++m_sleepTurns >= 64 && m_backoffFactor < 1000) {
+        m_sleepTurns = 0;
+        m_backoffFactor = m_backoffFactor << 1;
+        if (m_backoffFactor > 1000) m_backoffFactor = 1000;
     }
 }
 
 void AddressSpaceStream::resetBackoff() {
     m_backoffIters = 0;
     m_backoffFactor = 1;
+    m_sleepTurns = 0;
 }
