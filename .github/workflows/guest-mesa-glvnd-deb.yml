@@ -15,12 +15,22 @@ concurrency:
 
 jobs:
   build-deb:
-    name: Build arm64 deb
+    name: Build arm64 deb (${{ matrix.prefix_tag }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - install_prefix: /usr
+            prefix_tag: usr
+          - install_prefix: /usr/local
+            prefix_tag: usr-local
     env:
-      BUILD_DIR: build-guest-glvnd
-      STAGE_DIR: install-guest-glvnd
+      BUILD_DIR: build-guest-glvnd-${{ matrix.prefix_tag }}
+      STAGE_DIR: install-guest-glvnd-${{ matrix.prefix_tag }}
+      INSTALL_PREFIX: ${{ matrix.install_prefix }}
+      PREFIX_TAG: ${{ matrix.prefix_tag }}
       NINJA_JOBS: 3
 
     steps:
@@ -80,10 +90,10 @@ jobs:
           test "$(uname -m)" = aarch64
           meson setup "$BUILD_DIR" \
             --buildtype release \
-            --prefix /usr/local \
+            --prefix "$INSTALL_PREFIX" \
             --libdir lib/aarch64-linux-gnu \
             -Dplatforms=x11,wayland \
-            -Dvulkan-drivers=gfxstream,freedreno \
+            -Dvulkan-drivers=freedreno \
             -Dfreedreno-kmds=msm,virtio \
             -Dgallium-drivers=zink,freedreno \
             -Dopengl=true \
@@ -103,20 +113,70 @@ jobs:
           ninja -C "$BUILD_DIR" -j "$NINJA_JOBS"
           DESTDIR="$PWD/$STAGE_DIR" ninja -C "$BUILD_DIR" install
 
-          find "$STAGE_DIR" -type f -name 'libEGL_mesa.so*' -print -quit \
-            | grep -q .
+          mesa_libdir="${STAGE_DIR}${INSTALL_PREFIX}/lib/aarch64-linux-gnu"
+          dri_dir="$mesa_libdir/dri"
+          vulkan_icd_dir="${STAGE_DIR}${INSTALL_PREFIX}/share/vulkan/icd.d"
+
+          test -e "$mesa_libdir/libEGL_mesa.so.0"
+          test -e "$mesa_libdir/libGLX_mesa.so.0"
+          test -e "$mesa_libdir/libgbm.so.1"
+          test -e "$mesa_libdir/libvulkan_freedreno.so"
+          test -e "$dri_dir/msm_dri.so"
+          test -e "$dri_dir/virtio_gpu_dri.so"
+          test -e "$dri_dir/zink_dri.so"
+          test -e "$vulkan_icd_dir/freedreno_icd.aarch64.json"
+
+          if find "$vulkan_icd_dir" -type f -name '*gfxstream*.json' \
+            -print -quit | grep -q .; then
+            echo "Unexpected gfxstream Vulkan ICD in package" >&2
+            exit 1
+          fi
+
+          rm -f \
+            "${STAGE_DIR}${INSTALL_PREFIX}/share/glvnd/egl_vendor.d/50_mesa.json"
+          install -d -m 0755 \
+            "$STAGE_DIR/etc/glvnd/egl_vendor.d" \
+            "$STAGE_DIR/etc/ld.so.conf.d"
+
+          cat > "$STAGE_DIR/etc/glvnd/egl_vendor.d/10_droidvm_mesa.json" <<EOF
+          {
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "${INSTALL_PREFIX}/lib/aarch64-linux-gnu/libEGL_mesa.so.0"
+            }
+          }
+          EOF
+
+          cat > "$STAGE_DIR/etc/ld.so.conf.d/00-mesa-guest.conf" <<EOF
+          ${INSTALL_PREFIX}/lib/aarch64-linux-gnu
+          EOF
+
+          chmod 0644 \
+            "$STAGE_DIR/etc/glvnd/egl_vendor.d/10_droidvm_mesa.json" \
+            "$STAGE_DIR/etc/ld.so.conf.d/00-mesa-guest.conf"
+
+          python3 -m json.tool \
+            "$STAGE_DIR/etc/glvnd/egl_vendor.d/10_droidvm_mesa.json" \
+            >/dev/null
+          grep -Fq \
+            "${INSTALL_PREFIX}/lib/aarch64-linux-gnu/libEGL_mesa.so.0" \
+            "$STAGE_DIR/etc/glvnd/egl_vendor.d/10_droidvm_mesa.json"
+          grep -Fq \
+            "${INSTALL_PREFIX}/lib/aarch64-linux-gnu/libvulkan_freedreno.so" \
+            "$vulkan_icd_dir/freedreno_icd.aarch64.json"
 
       - name: Build deb package
         id: package
         run: |
           mesa_version="$(tr -d '\n' < VERSION)"
           package_version="${mesa_version}+git${GITHUB_RUN_NUMBER}.${GITHUB_SHA::8}"
-          package_file="mesa-guest-glvnd_${package_version}_arm64.deb"
+          package_name="mesa-guest-glvnd-${PREFIX_TAG}"
+          package_file="${package_name}_${package_version}_arm64.deb"
           installed_size="$(du -sk "$STAGE_DIR" | cut -f1)"
 
           install -d -m 0755 "$STAGE_DIR/DEBIAN"
           cat > "$STAGE_DIR/DEBIAN/control" <<EOF
-          Package: mesa-guest-glvnd
+          Package: ${package_name}
           Version: ${package_version}
           Section: libs
           Priority: optional
@@ -125,29 +185,24 @@ jobs:
           Maintainer: Droid-VM <noreply@github.com>
           Depends: libc6, libdrm2, libexpat1, libgcc-s1, libglvnd0, libstdc++6, libudev1, libvulkan1, libwayland-client0, libwayland-egl1, libwayland-server0, libx11-6, libx11-xcb1, libxcb1, libxcb-dri2-0, libxcb-dri3-0, libxcb-glx0, libxcb-present0, libxcb-randr0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxdamage1, libxext6, libxrandr2, libxshmfence1, libxxf86vm1, libzstd1, zlib1g
           Description: Guest Mesa GLVND stack for Droid-VM
-           Mesa guest libraries with gfxstream and freedreno Vulkan drivers,
-           the Zink Gallium driver, and GLVND vendor libraries.
+           Mesa guest libraries using Freedreno and Turnip by default, with the
+           Zink Gallium driver retained for explicit use and GLVND integration.
           EOF
 
-          cat > "$STAGE_DIR/DEBIAN/postinst" <<'EOF'
-          #!/bin/sh
-          set -e
-          ldconfig
+          cat > "$STAGE_DIR/DEBIAN/triggers" <<'EOF'
+          activate-noawait ldconfig
           EOF
-          cat > "$STAGE_DIR/DEBIAN/postrm" <<'EOF'
-          #!/bin/sh
-          set -e
-          ldconfig
-          EOF
-          chmod 0755 "$STAGE_DIR/DEBIAN/postinst" "$STAGE_DIR/DEBIAN/postrm"
+          chmod 0644 "$STAGE_DIR/DEBIAN/triggers"
 
           dpkg-deb --build --root-owner-group "$STAGE_DIR" "$package_file"
           dpkg-deb --info "$package_file"
+          dpkg-deb --contents "$package_file"
           echo "package_file=$package_file" >> "$GITHUB_OUTPUT"
 
       - name: Upload deb
         uses: actions/upload-artifact@v7
         with:
+          name: mesa-guest-glvnd-${{ matrix.prefix_tag }}
           path: ${{ steps.package.outputs.package_file }}
           if-no-files-found: error
           archive: false
