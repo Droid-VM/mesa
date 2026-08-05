@@ -81,6 +81,11 @@ private:
     uint64_t m_backoffIters;
     uint64_t m_backoffFactor;
     uint64_t m_deepWaitPingCountdown = 0;
+    // Wall-clock of the last ping, so the ping rate stops being a function of how long the spin
+    // phase is. See backoff() in the .cpp.
+    uint64_t m_lastPingNs = 0;
+    // Sleeping turns since the interval last doubled.
+    uint32_t m_sleepTurns = 0;
 
     size_t m_ringStorageSize;
     uint32_t m_resourceId = 0;
