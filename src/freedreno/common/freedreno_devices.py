@@ -1424,6 +1424,8 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0x44050a00, name="Adreno (TM) 840"), # virtio guest, patch level 0
+        GPUId(chip_id=0xffff44050a00, name="Adreno (TM) 840"),
         GPUId(chip_id=0xffff44050A31, name="Adreno (TM) 840"),
     ], A6xxGPUInfo(
         CHIP.A8XX,
