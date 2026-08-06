@@ -96,6 +96,9 @@ jobs:
             -Dvulkan-drivers=freedreno \
             -Dfreedreno-kmds=msm,virtio \
             -Dgallium-drivers=zink,freedreno \
+            -Dllvm=disabled \
+            -Ddraw-use-llvm=false \
+            -Damd-use-llvm=false \
             -Dopengl=true \
             -Dgbm=enabled \
             -Dglx=dri \
