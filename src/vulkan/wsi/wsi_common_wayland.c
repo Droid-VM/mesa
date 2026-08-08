@@ -52,6 +52,7 @@
 #include <util/cnd_monotonic.h>
 #include <util/compiler.h>
 #include <util/hash_table.h>
+#include <util/u_debug.h>
 #include <util/timespec.h>
 #include <util/u_endian.h>
 #include <util/u_vector.h>
@@ -1816,6 +1817,17 @@ wsi_wl_surface_get_support(VkIcdSurfaceBase *surface,
  *  4) One to render to
  */
 #define WSI_WL_BUMPED_NUM_IMAGES 4
+#define WSI_WL_DEFAULT_MAILBOX_IMAGES 8
+
+static uint32_t
+wsi_wl_mailbox_image_count(void)
+{
+   int64_t image_count =
+      debug_get_num_option("MESA_VK_WSI_WL_MAILBOX_IMAGES",
+                           WSI_WL_DEFAULT_MAILBOX_IMAGES);
+
+   return CLAMP(image_count, WSI_WL_BUMPED_NUM_IMAGES, 8);
+}
 
 /* Catch-all. 3 images is a sound default for everything except MAILBOX. */
 #define WSI_WL_DEFAULT_NUM_IMAGES 3
@@ -1826,7 +1838,7 @@ wsi_wl_surface_get_min_image_count(struct wsi_wl_display *display,
 {
    if (present_mode) {
       return present_mode->presentMode == VK_PRESENT_MODE_MAILBOX_KHR ?
-             WSI_WL_BUMPED_NUM_IMAGES : WSI_WL_DEFAULT_NUM_IMAGES;
+             wsi_wl_mailbox_image_count() : WSI_WL_DEFAULT_NUM_IMAGES;
    }
 
    /* If explicit present_mode is not being queried, we need to provide a safe "catch-all"
@@ -3734,7 +3746,9 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    /* We need to allocate the chain handle early, since display initialization code relies on it.
     * We do not know the actual image count until we have initialized the display handle,
     * so allocate conservatively in case we need to bump the image count. */
-   size_t size = sizeof(*chain) + MAX2(WSI_WL_BUMPED_NUM_IMAGES, pCreateInfo->minImageCount) * sizeof(chain->images[0]);
+   size_t size = sizeof(*chain) +
+      MAX2(wsi_wl_mailbox_image_count(), pCreateInfo->minImageCount) *
+      sizeof(chain->images[0]);
    chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (chain == NULL)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -3811,6 +3825,9 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       if (requires_image_count_bump)
          num_images = MAX2(min_images, num_images);
    }
+
+   if (pCreateInfo->presentMode == VK_PRESENT_MODE_MAILBOX_KHR)
+      num_images = MAX2(wsi_wl_mailbox_image_count(), num_images);
 
    VkPresentModeKHR present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
 
