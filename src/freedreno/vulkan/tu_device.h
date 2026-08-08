@@ -274,8 +274,9 @@ struct tu6_global
    volatile uint32_t breadcrumb_cpu_sync_seqno;
    uint32_t _pad4;
 
-   volatile uint32_t userspace_fence;
-   uint32_t _pad5;
+   /* GPU-written and CPU-polled; keep cache maintenance off CPU-owned fields. */
+   alignas(64) volatile uint32_t userspace_fence;
+   uint32_t _pad5[15];
 
    /* Autotune preemption delay tracking */
    uint64_t cur_rp_hash;

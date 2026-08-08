@@ -657,6 +657,11 @@ tu_virtio_sync_wait_many(struct vk_device *device, uint32_t wait_count,
       spin_end = (int64_t)abs_timeout_ns;
 
    for (;;) {
+      if (dev->vdev->vdrm->supports_guest_alloc) {
+         tu_bo_sync_cache(dev, dev->global_bo, gb_offset(userspace_fence),
+                          sizeof(dev->global_bo_map->userspace_fence),
+                          TU_MEM_SYNC_CACHE_FROM_GPU);
+      }
       uint32_t cur = dev->global_bo_map->userspace_fence;
       bool all = true, any = false;
 
@@ -1394,6 +1399,19 @@ setup_fence_cmds(struct tu_device *dev)
       c->pkt[3] = fence_iova >> 32;
    }
 
+   /* Guest-pool pages retain their contents across BO lifetimes.  Start a
+    * fresh fence generation and publish both CPU-written buffers before the
+    * poll-first path can use them.
+    */
+   dev->global_bo_map->userspace_fence = 0;
+   if (vdev->vdrm->supports_guest_alloc) {
+      tu_bo_sync_cache(dev, dev->global_bo, gb_offset(userspace_fence),
+                       sizeof(dev->global_bo_map->userspace_fence),
+                       TU_MEM_SYNC_CACHE_TO_GPU);
+      tu_bo_sync_cache(dev, vdev->fence_cmds_mem, 0, VK_WHOLE_SIZE,
+                       TU_MEM_SYNC_CACHE_TO_GPU);
+   }
+
    return result;
 }
 
@@ -1442,6 +1460,11 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    uint32_t fence = ++queue->fence;
    int idx = fence % ARRAY_SIZE(fcmds->cmds);
    fcmds->cmds[idx].fence = fence;
+   if (vdev->vdrm->supports_guest_alloc) {
+      tu_bo_sync_cache(queue->device, vdev->fence_cmds_mem,
+                       (uintptr_t)&fcmds->cmds[idx] - (uintptr_t)fcmds,
+                       sizeof(fcmds->cmds[idx]), TU_MEM_SYNC_CACHE_TO_GPU);
+   }
    struct tu_cs_entry fence_cs = {
       .bo = vdev->fence_cmds_mem,
       .size = 5 * 4,
