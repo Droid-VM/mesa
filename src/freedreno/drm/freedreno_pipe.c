@@ -6,8 +6,32 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
+#include "util/cache_ops.h"
+#include "util/os_time.h"
+
 #include "freedreno_drmif.h"
 #include "freedreno_priv.h"
+
+/**
+ * Has the GPU written a fence seqno that retires @ufence?
+ *
+ * The control bo is FD_BO_CACHED_COHERENT, but that is a lie when the bo is
+ * guest-allocated: the GPU's write lands through a different alias and the
+ * CPU can keep reading a stale line forever.  Invalidate before each read on
+ * those backends.  fd_pipe_control is a dedicated 64b-aligned allocation (it
+ * is not heap-suballocated, and SUBALLOC_ALIGNMENT is a cache line anyway),
+ * so the line we drop is ours alone.
+ */
+static inline bool
+control_fence_reached(struct fd_pipe *pipe, uint32_t ufence)
+{
+   if (pipe->control_needs_inval) {
+      util_flush_inval_range((void *)(uintptr_t)pipe->control,
+                             sizeof(*pipe->control));
+   }
+
+   return !fd_fence_after(ufence, pipe->control->fence);
+}
 
 /**
  * priority of zero is highest priority, and higher numeric values are
@@ -69,6 +93,13 @@ fd_pipe_new2(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
     * is not garbage:
     */
    pipe->control->fence = 0;
+
+   /* Publish the reset now, so that a later invalidate can't write this
+    * dirty line back over a fence the GPU has since written.
+    */
+   if (pipe->control_needs_inval)
+      util_flush_range((void *)(uintptr_t)pipe->control, sizeof(*pipe->control));
+
    pipe->control_mem->bo_reuse = NO_CACHE;
 
    return pipe;
@@ -175,13 +206,48 @@ int
 fd_pipe_wait_timeout(struct fd_pipe *pipe, const struct fd_fence *fence,
                      uint64_t timeout)
 {
-   if (!fd_fence_after(fence->ufence, pipe->control->fence))
+   if (control_fence_reached(pipe, fence->ufence))
       return 0;
 
    if (!timeout)
       return -ETIMEDOUT;
 
    fd_pipe_flush(pipe, fence->ufence);
+
+   /* Where funcs->wait is a guest->host round trip, a fence that is only
+    * microseconds from landing costs far more to ask about than to watch.
+    * Spin on the GPU-written control fence first.  The window has to cover
+    * wait-start to the GPU's write or the spin is wasted *and* the full
+    * round trip is paid on top, so this is all-or-nothing per workload.
+    *
+    * Only for callers that are actually blocked on the answer -- the retire
+    * worker reaps every submit, so spinning there costs a whole core (it was
+    * 50% of glmark2's CPU) and buys nothing.
+    *
+    * GL wants a much wider window than tu_poll_spin_ns() does (300us): GL
+    * frame times here are ~0.8-3ms rather than ~0.1ms, so the fence lands
+    * correspondingly later.  glmark2 sweep at 0/150/300/600/1200/2500us,
+    * heavy scenes only: 795 / 821 / 935 / 1435 / 1965 / 1874, and over the
+    * full suite 874 (off) -> ~1700, flat from 600us out to 2000us.  1200us
+    * sits past the knee of both mixes.
+    */
+   if (pipe->wait_spin_ns) {
+      int64_t spin_ns = pipe->wait_spin_ns;
+
+      /* Don't spin past the caller's deadline: */
+      if ((timeout != OS_TIMEOUT_INFINITE) && ((int64_t)timeout < spin_ns))
+         spin_ns = timeout;
+
+      int64_t spin_end = os_time_get_nano() + spin_ns;
+
+      do {
+         if (control_fence_reached(pipe, fence->ufence))
+            return 0;
+#ifdef __aarch64__
+         __asm__ volatile("yield");
+#endif
+      } while (os_time_get_nano() < spin_end);
+   }
 
    return pipe->funcs->wait(pipe, fence, timeout);
 }
