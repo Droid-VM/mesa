@@ -36,6 +36,14 @@
 #define VIRTGPU_BLOB_MEM_GUEST_VRAM 0x0004
 #endif
 
+#ifndef VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE
+/* DroidVM (protected VM): ask the VMM to wrap the guest pages of this blob in
+ * a udmabuf and hand it to the renderer context (same contract as the
+ * drm2kgsl guest-alloc route).
+ */
+#define VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE 0x0008
+#endif
+
 /* XXX comment these out to really use kernel uapi */
 #define SIMULATE_BO_SIZE_FIX 1
 #define SIMULATE_SYNCOBJ     1
@@ -104,6 +112,7 @@ struct virtgpu {
 
    uint32_t shmem_blob_mem;
    uint32_t bo_blob_mem;
+   bool bo_create_guest_handle;
 
    /* note that we use gem_handle instead of res_id to index because
     * res_id is monotonically increasing by default (see
@@ -1179,6 +1188,8 @@ virtgpu_bo_blob_flags(struct virtgpu *gpu,
       blob_flags |= VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
    if (external_handles)
       blob_flags |= VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+   if (gpu->bo_create_guest_handle)
+      blob_flags |= VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE;
    if (external_handles & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
       if (gpu->supports_cross_device)
          blob_flags |= VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
@@ -1503,8 +1514,18 @@ virtgpu_init_renderer_info(struct virtgpu *gpu)
       info->has_guest_vram = true;
 
    /* Use guest blob allocations from dedicated heap (Host visible memory) */
-   if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_HOST3D && capset->use_guest_vram)
+   if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_HOST3D && capset->use_guest_vram) {
       info->has_guest_vram = true;
+      /* DroidVM: give guest-allocated VkDeviceMemory the same wire shape as
+       * the drm2kgsl guest-alloc route.  HOST3D_GUEST makes the DroidVM
+       * kernel back the blob from the guest pool while the resource still
+       * reaches the renderer context's get_blob, and CREATE_GUEST_HANDLE
+       * makes the VMM turn those pages into a udmabuf parked for that
+       * get_blob, so the host can import them into VkDeviceMemory.
+       */
+      gpu->bo_blob_mem = VIRTGPU_BLOB_MEM_HOST3D_GUEST;
+      gpu->bo_create_guest_handle = true;
+   }
 }
 
 static void
