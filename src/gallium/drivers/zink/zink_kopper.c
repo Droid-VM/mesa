@@ -718,6 +718,17 @@ zink_kopper_acquire_submit(struct zink_screen *screen, struct zink_resource *res
    assert(res->obj->dt);
    struct kopper_displaytarget *cdt = res->obj->dt;
    assert(res->obj->dt_idx != UINT32_MAX);
+   /* DroidVM: with a threaded context the swapchain can be killed and
+    * recreated (VK_ERROR_OUT_OF_DATE on a window resize/first map) on the
+    * driver thread while a recorded batch still reaches this point on the tc
+    * thread with a stale obj/dt_idx -- indexing images[] with that value is
+    * how Minecraft segfaulted on every clean-image launch.  Bail and let the
+    * frame drop; the assert above keeps the invariant visible in debug
+    * builds.
+    */
+   if (res->obj->dt_idx == UINT32_MAX ||
+       res->obj->dt_idx >= cdt->swapchain->num_images)
+      return VK_NULL_HANDLE;
    if (cdt->swapchain->images[res->obj->dt_idx].dt_has_data)
       return VK_NULL_HANDLE;
    assert(res->obj->dt_idx != UINT32_MAX);
