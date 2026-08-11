@@ -592,6 +592,37 @@ vn_ring_submission_can_direct(const struct vn_ring *ring,
    return vn_cs_encoder_get_len(cs) <= ring->direct_size;
 }
 
+static VkResult
+vn_ring_submit_locked(struct vn_ring *ring,
+                      const struct vn_cs_encoder *cs,
+                      struct vn_renderer_shmem *extra_shmem,
+                      uint32_t *ring_seqno);
+
+/* DroidVM: roundtrip while the caller already holds ring->mutex.
+ *
+ * vn_ring_roundtrip() ends in vn_async_vkWaitVirtqueueSeqnoMESA, which goes
+ * through vn_ring_submit_command and takes ring->mutex again -- a guaranteed
+ * self-deadlock from vn_ring_cs_upload_locked, reachable only with
+ * has_guest_vram (a freshly allocated upload chunk needs the attach
+ * roundtrip).  kwin hit it on its first big shader upload.  Submit the
+ * virtqueue seqno the normal (ring-mutex-free) way, then encode the ring-side
+ * wait directly with vn_ring_submit_locked.
+ */
+static void
+vn_ring_roundtrip_locked(struct vn_ring *ring)
+{
+   uint64_t roundtrip_seqno;
+   if (vn_ring_submit_roundtrip(ring, &roundtrip_seqno) != VK_SUCCESS)
+      return;
+
+   uint32_t local_data[8];
+   struct vn_cs_encoder local_enc =
+      VN_CS_ENCODER_INITIALIZER_LOCAL(local_data, sizeof(local_data));
+   vn_encode_vkWaitVirtqueueSeqnoMESA(&local_enc, 0, roundtrip_seqno);
+   vn_cs_encoder_commit(&local_enc);
+   vn_ring_submit_locked(ring, &local_enc, NULL, NULL);
+}
+
 static struct vn_cs_encoder *
 vn_ring_cs_upload_locked(struct vn_ring *ring, const struct vn_cs_encoder *cs)
 {
@@ -612,7 +643,7 @@ vn_ring_cs_upload_locked(struct vn_ring *ring, const struct vn_cs_encoder *cs)
    vn_cs_encoder_commit(upload);
 
    if (vn_cs_encoder_needs_roundtrip(upload))
-      vn_ring_roundtrip(ring);
+      vn_ring_roundtrip_locked(ring);
 
    return upload;
 }
