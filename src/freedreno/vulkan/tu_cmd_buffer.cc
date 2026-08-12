@@ -237,6 +237,10 @@ tu6_lazy_init_vsc(struct tu_cmd_buffer *cmd)
 
    struct tu6_global *global = dev->global_bo_map;
 
+   if (dev->physical_device->guest_pool_size)
+      tu_bo_sync_cache(dev, dev->global_bo, gb_offset(vsc_draw_overflow),
+                       64, TU_MEM_SYNC_CACHE_FROM_GPU);
+
    uint32_t vsc_draw_overflow = global->vsc_draw_overflow;
    uint32_t vsc_prim_overflow = global->vsc_prim_overflow;
 

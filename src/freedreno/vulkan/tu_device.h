@@ -229,11 +229,12 @@ struct tu6_global
    uint32_t shaders[TU_BLIT_SHADER_SIZE];
 
    uint32_t seqno_dummy;          /* dummy seqno for CP_EVENT_WRITE */
-   uint32_t _pad0;
-   volatile uint32_t vsc_draw_overflow;
-   uint32_t _pad1;
+
+   /* GPU-written and CPU-read. Keep cache maintenance off adjacent fields. */
+   alignas(64) volatile uint32_t vsc_draw_overflow;
    volatile uint32_t vsc_prim_overflow;
-   uint32_t _pad2;
+   uint32_t _vsc_overflow_pad[14];
+
    uint64_t predicate;
 
    /* scratch space for VPC_SO[i].FLUSH_BASE_LO/HI, start on 32 byte boundary. */

@@ -984,8 +984,12 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
     * sampler descriptor.
     */
    p->maxPerSetDescriptors = MAX_SET_SIZE / (2 * FDL6_TEX_CONST_DWORDS * 4);
-   /* Our buffer size fields allow only this much */
+   /* Our buffer size fields allow only this much. Guest allocations have the
+    * additional constraint of the shared pool backing every BO. */
    p->maxMemoryAllocationSize = 0xFFFFFFFFull;
+   if (pdevice->guest_pool_size)
+      p->maxMemoryAllocationSize =
+         MIN2(p->maxMemoryAllocationSize, pdevice->heap.size);
 
 }
 
@@ -3108,6 +3112,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    global = (struct tu6_global *)device->global_bo->map;
+   /* Guest-pool pages retain their contents across BO lifetimes. Several
+    * fields in this BO rely on zero initialization, including the VSC
+    * overflow feedback that controls visibility-stream growth. */
+   memset(global, 0, global_size);
    device->global_bo_map = global;
    tu_init_clear_blit_shaders(device);
 
@@ -3260,6 +3268,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                      tu_trace_capture_data,
                      tu_trace_get_data,
                      tu_trace_delete_flush_data);
+
+   if (physical_device->guest_pool_size)
+      tu_bo_sync_cache(device, device->global_bo, 0, VK_WHOLE_SIZE,
+                       TU_MEM_SYNC_CACHE_TO_GPU);
 
    tu_breadcrumbs_init(device);
 
@@ -3776,6 +3788,12 @@ tu_AllocateMemory(VkDevice _device,
       result = VK_ERROR_FEATURE_NOT_PRESENT;
 #endif
    } else {
+      if (device->physical_device->guest_pool_size &&
+          pAllocateInfo->allocationSize > mem_heap->size) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto fail;
+      }
+
       uint64_t client_address = 0;
 
       const VkMemoryOpaqueCaptureAddressAllocateInfo *replay_info =
@@ -3815,6 +3833,7 @@ tu_AllocateMemory(VkDevice _device,
       mem->iova = mem->bo->iova;
    }
 
+fail:
    if (result != VK_SUCCESS) {
       vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
       tu_memory_emit_report(device, /* mem */ NULL, pAllocateInfo, result);
