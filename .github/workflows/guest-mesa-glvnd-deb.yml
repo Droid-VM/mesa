@@ -2,8 +2,6 @@ name: Guest Mesa GLVND arm64 deb
 
 on:
   push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
