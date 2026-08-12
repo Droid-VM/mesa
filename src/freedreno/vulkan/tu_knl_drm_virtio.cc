@@ -19,6 +19,7 @@
 #include "util/libsync.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
+#include "vk_drm_syncobj.h"
 #include "vk_util.h"
 
 #include "tu_cmd_buffer.h"
@@ -237,6 +238,9 @@ virtio_device_init(struct tu_device *dev)
 
    if (fd < 0)
       dev->vk.sync = vdrm_vpipe_get_sync(vdev->vdrm);
+
+   if (fd >= 0)
+      dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
 
    return VK_SUCCESS;
 }
@@ -735,6 +739,25 @@ tu_virtio_single_queue(struct tu_device *dev)
  * semantics are preserved (the transferred fence signals no earlier than any
  * same-queue wait could require; at worst it signals later than strictly
  * needed, which the poll-first fast path absorbs).
+ *
+ * That inheritance path needs every wait to be provably ordered behind this
+ * queue's submitted work, which a WSI acquire fence (a dma-buf import) or a
+ * cross-queue wait is not.  Such a submit is still command-less though, so
+ * rather than fall all the way back to EXECBUFFER it takes a second tier:
+ * tu_empty_submit_copy_payloads() hands each wait's own fence to the signal
+ * targets with vk_drm_syncobj_copy_payloads(), which is a few guest-local
+ * syncobj ioctls (TRANSFER, or export/SYNC_IOC_MERGE/import without timeline
+ * syncobj support) and still no host round-trip.  It costs more ioctls than
+ * the inheritance tier, hence the ordering, but far less than a kick plus a
+ * host GPU_COMMAND+TIMESTAMP_EVENT pair plus a completion vIRQ.
+ *
+ * The tiers are therefore:
+ *   1. inheritance from last_submit_syncobj  - one TRANSFER per signal
+ *   2. copy_payloads from the waits          - a few guest-local ioctls
+ *   3. real EXECBUFFER                       - commands/binds/u_trace only
+ *
+ * TU_NO_EMPTY_SUBMIT=1 disables all of this; TU_NO_EMPTY_SUBMIT_COPY=1
+ * disables only tier 2 so the two can be measured apart.
  */
 
 static bool
@@ -744,6 +767,15 @@ tu_empty_submit_disabled(void)
    if (no_skip < 0)
       no_skip = debug_get_bool_option("TU_NO_EMPTY_SUBMIT", false);
    return no_skip;
+}
+
+static bool
+tu_empty_submit_copy_disabled(void)
+{
+   static int no_copy = -1;
+   if (no_copy < 0)
+      no_copy = debug_get_bool_option("TU_NO_EMPTY_SUBMIT_COPY", false);
+   return no_copy;
 }
 
 static bool
@@ -800,8 +832,8 @@ tu_empty_submit_can_skip(struct tu_queue *queue,
 }
 
 static VkResult
-tu_empty_submit_fastpath(struct tu_queue *queue,
-                         struct vk_sync_signal *signals, uint32_t signal_count)
+tu_empty_submit_inherit(struct tu_queue *queue,
+                        struct vk_sync_signal *signals, uint32_t signal_count)
 {
    struct tu_device *dev = queue->device;
    struct tu_virtio_device *vdev = dev->vdev;
@@ -826,6 +858,44 @@ tu_empty_submit_fastpath(struct tu_queue *queue,
          struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
          s->submit_seqno = queue->fence;
          p_atomic_set(&s->owner, queue);
+      }
+   }
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+tu_empty_submit_copy_payloads(struct tu_queue *queue,
+                              struct vk_sync_wait *waits, uint32_t wait_count,
+                              struct vk_sync_signal *signals, uint32_t signal_count)
+{
+   struct tu_device *dev = queue->device;
+   const struct vk_sync_type *poll_type =
+      &dev->physical_device->poll_sync_type;
+
+   if (tu_empty_submit_disabled() || tu_empty_submit_copy_disabled())
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   if (dev->fd < 0 || !dev->vk.copy_sync_payloads)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   /* Tier 2: arbitrary waits, but still command-less. copy_payloads hands
+    * each wait's own fence to the signal targets, all guest-local (a few
+    * SYNCOBJ_TRANSFER ioctls, or export/SYNC_IOC_MERGE/import fallback).
+    * Signal targets get fences from elsewhere rather than this queue's
+    * last_submit_syncobj, so poll records must be invalidated. */
+   VkResult result = dev->vk.copy_sync_payloads(&dev->vk, wait_count, waits,
+                                                signal_count, signals);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Invalidate poll records: signals now hold fences unrelated to
+    * queue->fence, so reading userspace_fence[s->submit_seqno] would be
+    * wrong. Set owner to NULL so poll_wait falls back to syncobj query. */
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (signals[i].sync->type == poll_type) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+         p_atomic_set(&s->owner, NULL);
       }
    }
 
@@ -1436,7 +1506,18 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    if (tu_empty_submit_can_skip(queue, submit, waits, wait_count,
                                 signals, signal_count,
                                 u_trace_submission_data))
-      return tu_empty_submit_fastpath(queue, signals, signal_count);
+      return tu_empty_submit_inherit(queue, signals, signal_count);
+
+   /* Tier 2: empty submit with arbitrary waits (WSI acquire, cross-queue).
+    * Resolve with copy_payloads if available, falling back to EXECBUFFER. */
+   if (submit->commands.size == 0 && submit->binds.size == 0 &&
+       !u_trace_submission_data) {
+      VkResult copy_result = tu_empty_submit_copy_payloads(queue, waits, wait_count,
+                                                           signals, signal_count);
+      if (copy_result == VK_SUCCESS)
+         return VK_SUCCESS;
+      /* FEATURE_NOT_PRESENT or disabled → fall through to real submit */
+   }
 
 #if HAVE_PERFETTO
    struct tu_perfetto_clocks clocks;
