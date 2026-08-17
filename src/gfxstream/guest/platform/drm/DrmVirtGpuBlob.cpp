@@ -76,7 +76,7 @@ LowVaArena& lowVaArena() {
 }
 }  // namespace
 
-bool gfxstreamLowVaEnabled() {
+static bool gfxstreamLowVaEnabled() {
     static const bool enabled = [] {
         const char* e = getenv("GFXSTREAM_MAP_LOW");
         return e && e[0] == '1';
@@ -84,7 +84,7 @@ bool gfxstreamLowVaEnabled() {
     return enabled;
 }
 
-uintptr_t gfxstreamLowVaReserve(uint64_t size) {
+static uintptr_t gfxstreamLowVaReserve(uint64_t size) {
     return lowVaArena().reserve(lowVaAligned(size));
 }
 
