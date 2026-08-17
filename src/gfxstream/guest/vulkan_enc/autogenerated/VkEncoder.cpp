@@ -11055,9 +11055,7 @@ VkResult VkEncoder::vkEnumerateInstanceVersion(uint32_t* pApiVersion, uint32_t d
     auto pool = mImpl->pool();
     size_t count = 0;
     size_t* countPtr = &count;
-    {
-        *countPtr += sizeof(uint32_t);
-    }
+    { *countPtr += sizeof(uint32_t); }
     uint32_t packetSize_vkEnumerateInstanceVersion =
         4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
     uint8_t* streamPtr = stream->reserve(packetSize_vkEnumerateInstanceVersion);
@@ -12189,6 +12187,8 @@ void VkEncoder::vkGetPhysicalDeviceMemoryProperties2(
         stream, VK_STRUCTURE_TYPE_MAX_ENUM,
         (VkPhysicalDeviceMemoryProperties2*)(pMemoryProperties));
     if (pMemoryProperties) {
+        sResourceTracker->transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
+            pMemoryProperties, 1);
         transform_fromhost_VkPhysicalDeviceMemoryProperties2(
             sResourceTracker, (VkPhysicalDeviceMemoryProperties2*)(pMemoryProperties));
     }
@@ -18451,6 +18451,8 @@ void VkEncoder::vkGetPhysicalDeviceMemoryProperties2KHR(
         stream, VK_STRUCTURE_TYPE_MAX_ENUM,
         (VkPhysicalDeviceMemoryProperties2*)(pMemoryProperties));
     if (pMemoryProperties) {
+        sResourceTracker->transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
+            pMemoryProperties, 1);
         transform_fromhost_VkPhysicalDeviceMemoryProperties2(
             sResourceTracker, (VkPhysicalDeviceMemoryProperties2*)(pMemoryProperties));
     }
@@ -27880,9 +27882,7 @@ void VkEncoder::vkTraceAsyncGOOGLE(uint64_t id, uint32_t doLock) {
     local_id = id;
     size_t count = 0;
     size_t* countPtr = &count;
-    {
-        *countPtr += sizeof(uint64_t);
-    }
+    { *countPtr += sizeof(uint64_t); }
     uint32_t packetSize_vkTraceAsyncGOOGLE =
         4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
     uint8_t* streamPtr = stream->reserve(packetSize_vkTraceAsyncGOOGLE);

@@ -1911,6 +1911,16 @@ void reservedmarshal_VkQueueFamilyOwnershipTransferPropertiesKHR(
     const VkQueueFamilyOwnershipTransferPropertiesKHR* forMarshaling, uint8_t** ptr);
 
 #endif
+#ifdef VK_KHR_robustness2
+void reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2FeaturesKHR* forMarshaling, uint8_t** ptr);
+
+void reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2PropertiesKHR* forMarshaling, uint8_t** ptr);
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void reservedmarshal_VkNativeBufferUsage2ANDROID(VulkanStreamGuest* vkStream,
                                                  VkStructureType rootType,
@@ -2188,16 +2198,8 @@ void reservedmarshal_VkDeviceDeviceMemoryReportCreateInfoEXT(
 
 #endif
 #ifdef VK_EXT_robustness2
-void reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
-    VulkanStreamGuest* vkStream, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2FeaturesKHR* forMarshaling, uint8_t** ptr);
-
 DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR,
                       reservedmarshal_VkPhysicalDeviceRobustness2FeaturesEXT)
-
-void reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
-    VulkanStreamGuest* vkStream, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2PropertiesKHR* forMarshaling, uint8_t** ptr);
 
 DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR,
                       reservedmarshal_VkPhysicalDeviceRobustness2PropertiesEXT)

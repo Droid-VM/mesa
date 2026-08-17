@@ -50,7 +50,8 @@ class ResourceTracker;
 
 #define LIST_NON_TRIVIAL_TRANSFORMED_TYPES(f) \
     f(VkExternalMemoryProperties)             \
-    f(VkImageCreateInfo)
+    f(VkImageCreateInfo)                      \
+    f(VkPhysicalDeviceMemoryProperties2)
 
 #define LIST_TRANSFORMED_TYPES(f)     \
     LIST_TRIVIAL_TRANSFORMED_TYPES(f) \
@@ -3051,6 +3052,20 @@ void transform_fromhost_VkQueueFamilyOwnershipTransferPropertiesKHR(
     ResourceTracker* resourceTracker, VkQueueFamilyOwnershipTransferPropertiesKHR* toTransform);
 
 #endif
+#ifdef VK_KHR_robustness2
+void transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform);
+
+void transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform);
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void transform_tohost_VkNativeBufferUsage2ANDROID(ResourceTracker* resourceTracker,
                                                   VkNativeBufferUsage2ANDROID* toTransform);
@@ -3505,23 +3520,11 @@ void transform_fromhost_VkDeviceDeviceMemoryReportCreateInfoEXT(
 
 #endif
 #ifdef VK_EXT_robustness2
-void transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform);
-
-void transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform);
-
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR,
                       transform_tohost_VkPhysicalDeviceRobustness2FeaturesEXT)
 
 DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR,
                       transform_fromhost_VkPhysicalDeviceRobustness2FeaturesEXT)
-
-void transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform);
-
-void transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform);
 
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR,
                       transform_tohost_VkPhysicalDeviceRobustness2PropertiesEXT)
