@@ -4,6 +4,7 @@
  */
 
 #include "ResourceTracker.h"
+#include "util/os_misc.h"
 
 #include "CommandBufferStagingStream.h"
 #include "DescriptorSetVirtualization.h"
@@ -2423,8 +2424,36 @@ void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
     VirtGpuDevice* instance = VirtGpuDevice::getInstance();
     if (!instance) return;
 
+    // With a pool, that pool is the ceiling. Without one the allocation comes out of guest RAM,
+    // and the system-memory figures are then the honest answer -- still not the host's, which is
+    // what the query would otherwise return: the phone's whole RAM, several times anything this
+    // guest can have.
     VirtGpuGuestPoolInfo poolInfo;
-    if (!instance->getGuestPoolInfo(&poolInfo)) return;
+    uint64_t poolBudget = 0, poolUsage = 0;
+    if (instance->getGuestPoolInfo(&poolInfo)) {
+        poolBudget = poolInfo.totalBytes;
+        // budget - usage is read as "what I can still get", so usage comes from the largest
+        // allocation that can actually succeed, not from bytes handed out. The two agree while
+        // the allocator can scatter, and diverge the moment it cannot.
+        poolUsage = poolInfo.totalBytes - poolInfo.largestFreeBytes;
+    } else {
+        // No pool. Where the allocation lands decides who can answer: with guest handles the
+        // memory comes out of this guest and its system figures are the honest ones; without
+        // them it is allocated on the host, whose own numbers already describe it -- and
+        // VIRTIO_GPU_F_CREATE_GUEST_HANDLE is negotiated exactly when the VMM was started with
+        // udmabuf=true, which is the same switch.
+        if (!instance->getCaps().params[kParamCreateGuestHandle]) return;
+
+        uint64_t sysTotal = 0, sysAvail = 0;
+        if (!os_get_total_physical_memory(&sysTotal) ||
+            !os_get_available_system_memory(&sysAvail)) {
+            return;
+        }
+        // The same 90% restraint the other DroidVM routes use: never invite an app to take the
+        // guest's last page.
+        poolBudget = sysTotal - sysTotal / 10;
+        poolUsage = sysTotal > sysAvail ? sysTotal - sysAvail : 0;
+    }
 
     for (uint32_t i = 0; i < count; ++i) {
         VkPhysicalDeviceMemoryBudgetPropertiesEXT* budget = nullptr;
@@ -2451,9 +2480,8 @@ void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
             // budget - usage is read as "what I can still get", so usage comes from the largest
             // allocation that can actually succeed, not from bytes handed out. The two agree while
             // the allocator can scatter, and diverge the moment it cannot.
-            budget->heapBudget[h] = std::min(poolInfo.totalBytes, props.memoryHeaps[h].size);
-            budget->heapUsage[h] = std::min(poolInfo.totalBytes - poolInfo.largestFreeBytes,
-                                            budget->heapBudget[h]);
+            budget->heapBudget[h] = std::min(poolBudget, props.memoryHeaps[h].size);
+            budget->heapUsage[h] = std::min(poolUsage, budget->heapBudget[h]);
         }
     }
 }
