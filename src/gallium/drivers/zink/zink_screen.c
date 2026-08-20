@@ -3125,6 +3125,23 @@ init_driver_workarounds(struct zink_screen *screen)
    default:
       break;
    }
+   /* DroidVM: renderpass tracking deadlocks the threaded context on the paravirtualized
+    * Vulkan drivers. venus and gfxstream forward the host turnip driverID, so the tiler
+    * optimizations above get enabled, but their much higher submit latency keeps many tc
+    * batches in flight, and Minecraft (zink) then wedges with the app thread in
+    * tc_batch_increment_renderpass_info() waiting for a batch fence while the driver thread
+    * sits in threaded_context_get_renderpass_info() waiting for that batch's rp info
+    * (reproduced 2026-08-17 on A750 with the upstream rp-info fixes 42222/42388 applied).
+    * Until the tc race is fixed upstream, do not track renderpasses on "Virtio-GPU ..."
+    * devices; ZINK_DEBUG=rp still forces it on for experiments.
+    */
+   if (screen->driver_workarounds.track_renderpasses &&
+       !strncmp(screen->info.props.deviceName, "Virtio-GPU", 10)) {
+      mesa_logi("zink: paravirtualized device '%s': renderpass tracking disabled (tc deadlock)",
+                screen->info.props.deviceName);
+      screen->driver_workarounds.track_renderpasses = false;
+   }
+
    if (zink_debug & ZINK_DEBUG_RP)
       screen->driver_workarounds.track_renderpasses = true;
    else if (zink_debug & ZINK_DEBUG_NORP)
