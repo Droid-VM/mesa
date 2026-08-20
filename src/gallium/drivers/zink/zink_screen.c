@@ -3151,6 +3151,13 @@ init_driver_workarounds(struct zink_screen *screen)
    switch (zink_driverid(screen)) {
    case VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA:
    case VK_DRIVER_ID_MESA_TURNIP:
+   /* gfxstream is turnip seen through the ASG wire, and turnip is already on this list. On this
+    * stack the host hides VK_EXT_image_drm_format_modifier on purpose and the guest ICD emulates
+    * it LINEAR-only, so an INVALID modifier IS linear here -- there is nothing to translate. Left
+    * off the list, zink refuses every dmabuf the compositor hands it ("display server doesn't
+    * support DRI3 modifiers and driver can't handle INVALID<->LINEAR!"), EGLImage creation fails
+    * with EGL_BAD_ALLOC, and kwin ends up with no usable output at all. */
+   case VK_DRIVER_ID_MESA_GFXSTREAM:
    case VK_DRIVER_ID_MESA_NVK:
    case VK_DRIVER_ID_MESA_LLVMPIPE:
    case VK_DRIVER_ID_MESA_PANVK:
