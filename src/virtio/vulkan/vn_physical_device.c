@@ -1405,7 +1405,11 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_legacy_vertex_attributes = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
-      .EXT_memory_budget = VN_DEBUG(MEM_BUDGET),
+      /* DroidVM: always advertised. What bounds a guest here is the VM's own pool or its
+       * RAM, not the host GPU, and an app that cannot ask has no way to find that out --
+       * it sizes its caches against a heap several times larger than anything it can get.
+       * See vn_GetPhysicalDeviceMemoryProperties2. */
+      .EXT_memory_budget = true,
       .EXT_mesh_shader = true,
       .EXT_multi_draw = true,
       .EXT_multisampled_render_to_single_sampled = true,
@@ -2160,6 +2164,85 @@ vn_GetPhysicalDeviceQueueFamilyProperties2(
    }
 }
 
+/*
+ * DroidVM: VK_EXT_memory_budget answered about the guest, not the host GPU.
+ *
+ * The heaps venus reports are the renderer's, and so is the budget the server just filled in:
+ * they describe the physical GPU and the host's whole system memory. Neither is what bounds this
+ * guest. Where the memory actually comes from decides who can answer:
+ *
+ *   host-alloc  -- VkDeviceMemory lives on the host, so the host's figures are the right ones
+ *                  and we leave them exactly as they arrived.
+ *   guest-alloc -- the allocation comes out of the guest, and then either
+ *                    * the VM has a virtio-gpu pool, reserved at boot: that pool is the ceiling,
+ *                      and only the kernel knows how much of it is left, since it is device-wide
+ *                      (a compositor, a browser and a game all carve out of the same one), or
+ *                    * it has no pool and allocations come from guest RAM, where the system
+ *                      memory estimate is the honest answer.
+ *
+ * Only host-visible heaps are rewritten: device-local-only heaps are still the renderer's.
+ */
+static void
+vn_fill_guest_memory_budget(struct vn_physical_device *physical_dev,
+                            VkPhysicalDeviceMemoryProperties2 *props2,
+                            VkPhysicalDeviceMemoryBudgetPropertiesEXT *budget)
+{
+   struct vn_renderer *renderer = physical_dev->instance->renderer;
+   const VkPhysicalDeviceMemoryProperties *props = &props2->memoryProperties;
+   uint64_t guest_budget = 0;
+   uint64_t guest_usage = 0;
+   uint64_t total, used, largest_free;
+
+   /* A pool is its own evidence: a kernel only reports one when this VM's graphics memory is
+    * carved out of it. Failing that, what separates "the allocation happens in here" from
+    * host-alloc is whether guest handles were negotiated -- the capset's use_guest_vram is not
+    * that signal, the VMM sets it for every venus VM. In host-alloc the host's own figures
+    * describe the memory correctly and are left exactly as they arrived. */
+   const bool have_pool =
+      renderer->ops.get_guest_pool_stats &&
+      renderer->ops.get_guest_pool_stats(renderer, &total, &used, &largest_free);
+
+   if (!have_pool && !renderer->info.has_guest_handle)
+      return;
+
+   if (have_pool) {
+      /* budget - usage is read as "what I can still get", so the usage side comes from the
+       * largest allocation that can still succeed rather than from bytes handed out. The two
+       * agree while the pool can scatter and diverge the moment it cannot. */
+      guest_budget = total;
+      guest_usage = total > largest_free ? total - largest_free : used;
+   } else {
+      uint64_t sys_total = 0, sys_avail = 0;
+
+      if (!os_get_total_physical_memory(&sys_total) ||
+          !os_get_available_system_memory(&sys_avail))
+         return;
+
+      /* Same 90% restraint the other DroidVM routes use: never invite an app to take the
+       * guest's last page. */
+      guest_budget = sys_total - sys_total / 10;
+      guest_usage = sys_total > sys_avail ? sys_total - sys_avail : 0;
+   }
+
+   for (uint32_t h = 0; h < props->memoryHeapCount; h++) {
+      bool host_visible = false;
+
+      for (uint32_t t = 0; t < props->memoryTypeCount; t++) {
+         if (props->memoryTypes[t].heapIndex == h &&
+             (props->memoryTypes[t].propertyFlags &
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+            host_visible = true;
+            break;
+         }
+      }
+      if (!host_visible)
+         continue;
+
+      budget->heapBudget[h] = MIN2(guest_budget, props->memoryHeaps[h].size);
+      budget->heapUsage[h] = MIN2(guest_usage, budget->heapBudget[h]);
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 vn_GetPhysicalDeviceMemoryProperties2(
    VkPhysicalDevice physicalDevice,
@@ -2191,6 +2274,9 @@ vn_GetPhysicalDeviceMemoryProperties2(
     * version due to workarounds.
     */
    pMemoryProperties->memoryProperties = physical_dev->memory_properties;
+
+   if (memory_budget)
+      vn_fill_guest_memory_budget(physical_dev, pMemoryProperties, memory_budget);
 }
 
 static inline void

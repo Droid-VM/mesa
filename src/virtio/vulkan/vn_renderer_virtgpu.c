@@ -28,6 +28,17 @@
 #include "vn_renderer_sim_syncobj.h"
 
 /* All guest allocations happen via virtgpu dedicated heap. */
+/* DroidVM guest-alloc pool, reported by our virtio-gpu guest driver. */
+#ifndef VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB
+#define VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB 0x1000
+#define VIRTGPU_PARAM_GUEST_POOL_USED_KIB 0x1001
+#define VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB 0x1002
+#endif
+
+#ifndef VIRTGPU_PARAM_CREATE_GUEST_HANDLE
+#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
+#endif
+
 #ifndef VIRTGPU_PARAM_GUEST_VRAM
 #define VIRTGPU_PARAM_GUEST_VRAM 9
 #endif
@@ -764,6 +775,31 @@ virtgpu_shmem_create(struct vn_renderer *renderer, size_t size)
    return &shmem->base;
 }
 
+/* DroidVM: live pool figures, read straight from the kernel that owns the pool. */
+static bool
+virtgpu_get_guest_pool_stats(struct vn_renderer *renderer,
+                             uint64_t *total,
+                             uint64_t *used,
+                             uint64_t *largest_free)
+{
+   struct virtgpu *gpu = (struct virtgpu *)renderer;
+   const uint64_t total_kib =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB);
+
+   if (!total_kib)
+      return false;
+
+   if (total)
+      *total = total_kib << 10;
+   if (used)
+      *used = virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_USED_KIB) << 10;
+   if (largest_free)
+      *largest_free =
+         virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB) << 10;
+
+   return true;
+}
+
 static VkResult
 virtgpu_wait(struct vn_renderer *renderer,
              const struct vn_renderer_wait *wait)
@@ -910,6 +946,18 @@ virtgpu_init_renderer_info(struct virtgpu *gpu)
 
    if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_GUEST_VRAM)
       info->has_guest_vram = true;
+
+   /* DroidVM: how big the guest's allocation pool is, if this kernel has one. Zero elsewhere,
+    * which is what sends the budget query to the system-memory estimate instead. */
+   info->guest_pool_size =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB) << 10;
+
+   /* DroidVM: whether VkDeviceMemory is allocated in here or on the host. The VMM negotiates
+    * VIRTIO_GPU_F_CREATE_GUEST_HANDLE exactly when it was started with udmabuf=true, so this
+    * param -- unlike the capset's use_guest_vram, which venus gets either way -- is what
+    * separates the two. Used when reporting VK_EXT_memory_budget. */
+   info->has_guest_handle =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_CREATE_GUEST_HANDLE) != 0;
 
    /* Use guest blob allocations from dedicated heap (Host visible memory) */
    if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_HOST3D && capset->use_guest_vram) {
@@ -1229,6 +1277,7 @@ virtgpu_init(struct virtgpu *gpu)
    gpu->base.ops.destroy = virtgpu_destroy;
    gpu->base.ops.submit = virtgpu_submit;
    gpu->base.ops.wait = virtgpu_wait;
+   gpu->base.ops.get_guest_pool_stats = virtgpu_get_guest_pool_stats;
 
    gpu->base.shmem_ops.create = virtgpu_shmem_create;
    gpu->base.shmem_ops.destroy = virtgpu_shmem_destroy;
