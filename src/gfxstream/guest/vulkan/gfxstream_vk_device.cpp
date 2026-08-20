@@ -168,6 +168,48 @@ static std::vector<const char*> filteredDeviceExtensionNames(
     return retList;
 }
 
+// Extensions whose pNext structs the gfxstream host decoder cannot take from this encoder.
+//
+// The host's reservedunmarshal_extension_struct() dispatches on sType and abort()s -- taking
+// the whole VMM with it -- for any struct its (older, separately generated) cereal tables do
+// not know. This encoder marshals a wider set than some hosts decode, and the structs below
+// are exactly where the two disagree. Dropping the extension here means the guest ICD never
+// advertises it, so no application ever builds a chain containing one.
+//
+// The host hides these itself once its capset reports cerealStructSetVersion >= 1, so this
+// list is what protects the case the host cannot cover: a guest newer than its host, which is
+// the normal state whenever only the mesa .deb has been updated.
+static bool isHostUndecodableDeviceExtension(const char* name, uint32_t cerealStructSetVersion) {
+    // Not decodable by any host build so far: these structs need Vulkan headers newer than the
+    // ones gfxstream is built against (VK_HEADER_VERSION 313).
+    static const char* const kNeverDecodable[] = {
+        "VK_KHR_maintenance9",  // VkPhysicalDeviceMaintenance9{Features,Properties}KHR,
+                                // VkQueueFamilyOwnershipTransferPropertiesKHR
+        "VK_KHR_robustness2",   // VkPhysicalDeviceRobustness2{Features,Properties}KHR
+    };
+    // Decodable from cereal struct set 1 on (see host VkDecoderGlobalState.cpp).
+    static const char* const kNeedsStructSetV1[] = {
+        "VK_EXT_primitives_generated_query",  // VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
+        "VK_EXT_blend_operation_advanced",    // VkPhysicalDeviceBlendOperationAdvanced*EXT,
+                                              // VkPipelineColorBlendAdvancedStateCreateInfoEXT
+        "VK_EXT_border_color_swizzle",        // VkPhysicalDeviceBorderColorSwizzleFeaturesEXT,
+                                        // VkSamplerBorderColorComponentMappingCreateInfoEXT
+        "VK_EXT_frame_boundary",        // VkFrameBoundaryEXT, VkPhysicalDeviceFrameBoundary*EXT
+        "VK_KHR_maintenance7",          // VkPhysicalDeviceMaintenance7*KHR,
+                                        // VkPhysicalDeviceLayeredApi*KHR
+        "VK_KHR_maintenance8",          // VkMemoryBarrierAccessFlags3KHR
+    };
+    for (const char* ext : kNeverDecodable) {
+        if (0 == strncmp(name, ext, VK_MAX_EXTENSION_NAME_SIZE)) return true;
+    }
+    if (cerealStructSetVersion < 1) {
+        for (const char* ext : kNeedsStructSetV1) {
+            if (0 == strncmp(name, ext, VK_MAX_EXTENSION_NAME_SIZE)) return true;
+        }
+    }
+    return false;
+}
+
 static void get_device_extensions(VkPhysicalDevice physDevInternal,
                                   struct vk_device_extension_table* deviceExts) {
     VkResult result = (VkResult)0;
@@ -181,8 +223,22 @@ static void get_device_extensions(VkPhysicalDevice physDevInternal,
         result = resources->on_vkEnumerateDeviceExtensionProperties(
             vkEnc, VK_SUCCESS, physDevInternal, NULL, &numDeviceExts, extProps.data());
         if (result == VK_SUCCESS) {
+            uint32_t cerealStructSetVersion = 0;
+            if (VirtGpuDevice* virtGpu = VirtGpuDevice::getInstance(kCapsetGfxStreamVulkan)) {
+                cerealStructSetVersion = virtGpu->getCaps().vulkanCapset.cerealStructSetVersion;
+            }
             // Enable device extensions from the host's physical device
             for (uint32_t i = 0; i < numDeviceExts; i++) {
+                if (isHostUndecodableDeviceExtension(extProps[i].extensionName,
+                                                     cerealStructSetVersion)) {
+                    if (getenv("GFXSTREAM_EXT_TRACE")) {
+                        fprintf(stderr,
+                                "gfxstream: hiding [%s]: this host (cereal struct set %u) cannot "
+                                "decode its pNext structs\n",
+                                extProps[i].extensionName, cerealStructSetVersion);
+                    }
+                    continue;
+                }
                 for (uint32_t j = 0; j < VK_DEVICE_EXTENSION_COUNT; j++) {
                     if (0 == strncmp(extProps[i].extensionName,
                                      vk_device_extensions[j].extensionName,
