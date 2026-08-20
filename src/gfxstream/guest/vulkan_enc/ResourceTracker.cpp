@@ -1784,6 +1784,12 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_KHR_maintenance1",
         "VK_KHR_maintenance2",
         "VK_KHR_maintenance3",
+        // zink >= 26.1 refuses to create a screen without this one ("VK_KHR_maintenance5
+        // required!"), which on this stack means gbm_create_device() returns NULL, kwin never
+        // starts, and sddm restarts it forever. The host driver has had it all along
+        // (freedreno: .KHR_maintenance5 = tu_is_vk_1_1(device)) and the host decoder carries its
+        // commands; it was simply never added to this list, unlike maintenance4/7/8/9 above.
+        "VK_KHR_maintenance5",
         "VK_KHR_bind_memory2",
         "VK_KHR_dedicated_allocation",
         "VK_KHR_get_memory_requirements2",
