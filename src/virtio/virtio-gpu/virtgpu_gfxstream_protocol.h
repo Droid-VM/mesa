@@ -109,21 +109,12 @@ struct vulkanCapset {
     uint32_t hasTraceAsyncCommand;
     uint32_t hasSetMetadataCommand;
 
-    // DroidVM pVM guest-alloc pool partition (CMDLINE_V2 v3, udmabuf=true only): the
-    // guest-owned slice the guest ICD carves BLOB_MEM_GUEST allocations from, as MB
-    // offset/size within the boot-blessed GpuPool. 0/0 => host-alloc mode (whole pool
-    // host-owned); the guest ignores these unless guestAllocSizeMb > 0.
+    // pVM guest-alloc pool partition (udmabuf=true only): the guest-owned slice the guest
+    // ICD carves BLOB_MEM_GUEST allocations from, as MB offset/size within the boot-blessed
+    // GpuPool. 0/0 => host-alloc mode (the whole pool is host-owned); the guest ignores these
+    // unless guestAllocSizeMb > 0.
     uint32_t guestAllocOffsetMb;
     uint32_t guestAllocSizeMb;
-
-    // Which generation of the cereal pNext struct set this host can (un)marshal. 0 (an older
-    // host, or one that never wrote the field) means "only the struct set that shipped with
-    // gfxstream's own vk.xml"; a guest mesa >= 26 marshals a wider set, and a struct with no
-    // case in reservedunmarshal_extension_struct() desynchronises the stream and aborts the
-    // VMM. 1 = the set the mesa 26.3 guest encoder can send, minus the extensions listed in
-    // kHiddenDeviceExtensions. Bump this whenever the host gains coverage, and teach the
-    // guest's kStructSetV*Extensions about it.
-    uint32_t cerealStructSetVersion;
 };
 
 struct magmaCapset {
