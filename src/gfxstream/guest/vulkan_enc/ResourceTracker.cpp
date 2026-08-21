@@ -2486,6 +2486,15 @@ void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
             // budget - usage is read as "what I can still get", so usage comes from the largest
             // allocation that can actually succeed, not from bytes handed out. The two agree while
             // the allocator can scatter, and diverge the moment it cannot.
+            //
+            // Capped at the heap, which the spec requires and which bites in the no-pool
+            // guest-alloc mode: the memory really does come from this guest's RAM, but the heap
+            // the app is shown is not ours to correct. gfxstream's host emulation clamps every
+            // guest-visible heap to kMaxSafeHeapSize (2 GiB, VkEmulatedPhysicalDeviceMemory.cpp),
+            // and that figure reaches the app through the plain vkGetPhysicalDeviceMemoryProperties
+            // -- a query with no guest-side transform hook at all, so raising it here would only
+            // make the budget disagree with the size next to it. The utilisation is still the
+            // guest's own; the ceiling is upstream's.
             budget->heapBudget[h] = std::min(poolBudget, props.memoryHeaps[h].size);
             budget->heapUsage[h] = std::min(poolUsage, budget->heapBudget[h]);
         }
