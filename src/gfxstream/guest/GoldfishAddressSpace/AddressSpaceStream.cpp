@@ -383,9 +383,21 @@ int AddressSpaceStream::writeFully(const void* buf, size_t size) {
         }
     }
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
@@ -453,9 +465,21 @@ int AddressSpaceStream::writeFullyAsync(const void* buf, size_t size) {
     }
 
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
@@ -728,9 +752,21 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
         }
     }
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
