@@ -16,79 +16,6 @@
 #include "util/log.h"
 #include "util/perf/cpu_trace.h"
 
-// Where a guest thread's waiting time actually goes.
-//
-// Every wait on this path was invisible from the guest side, and the host-side probes can only say
-// "the ring went quiet" -- not which of the eight loops over here was holding the thread. These
-// loops are sequential rather than nested, so one active site per thread is enough to attribute a
-// whole wait to the loop that owned it.
-//
-// Raw counts and a duration histogram per site. No means and no per-frame ratios: on this
-// workload the frame count moves by a factor of four between builds, so any quantity divided by it
-// says more about the divisor than about the wait.
-//
-// GFXSTREAM_GUEST_WAIT_TRACE=1. Off, this costs one bool test per wait -- and a wait is already
-// the slow path.
-namespace {
-
-const char* kGuestWaitSiteNames[] = {
-    "writeFully", "writeFullyAsync", "specRead", "consumerFin",
-    "type1Fin",   "type3Fin",        "type1Write", "maxOutstanding",
-};
-
-bool guestWaitTraceEnabled() {
-    static const bool on = getenv("GFXSTREAM_GUEST_WAIT_TRACE") != nullptr;
-    return on;
-}
-
-uint64_t guestWaitNowNs() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
-}
-
-struct GuestWaitCounts {
-    uint64_t episodes[8] = {};
-    uint64_t iters[8] = {};
-    uint64_t totalUs[8] = {};
-    uint64_t buckets[8][7] = {};
-    uint64_t detailMax[8] = {};
-    uint64_t reported = 0;
-};
-
-void guestWaitNote(int site, uint64_t us, uint64_t iters, uint32_t detail) {
-    static thread_local GuestWaitCounts c;
-    if (site < 0 || site >= 8) return;
-    ++c.episodes[site];
-    c.iters[site] += iters;
-    c.totalUs[site] += us;
-    if (detail > c.detailMax[site]) c.detailMax[site] = detail;
-    static const uint64_t kEdges[] = {10, 50, 100, 500, 1000, 5000};
-    size_t i = 0;
-    while (i < 6 && us >= kEdges[i]) ++i;
-    ++c.buckets[site][i];
-
-    constexpr uint64_t kEvery = 2000;
-    uint64_t total = 0;
-    for (int k = 0; k < 8; ++k) total += c.episodes[k];
-    if (total % kEvery) return;
-    for (int k = 0; k < 8; ++k) {
-        if (!c.episodes[k]) continue;
-        mesa_logi(
-            "GUESTWAIT[%s/%d] %s: episodes=%llu iters=%llu totalus=%llu detailmax=%llu | "
-            "us <10:%llu <50:%llu <100:%llu <500:%llu <1k:%llu <5k:%llu 5k+:%llu",
-            kGuestWaitSiteNames[k], (int)getpid(), "raw", (unsigned long long)c.episodes[k],
-            (unsigned long long)c.iters[k], (unsigned long long)c.totalUs[k],
-            (unsigned long long)c.detailMax[k], (unsigned long long)c.buckets[k][0],
-            (unsigned long long)c.buckets[k][1], (unsigned long long)c.buckets[k][2],
-            (unsigned long long)c.buckets[k][3], (unsigned long long)c.buckets[k][4],
-            (unsigned long long)c.buckets[k][5], (unsigned long long)c.buckets[k][6]);
-    }
-    c = GuestWaitCounts();
-}
-
-}  // namespace
-
 static const size_t kReadSize = 512 * 1024;
 static const size_t kWriteOffset = kReadSize;
 
@@ -446,7 +373,7 @@ int AddressSpaceStream::writeFully(const void* buf, size_t size) {
 
         if (sentChunks == 0) {
             ring_buffer_yield();
-            backoff(kWaitWriteFully);
+            backoff();
         }
 
         sent += sentChunks * sendThisTime;
@@ -527,7 +454,7 @@ int AddressSpaceStream::writeFullyAsync(const void* buf, size_t size) {
 
         if (sentChunks == 0) {
             ring_buffer_yield();
-            backoff(kWaitWriteFullyAsync);
+            backoff();
         }
 
         sent += sentChunks * sendThisTime;
@@ -613,7 +540,7 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
 
         if (!readAvail) {
             ring_buffer_yield();
-            backoff(kWaitSpeculativeRead);
+            backoff();
             if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
                  *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
                 deepWaitWantsPing()) {
@@ -689,7 +616,7 @@ void AddressSpaceStream::ensureConsumerFinishing() {
             break;
         }
 
-        backoff(kWaitConsumerFinishing);
+        backoff();
     }
 }
 
@@ -707,7 +634,7 @@ void AddressSpaceStream::ensureType1Finished() {
     // wait into a storm of them.
     bool pingedHost = false;
     while (currAvailRead) {
-        backoff(kWaitType1Finished);
+        backoff();
         ring_buffer_yield();
         currAvailRead = ring_buffer_available_read(m_context.to_host, 0);
         if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
@@ -733,7 +660,7 @@ void AddressSpaceStream::ensureType3Finished() {
             &m_context.to_host_large_xfer.view);
     while (availReadLarge) {
         ring_buffer_yield();
-        backoff(kWaitType3Finished);
+        backoff();
         availReadLarge =
             ring_buffer_available_read(
                 m_context.to_host_large_xfer.ring,
@@ -794,24 +721,8 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
 
     uint32_t ringAvailReadNow = ring_buffer_available_read(m_context.to_host, 0);
 
-    // Timed here rather than through backoff() because this loop calls neither it nor
-    // ring_buffer_yield(): it is a bare read of the consumer's position until the outstanding
-    // transfers drop below the allowance, which at the shipped 1MB/256KB is three. A thread in
-    // here holds its vCPU and shows up on the host side only as a ring that went quiet.
-    {
-        const bool trace = guestWaitTraceEnabled();
-        const uint64_t t0 = trace ? guestWaitNowNs() : 0;
-        const uint32_t outstandingAtEntry =
-            sizeForRing ? (uint32_t)(ringAvailReadNow / sizeForRing) : 0;
-        uint64_t spins = 0;
-        while (ringAvailReadNow >= maxOutstanding * sizeForRing) {
-            ringAvailReadNow = ring_buffer_available_read(m_context.to_host, 0);
-            ++spins;
-        }
-        if (trace && spins) {
-            guestWaitNote(kWaitMaxOutstanding, (guestWaitNowNs() - t0) / 1000, spins,
-                          outstandingAtEntry);
-        }
+    while (ringAvailReadNow >= maxOutstanding * sizeForRing) {
+        ringAvailReadNow = ring_buffer_available_read(m_context.to_host, 0);
     }
 
     bool hostPinged = false;
@@ -831,7 +742,7 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
 
         if (sentChunks == 0) {
             ring_buffer_yield();
-            backoff(kWaitType1Write);
+            backoff();
         }
 
         sent += sentChunks * (sizeForRing - sent);
@@ -923,12 +834,7 @@ bool AddressSpaceStream::deepWaitWantsPing() {
     return true;
 }
 
-void AddressSpaceStream::backoff(WaitSite site, uint32_t detail) {
-    if (!m_backoffIters && guestWaitTraceEnabled()) {
-        m_waitSite = site;
-        m_waitDetail = detail;
-        m_waitStartNs = guestWaitNowNs();
-    }
+void AddressSpaceStream::backoff() {
     ++m_backoffIters;
     const uint32_t spinLimit = backoffSpinsBeforeSleep();
     if (m_backoffIters <= spinLimit) {
@@ -950,16 +856,7 @@ void AddressSpaceStream::backoff(WaitSite site, uint32_t detail) {
     }
 }
 
-void AddressSpaceStream::noteWaitEnd() {
-    if (m_waitSite == kWaitSiteCount) return;
-    guestWaitNote(m_waitSite, (guestWaitNowNs() - m_waitStartNs) / 1000, m_backoffIters,
-                  m_waitDetail);
-    m_waitSite = kWaitSiteCount;
-}
-
 void AddressSpaceStream::resetBackoff() {
-    if (m_waitStartNs) noteWaitEnd();
-    m_waitStartNs = 0;
     m_backoffIters = 0;
     m_backoffFactor = 1;
     m_sleepTurns = 0;
