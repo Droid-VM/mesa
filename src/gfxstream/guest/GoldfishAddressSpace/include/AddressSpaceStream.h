@@ -44,7 +44,24 @@ private:
     void ensureType3Finished();
     int type1Write(uint32_t offset, size_t size);
 
-    void backoff();
+    // Which loop the thread is waiting in. Only one can be active at a time on a thread -- these
+    // are sequential loops, not nested -- so a single site plus a timestamp is enough to attribute
+    // a whole wait to the loop that owned it.
+    enum WaitSite {
+        kWaitWriteFully = 0,
+        kWaitWriteFullyAsync,
+        kWaitSpeculativeRead,
+        kWaitConsumerFinishing,
+        kWaitType1Finished,
+        kWaitType3Finished,
+        kWaitType1Write,
+        // The bare spin in type1Write: no backoff, no yield, no ping. It cannot be reached
+        // through backoff(), so it is timed at the loop itself.
+        kWaitMaxOutstanding,
+        kWaitSiteCount,
+    };
+    void backoff(WaitSite site, uint32_t detail = 0);
+    void noteWaitEnd();
     // True about once a second once backoff() has escalated to sleeping. See the comment on the
     // definition: it exists so a wait that has already lost a wakeup can ask for another.
     bool deepWaitWantsPing();
@@ -79,6 +96,9 @@ private:
     uint32_t m_written;
 
     uint64_t m_backoffIters;
+    WaitSite m_waitSite = kWaitSiteCount;
+    uint64_t m_waitStartNs = 0;
+    uint32_t m_waitDetail = 0;
     uint64_t m_backoffFactor;
     uint64_t m_deepWaitPingCountdown = 0;
     // Wall-clock of the last ping, so the ping rate stops being a function of how long the spin
