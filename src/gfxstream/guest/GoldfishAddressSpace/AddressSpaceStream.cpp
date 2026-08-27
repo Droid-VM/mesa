@@ -697,20 +697,6 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
         memcpy(&m_lastSentOpcode, head, sizeof(uint32_t));
     }
 
-    // What this stream actually handed the ring, for its first few transfers. The host keeps the
-    // matching record of what it took out; a stream that starts mid-packet has to disagree with
-    // this side somewhere, and this is the only place the two can be compared.
-    if (m_reportedXfers < 3) {
-        ++m_reportedXfers;
-        const uint8_t* p = (const uint8_t*)(m_buf + bufferOffset);
-        char hex[3 * 12 + 1];
-        size_t n = size < 12 ? size : 12;
-        for (size_t k = 0; k < n; ++k) snprintf(hex + 3 * k, 4, "%02x ", p[k]);
-        hex[3 * n] = 0;
-        mesa_logw("gfxstream: GUEST-XFER #%u: offset=%u size=%zu bytes=[%s]", m_reportedXfers,
-                  bufferOffset, size, hex);
-    }
-
     uint8_t* writeBufferBytes = (uint8_t*)(&xfer);
 
     uint32_t maxOutstanding = 1;
