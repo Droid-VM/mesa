@@ -4130,6 +4130,16 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     // Check for import first; this takes precedence over exportDmabuf in creating the
     // VirtGpuResource
     if (importDmabuf) {
+        // The imported dma-buf still represents the resource named by the dedicated
+        // allocation info.  Preserve that type so the host receives
+        // VkImportColorBufferGOOGLE for images rather than looking up the colorbuffer as a
+        // VkBuffer.  exportDmabuf initializes these below, but the import path previously
+        // left both values false.
+        hasDedicatedImage =
+            dedicatedAllocInfoPtr && (dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
+        hasDedicatedBuffer =
+            dedicatedAllocInfoPtr && (dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE);
+
         VirtGpuExternalHandle importHandle = {};
         // importBlob impl may close the receivedFd after it creates an GEM handle from it. dup()
         // the FD here for input to that impl, then manage the original FD at the Vulkan level
