@@ -108,6 +108,13 @@ struct vulkanCapset {
     uint32_t vulkanBatchedDescriptorSetUpdate;
     uint32_t hasTraceAsyncCommand;
     uint32_t hasSetMetadataCommand;
+
+    // pVM guest-alloc pool partition (udmabuf=true only): the guest-owned slice the guest
+    // ICD carves BLOB_MEM_GUEST allocations from, as MB offset/size within the boot-blessed
+    // GpuPool. 0/0 => host-alloc mode (the whole pool is host-owned); the guest ignores these
+    // unless guestAllocSizeMb > 0.
+    uint32_t guestAllocOffsetMb;
+    uint32_t guestAllocSizeMb;
 };
 
 struct magmaCapset {

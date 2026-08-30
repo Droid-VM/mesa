@@ -87,3 +87,8 @@ class DrmVirtGpuDevice : public VirtGpuDevice {
     int mBusType;
     drmPciBusInfo mPciBusInfo;
 };
+
+// Defined in DrmVirtGpuBlob.cpp. Returns a freed GFXSTREAM_MAP_LOW slot to the
+// low-VA arena for reuse; a no-op for high (non-arena) mappings and when the
+// feature is off.
+void gfxstreamLowVaRelease(void* addr, uint64_t size);

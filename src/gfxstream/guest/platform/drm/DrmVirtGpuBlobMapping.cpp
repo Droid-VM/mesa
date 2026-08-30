@@ -5,6 +5,8 @@
 
 #include <sys/mman.h>
 
+#include <cstdint>
+
 #include "DrmVirtGpu.h"
 #include "drm-uapi/virtgpu_drm.h"
 
@@ -12,6 +14,9 @@ DrmVirtGpuResourceMapping::DrmVirtGpuResourceMapping(VirtGpuResourcePtr blob, ui
                                                          uint64_t size)
     : mBlob(blob), mPtr(ptr), mSize(size) {}
 
-DrmVirtGpuResourceMapping::~DrmVirtGpuResourceMapping(void) { munmap(mPtr, mSize); }
+DrmVirtGpuResourceMapping::~DrmVirtGpuResourceMapping(void) {
+    munmap(mPtr, mSize);
+    gfxstreamLowVaRelease(mPtr, mSize);
+}
 
 uint8_t* DrmVirtGpuResourceMapping::asRawPtr(void) { return mPtr; }
