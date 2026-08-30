@@ -2965,19 +2965,6 @@ void gfxstream_vk_CmdPushDescriptorSet(VkCommandBuffer commandBuffer,
                                       internal_pDescriptorWrites.data(), true /* do lock */);
     }
 }
-void gfxstream_vk_CmdPushDescriptorSetWithTemplate(
-    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void* pData) {
-    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetWithTemplate");
-    VK_FROM_HANDLE(gfxstream_vk_command_buffer, gfxstream_commandBuffer, commandBuffer);
-    {
-        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(
-            gfxstream_commandBuffer->internal_object);
-        vkEnc->vkCmdPushDescriptorSetWithTemplate(gfxstream_commandBuffer->internal_object,
-                                                  descriptorUpdateTemplate, layout, set, pData,
-                                                  true /* do lock */);
-    }
-}
 void gfxstream_vk_CmdBindDescriptorSets2(VkCommandBuffer commandBuffer,
                                          const VkBindDescriptorSetsInfo* pBindDescriptorSetsInfo) {
     MESA_TRACE_SCOPE("vkCmdBindDescriptorSets2");
@@ -3412,19 +3399,6 @@ void gfxstream_vk_UpdateDescriptorSetWithTemplateKHR(
         vkEnc->vkUpdateDescriptorSetWithTemplateKHR(gfxstream_device->internal_object,
                                                     descriptorSet, descriptorUpdateTemplate, pData,
                                                     true /* do lock */);
-    }
-}
-void gfxstream_vk_CmdPushDescriptorSetWithTemplateKHR(
-    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void* pData) {
-    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetWithTemplateKHR");
-    VK_FROM_HANDLE(gfxstream_vk_command_buffer, gfxstream_commandBuffer, commandBuffer);
-    {
-        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(
-            gfxstream_commandBuffer->internal_object);
-        vkEnc->vkCmdPushDescriptorSetWithTemplateKHR(gfxstream_commandBuffer->internal_object,
-                                                     descriptorUpdateTemplate, layout, set, pData,
-                                                     true /* do lock */);
     }
 }
 #endif

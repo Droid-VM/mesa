@@ -408,6 +408,44 @@ bool DrmVirtGpuDevice::getDrmInfo(VirtGpuDrmInfo* drmInfo) {
     return true;
 }
 
+/* DroidVM guest-alloc pool occupancy, from the virtio-gpu driver that owns the allocator.
+ *
+ * Live queries, not the cached init-time params: used and largest-free move with every blob.
+ * KiB because getparam writes an int, which a byte count would overflow at 2 GiB.
+ *
+ * A kernel without these answers -EINVAL, and a kernel with them but no pool configured answers
+ * zero; both mean "no figures to report", so both return false and the reply is left alone.
+ */
+bool DrmVirtGpuDevice::getGuestPoolInfo(VirtGpuGuestPoolInfo* poolInfo) {
+    static constexpr uint64_t kParamTotalKib = 0x1000;
+    static constexpr uint64_t kParamUsedKib = 0x1001;
+    static constexpr uint64_t kParamLargestFreeKib = 0x1002;
+
+    const uint64_t ids[3] = {kParamTotalKib, kParamUsedKib, kParamLargestFreeKib};
+    uint64_t kib[3] = {0, 0, 0};
+
+    for (int i = 0; i < 3; i++) {
+        struct drm_virtgpu_getparam get_param = {0};
+        int value = 0;
+
+        get_param.param = ids[i];
+        get_param.value = (uint64_t)(uintptr_t)&value;
+        if (drmIoctl(mDeviceHandle, DRM_IOCTL_VIRTGPU_GETPARAM, &get_param)) {
+            return false;
+        }
+        kib[i] = static_cast<uint64_t>(static_cast<uint32_t>(value));
+    }
+
+    if (kib[0] == 0) {
+        return false;
+    }
+
+    poolInfo->totalBytes = kib[0] << 10;
+    poolInfo->usedBytes = kib[1] << 10;
+    poolInfo->largestFreeBytes = kib[2] << 10;
+    return true;
+}
+
 bool DrmVirtGpuDevice::getPciBusInfo(VirtGpuPciBusInfo* pciBusInfo) {
     if (mBusType != DRM_BUS_PCI) {
         return false;

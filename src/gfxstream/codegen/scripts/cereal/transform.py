@@ -294,6 +294,15 @@ class VulkanTransform(VulkanWrapperGenerator):
                     for p in api.parameters:
                         cgen.stmt("(void)%s" % p.paramName)
 
+                    # A struct listed as transformed gets its own hook, not just its transformed
+                    # members. Without this the only way to be handed a whole struct was to be a
+                    # pNext extension of one, so anything needing to see a struct together with
+                    # what is chained onto it -- a reply whose correction depends on the reply --
+                    # had nowhere to go.
+                    if name in TRANSFORMED_TYPES:
+                        cgen.stmt("%s->transformImpl_%s_%s(%s, 1)" % (
+                            self.resourceTrackerVarName, name, variant, self.toTransformVar))
+
                     genTransformsForVulkanType(
                         self.resourceTrackerVarName,
                         structInfo,

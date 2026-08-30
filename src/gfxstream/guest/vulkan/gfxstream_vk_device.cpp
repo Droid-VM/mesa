@@ -67,6 +67,15 @@ static const char* const kGuestEmulatedInstanceExtensions[] = {
 #if defined(GFXSTREAM_VK_X11)
     VK_KHR_XCB_SURFACE_EXTENSION_NAME,
 #endif
+#if defined(GFXSTREAM_VK_DISPLAY)
+    // Present straight to the guest's virtio-gpu KMS device, with no compositor in the way:
+    // mesa's common wsi_display page-flips the swapchain image's dma-buf itself. Everything
+    // here is implemented guest-side by that code; nothing crosses to the host.
+    VK_KHR_DISPLAY_EXTENSION_NAME,
+    VK_KHR_GET_DISPLAY_PROPERTIES_2_EXTENSION_NAME,
+    VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME,
+    VK_EXT_ACQUIRE_DRM_DISPLAY_EXTENSION_NAME,
+#endif
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 };
 
@@ -225,6 +234,8 @@ static VkResult gfxstream_vk_physical_device_init(
         // Set the gfxstream-internal object
         physical_device->internal_object = internal_object;
         physical_device->instance = instance;
+        // Zeroed by the allocator, and 0 is a valid fd: say "none" explicitly.
+        physical_device->display_fd = -1;
         // Note: Must use dummy_sync for correct sync object path in WSI operations
         physical_device->sync_types[0] = &vk_sync_dummy_type;
         physical_device->sync_types[1] = NULL;

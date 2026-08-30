@@ -71,6 +71,7 @@ class DrmVirtGpuDevice : public VirtGpuDevice {
 
     virtual bool getDrmInfo(VirtGpuDrmInfo* drmInfo) override;
     virtual bool getPciBusInfo(VirtGpuPciBusInfo* pciBusInfo) override;
+    virtual bool getGuestPoolInfo(VirtGpuGuestPoolInfo* poolInfo) override;
 
    private:
     int64_t mDeviceHandle = -1;

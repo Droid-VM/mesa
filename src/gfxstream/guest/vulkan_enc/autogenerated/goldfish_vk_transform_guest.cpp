@@ -821,6 +821,7 @@ void transform_tohost_VkImageCreateInfo(ResourceTracker* resourceTracker,
                                         VkImageCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkImageCreateInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -831,6 +832,7 @@ void transform_fromhost_VkImageCreateInfo(ResourceTracker* resourceTracker,
                                           VkImageCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkImageCreateInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -2837,6 +2839,7 @@ void transform_tohost_VkPhysicalDeviceMemoryProperties2(
     ResourceTracker* resourceTracker, VkPhysicalDeviceMemoryProperties2* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceMemoryProperties2_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -2848,6 +2851,7 @@ void transform_fromhost_VkPhysicalDeviceMemoryProperties2(
     ResourceTracker* resourceTracker, VkPhysicalDeviceMemoryProperties2* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3025,18 +3029,21 @@ void transform_tohost_VkExternalMemoryProperties(ResourceTracker* resourceTracke
                                                  VkExternalMemoryProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryProperties_tohost(toTransform, 1);
 }
 
 void transform_fromhost_VkExternalMemoryProperties(ResourceTracker* resourceTracker,
                                                    VkExternalMemoryProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryProperties_fromhost(toTransform, 1);
 }
 
 void transform_tohost_VkPhysicalDeviceExternalImageFormatInfo(
     ResourceTracker* resourceTracker, VkPhysicalDeviceExternalImageFormatInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceExternalImageFormatInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3046,6 +3053,7 @@ void transform_fromhost_VkPhysicalDeviceExternalImageFormatInfo(
     ResourceTracker* resourceTracker, VkPhysicalDeviceExternalImageFormatInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceExternalImageFormatInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3055,6 +3063,7 @@ void transform_tohost_VkExternalImageFormatProperties(
     ResourceTracker* resourceTracker, VkExternalImageFormatProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalImageFormatProperties_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3068,6 +3077,7 @@ void transform_fromhost_VkExternalImageFormatProperties(
     ResourceTracker* resourceTracker, VkExternalImageFormatProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalImageFormatProperties_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3081,6 +3091,7 @@ void transform_tohost_VkPhysicalDeviceExternalBufferInfo(
     ResourceTracker* resourceTracker, VkPhysicalDeviceExternalBufferInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceExternalBufferInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3090,6 +3101,7 @@ void transform_fromhost_VkPhysicalDeviceExternalBufferInfo(
     ResourceTracker* resourceTracker, VkPhysicalDeviceExternalBufferInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkPhysicalDeviceExternalBufferInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3099,6 +3111,7 @@ void transform_tohost_VkExternalBufferProperties(ResourceTracker* resourceTracke
                                                  VkExternalBufferProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalBufferProperties_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3112,6 +3125,7 @@ void transform_fromhost_VkExternalBufferProperties(ResourceTracker* resourceTrac
                                                    VkExternalBufferProperties* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalBufferProperties_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3143,6 +3157,7 @@ void transform_tohost_VkExternalMemoryImageCreateInfo(
     ResourceTracker* resourceTracker, VkExternalMemoryImageCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryImageCreateInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3152,6 +3167,7 @@ void transform_fromhost_VkExternalMemoryImageCreateInfo(
     ResourceTracker* resourceTracker, VkExternalMemoryImageCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryImageCreateInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3161,6 +3177,7 @@ void transform_tohost_VkExternalMemoryBufferCreateInfo(
     ResourceTracker* resourceTracker, VkExternalMemoryBufferCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryBufferCreateInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3170,6 +3187,7 @@ void transform_fromhost_VkExternalMemoryBufferCreateInfo(
     ResourceTracker* resourceTracker, VkExternalMemoryBufferCreateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExternalMemoryBufferCreateInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3179,6 +3197,7 @@ void transform_tohost_VkExportMemoryAllocateInfo(ResourceTracker* resourceTracke
                                                  VkExportMemoryAllocateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExportMemoryAllocateInfo_tohost(toTransform, 1);
     if (toTransform->pNext) {
         transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -3188,6 +3207,7 @@ void transform_fromhost_VkExportMemoryAllocateInfo(ResourceTracker* resourceTrac
                                                    VkExportMemoryAllocateInfo* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
+    resourceTracker->transformImpl_VkExportMemoryAllocateInfo_fromhost(toTransform, 1);
     if (toTransform->pNext) {
         transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
     }
@@ -7684,6 +7704,44 @@ void transform_fromhost_VkQueueFamilyOwnershipTransferPropertiesKHR(
 }
 
 #endif
+#ifdef VK_KHR_robustness2
+void transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
+void transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
+void transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
+void transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void transform_tohost_VkNativeBufferUsage2ANDROID(ResourceTracker* resourceTracker,
                                                   VkNativeBufferUsage2ANDROID* toTransform) {
@@ -8384,44 +8442,6 @@ void transform_tohost_VkDeviceDeviceMemoryReportCreateInfoEXT(
 
 void transform_fromhost_VkDeviceDeviceMemoryReportCreateInfoEXT(
     ResourceTracker* resourceTracker, VkDeviceDeviceMemoryReportCreateInfoEXT* toTransform) {
-    (void)resourceTracker;
-    (void)toTransform;
-    if (toTransform->pNext) {
-        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
-    }
-}
-
-#endif
-#ifdef VK_EXT_robustness2
-void transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform) {
-    (void)resourceTracker;
-    (void)toTransform;
-    if (toTransform->pNext) {
-        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
-    }
-}
-
-void transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2FeaturesKHR* toTransform) {
-    (void)resourceTracker;
-    (void)toTransform;
-    if (toTransform->pNext) {
-        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
-    }
-}
-
-void transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform) {
-    (void)resourceTracker;
-    (void)toTransform;
-    if (toTransform->pNext) {
-        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
-    }
-}
-
-void transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
-    ResourceTracker* resourceTracker, VkPhysicalDeviceRobustness2PropertiesKHR* toTransform) {
     (void)resourceTracker;
     (void)toTransform;
     if (toTransform->pNext) {
@@ -9980,6 +10000,20 @@ void transform_tohost_extension_struct(ResourceTracker* resourceTracker,
             break;
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension_out));
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             transform_tohost_VkNativeBufferANDROID(
@@ -10179,20 +10213,6 @@ void transform_tohost_extension_struct(ResourceTracker* resourceTracker,
             transform_tohost_VkDeviceDeviceMemoryReportCreateInfoEXT(
                 resourceTracker,
                 reinterpret_cast<VkDeviceDeviceMemoryReportCreateInfoEXT*>(structExtension_out));
-            break;
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            transform_tohost_VkPhysicalDeviceRobustness2FeaturesKHR(
-                resourceTracker,
-                reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension_out));
-            break;
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            transform_tohost_VkPhysicalDeviceRobustness2PropertiesKHR(
-                resourceTracker,
-                reinterpret_cast<VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension_out));
             break;
         }
 #endif
@@ -11377,6 +11397,20 @@ void transform_fromhost_extension_struct(ResourceTracker* resourceTracker,
             break;
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension_out));
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
+                resourceTracker,
+                reinterpret_cast<VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension_out));
+            break;
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             transform_fromhost_VkNativeBufferANDROID(
@@ -11576,20 +11610,6 @@ void transform_fromhost_extension_struct(ResourceTracker* resourceTracker,
             transform_fromhost_VkDeviceDeviceMemoryReportCreateInfoEXT(
                 resourceTracker,
                 reinterpret_cast<VkDeviceDeviceMemoryReportCreateInfoEXT*>(structExtension_out));
-            break;
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            transform_fromhost_VkPhysicalDeviceRobustness2FeaturesKHR(
-                resourceTracker,
-                reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension_out));
-            break;
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            transform_fromhost_VkPhysicalDeviceRobustness2PropertiesKHR(
-                resourceTracker,
-                reinterpret_cast<VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension_out));
             break;
         }
 #endif

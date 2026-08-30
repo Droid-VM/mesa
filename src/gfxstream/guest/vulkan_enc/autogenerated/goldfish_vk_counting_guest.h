@@ -1732,6 +1732,16 @@ void count_VkQueueFamilyOwnershipTransferPropertiesKHR(
     const VkQueueFamilyOwnershipTransferPropertiesKHR* toCount, size_t* count);
 
 #endif
+#ifdef VK_KHR_robustness2
+void count_VkPhysicalDeviceRobustness2FeaturesKHR(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2FeaturesKHR* toCount, size_t* count);
+
+void count_VkPhysicalDeviceRobustness2PropertiesKHR(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2PropertiesKHR* toCount, size_t* count);
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void count_VkNativeBufferUsage2ANDROID(uint32_t featureBits, VkStructureType rootType,
                                        const VkNativeBufferUsage2ANDROID* toCount, size_t* count);
@@ -2000,16 +2010,8 @@ void count_VkDeviceDeviceMemoryReportCreateInfoEXT(
 
 #endif
 #ifdef VK_EXT_robustness2
-void count_VkPhysicalDeviceRobustness2FeaturesKHR(
-    uint32_t featureBits, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2FeaturesKHR* toCount, size_t* count);
-
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceRobustness2FeaturesKHR,
                       count_VkPhysicalDeviceRobustness2FeaturesEXT)
-
-void count_VkPhysicalDeviceRobustness2PropertiesKHR(
-    uint32_t featureBits, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2PropertiesKHR* toCount, size_t* count);
 
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceRobustness2PropertiesKHR,
                       count_VkPhysicalDeviceRobustness2PropertiesEXT)

@@ -7261,6 +7261,41 @@ void count_VkQueueFamilyOwnershipTransferPropertiesKHR(
 }
 
 #endif
+#ifdef VK_KHR_robustness2
+void count_VkPhysicalDeviceRobustness2FeaturesKHR(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2FeaturesKHR* toCount, size_t* count) {
+    (void)featureBits;
+    (void)rootType;
+    (void)toCount;
+    (void)count;
+    *count += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = toCount->sType;
+    }
+    count_extension_struct(featureBits, rootType, toCount->pNext, count);
+    *count += sizeof(VkBool32);
+    *count += sizeof(VkBool32);
+    *count += sizeof(VkBool32);
+}
+
+void count_VkPhysicalDeviceRobustness2PropertiesKHR(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2PropertiesKHR* toCount, size_t* count) {
+    (void)featureBits;
+    (void)rootType;
+    (void)toCount;
+    (void)count;
+    *count += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = toCount->sType;
+    }
+    count_extension_struct(featureBits, rootType, toCount->pNext, count);
+    *count += sizeof(VkDeviceSize);
+    *count += sizeof(VkDeviceSize);
+}
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void count_VkNativeBufferUsage2ANDROID(uint32_t featureBits, VkStructureType rootType,
                                        const VkNativeBufferUsage2ANDROID* toCount, size_t* count) {
@@ -7874,41 +7909,6 @@ void count_VkDeviceDeviceMemoryReportCreateInfoEXT(
     *count += sizeof(VkDeviceMemoryReportFlagsEXT);
     *count += 8;
     *count += sizeof(uint8_t);
-}
-
-#endif
-#ifdef VK_EXT_robustness2
-void count_VkPhysicalDeviceRobustness2FeaturesKHR(
-    uint32_t featureBits, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2FeaturesKHR* toCount, size_t* count) {
-    (void)featureBits;
-    (void)rootType;
-    (void)toCount;
-    (void)count;
-    *count += sizeof(VkStructureType);
-    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-        rootType = toCount->sType;
-    }
-    count_extension_struct(featureBits, rootType, toCount->pNext, count);
-    *count += sizeof(VkBool32);
-    *count += sizeof(VkBool32);
-    *count += sizeof(VkBool32);
-}
-
-void count_VkPhysicalDeviceRobustness2PropertiesKHR(
-    uint32_t featureBits, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2PropertiesKHR* toCount, size_t* count) {
-    (void)featureBits;
-    (void)rootType;
-    (void)toCount;
-    (void)count;
-    *count += sizeof(VkStructureType);
-    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-        rootType = toCount->sType;
-    }
-    count_extension_struct(featureBits, rootType, toCount->pNext, count);
-    *count += sizeof(VkDeviceSize);
-    *count += sizeof(VkDeviceSize);
 }
 
 #endif
@@ -9568,6 +9568,22 @@ void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
             break;
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            count_VkPhysicalDeviceRobustness2FeaturesKHR(
+                featureBits, rootType,
+                reinterpret_cast<const VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension),
+                count);
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            count_VkPhysicalDeviceRobustness2PropertiesKHR(
+                featureBits, rootType,
+                reinterpret_cast<const VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension),
+                count);
+            break;
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             count_VkNativeBufferANDROID(
@@ -9884,22 +9900,6 @@ void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
             count_VkDeviceDeviceMemoryReportCreateInfoEXT(
                 featureBits, rootType,
                 reinterpret_cast<const VkDeviceDeviceMemoryReportCreateInfoEXT*>(structExtension),
-                count);
-            break;
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            count_VkPhysicalDeviceRobustness2FeaturesKHR(
-                featureBits, rootType,
-                reinterpret_cast<const VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension),
-                count);
-            break;
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            count_VkPhysicalDeviceRobustness2PropertiesKHR(
-                featureBits, rootType,
-                reinterpret_cast<const VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension),
                 count);
             break;
         }
