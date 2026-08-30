@@ -235,6 +235,12 @@ int32_t DrmVirtGpuDevice::init(int32_t descriptor) {
         mesa_loge("DRM_IOCTL_VIRTGPU_GET_CAPS failed with %s", strerror(errno));
     }
 
+    // DroidVM: report the pVM guest-alloc pool partition the host announced via capset.
+    // Nonzero only in udmabuf=true (guest-alloc) mode; 0/0 == host-alloc. Reading a clean
+    // 0/0 in host-alloc mode also confirms the capset struct offsets are in sync host<->guest.
+    mesa_logi("DROIDVM: guest-alloc pool slice: offsetMb=%u sizeMb=%u",
+              mCaps.vulkanCapset.guestAllocOffsetMb, mCaps.vulkanCapset.guestAllocSizeMb);
+
     // We always need an ASG blob in some cases, so always define blobAlignment
     if (!mCaps.vulkanCapset.blobAlignment) {
         mCaps.vulkanCapset.blobAlignment = 4096;
