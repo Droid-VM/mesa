@@ -28,11 +28,30 @@
 #include "vn_renderer_sim_syncobj.h"
 
 /* All guest allocations happen via virtgpu dedicated heap. */
+/* DroidVM guest-alloc pool, reported by our virtio-gpu guest driver. */
+#ifndef VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB
+#define VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB 0x1000
+#define VIRTGPU_PARAM_GUEST_POOL_USED_KIB 0x1001
+#define VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB 0x1002
+#endif
+
+#ifndef VIRTGPU_PARAM_CREATE_GUEST_HANDLE
+#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
+#endif
+
 #ifndef VIRTGPU_PARAM_GUEST_VRAM
 #define VIRTGPU_PARAM_GUEST_VRAM 9
 #endif
 #ifndef VIRTGPU_BLOB_MEM_GUEST_VRAM
 #define VIRTGPU_BLOB_MEM_GUEST_VRAM 0x0004
+#endif
+
+#ifndef VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE
+/* DroidVM (protected VM): ask the VMM to wrap the guest pages of this blob in
+ * a udmabuf and hand it to the renderer context (same contract as the
+ * drm2kgsl guest-alloc route).
+ */
+#define VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE 0x0008
 #endif
 
 #define VIRTGPU_PCI_VENDOR_ID 0x1af4
@@ -75,6 +94,7 @@ struct virtgpu {
 
    uint32_t shmem_blob_mem;
    uint32_t bo_blob_mem;
+   bool bo_create_guest_handle;
 
    /* note that we use gem_handle instead of res_id to index because
     * res_id is monotonically increasing by default (see
@@ -511,6 +531,8 @@ virtgpu_bo_blob_flags(struct virtgpu *gpu,
       blob_flags |= VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
    if (external_handles)
       blob_flags |= VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+   if (gpu->bo_create_guest_handle)
+      blob_flags |= VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE;
    if (external_handles & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
       if (gpu->supports_cross_device)
          blob_flags |= VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
@@ -578,6 +600,20 @@ virtgpu_bo_create_from_dma_buf(struct vn_renderer *renderer,
             mmap_size = info.size;
          }
       }
+   } else {
+      /* Classic (non-blob) resources have no host-side memory venus could
+       * bind. The one that shows up in practice is the KMS dumb boot
+       * framebuffer (res_id 2): Xorg's -background none takeover hands its
+       * dma-buf to glamor, the render server's import fails, and the
+       * following asynchronous vkBindImageMemory2 poisons the command
+       * stream -- the ring dies and vn_relax() aborts the whole X server.
+       * Refuse the import here, synchronously, so callers see a plain
+       * VK_ERROR_INVALID_EXTERNAL_HANDLE and fall back.
+       */
+      vn_log(gpu->instance,
+             "dma-buf import failed: classic resource (blob_mem 0) cannot "
+             "back venus memory");
+      goto fail;
    }
 
    /* we check bo->gem_handle instead of bo->refcount because bo->refcount
@@ -753,6 +789,31 @@ virtgpu_shmem_create(struct vn_renderer *renderer, size_t size)
    return &shmem->base;
 }
 
+/* DroidVM: live pool figures, read straight from the kernel that owns the pool. */
+static bool
+virtgpu_get_guest_pool_stats(struct vn_renderer *renderer,
+                             uint64_t *total,
+                             uint64_t *used,
+                             uint64_t *largest_free)
+{
+   struct virtgpu *gpu = (struct virtgpu *)renderer;
+   const uint64_t total_kib =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB);
+
+   if (!total_kib)
+      return false;
+
+   if (total)
+      *total = total_kib << 10;
+   if (used)
+      *used = virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_USED_KIB) << 10;
+   if (largest_free)
+      *largest_free =
+         virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB) << 10;
+
+   return true;
+}
+
 static VkResult
 virtgpu_wait(struct vn_renderer *renderer,
              const struct vn_renderer_wait *wait)
@@ -900,9 +961,31 @@ virtgpu_init_renderer_info(struct virtgpu *gpu)
    if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_GUEST_VRAM)
       info->has_guest_vram = true;
 
+   /* DroidVM: how big the guest's allocation pool is, if this kernel has one. Zero elsewhere,
+    * which is what sends the budget query to the system-memory estimate instead. */
+   info->guest_pool_size =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB) << 10;
+
+   /* DroidVM: whether VkDeviceMemory is allocated in here or on the host. The VMM negotiates
+    * VIRTIO_GPU_F_CREATE_GUEST_HANDLE exactly when it was started with udmabuf=true, so this
+    * param -- unlike the capset's use_guest_vram, which venus gets either way -- is what
+    * separates the two. Used when reporting VK_EXT_memory_budget. */
+   info->has_guest_handle =
+      virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_CREATE_GUEST_HANDLE) != 0;
+
    /* Use guest blob allocations from dedicated heap (Host visible memory) */
-   if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_HOST3D && capset->use_guest_vram)
+   if (gpu->bo_blob_mem == VIRTGPU_BLOB_MEM_HOST3D && capset->use_guest_vram) {
       info->has_guest_vram = true;
+      /* DroidVM: give guest-allocated VkDeviceMemory the same wire shape as
+       * the drm2kgsl guest-alloc route.  HOST3D_GUEST makes the DroidVM
+       * kernel back the blob from the guest pool while the resource still
+       * reaches the renderer context's get_blob, and CREATE_GUEST_HANDLE
+       * makes the VMM turn those pages into a udmabuf parked for that
+       * get_blob, so the host can import them into VkDeviceMemory.
+       */
+      gpu->bo_blob_mem = VIRTGPU_BLOB_MEM_HOST3D_GUEST;
+      gpu->bo_create_guest_handle = true;
+   }
 }
 
 static void
@@ -1208,6 +1291,7 @@ virtgpu_init(struct virtgpu *gpu)
    gpu->base.ops.destroy = virtgpu_destroy;
    gpu->base.ops.submit = virtgpu_submit;
    gpu->base.ops.wait = virtgpu_wait;
+   gpu->base.ops.get_guest_pool_stats = virtgpu_get_guest_pool_stats;
 
    gpu->base.shmem_ops.create = virtgpu_shmem_create;
    gpu->base.shmem_ops.destroy = virtgpu_shmem_destroy;
