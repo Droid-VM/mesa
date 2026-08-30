@@ -57,6 +57,19 @@ PERFETTO_DEFINE_CATEGORIES(
 static void zx_handle_close(zx_handle_t) {}
 #endif
 
+// The dma-buf interop diagnostics (ALLOC-ROUTE, EXPORT-FD, MOD-EMU, FORCE-LINEAR) print for
+// every allocation and export, which is one line per buffer per process on a busy desktop.
+// They found the tiled-bytes-read-as-linear bug and stay available, but off: set
+// GFXSTREAM_GUEST_DIAG=1 in the guest to turn them on. Failure paths (ALLOC-FAIL) stay
+// unconditional -- an allocation that fails is always worth a line.
+static bool guestDiagEnabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("GFXSTREAM_GUEST_DIAG");
+        return v && v[0] && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 static constexpr uint32_t kDefaultApiVersion = VK_MAKE_VERSION(1, 1, 0);
 
 struct vk_struct_chain_iterator {
@@ -4483,7 +4496,7 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     // three different owners (kernel blob, host colorbuffer, imported fd) and a binding that
     // silently lands in the wrong one produces pixels the display never sees -- with no error
     // anywhere. This is the only place all the branches meet.
-    {
+    if (guestDiagEnabled()) {
         int route = importedFd >= 0 ? 0 : (bufferBlob ? 1 : (requestedMemoryIsHostVisible ? 2 : 3));
         mesa_logw(
             "gfxstream: ALLOC-ROUTE[%s]: size=%llu res=%u hostVisible=%d dedicatedImage=%d "
@@ -4922,13 +4935,17 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                         [](const uint64_t mod) { return mod == DRM_FORMAT_MOD_LINEAR; });
                 // host doesn't support DRM format modifiers, try emulating
                 if (canUseLinearModifier) {
-                    mesa_logw(
-                        "gfxstream: MOD-EMU vkCreateImage %ux%u usage=0x%x -> LINEAR%s pitch=%llu",
-                        pCreateInfo->extent.width, pCreateInfo->extent.height,
-                        pCreateInfo->usage, drmFmtMod ? " (explicit, planeLayouts dropped)" : "",
-                        drmFmtMod && drmFmtMod->drmFormatModifierPlaneCount
-                            ? (unsigned long long)drmFmtMod->pPlaneLayouts[0].rowPitch
-                            : 0ull);
+                    if (guestDiagEnabled()) {
+                        mesa_logw(
+                            "gfxstream: MOD-EMU vkCreateImage %ux%u usage=0x%x -> LINEAR%s "
+                            "pitch=%llu",
+                            pCreateInfo->extent.width, pCreateInfo->extent.height,
+                            pCreateInfo->usage,
+                            drmFmtMod ? " (explicit, planeLayouts dropped)" : "",
+                            drmFmtMod && drmFmtMod->drmFormatModifierPlaneCount
+                                ? (unsigned long long)drmFmtMod->pPlaneLayouts[0].rowPitch
+                                : 0ull);
+                    }
                     localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
                 } else {
                     mesa_loge(
@@ -4966,10 +4983,13 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
             }
             if (physicalDevice != VK_NULL_HANDLE &&
                 doImageDrmFormatModifierEmulation(physicalDevice)) {
-                mesa_logw(
-                    "gfxstream: FORCE-LINEAR vkCreateImage %ux%u usage=0x%x (dma-buf exportable)",
-                    localCreateInfo.extent.width, localCreateInfo.extent.height,
-                    localCreateInfo.usage);
+                if (guestDiagEnabled()) {
+                    mesa_logw(
+                        "gfxstream: FORCE-LINEAR vkCreateImage %ux%u usage=0x%x "
+                        "(dma-buf exportable)",
+                        localCreateInfo.extent.width, localCreateInfo.extent.height,
+                        localCreateInfo.usage);
+                }
                 localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
             }
         }
@@ -6660,9 +6680,12 @@ VkResult ResourceTracker::on_vkGetMemoryFdKHR(void* context, VkResult, VkDevice 
         mesa_loge("%s: Failed to export host resource to FD.\n", __func__);
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
-    mesa_logw("gfxstream: EXPORT-FD res=%u allocSize=%llu coherentOff=%llu blobId=%llu",
-              info.blobPtr->getResourceHandle(), (unsigned long long)info.allocationSize,
-              (unsigned long long)info.coherentMemoryOffset, (unsigned long long)info.blobId);
+    if (guestDiagEnabled()) {
+        mesa_logw("gfxstream: EXPORT-FD res=%u allocSize=%llu coherentOff=%llu blobId=%llu",
+                  info.blobPtr->getResourceHandle(), (unsigned long long)info.allocationSize,
+                  (unsigned long long)info.coherentMemoryOffset,
+                  (unsigned long long)info.blobId);
+    }
     *pFd = handle.osHandle;
     return VK_SUCCESS;
 #else
