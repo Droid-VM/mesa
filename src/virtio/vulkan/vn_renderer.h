@@ -69,6 +69,13 @@ struct vn_renderer_info {
    bool has_timeline_sync;
    bool has_implicit_fencing;
    bool has_guest_vram;
+   /* DroidVM: bytes in the guest's virtio-gpu allocation pool, 0 when there is none. What
+    * bounds a guest-alloc VM is this pool, not the host GPU's heaps; see
+    * vn_GetPhysicalDeviceMemoryProperties2. */
+   uint64_t guest_pool_size;
+   /* DroidVM: VkDeviceMemory is allocated in the guest (VIRTIO_GPU_F_CREATE_GUEST_HANDLE
+    * negotiated), rather than on the host. */
+   bool has_guest_handle;
 
    uint32_t max_timeline_count;
 
@@ -126,6 +133,15 @@ struct vn_renderer_ops {
     */
    VkResult (*wait)(struct vn_renderer *renderer,
                     const struct vn_renderer_wait *wait);
+
+   /* DroidVM: live guest-pool figures for VK_EXT_memory_budget. Optional -- absent (or
+    * returning false) on renderers with no pool, which then report against system memory.
+    * The pool is device-wide, so only the kernel knows how much of it is left; this process's
+    * own accounting would say "plenty" right up to the allocation that fails. */
+   bool (*get_guest_pool_stats)(struct vn_renderer *renderer,
+                                uint64_t *total,
+                                uint64_t *used,
+                                uint64_t *largest_free);
 };
 
 struct vn_renderer_shmem_ops {
