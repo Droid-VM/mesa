@@ -156,7 +156,14 @@ _mesa_GetString( GLenum name )
       case GL_EXTENSIONS:
          if (_mesa_is_desktop_gl_core(ctx)) {
             _mesa_error(ctx, GL_INVALID_ENUM, "glGetString(GL_EXTENSIONS)");
-            return (const GLubyte *) 0;
+            /* Spec says return NULL here (use glGetStringi in core profile),
+             * but apps that ignore the return value and strlen() it crash --
+             * notably Qt's QEGLPlatformContext::hasExtension().  Return an
+             * empty string instead: strlen("")==0 is harmless, the
+             * GL_INVALID_ENUM above still signals the error to conformant
+             * callers, and glGetStringi (the correct core-profile path) is
+             * unaffected. */
+            return (const GLubyte *) "";
          }
          if (!ctx->Extensions.String)
             ctx->Extensions.String = _mesa_make_extension_string(ctx);

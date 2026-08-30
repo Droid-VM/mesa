@@ -787,7 +787,14 @@ zink_kopper_acquire_submit(struct zink_screen *screen, struct zink_resource *res
    assert(res->obj->dt);
    struct kopper_displaytarget *cdt = res->obj->dt;
    /* the swapchain was replaced and this resource has not been reacquired */
-   if (zink_kopper_get_dt_idx(res) == UINT32_MAX)
+   uint32_t dt_idx = zink_kopper_get_dt_idx(res);
+   /* DroidVM: with a threaded context the swapchain can also be killed and recreated
+    * (VK_ERROR_OUT_OF_DATE on a window resize/first map) on the driver thread while a
+    * recorded batch still reaches this point with an index of the old one -- indexing
+    * images[] with it is how Minecraft segfaulted on every clean-image launch.  Upstream
+    * now answers UINT32_MAX for a replaced swapchain; the bound stays as the last guard.
+    */
+   if (dt_idx == UINT32_MAX || dt_idx >= cdt->swapchain->num_images)
       return VK_NULL_HANDLE;
    if (cdt->swapchain->images[res->obj->dt_idx].dt_has_data)
       return VK_NULL_HANDLE;
