@@ -46,6 +46,11 @@
 #include "tu_tracepoints.h"
 #include "tu_wsi.h"
 
+#ifdef TU_HAS_VIRTIO
+/* DroidVM guest-alloc pool accounting; see tu_get_guest_pool_budget(). */
+#include "vdrm.h"
+#endif
+
 #ifdef TU_WSI_PLATFORM
 #include "wsi_common.h"
 #endif
@@ -979,8 +984,12 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
     * sampler descriptor.
     */
    p->maxPerSetDescriptors = MAX_SET_SIZE / (2 * FDL6_TEX_CONST_DWORDS * 4);
-   /* Our buffer size fields allow only this much */
+   /* Our buffer size fields allow only this much. Guest allocations have the
+    * additional constraint of the shared pool backing every BO. */
    p->maxMemoryAllocationSize = 0xFFFFFFFFull;
+   if (pdevice->guest_pool_size)
+      p->maxMemoryAllocationSize =
+         MIN2(p->maxMemoryAllocationSize, pdevice->heap.size);
 
 }
 
@@ -2119,11 +2128,49 @@ tu_get_system_heap_size(struct tu_physical_device *physical_device)
    return available_ram;
 }
 
+/*
+ * DroidVM guest-alloc: what is left in the guest's virtio-gpu pool, plus what we already hold.
+ *
+ * The pool is device-wide. A compositor, a browser and a game all carve out of the same one, so
+ * heap.used -- which only counts this process -- can say "plenty left" right up to the moment an
+ * allocation fails; and the system-memory estimate below is answering about the wrong memory
+ * entirely, since free guest RAM says nothing about a pool that was reserved at boot. Only the
+ * kernel knows the shared figure.
+ *
+ * Adding heap.used back is what VkPhysicalDeviceMemoryBudgetPropertiesEXT asks for: heapBudget is
+ * how much this process may have allocated in total, not how much more it may ask for, and it is
+ * paired with a heapUsage that counts only us.
+ *
+ * Returns false on every backend without a pool, leaving the caller on the estimate.
+ */
+static bool
+tu_get_guest_pool_budget(struct tu_physical_device *physical_device,
+                         VkDeviceSize *budget)
+{
+#ifdef TU_HAS_VIRTIO
+   uint64_t total, used;
+
+   if (!physical_device->guest_pool_size ||
+       !vdrm_guest_pool_stats(physical_device->local_fd, &total, &used, NULL))
+      return false;
+
+   *budget = p_atomic_read(&physical_device->heap.used) +
+             (used < total ? total - used : 0);
+   return true;
+#else
+   return false;
+#endif
+}
+
 static inline VkDeviceSize
 tu_get_budget_memory(struct tu_physical_device *physical_device)
 {
    uint64_t heap_size = physical_device->heap.size;
    uint64_t heap_used = p_atomic_read(&physical_device->heap.used);
+   VkDeviceSize pool_budget;
+
+   if (tu_get_guest_pool_budget(physical_device, &pool_budget))
+      return pool_budget;
 
    /*
     * Let's not incite the app to starve the system: report at most 90% of
@@ -2874,6 +2921,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    device->instance = physical_device->instance;
    device->physical_device = physical_device;
    device->device_idx = device->physical_device->device_count++;
+   device->va_start = physical_device->va_start;
+   device->va_size = physical_device->va_size;
 
    result = tu_drm_device_init(device);
    if (result != VK_SUCCESS) {
@@ -2912,8 +2961,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    if (physical_device->has_set_iova) {
       mtx_init(&device->vma_mutex, mtx_plain);
-      util_vma_heap_init(&device->vma, physical_device->va_start,
-                         ROUND_DOWN_TO(physical_device->va_size, os_page_size));
+      util_vma_heap_init(&device->vma, device->va_start,
+                         ROUND_DOWN_TO(device->va_size, os_page_size));
    }
 
    if (TU_DEBUG(BOS))
@@ -3063,6 +3112,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    global = (struct tu6_global *)device->global_bo->map;
+   /* Guest-pool pages retain their contents across BO lifetimes. Several
+    * fields in this BO rely on zero initialization, including the VSC
+    * overflow feedback that controls visibility-stream growth. */
+   memset(global, 0, global_size);
    device->global_bo_map = global;
    tu_init_clear_blit_shaders(device);
 
@@ -3215,6 +3268,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                      tu_trace_capture_data,
                      tu_trace_get_data,
                      tu_trace_delete_flush_data);
+
+   if (physical_device->guest_pool_size)
+      tu_bo_sync_cache(device, device->global_bo, 0, VK_WHOLE_SIZE,
+                       TU_MEM_SYNC_CACHE_TO_GPU);
 
    tu_breadcrumbs_init(device);
 
@@ -3731,6 +3788,12 @@ tu_AllocateMemory(VkDevice _device,
       result = VK_ERROR_FEATURE_NOT_PRESENT;
 #endif
    } else {
+      if (device->physical_device->guest_pool_size &&
+          pAllocateInfo->allocationSize > mem_heap->size) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         goto fail;
+      }
+
       uint64_t client_address = 0;
 
       const VkMemoryOpaqueCaptureAddressAllocateInfo *replay_info =
@@ -3770,6 +3833,7 @@ tu_AllocateMemory(VkDevice _device,
       mem->iova = mem->bo->iova;
    }
 
+fail:
    if (result != VK_SUCCESS) {
       vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
       tu_memory_emit_report(device, /* mem */ NULL, pAllocateInfo, result);
@@ -4579,7 +4643,7 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 void
 tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
 {
-   bo->dump_bo_list_idx = ~0;
+   bo->dump_bo_list_idx = TU_DUMP_BO_NOT_LISTED;
 
    if (!FD_RD_DUMP(ENABLE))
       return;
@@ -4587,7 +4651,7 @@ tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
    mtx_lock(&dev->bo_mutex);
    uint32_t idx =
       util_dynarray_num_elements(&dev->dump_bo_list, struct tu_bo *);
-   bo->dump_bo_list_idx = idx;
+   bo->dump_bo_list_idx = idx + 1;
    util_dynarray_append(&dev->dump_bo_list, bo);
    mtx_unlock(&dev->bo_mutex);
 }
@@ -4595,15 +4659,24 @@ tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo)
 void
 tu_dump_bo_del(struct tu_device *dev, struct tu_bo *bo)
 {
-   if (bo->dump_bo_list_idx != ~0) {
-      mtx_lock(&dev->bo_mutex);
-      struct tu_bo *exchanging_bo =
-         util_dynarray_pop(&dev->dump_bo_list, struct tu_bo *);
-      *util_dynarray_element(&dev->dump_bo_list, struct tu_bo *,
-                             bo->dump_bo_list_idx) = exchanging_bo;
-      exchanging_bo->dump_bo_list_idx = bo->dump_bo_list_idx;
-      mtx_unlock(&dev->bo_mutex);
+   if (bo->dump_bo_list_idx == TU_DUMP_BO_NOT_LISTED)
+      return;
+
+   uint32_t idx = bo->dump_bo_list_idx - 1;
+
+   mtx_lock(&dev->bo_mutex);
+   struct tu_bo *exchanging_bo =
+      util_dynarray_pop(&dev->dump_bo_list, struct tu_bo *);
+   /* Removing the last element pops the BO we are removing, and there is no
+    * longer a slot at idx to swap it into. */
+   if (exchanging_bo != bo) {
+      *util_dynarray_element(&dev->dump_bo_list, struct tu_bo *, idx) =
+         exchanging_bo;
+      exchanging_bo->dump_bo_list_idx = idx + 1;
    }
+   mtx_unlock(&dev->bo_mutex);
+
+   bo->dump_bo_list_idx = TU_DUMP_BO_NOT_LISTED;
 }
 
 void

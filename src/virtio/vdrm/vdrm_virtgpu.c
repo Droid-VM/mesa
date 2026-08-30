@@ -16,6 +16,24 @@
 #include "util/perf/cpu_trace.h"
 
 
+/*
+ * DroidVM guest-alloc extensions to the virtio-gpu uAPI. Neither is upstream, so define them
+ * here rather than requiring a matching kernel header at build time: on a kernel that lacks
+ * them GETPARAM returns 0 and the flag is never sent, which is exactly the fallback wanted.
+ * The values match the guest driver's virtgpu_drv.h.
+ */
+#ifndef VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE
+#define VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE 0x0008
+#endif
+#ifndef VIRTGPU_PARAM_CREATE_GUEST_HANDLE
+#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
+#endif
+#ifndef VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB
+#define VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB 0x1000
+#define VIRTGPU_PARAM_GUEST_POOL_USED_KIB 0x1001
+#define VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB 0x1002
+#endif
+
 #define SHMEM_SZ 0x4000
 
 #define virtgpu_ioctl(fd, name, args...) ({                          \
@@ -157,9 +175,22 @@ virtgpu_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
                   struct vdrm_ccmd_req *req)
 {
    struct virtgpu_device *vgdev = to_virtgpu_device(vdev);
+   /*
+    * DroidVM guest-alloc: HOST3D_GUEST asks for both storages -- the guest kernel backs the
+    * blob from its own drm_buddy pool and still carries our ctx_id/blob_id, so the host context
+    * can match the pages to the GEM_NEW that described them. CREATE_GUEST_HANDLE is what makes
+    * the VMM turn those pages into the dma-buf the host backend imports.
+    *
+    * Plain HOST3D otherwise: without a guest pool the guest has nothing to allocate from, and
+    * asking for guest storage would only fail later, in the host, as a blob whose iovecs cover
+    * nothing.
+    */
+   const bool guest_alloc = vdev->supports_guest_alloc;
    struct drm_virtgpu_resource_create_blob args = {
-         .blob_mem   = VIRTGPU_BLOB_MEM_HOST3D,
-         .blob_flags = blob_flags,
+         .blob_mem   = guest_alloc ? VIRTGPU_BLOB_MEM_HOST3D_GUEST
+                                   : VIRTGPU_BLOB_MEM_HOST3D,
+         .blob_flags = blob_flags |
+                       (guest_alloc ? VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE : 0),
          .blob_hints = blob_hints,
          .size       = size,
          .cmd_size   = req->len,
@@ -366,6 +397,40 @@ get_param(int fd, uint64_t param)
    return ret ? 0 : val;
 }
 
+/*
+ * DroidVM guest-alloc: how much memory actually backs this device's buffers.
+ *
+ * On this route the guest kernel carves BO pages out of a fixed pool the VMM handed it, so the
+ * amount of memory a driver may hand out has nothing to do with how much RAM the guest has --
+ * asking the system, as os_get_gpu_heap_size() does, overstates it by however much of guest RAM
+ * is not in the pool, and understates the pressure because the pool is shared with every other
+ * process on this device.
+ *
+ * Takes the fd rather than a vdrm_device because the interesting caller is driver probe, which
+ * has an fd long before it connects. Cheap: the values live in the guest driver, so there is no
+ * round trip to the host and this is safe to call per query.
+ *
+ * Returns false when there is no pool -- old kernel, or a VMM that allocates host-side -- and
+ * leaves the outputs untouched, which is the signal to fall back to the system heap size.
+ */
+bool
+vdrm_guest_pool_stats(int fd, uint64_t *total, uint64_t *used, uint64_t *largest_free)
+{
+   uint64_t total_kib = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_TOTAL_KIB);
+
+   if (!total_kib)
+      return false;
+
+   if (total)
+      *total = total_kib << 10;
+   if (used)
+      *used = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_USED_KIB) << 10;
+   if (largest_free)
+      *largest_free = get_param(fd, VIRTGPU_PARAM_GUEST_POOL_LARGEST_FREE_KIB) << 10;
+
+   return true;
+}
+
 struct vdrm_device * vdrm_virtgpu_connect(int fd, uint32_t context_type);
 
 struct vdrm_device *
@@ -417,6 +482,12 @@ vdrm_virtgpu_connect(int fd, uint32_t context_type)
     */
    if (get_param(fd, VIRTGPU_PARAM_CROSS_DEVICE))
       vdev->supports_cross_device = true;
+
+   /* DroidVM guest-alloc. Optional in both directions: an older kernel does not know the
+    * param and returns 0, and a VMM without a guest pool leaves the feature unnegotiated, so
+    * this stays false and every allocation keeps the host-allocating path. */
+   if (get_param(fd, VIRTGPU_PARAM_CREATE_GUEST_HANDLE))
+      vdev->supports_guest_alloc = true;
 
    return vdev;
 }

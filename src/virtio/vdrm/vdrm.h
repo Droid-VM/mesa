@@ -55,6 +55,14 @@ struct vdrm_device {
    const struct vdrm_device_funcs *funcs;
 
    bool supports_cross_device;
+
+   /* DroidVM guest-alloc: BO pages come from the guest's own virtio-gpu pool instead of the
+    * host allocating them. Probed from VIRTGPU_PARAM_CREATE_GUEST_HANDLE, so it is false on a
+    * kernel or VMM that does not offer it and every caller keeps the host-allocating path.
+    * Drivers that build their own GEM_NEW request need this to decide whether to mark the BO
+    * guest-allocated; only they know which of their allocations may take that path. */
+   bool supports_guest_alloc;
+
    struct vdrm_shmem *shmem;
    uint8_t *rsp_mem;
    uint32_t rsp_mem_len;
@@ -80,6 +88,11 @@ struct vdrm_device {
 
 struct vdrm_device *vdrm_device_connect(int fd, uint32_t context_type);
 void vdrm_device_close(struct vdrm_device *vdev);
+
+/* DroidVM guest-alloc pool accounting; see vdrm_virtgpu.c. Byte counts. Any output may be NULL.
+ * False (outputs untouched) means this device has no guest pool. Takes an fd because probe needs
+ * it before connecting. */
+bool vdrm_guest_pool_stats(int fd, uint64_t *total, uint64_t *used, uint64_t *largest_free);
 
 void * vdrm_alloc_rsp(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, uint32_t sz);
 int vdrm_send_req(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, bool sync);

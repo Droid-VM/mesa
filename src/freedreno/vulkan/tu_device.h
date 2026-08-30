@@ -185,9 +185,21 @@ struct tu_physical_device
 
    struct tu_memory_heap heap;
 
+   /* DroidVM guest-alloc (virtio only): bytes in the guest's virtio-gpu pool, which is what
+    * actually backs every BO on that route -- so it, not guest RAM, is the heap size. Zero on
+    * every other backend and on a VMM that allocates host-side; heap.size then keeps its
+    * os_get_gpu_heap_size() value. Non-zero also means heap.used undercounts, because the pool
+    * is shared with every other process on the device, so the budget must come from the kernel
+    * rather than from our own accounting. */
+   uint64_t guest_pool_size;
+
    struct vk_sync_type syncobj_type;
+   /* virtio only: syncobj wrapped with a userspace-fence poll fast path;
+    * installed as sync_types[0] so fences/binary semaphores use it while
+    * timeline semaphores keep using syncobj_type. */
+   struct vk_sync_type poll_sync_type;
    struct vk_sync_timeline_type timeline_type;
-   const struct vk_sync_type *sync_types[3];
+   const struct vk_sync_type *sync_types[4];
 
    uint32_t device_count;
 };
@@ -217,11 +229,12 @@ struct tu6_global
    uint32_t shaders[TU_BLIT_SHADER_SIZE];
 
    uint32_t seqno_dummy;          /* dummy seqno for CP_EVENT_WRITE */
-   uint32_t _pad0;
-   volatile uint32_t vsc_draw_overflow;
-   uint32_t _pad1;
+
+   /* GPU-written and CPU-read. Keep cache maintenance off adjacent fields. */
+   alignas(64) volatile uint32_t vsc_draw_overflow;
    volatile uint32_t vsc_prim_overflow;
-   uint32_t _pad2;
+   uint32_t _vsc_overflow_pad[14];
+
    uint64_t predicate;
 
    /* scratch space for VPC_SO[i].FLUSH_BASE_LO/HI, start on 32 byte boundary. */
@@ -262,8 +275,9 @@ struct tu6_global
    volatile uint32_t breadcrumb_cpu_sync_seqno;
    uint32_t _pad4;
 
-   volatile uint32_t userspace_fence;
-   uint32_t _pad5;
+   /* GPU-written and CPU-polled; keep cache maintenance off CPU-owned fields. */
+   alignas(64) volatile uint32_t userspace_fence;
+   uint32_t _pad5[15];
 
    /* Autotune preemption delay tracking */
    uint64_t cur_rp_hash;
@@ -469,6 +483,8 @@ struct tu_device
    uint32_t submit_count;
 
    /* Address space and global fault count for this local_fd with DRM backend */
+   uint64_t va_start;
+   uint64_t va_size;
    uint64_t fault_count;
 
    /* Temporary storage for multisampled attachments backed by a

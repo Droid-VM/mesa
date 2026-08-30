@@ -237,6 +237,10 @@ tu6_lazy_init_vsc(struct tu_cmd_buffer *cmd)
 
    struct tu6_global *global = dev->global_bo_map;
 
+   if (dev->physical_device->guest_pool_size)
+      tu_bo_sync_cache(dev, dev->global_bo, gb_offset(vsc_draw_overflow),
+                       64, TU_MEM_SYNC_CACHE_FROM_GPU);
+
    uint32_t vsc_draw_overflow = global->vsc_draw_overflow;
    uint32_t vsc_prim_overflow = global->vsc_prim_overflow;
 
@@ -2109,40 +2113,81 @@ tu_disable_draw_states(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    cmd->state.dirty |= TU_CMD_DIRTY_DRAW_STATE;
 }
 
+/* Emit the A7XX static RB_CCU_CNTL configuration.
+ *
+ * On A7XX, RB_CCU_CNTL holds static properties that can be set once and
+ * requires a WFI to take effect (the per-RP subset lives in the separate
+ * RB_CCU_CACHE_CNTL register).
+ *
+ * This is deliberately NOT emitted from tu6_init_static_regs(): RB is a
+ * BR-only hardware block, so the write must never execute on the BV pipeline.
+ * Emitting it under CP_SET_THREAD_BOTH makes BV replay a write to a register
+ * that doesn't exist on BV, raising a CP AHB bus error on a750/gen7_9.
+ * tu6_init_static_regs() is shared with the BV bin-restore preamble and cannot
+ * guarantee a BR-only thread state, so callers emit this from a BR-only
+ * context instead. See AHB error analysis.
+ */
+static void
+tu7_emit_static_rb_ccu_cntl(struct tu_device *dev, struct tu_cs *cs)
+{
+   enum a7xx_concurrent_resolve_mode resolve_mode = CONCURRENT_RESOLVE_MODE_2;
+   if (TU_DEBUG(NO_CONCURRENT_RESOLVES))
+      resolve_mode = CONCURRENT_RESOLVE_MODE_DISABLED;
+
+   enum a7xx_concurrent_unresolve_mode unresolve_mode = CONCURRENT_UNRESOLVE_MODE_FULL;
+   if (TU_DEBUG(NO_CONCURRENT_UNRESOLVES))
+      unresolve_mode = CONCURRENT_UNRESOLVE_MODE_DISABLED;
+
+   tu_cs_emit_regs(cs, RB_CCU_CNTL(A7XX,
+      .gmem_fast_clear_disable =
+        !dev->physical_device->info->props.has_gmem_fast_clear,
+      .concurrent_resolve_mode = resolve_mode,
+      .concurrent_unresolve_mode = unresolve_mode,
+   ));
+
+   /* RB_CCU_DBG_ECO_CNTL is another BR-only RB-block register carried in the
+    * per-device magic_raw table. It is skipped by tu6_init_static_regs()'s loop
+    * (which runs under THREAD_BOTH) and emitted here instead, from the BR-only
+    * context this helper is always called in. Read the value from the device
+    * table so it stays correct across a7xx variants (e.g. 0x02082000 on a750,
+    * 0x02080000 on others) rather than hard-coding it. */
+   const struct tu_physical_device *phys_dev = dev->physical_device;
+   for (size_t i = 0; i < ARRAY_SIZE(phys_dev->info->magic_raw); i++) {
+      auto magic_reg = phys_dev->info->magic_raw[i];
+      if (!magic_reg.reg)
+         break;
+      if (magic_reg.reg == REG_A7XX_RB_CCU_DBG_ECO_CNTL) {
+         tu_cs_emit_write_reg(cs, REG_A7XX_RB_CCU_DBG_ECO_CNTL, magic_reg.value);
+         break;
+      }
+   }
+}
+
 template <chip CHIP>
 static void
 tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
 {
    const struct tu_physical_device *phys_dev = dev->physical_device;
 
-   if (CHIP == A7XX) {
-      /* On A7XX, RB_CCU_CNTL was broken into two registers, RB_CCU_CNTL which has
-       * static properties that can be set once, this requires a WFI to take effect.
-       * While the newly introduced register RB_CCU_CACHE_CNTL has properties that may
-       * change per-RP and don't require a WFI to take effect, only CCU inval/flush
-       * events are required.
-       */
-
-      enum a7xx_concurrent_resolve_mode resolve_mode = CONCURRENT_RESOLVE_MODE_2;
-      if (TU_DEBUG(NO_CONCURRENT_RESOLVES))
-         resolve_mode = CONCURRENT_RESOLVE_MODE_DISABLED;
-
-      enum a7xx_concurrent_unresolve_mode unresolve_mode = CONCURRENT_UNRESOLVE_MODE_FULL;
-      if (TU_DEBUG(NO_CONCURRENT_UNRESOLVES))
-         unresolve_mode = CONCURRENT_UNRESOLVE_MODE_DISABLED;
-
-      tu_cs_emit_regs(cs, RB_CCU_CNTL(A7XX,
-         .gmem_fast_clear_disable =
-           !dev->physical_device->info->props.has_gmem_fast_clear,
-         .concurrent_resolve_mode = resolve_mode,
-         .concurrent_unresolve_mode = unresolve_mode,
-      ));
-   }
+   /* The A7XX static RB_CCU_CNTL write that used to live here has been moved
+    * out to tu7_emit_static_rb_ccu_cntl(), emitted by callers from a BR-only
+    * context. RB is BR-only and this function is reused by the BV bin-restore
+    * preamble, so a thread-control-wrapped RB write here would corrupt the BV
+    * preamble's thread state (hanging preemption restore) or AHB-error on BV.
+    */
 
    for (size_t i = 0; i < ARRAY_SIZE(phys_dev->info->magic_raw); i++) {
       auto magic_reg = phys_dev->info->magic_raw[i];
       if (!magic_reg.reg)
          break;
+
+      /* RB_CCU_DBG_ECO_CNTL is a BR-only RB-block register. Emitting it from
+       * this shared loop (which runs under CP_SET_THREAD_BOTH, and is reused by
+       * the BV bin-restore preamble) makes the BV pipe raise a per-frame CP AHB
+       * bus error on a750/gen7_9. It is emitted instead from a BR-only context
+       * by tu7_emit_static_rb_ccu_cntl(), using this same per-device value. */
+      if (CHIP == A7XX && magic_reg.reg == REG_A7XX_RB_CCU_DBG_ECO_CNTL)
+         continue;
 
       uint32_t value = magic_reg.value;
       switch(magic_reg.reg) {
@@ -2329,8 +2374,16 @@ tu_emit_bin_preamble(struct tu_device *dev, struct tu_cs *cs, bool bv)
 {
    tu6_init_static_regs<CHIP>(dev, cs);
 
-   if (!bv)
+   if (!bv) {
+      /* RB is BR-only. This BR-variant preamble only ever executes on the BR
+       * pipeline, so the static RB_CCU_CNTL write needs no thread-control
+       * packet here. The BV-variant preamble (bv==true) intentionally omits
+       * it -- the BV pipe must not touch RB registers.
+       */
+      if (CHIP == A7XX)
+         tu7_emit_static_rb_ccu_cntl(dev, cs);
       emit_rb_ccu_cntl<CHIP>(cs, dev, true);
+   }
    emit_vpc_attr_buf<CHIP>(cs, dev, true);
 
    if (CHIP >= A7XX && !bv) {
@@ -2447,6 +2500,17 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    tu6_init_static_regs<CHIP>(cmd->device, cs);
    tu_init_hw_rp<CHIP>(cs);
+
+   if (CHIP == A7XX) {
+      /* RB is a BR-only hardware block; emitting RB_CCU_CNTL under
+       * CP_SET_THREAD_BOTH makes the BV pipe replay a write to a register that
+       * doesn't exist on BV and raise a CP AHB bus error on a750/gen7_9.
+       * Restrict the static write to BR, then restore BOTH.
+       */
+      tu7_thread_control(cs, CP_SET_THREAD_BR);
+      tu7_emit_static_rb_ccu_cntl(cmd->device, cs);
+      tu7_thread_control(cs, CP_SET_THREAD_BOTH);
+   }
 
    emit_rb_ccu_cntl<CHIP>(cs, cmd->device, false);
    emit_vpc_attr_buf<CHIP>(cs, cmd->device, false);

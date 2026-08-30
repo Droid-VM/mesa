@@ -302,6 +302,9 @@ virtio_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
          .size = size,
    };
 
+   if (virtio_dev->vdrm->supports_guest_alloc)
+      req.flags |= MSM_BO_GUEST_ALLOC;
+
    if (flags & FD_BO_SCANOUT)
       req.flags |= MSM_BO_SCANOUT;
 
