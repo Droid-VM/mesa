@@ -9116,6 +9116,46 @@ void reservedmarshal_VkQueueFamilyOwnershipTransferPropertiesKHR(
 }
 
 #endif
+#ifdef VK_KHR_robustness2
+void reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2FeaturesKHR* forMarshaling, uint8_t** ptr) {
+    (void)vkStream;
+    (void)rootType;
+    memcpy(*ptr, (VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    *ptr += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    reservedmarshal_extension_struct(vkStream, rootType, forMarshaling->pNext, ptr);
+    memcpy(*ptr, (VkBool32*)&forMarshaling->robustBufferAccess2, sizeof(VkBool32));
+    *ptr += sizeof(VkBool32);
+    memcpy(*ptr, (VkBool32*)&forMarshaling->robustImageAccess2, sizeof(VkBool32));
+    *ptr += sizeof(VkBool32);
+    memcpy(*ptr, (VkBool32*)&forMarshaling->nullDescriptor, sizeof(VkBool32));
+    *ptr += sizeof(VkBool32);
+}
+
+void reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2PropertiesKHR* forMarshaling, uint8_t** ptr) {
+    (void)vkStream;
+    (void)rootType;
+    memcpy(*ptr, (VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    *ptr += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    reservedmarshal_extension_struct(vkStream, rootType, forMarshaling->pNext, ptr);
+    memcpy(*ptr, (VkDeviceSize*)&forMarshaling->robustStorageBufferAccessSizeAlignment,
+           sizeof(VkDeviceSize));
+    *ptr += sizeof(VkDeviceSize);
+    memcpy(*ptr, (VkDeviceSize*)&forMarshaling->robustUniformBufferAccessSizeAlignment,
+           sizeof(VkDeviceSize));
+    *ptr += sizeof(VkDeviceSize);
+}
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void reservedmarshal_VkNativeBufferUsage2ANDROID(VulkanStreamGuest* vkStream,
                                                  VkStructureType rootType,
@@ -9805,46 +9845,6 @@ void reservedmarshal_VkDeviceDeviceMemoryReportCreateInfoEXT(
     *ptr += 8;
     memcpy(*ptr, (void*)forMarshaling->pUserData, sizeof(uint8_t));
     *ptr += sizeof(uint8_t);
-}
-
-#endif
-#ifdef VK_EXT_robustness2
-void reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
-    VulkanStreamGuest* vkStream, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2FeaturesKHR* forMarshaling, uint8_t** ptr) {
-    (void)vkStream;
-    (void)rootType;
-    memcpy(*ptr, (VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-    *ptr += sizeof(VkStructureType);
-    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-        rootType = forMarshaling->sType;
-    }
-    reservedmarshal_extension_struct(vkStream, rootType, forMarshaling->pNext, ptr);
-    memcpy(*ptr, (VkBool32*)&forMarshaling->robustBufferAccess2, sizeof(VkBool32));
-    *ptr += sizeof(VkBool32);
-    memcpy(*ptr, (VkBool32*)&forMarshaling->robustImageAccess2, sizeof(VkBool32));
-    *ptr += sizeof(VkBool32);
-    memcpy(*ptr, (VkBool32*)&forMarshaling->nullDescriptor, sizeof(VkBool32));
-    *ptr += sizeof(VkBool32);
-}
-
-void reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
-    VulkanStreamGuest* vkStream, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2PropertiesKHR* forMarshaling, uint8_t** ptr) {
-    (void)vkStream;
-    (void)rootType;
-    memcpy(*ptr, (VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-    *ptr += sizeof(VkStructureType);
-    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-        rootType = forMarshaling->sType;
-    }
-    reservedmarshal_extension_struct(vkStream, rootType, forMarshaling->pNext, ptr);
-    memcpy(*ptr, (VkDeviceSize*)&forMarshaling->robustStorageBufferAccessSizeAlignment,
-           sizeof(VkDeviceSize));
-    *ptr += sizeof(VkDeviceSize);
-    memcpy(*ptr, (VkDeviceSize*)&forMarshaling->robustUniformBufferAccessSizeAlignment,
-           sizeof(VkDeviceSize));
-    *ptr += sizeof(VkDeviceSize);
 }
 
 #endif
@@ -11595,6 +11595,22 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
             break;
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension),
+                ptr);
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
+                vkStream, rootType,
+                reinterpret_cast<const VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension),
+                ptr);
+            break;
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             reservedmarshal_VkNativeBufferANDROID(
@@ -11911,22 +11927,6 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
             reservedmarshal_VkDeviceDeviceMemoryReportCreateInfoEXT(
                 vkStream, rootType,
                 reinterpret_cast<const VkDeviceDeviceMemoryReportCreateInfoEXT*>(structExtension),
-                ptr);
-            break;
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            reservedmarshal_VkPhysicalDeviceRobustness2FeaturesKHR(
-                vkStream, rootType,
-                reinterpret_cast<const VkPhysicalDeviceRobustness2FeaturesKHR*>(structExtension),
-                ptr);
-            break;
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            reservedmarshal_VkPhysicalDeviceRobustness2PropertiesKHR(
-                vkStream, rootType,
-                reinterpret_cast<const VkPhysicalDeviceRobustness2PropertiesKHR*>(structExtension),
                 ptr);
             break;
         }

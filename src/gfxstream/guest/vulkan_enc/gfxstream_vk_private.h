@@ -70,6 +70,8 @@ struct gfxstream_vk_physical_device {
     struct vk_physical_device vk;
 
     struct wsi_device wsi_device;
+    /* virtio-gpu primary (card) node, for VK_KHR_display's page flips; -1 when unavailable. */
+    int display_fd;
     const struct vk_sync_type* sync_types[2];
     struct gfxstream_vk_instance* instance;
     bool doImageDrmFormatModifierEmulation;

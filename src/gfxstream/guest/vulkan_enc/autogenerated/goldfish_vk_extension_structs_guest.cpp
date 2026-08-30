@@ -538,6 +538,14 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
             return sizeof(VkQueueFamilyOwnershipTransferPropertiesKHR);
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            return sizeof(VkPhysicalDeviceRobustness2FeaturesKHR);
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            return sizeof(VkPhysicalDeviceRobustness2PropertiesKHR);
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             return sizeof(VkNativeBufferANDROID);
@@ -694,14 +702,6 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
         }
         case VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT: {
             return sizeof(VkDeviceDeviceMemoryReportCreateInfoEXT);
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            return sizeof(VkPhysicalDeviceRobustness2FeaturesKHR);
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            return sizeof(VkPhysicalDeviceRobustness2PropertiesKHR);
         }
 #endif
 #ifdef VK_EXT_custom_border_color
@@ -1327,6 +1327,14 @@ size_t goldfish_vk_extension_struct_size_with_stream_features(uint32_t streamFea
             return sizeof(VkQueueFamilyOwnershipTransferPropertiesKHR);
         }
 #endif
+#ifdef VK_KHR_robustness2
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+            return sizeof(VkPhysicalDeviceRobustness2FeaturesKHR);
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
+            return sizeof(VkPhysicalDeviceRobustness2PropertiesKHR);
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
             return sizeof(VkNativeBufferANDROID);
@@ -1483,14 +1491,6 @@ size_t goldfish_vk_extension_struct_size_with_stream_features(uint32_t streamFea
         }
         case VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT: {
             return sizeof(VkDeviceDeviceMemoryReportCreateInfoEXT);
-        }
-#endif
-#ifdef VK_EXT_robustness2
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
-            return sizeof(VkPhysicalDeviceRobustness2FeaturesKHR);
-        }
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR: {
-            return sizeof(VkPhysicalDeviceRobustness2PropertiesKHR);
         }
 #endif
 #ifdef VK_EXT_custom_border_color

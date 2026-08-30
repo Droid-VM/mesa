@@ -1891,6 +1891,17 @@ void deepcopy_VkQueueFamilyOwnershipTransferPropertiesKHR(
     VkQueueFamilyOwnershipTransferPropertiesKHR* to);
 
 #endif
+#ifdef VK_KHR_robustness2
+void deepcopy_VkPhysicalDeviceRobustness2FeaturesKHR(
+    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceRobustness2FeaturesKHR* from,
+    VkPhysicalDeviceRobustness2FeaturesKHR* to);
+
+void deepcopy_VkPhysicalDeviceRobustness2PropertiesKHR(
+    Allocator* alloc, VkStructureType rootType,
+    const VkPhysicalDeviceRobustness2PropertiesKHR* from,
+    VkPhysicalDeviceRobustness2PropertiesKHR* to);
+
+#endif
 #ifdef VK_ANDROID_native_buffer
 void deepcopy_VkNativeBufferUsage2ANDROID(Allocator* alloc, VkStructureType rootType,
                                           const VkNativeBufferUsage2ANDROID* from,
@@ -2185,17 +2196,8 @@ void deepcopy_VkDeviceDeviceMemoryReportCreateInfoEXT(
 
 #endif
 #ifdef VK_EXT_robustness2
-void deepcopy_VkPhysicalDeviceRobustness2FeaturesKHR(
-    Allocator* alloc, VkStructureType rootType, const VkPhysicalDeviceRobustness2FeaturesKHR* from,
-    VkPhysicalDeviceRobustness2FeaturesKHR* to);
-
 DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceRobustness2FeaturesKHR,
                       deepcopy_VkPhysicalDeviceRobustness2FeaturesEXT)
-
-void deepcopy_VkPhysicalDeviceRobustness2PropertiesKHR(
-    Allocator* alloc, VkStructureType rootType,
-    const VkPhysicalDeviceRobustness2PropertiesKHR* from,
-    VkPhysicalDeviceRobustness2PropertiesKHR* to);
 
 DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceRobustness2PropertiesKHR,
                       deepcopy_VkPhysicalDeviceRobustness2PropertiesEXT)
