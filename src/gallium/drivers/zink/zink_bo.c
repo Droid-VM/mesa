@@ -302,7 +302,15 @@ bo_create_internal(struct zink_screen *screen,
    return bo;
 
 fail:
-   bo_destroy(screen, (void*)bo);
+   /* Only the CALLOC has happened at this point: the locks and the export list are
+    * initialized after AllocateMemory succeeds, and on failure bo->mem is unspecified --
+    * gfxstream's guest ICD in particular leaves a non-null handle in it.  bo_destroy
+    * would take that non-null mem as license to walk the (all-zero) export list and
+    * crash the X server at the exact moment a doomed import fails cleanly, e.g. glamor's
+    * -background none takeover of the boot framebuffer on venus/gfxstream.  Nothing to
+    * tear down; just free the allocation.
+    */
+   FREE(bo);
    return NULL;
 }
 

@@ -1837,7 +1837,13 @@ resource_create(struct pipe_screen *pscreen,
       templ2.bind |= PIPE_BIND_SHADER_IMAGE;
 
 #ifdef HAVE_LIBDRM
-   if (!whandle && screen->ro && (templ2.bind & PIPE_BIND_SCANOUT)) {
+   /* CURSOR rides the same renderonly path as SCANOUT: both end up as KMS ioctls on the
+    * display device (drmModeSetCursor2 for the cursor plane), and a bo allocated on the
+    * render device's heap hands the X server a handle the display device has never seen.
+    * modesetting then falls back to a software cursor without logging a word, and on the
+    * split render/display routes the pointer simply never appears on the login screen.
+    */
+   if (!whandle && screen->ro && (templ2.bind & (PIPE_BIND_SCANOUT | PIPE_BIND_CURSOR))) {
       struct winsys_handle handle;
 
       assert(screen->info.have_EXT_image_drm_format_modifier);
@@ -1986,6 +1992,23 @@ static struct pipe_resource *
 zink_resource_create(struct pipe_screen *pscreen,
                      const struct pipe_resource *templ)
 {
+   struct zink_screen *screen = zink_screen(pscreen);
+   /* A modifier-less scanout image (an X server whose KMS reports no modifiers goes
+    * through plain gbm_bo_create) is exported under the INVALID<->LINEAR swap: the
+    * consumer takes INVALID to mean LINEAR, and on the DroidVM routes the pool-scanout
+    * display path scans the backing pages out directly.  An OPTIMAL image behind that
+    * claim puts tile noise on the login screen; a plain VK_IMAGE_TILING_LINEAR image
+    * takes an untraveled path through the paravirt stack and came out black.  So take
+    * the road the WSI already proves out every frame: create the image through the
+    * modifier path with an explicit LINEAR modifier.
+    */
+   if (templ->target != PIPE_BUFFER &&
+       (templ->bind & PIPE_BIND_SCANOUT) &&
+       screen->info.have_EXT_image_drm_format_modifier &&
+       screen->driver_workarounds.can_do_invalid_linear_modifier) {
+      const uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+      return resource_create(pscreen, templ, NULL, 0, &linear, 1, NULL, NULL);
+   }
    return resource_create(pscreen, templ, NULL, 0, NULL, 0, NULL, NULL);
 }
 

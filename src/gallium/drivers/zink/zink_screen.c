@@ -3125,6 +3125,23 @@ init_driver_workarounds(struct zink_screen *screen)
    default:
       break;
    }
+   /* DroidVM: renderpass tracking deadlocks the threaded context on the paravirtualized
+    * Vulkan drivers. venus and gfxstream forward the host turnip driverID, so the tiler
+    * optimizations above get enabled, but their much higher submit latency keeps many tc
+    * batches in flight, and Minecraft (zink) then wedges with the app thread in
+    * tc_batch_increment_renderpass_info() waiting for a batch fence while the driver thread
+    * sits in threaded_context_get_renderpass_info() waiting for that batch's rp info
+    * (reproduced 2026-08-17 on A750 with the upstream rp-info fixes 42222/42388 applied).
+    * Until the tc race is fixed upstream, do not track renderpasses on "Virtio-GPU ..."
+    * devices; ZINK_DEBUG=rp still forces it on for experiments.
+    */
+   if (screen->driver_workarounds.track_renderpasses &&
+       !strncmp(screen->info.props.deviceName, "Virtio-GPU", 10)) {
+      mesa_logi("zink: paravirtualized device '%s': renderpass tracking disabled (tc deadlock)",
+                screen->info.props.deviceName);
+      screen->driver_workarounds.track_renderpasses = false;
+   }
+
    if (zink_debug & ZINK_DEBUG_RP)
       screen->driver_workarounds.track_renderpasses = true;
    else if (zink_debug & ZINK_DEBUG_NORP)
@@ -3134,6 +3151,13 @@ init_driver_workarounds(struct zink_screen *screen)
    switch (zink_driverid(screen)) {
    case VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA:
    case VK_DRIVER_ID_MESA_TURNIP:
+   /* gfxstream is turnip seen through the ASG wire, and turnip is already on this list. On this
+    * stack the host hides VK_EXT_image_drm_format_modifier on purpose and the guest ICD emulates
+    * it LINEAR-only, so an INVALID modifier IS linear here -- there is nothing to translate. Left
+    * off the list, zink refuses every dmabuf the compositor hands it ("display server doesn't
+    * support DRI3 modifiers and driver can't handle INVALID<->LINEAR!"), EGLImage creation fails
+    * with EGL_BAD_ALLOC, and kwin ends up with no usable output at all. */
+   case VK_DRIVER_ID_MESA_GFXSTREAM:
    case VK_DRIVER_ID_MESA_NVK:
    case VK_DRIVER_ID_MESA_LLVMPIPE:
    case VK_DRIVER_ID_MESA_PANVK:

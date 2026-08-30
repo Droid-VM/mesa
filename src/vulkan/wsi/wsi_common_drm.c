@@ -28,6 +28,7 @@
 #include "util/os_file.h"
 #include "util/log.h"
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
 #include "util/xmlconfig.h"
 #include "vk_device.h"
 #include "vk_physical_device.h"
@@ -961,6 +962,89 @@ static const uint32_t wsi_explicit_sync_free_levels[] = {
    (WSI_ES_STATE_RELEASE_MATERIALIZED),
 };
 
+static bool
+wsi_drm_batch_release_probe_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("MESA_VK_WSI_DRM_BATCH_RELEASE_PROBE", false);
+
+   return enabled;
+}
+
+/* Probe unresolved releases in free-level order.  WAIT_ANY returns the lowest
+ * matching array index, so ordering by acquire state and then present_serial
+ * preserves the free-level and oldest-image preferences. */
+static bool
+wsi_drm_probe_release_materialized(struct vk_device *device, int count,
+                                   uint32_t *indices, struct wsi_image **images,
+                                   uint32_t *flags)
+{
+   STACK_ARRAY(uint32_t, probe_handles, count);
+   STACK_ARRAY(uint64_t, probe_points, count);
+   STACK_ARRAY(uint32_t, probe_indices, count);
+   STACK_ARRAY(uint8_t, selected, count);
+   uint32_t probe_count = 0;
+
+   memset(selected, 0, count * sizeof(selected[0]));
+
+   for (uint32_t n = 0; n < count; n++) {
+      uint32_t best = UINT32_MAX;
+      uint64_t best_serial = UINT64_MAX;
+
+      for (uint32_t i = 0; i < (uint32_t)count; i++) {
+         struct wsi_image *image = images[indices[i]];
+         bool image_acquire_signalled =
+            (flags[i] & WSI_ES_STATE_ACQUIRE_SIGNALLED) != 0;
+
+         if (selected[i] || (flags[i] & WSI_ES_STATE_RELEASE_SIGNALLED))
+            continue;
+
+         if (best == UINT32_MAX ||
+             (image_acquire_signalled &&
+              !(flags[best] & WSI_ES_STATE_ACQUIRE_SIGNALLED)) ||
+             (image_acquire_signalled ==
+                 ((flags[best] & WSI_ES_STATE_ACQUIRE_SIGNALLED) != 0) &&
+              image->present_serial < best_serial)) {
+            best = i;
+            best_serial = image->present_serial;
+         }
+      }
+
+      if (best == UINT32_MAX)
+         break;
+
+      selected[best] = 1;
+      struct wsi_image *image = images[indices[best]];
+      probe_handles[probe_count] = image->explicit_sync[WSI_ES_RELEASE].handle;
+      probe_points[probe_count] = image->explicit_sync[WSI_ES_RELEASE].timeline;
+      probe_indices[probe_count] = best;
+      probe_count++;
+   }
+
+   bool materialized = false;
+   if (probe_count > 0) {
+      uint32_t first_signalled;
+      int ret = device->sync->timeline_wait(device->sync,
+                                            probe_handles, probe_points,
+                                            probe_count, 0,
+                                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                            &first_signalled);
+      if (ret == 0) {
+         flags[probe_indices[first_signalled]] |= WSI_ES_STATE_RELEASE_MATERIALIZED;
+         materialized = true;
+      }
+   }
+
+   STACK_ARRAY_FINISH(selected);
+   STACK_ARRAY_FINISH(probe_indices);
+   STACK_ARRAY_FINISH(probe_points);
+   STACK_ARRAY_FINISH(probe_handles);
+
+   return materialized;
+}
+
 static void
 wsi_drm_images_explicit_sync_state(struct vk_device *device, int count, uint32_t *indices,
                                    struct wsi_image **images, uint32_t *flags)
@@ -1002,15 +1086,38 @@ wsi_drm_images_explicit_sync_state(struct vk_device *device, int count, uint32_t
       if (points[i * WSI_ES_COUNT + WSI_ES_ACQUIRE] >= image->explicit_sync[WSI_ES_ACQUIRE].timeline)
          flags[i] |= WSI_ES_STATE_ACQUIRE_SIGNALLED;
 
-      if (points[i * WSI_ES_COUNT + WSI_ES_RELEASE] >= image->explicit_sync[WSI_ES_RELEASE].timeline) {
+      if (points[i * WSI_ES_COUNT + WSI_ES_RELEASE] >= image->explicit_sync[WSI_ES_RELEASE].timeline)
          flags[i] |= WSI_ES_STATE_RELEASE_SIGNALLED | WSI_ES_STATE_RELEASE_MATERIALIZED;
-      } else {
-         uint32_t first_signalled;
-         ret = device->sync->timeline_wait(device->sync, &handles[i * WSI_ES_COUNT + WSI_ES_RELEASE],
-                                           &image->explicit_sync[WSI_ES_RELEASE].timeline, 1, 0,
-                                           DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE, &first_signalled);
-         if (ret == 0)
-            flags[i] |= WSI_ES_STATE_RELEASE_MATERIALIZED;
+   }
+
+   if (wsi_drm_batch_release_probe_enabled()) {
+      bool has_level0 = false;
+      bool has_level2 = false;
+      for (i = 0; i < count; i++) {
+         if ((flags[i] & wsi_explicit_sync_free_levels[0]) ==
+             wsi_explicit_sync_free_levels[0])
+            has_level0 = true;
+         if ((flags[i] & wsi_explicit_sync_free_levels[2]) ==
+             wsi_explicit_sync_free_levels[2])
+            has_level2 = true;
+      }
+
+      if (!has_level0 && !has_level2)
+         wsi_drm_probe_release_materialized(device, count, indices, images, flags);
+   } else {
+      for (i = 0; i < count; i++) {
+         image = images[indices[i]];
+
+         if (!(flags[i] & WSI_ES_STATE_RELEASE_SIGNALLED)) {
+            uint32_t first_signalled;
+            ret = device->sync->timeline_wait(device->sync,
+                                              &handles[i * WSI_ES_COUNT + WSI_ES_RELEASE],
+                                              &image->explicit_sync[WSI_ES_RELEASE].timeline, 1, 0,
+                                              DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                              &first_signalled);
+            if (ret == 0)
+               flags[i] |= WSI_ES_STATE_RELEASE_MATERIALIZED;
+         }
       }
    }
 
