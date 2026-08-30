@@ -1321,6 +1321,8 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0x43051400, name="FD750"), # virtio guest, patch level 0
+        GPUId(chip_id=0xffff43051400, name="FD750"),
         GPUId(chip_id=0x43051401, name="FD750"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43051401, name="FD750"), # Default no-speedbin fallback
         GPUId(chip_id=0xffff43051701, name="Adreno (TM) 753"),
@@ -1544,6 +1546,8 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0x44050a00, name="Adreno (TM) 840"), # virtio guest, patch level 0
+        GPUId(chip_id=0xffff44050a00, name="Adreno (TM) 840"),
         GPUId(chip_id=0xffff44050A31, name="Adreno (TM) 840"),
     ], A6xxGPUInfo(
         CHIP.A8XX,

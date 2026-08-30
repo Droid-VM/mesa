@@ -255,6 +255,15 @@ virtio_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
    pipe->dev = dev;
    virtio_pipe->pipe = pipe_id[id];
 
+   /* virtio_pipe_wait() is a blocking guest->host round trip, so let
+    * fd_pipe_wait_timeout() watch the GPU-written control fence locally
+    * first.  Guest-allocated bo's are not really cached-coherent, so those
+    * reads need explicit cache maintenance to ever observe the write.
+    */
+   pipe->wait_spin_ns =
+      (int64_t)debug_get_num_option("FD_POLL_SPIN_US", 1200) * 1000;
+   pipe->control_needs_inval = vdrm->supports_guest_alloc;
+
    virtio_pipe->gpu_id = vdrm->caps.u.msm.gpu_id;
    virtio_pipe->gmem = vdrm->caps.u.msm.gmem_size;
    virtio_pipe->gmem_base = vdrm->caps.u.msm.gmem_base;

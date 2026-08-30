@@ -364,6 +364,22 @@ struct fd_pipe {
    struct fd_bo *control_mem;
    volatile struct fd_pipe_control *control;
 
+   /**
+    * How long fd_pipe_wait_timeout() may spin on the GPU-written
+    * control fence before falling back to funcs->wait.  Only set by
+    * backends where funcs->wait is expensive enough to be worth burning
+    * CPU on (virtio, where every wait is a guest->host round trip).
+    * Zero disables the spin.
+    */
+   int64_t wait_spin_ns;
+
+   /**
+    * Whether reads of control->fence need an explicit cache invalidate.
+    * FD_BO_CACHED_COHERENT is not actually coherent for guest-allocated
+    * bo's, so without this the CPU can sit on a stale line indefinitely.
+    */
+   bool control_needs_inval;
+
    struct slab_parent_pool ring_pool;
 
    const struct fd_pipe_funcs *funcs;
