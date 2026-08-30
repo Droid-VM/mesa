@@ -4,6 +4,7 @@
  */
 
 #include "ResourceTracker.h"
+#include "util/os_misc.h"
 
 #include "CommandBufferStagingStream.h"
 #include "DescriptorSetVirtualization.h"
@@ -1783,6 +1784,12 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_KHR_maintenance1",
         "VK_KHR_maintenance2",
         "VK_KHR_maintenance3",
+        // zink >= 26.1 refuses to create a screen without this one ("VK_KHR_maintenance5
+        // required!"), which on this stack means gbm_create_device() returns NULL, kwin never
+        // starts, and sddm restarts it forever. The host driver has had it all along
+        // (freedreno: .KHR_maintenance5 = tu_is_vk_1_1(device)) and the host decoder carries its
+        // commands; it was simply never added to this list, unlike maintenance4/7/8/9 above.
+        "VK_KHR_maintenance5",
         "VK_KHR_bind_memory2",
         "VK_KHR_dedicated_allocation",
         "VK_KHR_get_memory_requirements2",
@@ -1829,9 +1836,25 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_device_memory_report",
 #endif
 #ifdef LINUX_GUEST_BUILD
+        // Required by Zink: the nullDescriptor feature lives in VK_EXT_robustness2 /
+        // VK_KHR_robustness2. The host Turnip driver advertises these, but this guest
+        // allowlist was dropping them (host 151 exts -> guest 81), so zink saw no
+        // robustness2 and aborted device creation. Only passes through if the host
+        // actually advertises them (intersection below).
+        "VK_EXT_robustness2",
+        "VK_KHR_robustness2",
         // Passthrough if available on host. Will otherwise be emulated by guest
         "VK_EXT_image_drm_format_modifier",
         "VK_KHR_external_memory_fd",
+        // Required by Minecraft 26.2's official Vulkan backend (host Turnip
+        // advertises all three; intersection below keeps them host-gated).
+        // NOTE: VK_KHR_push_descriptor is withheld for now — exposing it makes
+        // zink use vkCmdPushDescriptorSetWithTemplateKHR, and the host gfxstream
+        // sub-decoder crashes unmarshalling that op (template pData path). Host
+        // decode must be fixed before re-adding it.
+        // "VK_KHR_push_descriptor",
+        "VK_EXT_multi_draw",
+        "VK_EXT_vertex_attribute_divisor",
 #endif
         // Vulkan 1.1
         "VK_KHR_16bit_storage",
@@ -1910,6 +1933,33 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
 
         if (hostRes != VK_SUCCESS) {
             return hostRes;
+        }
+    }
+
+    // VK_KHR_push_descriptor is opt-in per process: the host sub-decoder cannot
+    // yet unmarshal vkCmdPushDescriptorSetWithTemplate (untyped pData needs the
+    // template layout; codegen consumes 1 byte and desyncs the stream), and zink
+    // uses exactly that path, killing the VM. Plain write-array pushes decode
+    // fine, so apps that only use those (e.g. Minecraft) may enable it via env.
+    // VK_KHR_push_descriptor is now always safe: the guest unrolls
+    // vkCmdPushDescriptorSetWithTemplate into a typed vkCmdPushDescriptorSet
+    // (host cannot decode the untyped pData), and the host sub-decoder drops any
+    // raw push-template op instead of crashing. No env gate needed.
+    allowedExtensionNames.push_back("VK_KHR_push_descriptor");
+
+    // Which of the extensions this route depends on the host actually handed us. Behind a switch
+    // because an ICD writing to stderr writes into every application that loads it.
+    {
+        static const bool trace = getenv("GFXSTREAM_EXT_TRACE") != nullptr;
+        static bool once = false;
+        if (trace && !once) {
+            once = true;
+            const char* checks[] = {"VK_KHR_push_descriptor", "VK_EXT_multi_draw",
+                                    "VK_EXT_vertex_attribute_divisor"};
+            for (const char* c : checks) {
+                fprintf(stderr, "HOSTEXT %s: %d\n", c, getHostDeviceExtensionIndex(c));
+            }
+            fprintf(stderr, "HOSTEXT total=%zu\n", mHostDeviceExtensions.size());
         }
     }
 
@@ -2358,6 +2408,101 @@ void ResourceTracker::on_vkGetPhysicalDeviceMemoryProperties2(
     void*, VkPhysicalDevice physdev, VkPhysicalDeviceMemoryProperties2* out) {
     on_vkGetPhysicalDeviceMemoryProperties(nullptr, physdev, &out->memoryProperties);
 }
+
+// VK_EXT_memory_budget for the guest-alloc pool.
+//
+// What the host filled in describes its own heaps and the phone's capacity, and in guest-alloc
+// mode neither is what bounds this guest: its host-visible memory is sub-allocated from a pool
+// this kernel owns. The host cannot answer it -- crosvm only ever sees one scatter list per blob,
+// so gfxstream's budget override stands down -- and the figures have to be collected here, where
+// the allocator is. Without them a client honouring this extension is told several GiB against a
+// pool of one, and allocates until the pool hard-fails instead of backing off.
+//
+// A fromhost transform rather than on_vkGetPhysicalDeviceMemoryProperties2, which is dead code:
+// the generated encoder forwards this call straight to the host and only runs transforms on the
+// reply. Hung off the parent struct so the heap table arrives with the budget -- reading it from
+// the cached copy instead would abort() when that cache has not been filled yet.
+//
+// Left exactly as it arrived in every other backing mode: the query returns false when there is no
+// such pool, and the host's own override already covers host-alloc and runtime-share.
+void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_fromhost(
+    VkPhysicalDeviceMemoryProperties2* pProps, uint32_t count) {
+    VirtGpuDevice* instance = VirtGpuDevice::getInstance();
+    if (!instance) return;
+
+    // With a pool, that pool is the ceiling. Without one the allocation comes out of guest RAM,
+    // and the system-memory figures are then the honest answer -- still not the host's, which is
+    // what the query would otherwise return: the phone's whole RAM, several times anything this
+    // guest can have.
+    VirtGpuGuestPoolInfo poolInfo;
+    uint64_t poolBudget = 0, poolUsage = 0;
+    if (instance->getGuestPoolInfo(&poolInfo)) {
+        poolBudget = poolInfo.totalBytes;
+        // budget - usage is read as "what I can still get", so usage comes from the largest
+        // allocation that can actually succeed, not from bytes handed out. The two agree while
+        // the allocator can scatter, and diverge the moment it cannot.
+        poolUsage = poolInfo.totalBytes - poolInfo.largestFreeBytes;
+    } else {
+        // No pool. Where the allocation lands decides who can answer: with guest handles the
+        // memory comes out of this guest and its system figures are the honest ones; without
+        // them it is allocated on the host, whose own numbers already describe it -- and
+        // VIRTIO_GPU_F_CREATE_GUEST_HANDLE is negotiated exactly when the VMM was started with
+        // udmabuf=true, which is the same switch.
+        if (!instance->getCaps().params[kParamCreateGuestHandle]) return;
+
+        uint64_t sysTotal = 0, sysAvail = 0;
+        if (!os_get_total_physical_memory(&sysTotal) ||
+            !os_get_available_system_memory(&sysAvail)) {
+            return;
+        }
+        // The same 90% restraint the other DroidVM routes use: never invite an app to take the
+        // guest's last page.
+        poolBudget = sysTotal - sysTotal / 10;
+        poolUsage = sysTotal > sysAvail ? sysTotal - sysAvail : 0;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT* budget = nullptr;
+        for (auto* s = reinterpret_cast<VkBaseOutStructure*>(pProps[i].pNext); s; s = s->pNext) {
+            if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+                budget = reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(s);
+                break;
+            }
+        }
+        if (!budget) continue;
+
+        const VkPhysicalDeviceMemoryProperties& props = pProps[i].memoryProperties;
+        for (uint32_t h = 0; h < props.memoryHeapCount; ++h) {
+            bool hostVisible = false;
+            for (uint32_t t = 0; t < props.memoryTypeCount; ++t) {
+                if (props.memoryTypes[t].heapIndex == h &&
+                    (props.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    hostVisible = true;
+                    break;
+                }
+            }
+            if (!hostVisible) continue;
+
+            // budget - usage is read as "what I can still get", so usage comes from the largest
+            // allocation that can actually succeed, not from bytes handed out. The two agree while
+            // the allocator can scatter, and diverge the moment it cannot.
+            //
+            // Capped at the heap, which the spec requires and which bites in the no-pool
+            // guest-alloc mode: the memory really does come from this guest's RAM, but the heap
+            // the app is shown is not ours to correct. gfxstream's host emulation clamps every
+            // guest-visible heap to kMaxSafeHeapSize (2 GiB, VkEmulatedPhysicalDeviceMemory.cpp),
+            // and that figure reaches the app through the plain vkGetPhysicalDeviceMemoryProperties
+            // -- a query with no guest-side transform hook at all, so raising it here would only
+            // make the budget disagree with the size next to it. The utilisation is still the
+            // guest's own; the ceiling is upstream's.
+            budget->heapBudget[h] = std::min(poolBudget, props.memoryHeaps[h].size);
+            budget->heapUsage[h] = std::min(poolUsage, budget->heapBudget[h]);
+        }
+    }
+}
+
+void ResourceTracker::transformImpl_VkPhysicalDeviceMemoryProperties2_tohost(
+    VkPhysicalDeviceMemoryProperties2*, uint32_t) {}
 
 VkResult ResourceTracker::on_vkCreateInstance(void* context, VkResult input_result,
                                               const VkInstanceCreateInfo* createInfo,
@@ -3973,10 +4118,28 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
     VirtGpuResourcePtr bufferBlob = nullptr;
     int importedFd = -1;
+    // A guest-pool-backed export: the memory is guest pages, so no colorbuffer import is sent,
+    // and the completion below maps the blob directly instead of asking the host for a pointer.
+    bool guestBlobExport = false;
+    uint64_t guestBlobExportSize = 0;
+    uint64_t guestBlobExportId = 0;
+    VkCreateBlobGOOGLE guestBlobCreateInfo;
+    memset(&guestBlobCreateInfo, 0, sizeof(guestBlobCreateInfo));
+    guestBlobCreateInfo.sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
 #if defined(LINUX_GUEST_BUILD)
     // Check for import first; this takes precedence over exportDmabuf in creating the
     // VirtGpuResource
     if (importDmabuf) {
+        // The imported dma-buf still represents the resource named by the dedicated
+        // allocation info.  Preserve that type so the host receives
+        // VkImportColorBufferGOOGLE for images rather than looking up the colorbuffer as a
+        // VkBuffer.  exportDmabuf initializes these below, but the import path previously
+        // left both values false.
+        hasDedicatedImage =
+            dedicatedAllocInfoPtr && (dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
+        hasDedicatedBuffer =
+            dedicatedAllocInfoPtr && (dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE);
+
         VirtGpuExternalHandle importHandle = {};
         // importBlob impl may close the receivedFd after it creates an GEM handle from it. dup()
         // the FD here for input to that impl, then manage the original FD at the Vulkan level
@@ -3992,6 +4155,25 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         // As per the Vulkan spec, the ownership of this FD has been transferred
         // to the implementation
         importedFd = importFdInfoPtr->fd;
+
+        // Importing one of our own guest-pool exports (a GBM bo bound again in another context of
+        // the same process): there is no colorbuffer to name, but the blob id resolves host-side
+        // to the same udmabuf, so bind through the create-blob chain instead.
+        {
+            std::lock_guard<std::recursive_mutex> lock(mLock);
+            auto guestIt = mGuestBlobExports.find(bufferBlob->getResourceHandle());
+            if (guestIt != mGuestBlobExports.end()) {
+                guestBlobExport = true;
+                guestBlobExportId = guestIt->second.blobId;
+                guestBlobExportSize = guestIt->second.size;
+            }
+        }
+        if (guestBlobExport) {
+            guestBlobCreateInfo.blobId = guestBlobExportId;
+            guestBlobCreateInfo.blobMem = kBlobMemGuest;
+            guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+            vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+        }
     } else if (exportDmabuf) {
         VirtGpuDevice* instance = VirtGpuDevice::getInstance();
         hasDedicatedImage =
@@ -4042,7 +4224,55 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
             const uint32_t target = PIPE_TEXTURE_2D;
             uint32_t bind = VIRGL_BIND_RENDER_TARGET;
 
-            if (mCaps.vulkanCapset.alwaysBlob) {
+            if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                // Same rule as the branch below: on a protected VM an exportable HOST_VISIBLE
+                // allocation must be guest pages, whatever the capset says about blobs.
+                struct VirtGpuCreateBlob createBlob = {};
+                struct VirtGpuExecBuffer exec = {};
+                struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
+                VirtGpuDevice* instance = VirtGpuDevice::getInstance();
+
+                guestBlobCreateInfo.blobId =
+                    (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                createBlob.blobMem = kBlobMemGuest;
+                createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                   kBlobFlagCrossDevice;
+                createBlob.blobId = guestBlobCreateInfo.blobId;
+                createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                bufferBlob = instance->createBlob(createBlob);
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+
+                placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
+                exec.command = static_cast<void*>(&placeholderCmd);
+                exec.command_size = sizeof(placeholderCmd);
+                exec.flags = kRingIdx;
+                exec.ring_idx = 1;
+                if (instance->execBuffer(exec, bufferBlob.get())) {
+                    mesa_loge("Failed to execbuffer for guest-blob export wait.");
+                    return VK_ERROR_OUT_OF_HOST_MEMORY;
+                }
+                bufferBlob->wait();
+
+                guestBlobExport = true;
+                guestBlobExportSize = createBlob.size;
+                guestBlobExportId = guestBlobCreateInfo.blobId;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mLock);
+                    GuestBlobExport rec;
+                    rec.blobId = guestBlobCreateInfo.blobId;
+                    rec.size = createBlob.size;
+                    mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                }
+            } else if (mCaps.vulkanCapset.alwaysBlob) {
                 struct gfxstreamResourceCreate3d create3d = {};
                 struct VirtGpuExecBuffer exec = {};
                 struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
@@ -4058,13 +4288,46 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
                 createBlob.blobCmd = reinterpret_cast<uint8_t*>(&create3d);
                 createBlob.blobCmdSize = sizeof(create3d);
+                // Same rule as the image side: an exportable HOST_VISIBLE allocation cannot be
+                // host-owned on a protected VM, so back it with guest pages.
+                if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                    guestBlobCreateInfo.blobId =
+                        (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                    guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                    guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                    vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                    createBlob.blobCmd = nullptr;
+                    createBlob.blobCmdSize = 0;
+                    createBlob.blobMem = kBlobMemGuest;
+                    createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                       kBlobFlagCrossDevice;
+                    createBlob.blobId = guestBlobCreateInfo.blobId;
+                    createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                    guestBlobExport = true;
+                    guestBlobExportSize = createBlob.size;
+                    guestBlobExportId = guestBlobCreateInfo.blobId;
+                } else {
                 createBlob.blobMem = kBlobMemHost3d;
                 createBlob.flags = kBlobFlagShareable | kBlobFlagCrossDevice;
                 createBlob.blobId = create3d.blobId;
                 createBlob.size = finalAllocInfo.allocationSize;
+                }
 
                 bufferBlob = instance->createBlob(createBlob);
-                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+                if (guestBlobExport) {
+                    std::lock_guard<std::recursive_mutex> lock(mLock);
+                    GuestBlobExport rec;
+                    rec.blobId = guestBlobExportId;
+                    rec.size = guestBlobExportSize;
+                    mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                 exec.command = static_cast<void*>(&placeholderCmd);
@@ -4095,7 +4358,17 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
             }
-        } else if (hasDedicatedBuffer) {
+        } else {
+            // Zero-copy: any exportDmabuf allocation that does not have a
+            // dedicated image must still be backed by an exportable VirtGpu
+            // resource. This covers both a dedicated buffer AND allocations with
+            // no dedicated resource at all -- e.g. the WSI dma-buf sync-file
+            // capability probe in wsi_common_drm.c
+            // (wsi_drm_check_dma_buf_sync_file_import_export) which allocates a
+            // 4096-byte VkExportMemoryAllocateInfo(DMA_BUF) memory and then calls
+            // vkGetMemoryFdKHR on it. Without a blob, on_vkGetMemoryFdKHR fails
+            // ("does not have a resource available for export"), the probe fails,
+            // and WSI silently drops back from explicit dma-buf sync.
             uint32_t virglFormat = VIRGL_FORMAT_R8_UNORM;
             const uint32_t target = PIPE_BUFFER;
             uint32_t bind = VIRGL_BIND_LINEAR;
@@ -4108,6 +4381,55 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 struct gfxstreamPlaceholderCommandVk placeholderCmd = {};
                 struct VirtGpuCreateBlob createBlob = {};
 
+                // On a protected VM, host-owned memory can never be mapped back into the
+                // guest: registering the host pointer means runtime-sharing pages the GPU
+                // driver owns, and the hypervisor refuses them. So an exportable allocation
+                // that is also HOST_VISIBLE -- a compositor's GBM scanout buffer -- must live
+                // in guest-shared pages from the start: a dedicated guest-pool blob, imported
+                // host-side as the image's memory via udmabuf. The GPU renders into the same
+                // pages the guest CPU (and the display path) reads.
+                if (requestedMemoryIsHostVisible && mCaps.params[kParamCreateGuestHandle]) {
+                    guestBlobCreateInfo.blobId =
+                    (((uint64_t)getpid()) << 32) | (uint32_t)(++mAtomicId);
+                    guestBlobCreateInfo.blobMem = kBlobMemGuest;
+                    guestBlobCreateInfo.blobFlags = kBlobFlagCreateGuestHandle;
+                    vk_append_struct(&structChainIter, &guestBlobCreateInfo);
+
+                    createBlob.blobMem = kBlobMemGuest;
+                    createBlob.flags = kBlobFlagCreateGuestHandle | kBlobFlagShareable |
+                                       kBlobFlagCrossDevice;
+                    createBlob.blobId = guestBlobCreateInfo.blobId;
+                    createBlob.size = ALIGN_POT(finalAllocInfo.allocationSize, 4096);
+
+                    bufferBlob = instance->createBlob(createBlob);
+                    if (!bufferBlob) {
+                        mesa_loge("gfxstream: ALLOC-FAIL createBlob(guest-pool) size=%llu",
+                                  (unsigned long long)createBlob.size);
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+
+                    placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
+                    exec.command = static_cast<void*>(&placeholderCmd);
+                    exec.command_size = sizeof(placeholderCmd);
+                    exec.flags = kRingIdx;
+                    exec.ring_idx = 1;
+                    if (instance->execBuffer(exec, bufferBlob.get())) {
+                        mesa_loge("Failed to execbuffer for guest-blob export wait.");
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                    bufferBlob->wait();
+
+                    guestBlobExport = true;
+                    guestBlobExportSize = createBlob.size;
+                    guestBlobExportId = guestBlobCreateInfo.blobId;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mLock);
+                        GuestBlobExport rec;
+                        rec.blobId = guestBlobCreateInfo.blobId;
+                        rec.size = createBlob.size;
+                        mGuestBlobExports[bufferBlob->getResourceHandle()] = rec;
+                    }
+                } else {
                 create3d.hdr.opCode = GFXSTREAM_RESOURCE_CREATE_3D;
                 create3d.bind = bind;
                 create3d.target = target;
@@ -4124,7 +4446,12 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                 createBlob.size = width;
 
                 bufferBlob = instance->createBlob(createBlob);
-                if (!bufferBlob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (!bufferBlob) {
+                    mesa_loge("gfxstream: ALLOC-FAIL createBlob(mem=%u) size=%llu",
+                              createBlob.blobMem, (unsigned long long)createBlob.size);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+                }
 
                 placeholderCmd.hdr.opCode = GFXSTREAM_PLACEHOLDER_COMMAND_VK;
                 exec.command = static_cast<void*>(&placeholderCmd);
@@ -4149,20 +4476,36 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
             }
-        } else {
-            mesa_logw(
-                "VkDeviceMemory is not exportable (VkExportMemoryAllocateInfo). Requires "
-                "VkMemoryDedicatedAllocateInfo::image to create external resource.");
         }
     }
 
-    if (bufferBlob) {
-        if (hasDedicatedBuffer) {
-            importBufferInfo.buffer = bufferBlob->getResourceHandle();
-            vk_append_struct(&structChainIter, &importBufferInfo);
-        } else {
+    // Which road each allocation takes, once per distinct shape. The scanout path involves
+    // three different owners (kernel blob, host colorbuffer, imported fd) and a binding that
+    // silently lands in the wrong one produces pixels the display never sees -- with no error
+    // anywhere. This is the only place all the branches meet.
+    {
+        int route = importedFd >= 0 ? 0 : (bufferBlob ? 1 : (requestedMemoryIsHostVisible ? 2 : 3));
+        mesa_logw(
+            "gfxstream: ALLOC-ROUTE[%s]: size=%llu res=%u hostVisible=%d dedicatedImage=%d "
+            "dedicatedBuffer=%d guestBlobExport=%d",
+            route == 0   ? "import-fd"
+            : route == 1 ? "export-blob"
+            : route == 2 ? "host-visible"
+                         : "plain-host",
+            (unsigned long long)finalAllocInfo.allocationSize,
+            bufferBlob ? bufferBlob->getResourceHandle() : 0, requestedMemoryIsHostVisible,
+            (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
+            (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
+            (int)guestBlobExport);
+    }
+
+    if (bufferBlob && !guestBlobExport) {
+        if (hasDedicatedImage) {
             importCbInfo.colorBuffer = bufferBlob->getResourceHandle();
             vk_append_struct(&structChainIter, &importCbInfo);
+        } else {
+            importBufferInfo.buffer = bufferBlob->getResourceHandle();
+            vk_append_struct(&structChainIter, &importBufferInfo);
         }
     }
 #endif
@@ -4171,10 +4514,50 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         input_result =
             enc->vkAllocateMemory(device, &finalAllocInfo, pAllocator, pMemory, true /* do lock */);
 
-        if (input_result != VK_SUCCESS) _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(input_result);
+        if (input_result != VK_SUCCESS) {
+            // zink reports only "couldn't allocate memory: heap=N size=N", which says nothing
+            // about which of the four allocation shapes was in flight. Without this the same
+            // message covers a host refusal, a blob that was never created, and a memory type
+            // the host rejects -- three different bugs.
+            mesa_loge(
+                "gfxstream: ALLOC-FAIL host result=%d size=%llu typeIndex=%u guestBlobExport=%d "
+                "blobRes=%u hostVisible=%d dedicatedImage=%d dedicatedBuffer=%d importedFd=%d",
+                (int)input_result, (unsigned long long)finalAllocInfo.allocationSize,
+                finalAllocInfo.memoryTypeIndex, (int)guestBlobExport,
+                bufferBlob ? bufferBlob->getResourceHandle() : 0, (int)requestedMemoryIsHostVisible,
+                (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
+                (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
+                importedFd);
+            _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(input_result);
+        }
 
         setDeviceMemoryInfo(device, *pMemory, 0, nullptr, finalAllocInfo.memoryTypeIndex, ahw,
                             isImport, vmo_handle, bufferBlob, importedFd);
+
+        if (guestBlobExport && bufferBlob) {
+            // Guest pages: map them here and now, exactly as the coherent route would. The size
+            // recorded is the blob's, so vkMapMemory bounds checks hold.
+            auto mapping = bufferBlob->createMapping();
+            if (!mapping) {
+                mesa_loge("guest-blob export: failed to map the blob");
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+            auto coherentMemory = std::make_shared<CoherentMemory>(
+                mapping, guestBlobExportSize, device, *pMemory);
+            uint8_t* ptr = nullptr;
+            uint64_t offset = 0;
+            coherentMemory->subAllocate(finalAllocInfo.allocationSize, &ptr, offset);
+            {
+                std::lock_guard<std::recursive_mutex> lock(mLock);
+                auto& info = info_VkDeviceMemory[*pMemory];
+                info.allocationSize = finalAllocInfo.allocationSize;
+                info.coherentMemorySize = guestBlobExportSize;
+                info.coherentMemoryOffset = offset;
+                info.coherentMemory = coherentMemory;
+                info.blobId = guestBlobExportId;
+                info.ptr = ptr;
+            }
+        }
 
         uint64_t memoryObjectId = (uint64_t)(void*)*pMemory;
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
@@ -4316,25 +4699,72 @@ VkResult ResourceTracker::on_vkMapMemory(void* context, VkResult host_result, Vk
     }
     auto& deviceMemoryInfo = deviceMemoryInfoIt->second;
 
-    if (deviceMemoryInfo.blobId && !deviceMemoryInfo.coherentMemory &&
-        !mCaps.params[kParamCreateGuestHandle]) {
+    // The CreateGuestHandle capability must not gate this fallback. On a stack that mixes
+    // guest-pool memory (plain host-visible) with host-owned colorbuffer memory (exportable,
+    // dedicated-image), the second kind arrives here with a blobId and no mapping, and this
+    // HOST3D map-through-the-BAR path is the only way the guest can ever see its bytes. Gating
+    // it on "no guest handles anywhere" made every gbm_bo_map on an exportable buffer fail with
+    // MEMORY_MAP_FAILED -- which a compositor experiences as its readability probe failing, its
+    // screenshots reading back zeros, and any CPU-side buffer fill silently never happening.
+    // Memory that IS guest-handle-backed sets ptr at allocation time and never reaches this
+    // branch, so the capability tells us nothing here.
+    if (!deviceMemoryInfo.ptr && !deviceMemoryInfo.coherentMemory) {
+        // Memory allocated down the export path (host-owned colorbuffer backing a dedicated,
+        // exportable image -- a compositor's scanout buffer) reaches here with neither a mapping
+        // nor a blob id: blobId is only filled in by the coherent-memory route. The host can
+        // still hand us one -- vkGetMemoryHostAddressInfoGOOGLE mints a host blob id, exports
+        // the memory under it, and returns it -- and from there the ordinary HOST3D
+        // map-through-the-BAR path works. Without this, every gbm_bo_map on such a buffer fails
+        // with MEMORY_MAP_FAILED, which a compositor experiences as its readability probe
+        // failing, its screenshots reading back zeros, and CPU-side buffer fills silently never
+        // happening.
+        //
         // NOTE: must not hold lock while calling into the encoder.
         lock.unlock();
         VkEncoder* enc = (VkEncoder*)context;
-        VkResult vkResult = enc->vkGetBlobGOOGLE(device, memory, /*doLock*/ false);
-        if (vkResult != VK_SUCCESS) {
-            mesa_loge("%s: Failed to vkGetBlobGOOGLE().", __func__);
-            return vkResult;
+        uint64_t hostReportedSize = 0;
+        if (!deviceMemoryInfo.blobId) {
+            uint64_t hostAddr = 0, hostmemId = 0;
+            VkResult vkResult = enc->vkGetMemoryHostAddressInfoGOOGLE(
+                device, memory, &hostAddr, &hostReportedSize, &hostmemId, /*doLock*/ false);
+            if (vkResult != VK_SUCCESS || !hostmemId) {
+                mesa_loge("%s: Failed to vkGetMemoryHostAddressInfoGOOGLE (%d, id=%llu).",
+                          __func__, vkResult, (unsigned long long)hostmemId);
+                return VK_ERROR_MEMORY_MAP_FAILED;
+            }
+            lock.lock();
+            deviceMemoryInfo.blobId = hostmemId;
+            lock.unlock();
+        } else {
+            VkResult vkResult = enc->vkGetBlobGOOGLE(device, memory, /*doLock*/ false);
+            if (vkResult != VK_SUCCESS) {
+                mesa_loge("%s: Failed to vkGetBlobGOOGLE().", __func__);
+                return vkResult;
+            }
         }
         lock.lock();
 
         // NOTE: deviceMemoryInfoIt potentially invalidated but deviceMemoryInfo still okay.
 
+        // coherentMemorySize is only set by the coherent route; for the export route the mapping
+        // has to cover the allocation itself, page-aligned as every blob must be.
+        // The export route records no allocationSize guest-side, so the authoritative size is
+        // the one the host just reported for the blob it minted. Everything must stay page-
+        // aligned; a zero here becomes a zero-size GEM object and a baffling ENOSPC.
+        uint64_t mapSize = deviceMemoryInfo.coherentMemorySize
+                               ? deviceMemoryInfo.coherentMemorySize
+                               : (hostReportedSize ? ((hostReportedSize + 4095) & ~4095ull)
+                                                   : ((deviceMemoryInfo.allocationSize + 4095) & ~4095ull));
+        if (!mapSize) {
+            mesa_loge("%s: no usable size for HOST3D map blob (blobId=%llu).", __func__,
+                      (unsigned long long)deviceMemoryInfo.blobId);
+            return VK_ERROR_MEMORY_MAP_FAILED;
+        }
         struct VirtGpuCreateBlob createBlob = {};
         createBlob.blobMem = kBlobMemHost3d;
         createBlob.flags = kBlobFlagMappable;
         createBlob.blobId = deviceMemoryInfo.blobId;
-        createBlob.size = deviceMemoryInfo.coherentMemorySize;
+        createBlob.size = mapSize;
 
         auto blob = VirtGpuDevice::getInstance()->createBlob(createBlob);
         if (!blob) {
@@ -4492,9 +4922,13 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                         [](const uint64_t mod) { return mod == DRM_FORMAT_MOD_LINEAR; });
                 // host doesn't support DRM format modifiers, try emulating
                 if (canUseLinearModifier) {
-                    mesa_logd(
-                        "vkCreateImage: emulating DRM_FORMAT_MOD_LINEAR with "
-                        "VK_IMAGE_TILING_LINEAR");
+                    mesa_logw(
+                        "gfxstream: MOD-EMU vkCreateImage %ux%u usage=0x%x -> LINEAR%s pitch=%llu",
+                        pCreateInfo->extent.width, pCreateInfo->extent.height,
+                        pCreateInfo->usage, drmFmtMod ? " (explicit, planeLayouts dropped)" : "",
+                        drmFmtMod && drmFmtMod->drmFormatModifierPlaneCount
+                            ? (unsigned long long)drmFmtMod->pPlaneLayouts[0].rowPitch
+                            : 0ull);
                     localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
                 } else {
                     mesa_loge(
@@ -4512,6 +4946,31 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                     localDrmFormatModifierList = vk_make_orphan_copy(*drmFmtModList);
                     vk_append_struct(&structChainIter, &localDrmFormatModifierList);
                 }
+            }
+        }
+
+        // Cross-process dma-buf consumers on this stack read buffers as LINEAR: there is
+        // no KMS/DRI3 modifier negotiation (virtio-gpu reports no ADDFB2 modifiers), so
+        // WSI and DRI3 clients land here with plain OPTIMAL images that they then export
+        // and share by (offset, stride) alone.  The host would lay such an image out
+        // UBWC-tiled, and every importer -- an X server's glamor, a compositor, the
+        // display path -- would scan the tiled bytes out as linear noise.  Until real
+        // modifier plumbing exists, any dma-buf-exportable image must be linear on the
+        // host, matching what vkGetImageSubresourceLayout then reports to the sharer.
+        if (localCreateInfo.tiling == VK_IMAGE_TILING_OPTIMAL) {
+            VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+            {
+                std::lock_guard<std::recursive_mutex> lock(mLock);
+                auto it = info_VkDevice.find(device);
+                if (it != info_VkDevice.end()) physicalDevice = it->second.physdev;
+            }
+            if (physicalDevice != VK_NULL_HANDLE &&
+                doImageDrmFormatModifierEmulation(physicalDevice)) {
+                mesa_logw(
+                    "gfxstream: FORCE-LINEAR vkCreateImage %ux%u usage=0x%x (dma-buf exportable)",
+                    localCreateInfo.extent.width, localCreateInfo.extent.height,
+                    localCreateInfo.usage);
+                localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
             }
         }
     }
@@ -4642,6 +5101,83 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
         localCreateInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     }
 #endif
+
+    // Every vkCreateImage costs a full round trip: the host has to answer with a handle and the
+    // memory requirements, so the guest blocks. Minecraft drives this at ~447/s, which is 58% of
+    // all the guest's synchronous waits -- more than every fence and semaphore call combined.
+    // Whether that can be avoided depends on how many distinct image shapes are behind those
+    // calls, since identical create info yields identical requirements. Report the distribution
+    // under GFXSTREAM_IMAGE_TRACE=1.
+    {
+        static const bool kImageTrace = [] {
+            const char* env = getenv("GFXSTREAM_IMAGE_TRACE");
+            return env && env[0] != '0';
+        }();
+        if (kImageTrace) {
+            struct Shape {
+                uint32_t format, w, h, d, mips, layers, usage, tiling, flags, samples;
+                bool operator==(const Shape& o) const {
+                    return format == o.format && w == o.w && h == o.h && d == o.d &&
+                           mips == o.mips && layers == o.layers && usage == o.usage &&
+                           tiling == o.tiling && flags == o.flags && samples == o.samples;
+                }
+            };
+            struct ShapeHash {
+                size_t operator()(const Shape& s) const {
+                    size_t h = 1469598103934665603ull;
+                    for (uint32_t v : {s.format, s.w, s.h, s.d, s.mips, s.layers, s.usage,
+                                       s.tiling, s.flags, s.samples}) {
+                        h = (h ^ v) * 1099511628211ull;
+                    }
+                    return h;
+                }
+            };
+            static std::mutex sMutex;
+            static std::unordered_map<Shape, uint64_t, ShapeHash> sShapes;
+            static uint64_t sTotal = 0;
+            static auto sLast = std::chrono::steady_clock::now();
+
+            const Shape shape{(uint32_t)pCreateInfo->format,
+                              pCreateInfo->extent.width,
+                              pCreateInfo->extent.height,
+                              pCreateInfo->extent.depth,
+                              pCreateInfo->mipLevels,
+                              pCreateInfo->arrayLayers,
+                              (uint32_t)pCreateInfo->usage,
+                              (uint32_t)pCreateInfo->tiling,
+                              (uint32_t)pCreateInfo->flags,
+                              (uint32_t)pCreateInfo->samples};
+            std::lock_guard<std::mutex> lock(sMutex);
+            ++sShapes[shape];
+            ++sTotal;
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - sLast).count();
+            if (elapsed >= 10.0) {
+                sLast = now;
+                std::vector<std::pair<Shape, uint64_t>> rows(sShapes.begin(), sShapes.end());
+                std::sort(rows.begin(), rows.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::string top;
+                for (size_t i = 0; i < rows.size() && i < 5; ++i) {
+                    const Shape& sh = rows[i].first;
+                    top += "\n    fmt=" + std::to_string(sh.format) + " " +
+                           std::to_string(sh.w) + "x" + std::to_string(sh.h) +
+                           " mips=" + std::to_string(sh.mips) +
+                           " layers=" + std::to_string(sh.layers) +
+                           " usage=0x" + std::to_string(sh.usage) +
+                           " tiling=" + std::to_string(sh.tiling) + " -> " +
+                           std::to_string(rows[i].second) + " (" +
+                           std::to_string(rows[i].second * 100 / sTotal) + "%)";
+                }
+                mesa_logi("IMAGETRACE over %.1fs: %llu vkCreateImage (%.0f/s), %zu distinct "
+                          "shapes;%s",
+                          elapsed, (unsigned long long)sTotal, sTotal / elapsed, sShapes.size(),
+                          top.c_str());
+                sShapes.clear();
+                sTotal = 0;
+            }
+        }
+    }
 
     VkResult res;
     VkMemoryRequirements memReqs;
@@ -6124,6 +6660,9 @@ VkResult ResourceTracker::on_vkGetMemoryFdKHR(void* context, VkResult, VkDevice 
         mesa_loge("%s: Failed to export host resource to FD.\n", __func__);
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
+    mesa_logw("gfxstream: EXPORT-FD res=%u allocSize=%llu coherentOff=%llu blobId=%llu",
+              info.blobPtr->getResourceHandle(), (unsigned long long)info.allocationSize,
+              (unsigned long long)info.coherentMemoryOffset, (unsigned long long)info.blobId);
     *pFd = handle.osHandle;
     return VK_SUCCESS;
 #else
@@ -6528,7 +7067,14 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
                     }
 #endif
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
+                    // Taking a sync-fd-backed signal semaphore OUT of the submit only makes sense
+                    // when this build can signal that fd itself afterwards -- the goldfish design
+                    // is "prune -> vkQueueWaitIdle -> goldfish_sync_signal(fd)", and both of the
+                    // other halves live under the platform guards below. On a virtio-gpu guest the
+                    // local signal is compiled out, so pruning here would leave the semaphore
+                    // signalled by NOBODY: not the host (removed from the submit) and not us. Keep
+                    // the semaphore in the submit and let the host signal it normally.
+#if defined(VK_USE_PLATFORM_FUCHSIA) || GFXSTREAM_ENABLE_GUEST_GOLDFISH
                     if (semInfo.syncFd.value_or(-1) >= 0) {
                         post_wait_sync_fds.push_back(semInfo.syncFd.value());
                         signalSemsToRemove.push_back(semaphore);
@@ -6610,6 +7156,18 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
 
     VkResult waitIdleRes = VK_SUCCESS;
+    // Only stall the queue if this build actually signals something afterwards. Everything inside
+    // the block below is Fuchsia-only (zx_object_signal) or goldfish-only (goldfish_sync_signal);
+    // on a virtio-gpu guest both are compiled out, so this became a full pipeline stall plus a
+    // synchronous host round trip on every submit with nothing to do once it returned. The sync
+    // fds are signalled by the virtio-gpu fence path instead -- goldfish_sync_signal is specific
+    // to the goldfish transport.
+    //
+    // Measured (Adreno 8 Elite, gfxstream + virtio-gpu): this vkQueueWaitIdle sat in the WSI
+    // present path of every frame, and the guest burned ~89% of its CPU time spinning in
+    // sched_yield() inside AddressSpaceStream::ensureType1Finished() waiting for the reply --
+    // while the host GPU idled at ~15% busy.
+#if defined(VK_USE_PLATFORM_FUCHSIA) || GFXSTREAM_ENABLE_GUEST_GOLDFISH
     if (externalFenceFdToSignal >= 0 || !post_wait_events.empty() || !post_wait_sync_fds.empty()) {
         auto hostConn = ResourceTracker::threadingCallbacks.hostConnectionGetFunc();
         auto vkEncoder = ResourceTracker::threadingCallbacks.vkEncoderGetFunc(hostConn);
@@ -6641,6 +7199,9 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
 #endif
         }
     }
+#else
+    (void)externalFenceFdToSignal;
+#endif
     return waitIdleRes;
 }
 
@@ -6812,6 +7373,7 @@ VkResult ResourceTracker::initDescriptorUpdateTemplateBuffers(
     }
 
     auto& info = it->second;
+    info.pipelineBindPoint = pCreateInfo->pipelineBindPoint;
     uint32_t inlineUniformBlockBufferSize = 0;
 
     for (uint32_t i = 0; i < pCreateInfo->descriptorUpdateEntryCount; ++i) {
@@ -6912,6 +7474,102 @@ VkResult ResourceTracker::on_vkCreateDescriptorUpdateTemplate(
     return initDescriptorUpdateTemplateBuffers(pCreateInfo, *pDescriptorUpdateTemplate);
 }
 
+void ResourceTracker::on_vkCmdPushDescriptorSetWithTemplate(
+    void* context, VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate, VkPipelineLayout layout, uint32_t set,
+    const void* pData) {
+    VkEncoder* enc = (VkEncoder*)context;
+    uint8_t* userBuffer = (uint8_t*)pData;
+    if (!userBuffer) return;
+
+    uint32_t entryCount = 0;
+    VkDescriptorUpdateTemplateEntry* entries = nullptr;
+    VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    {
+        std::unique_lock<std::recursive_mutex> lock(mLock);
+        auto it = info_VkDescriptorUpdateTemplate.find(descriptorUpdateTemplate);
+        if (it == info_VkDescriptorUpdateTemplate.end()) return;
+        entryCount = it->second.templateEntryCount;
+        entries = it->second.templateEntries;
+        bindPoint = it->second.pipelineBindPoint;
+    }
+    if (!entries) return;
+
+    // Per-entry typed storage; reserved so the vectors never reallocate (keeps the
+    // .data() pointers stored in each VkWriteDescriptorSet valid until the call).
+    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<std::vector<VkDescriptorImageInfo>> imageStore;
+    std::vector<std::vector<VkDescriptorBufferInfo>> bufferStore;
+    std::vector<std::vector<VkBufferView>> bufferViewStore;
+    writes.reserve(entryCount);
+    imageStore.reserve(entryCount);
+    bufferStore.reserve(entryCount);
+    bufferViewStore.reserve(entryCount);
+
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        const auto& entry = entries[i];
+        VkDescriptorType descType = entry.descriptorType;
+        size_t offset = entry.offset;
+        size_t stride = entry.stride;
+        uint32_t descCount = entry.descriptorCount;
+
+        VkWriteDescriptorSet w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = VK_NULL_HANDLE;  // ignored for push descriptors
+        w.dstBinding = entry.dstBinding;
+        w.dstArrayElement = entry.dstArrayElement;
+        w.descriptorCount = descCount;
+        w.descriptorType = descType;
+
+        if (isDescriptorTypeImageInfo(descType)) {
+            if (!stride) stride = sizeof(VkDescriptorImageInfo);
+            imageStore.emplace_back(descCount);
+            auto& store = imageStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride,
+                       sizeof(VkDescriptorImageInfo));
+            }
+            w.pImageInfo = store.data();
+        } else if (isDescriptorTypeBufferInfo(descType)) {
+            if (!stride) stride = sizeof(VkDescriptorBufferInfo);
+            bufferStore.emplace_back(descCount);
+            auto& store = bufferStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride,
+                       sizeof(VkDescriptorBufferInfo));
+#if DETECT_OS_LINUX || defined(VK_USE_PLATFORM_ANDROID_KHR)
+                // Convert mesa buffer wrapper to internal; VK_NULL_HANDLE stays null
+                // (robustness2 nullDescriptor), mirroring the update-template path.
+                VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, store[j].buffer);
+                store[j].buffer =
+                    gfxstream_buffer ? gfxstream_buffer->internal_object : VK_NULL_HANDLE;
+#endif
+            }
+            w.pBufferInfo = store.data();
+        } else if (isDescriptorTypeBufferView(descType)) {
+            if (!stride) stride = sizeof(VkBufferView);
+            bufferViewStore.emplace_back(descCount);
+            auto& store = bufferViewStore.back();
+            for (uint32_t j = 0; j < descCount; ++j) {
+                memcpy(&store[j], userBuffer + offset + j * stride, sizeof(VkBufferView));
+            }
+            w.pTexelBufferView = store.data();
+        } else {
+            // Inline uniform block / unknown: not yet unrolled. Skip rather than
+            // push a malformed write (would corrupt the guest's own rendering only).
+            mesa_logw("gfxstream: push-template descriptor type %d not unrolled, skipping\n",
+                      descType);
+            continue;
+        }
+        writes.push_back(w);
+    }
+
+    if (writes.empty()) return;
+    enc->vkCmdPushDescriptorSet(commandBuffer, bindPoint, layout, set,
+                                static_cast<uint32_t>(writes.size()), writes.data(),
+                                true /* do lock */);
+}
+
 void ResourceTracker::on_vkUpdateDescriptorSetWithTemplate(
     void* context, VkDevice device, VkDescriptorSet descriptorSet,
     VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void* pData) {
@@ -7003,11 +7661,16 @@ void ResourceTracker::on_vkUpdateDescriptorSetWithTemplate(
 
                 // TODO(b/355497683): move this into gfxstream_vk_UpdateDescriptorSetWithTemplate().
 #if DETECT_OS_LINUX || defined(VK_USE_PLATFORM_ANDROID_KHR)
-                // Convert mesa to internal for objects in the user buffer
+                // Convert mesa to internal for objects in the user buffer.
+                // buffer may legitimately be VK_NULL_HANDLE when the device advertises the
+                // robustness2 nullDescriptor feature (zink binds null descriptors); the
+                // VK_FROM_HANDLE then yields a NULL wrapper, so guard the unwrap instead of
+                // dereferencing it (was an unconditional ->internal_object -> SIGSEGV).
                 VkDescriptorBufferInfo* internalBufferInfo =
                     (VkDescriptorBufferInfo*)(((uint8_t*)bufferInfos) + currBufferInfoOffset);
                 VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, internalBufferInfo->buffer);
-                internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+                internalBufferInfo->buffer =
+                    gfxstream_buffer ? gfxstream_buffer->internal_object : VK_NULL_HANDLE;
 #endif
                 currBufferInfoOffset += sizeof(VkDescriptorBufferInfo);
             }
@@ -7071,14 +7734,21 @@ static void fillEmulatedDrmFormatModPropsList(
     mesa_logd(
         "VkDrmFormatModifierPropertiesListEXT: emulating DRM_FORMAT_MOD_LINEAR with linear tiling "
         "features");
-    emulatedDrmFmtModPropsList->drmFormatModifierCount = 1;
-    if (emulatedDrmFmtModPropsList->pDrmFormatModifierProperties) {
+    /* An emulated LINEAR modifier image is just a VK_IMAGE_TILING_LINEAR image, so the
+     * modifier's feature set is exactly linearTilingFeatures.  The hardcoded
+     * SAMPLED|FILTER_LINEAR|COLOR_ATTACHMENT subset this used to report starved every
+     * consumer that checks modifier feats: zink derived usage without TRANSFER_DST (scanout
+     * flush copies silently dropped) and without COLOR_ATTACHMENT_BLEND st/mesa demoted
+     * glamor's dma-buf pixmaps to a one-shot shadow copy, so an X server rendered into
+     * memory the presenter never read (black greeter, black GLX windows).
+     */
+    VkFormatFeatureFlags linearFeats = pFormatProperties->linearTilingFeatures;
+    emulatedDrmFmtModPropsList->drmFormatModifierCount = linearFeats ? 1 : 0;
+    if (linearFeats && emulatedDrmFmtModPropsList->pDrmFormatModifierProperties) {
         emulatedDrmFmtModPropsList->pDrmFormatModifierProperties[0] = {
             .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
             .drmFormatModifierPlaneCount = 1,
-            .drmFormatModifierTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-                                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+            .drmFormatModifierTilingFeatures = linearFeats,
         };
     };
 }

@@ -551,6 +551,15 @@ class ResourceTracker {
     static VkEncoder* getQueueEncoder(VkQueue queue);
     static VkEncoder* getThreadLocalEncoder();
 
+    // Guest-pool-backed exportable allocations, keyed by virtio resource handle: importing our
+    // own GBM bo back in another context has no colorbuffer to name, and this is how the blob id
+    // is recovered so the host can rebind the same udmabuf.
+    struct GuestBlobExport {
+        uint64_t blobId;
+        uint64_t size;
+    };
+    std::unordered_map<uint32_t, GuestBlobExport> mGuestBlobExports;
+
     static void setSeqnoPtr(uint32_t* seqnoptr);
     static ALWAYS_INLINE_GFXSTREAM uint32_t nextSeqno();
     static ALWAYS_INLINE_GFXSTREAM uint32_t getSeqno();
