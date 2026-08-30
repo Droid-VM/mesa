@@ -4,6 +4,8 @@
  */
 #include "AddressSpaceStream.h"
 
+#include <time.h>
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,9 +265,21 @@ int AddressSpaceStream::writeFully(const void* buf, size_t size) {
         }
     }
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
@@ -312,9 +326,10 @@ int AddressSpaceStream::writeFullyAsync(const void* buf, size_t size) {
 
         uint32_t hostState = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-        if (!pingedHost &&
-            hostState != ASG_HOST_STATE_CAN_CONSUME &&
-            hostState != ASG_HOST_STATE_RENDERING) {
+        if ((!pingedHost &&
+             hostState != ASG_HOST_STATE_CAN_CONSUME &&
+             hostState != ASG_HOST_STATE_RENDERING) ||
+            deepWaitWantsPing()) {
             pingedHost = true;
             notifyAvailable();
         }
@@ -332,9 +347,21 @@ int AddressSpaceStream::writeFullyAsync(const void* buf, size_t size) {
     }
 
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
@@ -376,6 +403,16 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
 
     size_t actuallyRead = 0;
 
+    // Wake the consumer once if it has parked, the same way ensureType1Finished() does.
+    //
+    // Normally unnecessary: the host is mid-command when it owes a reply, so it is not parked. But
+    // if it ever does park with a reply outstanding, nothing here brings it back -- this loop only
+    // spins, and there is no host-to-guest doorbell. That turns a recoverable desync into a hang:
+    // observed after a stream corruption, gnome-shell burned 580% sys in backoff() while every
+    // host render thread slept, and only a full VM restart cleared it. A single ping costs one
+    // virtio round trip on a path that is already stuck, and makes the failure survivable.
+    bool pingedHost = false;
+
     while (!actuallyRead) {
 
         uint32_t readAvail =
@@ -386,6 +423,12 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
         if (!readAvail) {
             ring_buffer_yield();
             backoff();
+            if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+                 *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
+                deepWaitWantsPing()) {
+                notifyAvailable();
+                pingedHost = true;
+            }
             continue;
         }
 
@@ -454,10 +497,22 @@ void AddressSpaceStream::ensureType1Finished() {
     uint32_t currAvailRead =
         ring_buffer_available_read(m_context.to_host, 0);
 
+    // Wake the consumer once if it has parked itself, the way ensureConsumerFinishing() does.
+    // This wait sits at the head of every writeFullyAsync() -- the path a command buffer takes
+    // to the host -- and spinning alone will never bring back a consumer that is asleep. Once
+    // is the operative word: a ping is a virtio round trip, so pinging per iteration turns the
+    // wait into a storm of them.
+    bool pingedHost = false;
     while (currAvailRead) {
         backoff();
         ring_buffer_yield();
         currAvailRead = ring_buffer_available_read(m_context.to_host, 0);
+        if ((!pingedHost && *(m_context.host_state) != ASG_HOST_STATE_CAN_CONSUME &&
+             *(m_context.host_state) != ASG_HOST_STATE_RENDERING) ||
+            deepWaitWantsPing()) {
+            notifyAvailable();
+            pingedHost = true;
+        }
         if (isInError()) {
             return;
         }
@@ -541,9 +596,21 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
         }
     }
 
-    bool isRenderingAfter = ASG_HOST_STATE_RENDERING == __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
+    // Ping only a host that is actually parked, which is what the state word is for.
+    //
+    // Upstream pings whenever the host is not RENDERING, and a host spinning in its consumer loop
+    // reads as CAN_CONSUME -- so a ping goes out to a thread that was already going to find this
+    // data on its own. On a machine with cores to spare that is free. Here every gfxstream consumer
+    // is in one cpuset on a single core, the consumer only looks at its message queue after
+    // exhausting a three-thousand-turn spin, and each of those turns is a sched_yield: a redundant
+    // ping therefore queues up and costs a full spin to discover it meant nothing. Measured, that
+    // is where regression A's tail lives -- five queued pings back to back, the write position
+    // unmoved, about seven milliseconds gone.
+    //
+    // The five other ping sites in this file already test both states. These three did not.
+    const uint32_t stateAfter = __atomic_load_n(m_context.host_state, __ATOMIC_ACQUIRE);
 
-    if (!isRenderingAfter) {
+    if (stateAfter != ASG_HOST_STATE_RENDERING && stateAfter != ASG_HOST_STATE_CAN_CONSUME) {
         notifyAvailable();
     }
 
@@ -561,23 +628,80 @@ int AddressSpaceStream::type1Write(uint32_t bufferOffset, size_t size) {
     return 0;
 }
 
-void AddressSpaceStream::backoff() {
-    static const uint32_t kBackoffItersThreshold = 50000000;
-    static const uint32_t kBackoffFactorDoublingIncrement = 50000000;
-    ++m_backoffIters;
-
-    if (m_backoffIters > kBackoffItersThreshold) {
-        usleep(m_backoffFactor);
-        uint32_t itersSoFarAfterThreshold = m_backoffIters - kBackoffItersThreshold;
-        if (itersSoFarAfterThreshold > kBackoffFactorDoublingIncrement) {
-            m_backoffFactor = m_backoffFactor << 1;
-            if (m_backoffFactor > 1000) m_backoffFactor = 1000;
-            m_backoffIters = kBackoffItersThreshold;
+// How long a guest thread spins before it starts sleeping, waiting for a reply the host has not
+// produced yet.
+//
+// Upstream's value here is fifty million, which on this device is seconds of a vCPU held at 100%
+// by a thread that is doing nothing. That is paid by the host as well -- a spinning vCPU is a
+// crosvm thread burning a core the render threads need -- and it is why a wedged client shows up
+// as the phone at 100% with nothing being computed.
+//
+// A few tens of thousands is enough to cover the case the spin exists for: a reply already on its
+// way. Past that, sleeping is the honest answer.
+static uint32_t backoffSpinsBeforeSleep() {
+    static const uint32_t kSpins = [] {
+        if (const char* e = getenv("GFXSTREAM_GUEST_BACKOFF_SPINS")) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(e, &end, 10);
+            if (end != e) return static_cast<uint32_t>(v);
         }
+        return 20000u;
+    }();
+    return kSpins;
+}
+
+// Ask for another ping, roughly once a second, but only once the wait is deep.
+//
+// The wait loops ping the host once when it looks parked. Once is right for the common case and
+// wrong for the one that matters: the ping can be lost, the host can park again after it, and the
+// state word can say CAN_CONSUME or RENDERING while the thread that would consume is asleep -- in
+// which case the guarded one-shot never fires at all. There is no host-to-guest doorbell, so
+// nothing else ends the wait, and a missed wakeup becomes a permanent hang. Observed on KDE:
+// plasmashell parked in vkCreateSemaphore inside kopper_acquire while every host render thread
+// slept at 0% CPU, and the desktop never drew.
+//
+// Rate is the whole design. backoff() spins for its first 50M turns and only then starts sleeping
+// up to 1ms a turn, so gating on that keeps every ping out of the fast path; one per ~1000 sleeping
+// turns is about a second. Pinging per iteration was tried and is much worse than not pinging --
+// each one is a virtio round trip, and it cost Minecraft two thirds of its frame rate.
+bool AddressSpaceStream::deepWaitWantsPing() {
+    if (m_backoffIters <= backoffSpinsBeforeSleep()) return false;
+    // Once a second by the clock, not once per thousand turns. The turn count only meant a second
+    // while the spin phase was fifty million long; tie the rate to that and shortening the spin
+    // silently turns a ping a second into hundreds, and each one is a virtio round trip -- pinging
+    // per iteration was measured to cost Minecraft two thirds of its frame rate.
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+    if (m_lastPingNs && now - m_lastPingNs < 1000000000ull) return false;
+    m_lastPingNs = now;
+    return true;
+}
+
+void AddressSpaceStream::backoff() {
+    ++m_backoffIters;
+    const uint32_t spinLimit = backoffSpinsBeforeSleep();
+    if (m_backoffIters <= spinLimit) {
+        return;
+    }
+
+    usleep(static_cast<useconds_t>(m_backoffFactor));
+
+    // Grow the sleep quickly, and cap it. The doubling used to need fifty million sleeping turns
+    // to trigger, which with a short spin phase means it never triggers at all and the thread
+    // sleeps one microsecond at a time forever -- and a one microsecond sleep is a timer armed and
+    // an interrupt taken, tens of thousands a second per waiting thread. That exact shape, on the
+    // host side of the same transport, held this phone at 100% with 289k timer interrupts a second
+    // and nothing being computed.
+    if (++m_sleepTurns >= 64 && m_backoffFactor < 1000) {
+        m_sleepTurns = 0;
+        m_backoffFactor = m_backoffFactor << 1;
+        if (m_backoffFactor > 1000) m_backoffFactor = 1000;
     }
 }
 
 void AddressSpaceStream::resetBackoff() {
     m_backoffIters = 0;
     m_backoffFactor = 1;
+    m_sleepTurns = 0;
 }
