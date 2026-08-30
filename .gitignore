@@ -7,3 +7,5 @@
 /build
 .venv/
 *.mda.tar
+/build-cross
+/install-cross
