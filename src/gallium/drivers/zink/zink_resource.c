@@ -1837,7 +1837,13 @@ resource_create(struct pipe_screen *pscreen,
       templ2.bind |= PIPE_BIND_SHADER_IMAGE;
 
 #ifdef HAVE_LIBDRM
-   if (!whandle && screen->ro && (templ2.bind & PIPE_BIND_SCANOUT)) {
+   /* CURSOR rides the same renderonly path as SCANOUT: both end up as KMS ioctls on the
+    * display device (drmModeSetCursor2 for the cursor plane), and a bo allocated on the
+    * render device's heap hands the X server a handle the display device has never seen.
+    * modesetting then falls back to a software cursor without logging a word, and on the
+    * split render/display routes the pointer simply never appears on the login screen.
+    */
+   if (!whandle && screen->ro && (templ2.bind & (PIPE_BIND_SCANOUT | PIPE_BIND_CURSOR))) {
       struct winsys_handle handle;
 
       assert(screen->info.have_EXT_image_drm_format_modifier);
