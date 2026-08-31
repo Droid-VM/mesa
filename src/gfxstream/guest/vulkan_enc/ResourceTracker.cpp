@@ -4484,19 +4484,19 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     // silently lands in the wrong one produces pixels the display never sees -- with no error
     // anywhere. This is the only place all the branches meet.
     {
-        static std::once_flag sAllocRouteOnce[4];
         int route = importedFd >= 0 ? 0 : (bufferBlob ? 1 : (requestedMemoryIsHostVisible ? 2 : 3));
-        std::call_once(sAllocRouteOnce[route], [&] {
-            mesa_logw(
-                "gfxstream: ALLOC-ROUTE[%s]: size=%llu res=%u hostVisible=%d dedicatedImage=%d",
-                route == 0   ? "import-fd"
-                : route == 1 ? "export-blob"
-                : route == 2 ? "host-visible"
-                             : "plain-host",
-                (unsigned long long)finalAllocInfo.allocationSize,
-                bufferBlob ? bufferBlob->getResourceHandle() : 0, requestedMemoryIsHostVisible,
-                dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
-        });
+        mesa_logw(
+            "gfxstream: ALLOC-ROUTE[%s]: size=%llu res=%u hostVisible=%d dedicatedImage=%d "
+            "dedicatedBuffer=%d guestBlobExport=%d",
+            route == 0   ? "import-fd"
+            : route == 1 ? "export-blob"
+            : route == 2 ? "host-visible"
+                         : "plain-host",
+            (unsigned long long)finalAllocInfo.allocationSize,
+            bufferBlob ? bufferBlob->getResourceHandle() : 0, requestedMemoryIsHostVisible,
+            (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE),
+            (int)(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->buffer != VK_NULL_HANDLE),
+            (int)guestBlobExport);
     }
 
     if (bufferBlob && !guestBlobExport) {
@@ -4922,9 +4922,13 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                         [](const uint64_t mod) { return mod == DRM_FORMAT_MOD_LINEAR; });
                 // host doesn't support DRM format modifiers, try emulating
                 if (canUseLinearModifier) {
-                    mesa_logd(
-                        "vkCreateImage: emulating DRM_FORMAT_MOD_LINEAR with "
-                        "VK_IMAGE_TILING_LINEAR");
+                    mesa_logw(
+                        "gfxstream: MOD-EMU vkCreateImage %ux%u usage=0x%x -> LINEAR%s pitch=%llu",
+                        pCreateInfo->extent.width, pCreateInfo->extent.height,
+                        pCreateInfo->usage, drmFmtMod ? " (explicit, planeLayouts dropped)" : "",
+                        drmFmtMod && drmFmtMod->drmFormatModifierPlaneCount
+                            ? (unsigned long long)drmFmtMod->pPlaneLayouts[0].rowPitch
+                            : 0ull);
                     localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
                 } else {
                     mesa_loge(
@@ -4942,6 +4946,31 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                     localDrmFormatModifierList = vk_make_orphan_copy(*drmFmtModList);
                     vk_append_struct(&structChainIter, &localDrmFormatModifierList);
                 }
+            }
+        }
+
+        // Cross-process dma-buf consumers on this stack read buffers as LINEAR: there is
+        // no KMS/DRI3 modifier negotiation (virtio-gpu reports no ADDFB2 modifiers), so
+        // WSI and DRI3 clients land here with plain OPTIMAL images that they then export
+        // and share by (offset, stride) alone.  The host would lay such an image out
+        // UBWC-tiled, and every importer -- an X server's glamor, a compositor, the
+        // display path -- would scan the tiled bytes out as linear noise.  Until real
+        // modifier plumbing exists, any dma-buf-exportable image must be linear on the
+        // host, matching what vkGetImageSubresourceLayout then reports to the sharer.
+        if (localCreateInfo.tiling == VK_IMAGE_TILING_OPTIMAL) {
+            VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+            {
+                std::lock_guard<std::recursive_mutex> lock(mLock);
+                auto it = info_VkDevice.find(device);
+                if (it != info_VkDevice.end()) physicalDevice = it->second.physdev;
+            }
+            if (physicalDevice != VK_NULL_HANDLE &&
+                doImageDrmFormatModifierEmulation(physicalDevice)) {
+                mesa_logw(
+                    "gfxstream: FORCE-LINEAR vkCreateImage %ux%u usage=0x%x (dma-buf exportable)",
+                    localCreateInfo.extent.width, localCreateInfo.extent.height,
+                    localCreateInfo.usage);
+                localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
             }
         }
     }
@@ -6631,6 +6660,9 @@ VkResult ResourceTracker::on_vkGetMemoryFdKHR(void* context, VkResult, VkDevice 
         mesa_loge("%s: Failed to export host resource to FD.\n", __func__);
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
+    mesa_logw("gfxstream: EXPORT-FD res=%u allocSize=%llu coherentOff=%llu blobId=%llu",
+              info.blobPtr->getResourceHandle(), (unsigned long long)info.allocationSize,
+              (unsigned long long)info.coherentMemoryOffset, (unsigned long long)info.blobId);
     *pFd = handle.osHandle;
     return VK_SUCCESS;
 #else
@@ -7702,14 +7734,21 @@ static void fillEmulatedDrmFormatModPropsList(
     mesa_logd(
         "VkDrmFormatModifierPropertiesListEXT: emulating DRM_FORMAT_MOD_LINEAR with linear tiling "
         "features");
-    emulatedDrmFmtModPropsList->drmFormatModifierCount = 1;
-    if (emulatedDrmFmtModPropsList->pDrmFormatModifierProperties) {
+    /* An emulated LINEAR modifier image is just a VK_IMAGE_TILING_LINEAR image, so the
+     * modifier's feature set is exactly linearTilingFeatures.  The hardcoded
+     * SAMPLED|FILTER_LINEAR|COLOR_ATTACHMENT subset this used to report starved every
+     * consumer that checks modifier feats: zink derived usage without TRANSFER_DST (scanout
+     * flush copies silently dropped) and without COLOR_ATTACHMENT_BLEND st/mesa demoted
+     * glamor's dma-buf pixmaps to a one-shot shadow copy, so an X server rendered into
+     * memory the presenter never read (black greeter, black GLX windows).
+     */
+    VkFormatFeatureFlags linearFeats = pFormatProperties->linearTilingFeatures;
+    emulatedDrmFmtModPropsList->drmFormatModifierCount = linearFeats ? 1 : 0;
+    if (linearFeats && emulatedDrmFmtModPropsList->pDrmFormatModifierProperties) {
         emulatedDrmFmtModPropsList->pDrmFormatModifierProperties[0] = {
             .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
             .drmFormatModifierPlaneCount = 1,
-            .drmFormatModifierTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-                                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+            .drmFormatModifierTilingFeatures = linearFeats,
         };
     };
 }
