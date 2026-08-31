@@ -889,6 +889,17 @@ init_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe_r
       ici->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
    else if (bind & (PIPE_BIND_LINEAR | ZINK_BIND_DMABUF))
       ici->tiling = VK_IMAGE_TILING_LINEAR;
+   else if ((bind & PIPE_BIND_SCANOUT) &&
+            screen->driver_workarounds.can_do_invalid_linear_modifier)
+      /* No modifier negotiation happened (e.g. an X server whose KMS reports no
+       * modifiers goes through plain gbm_bo_create), so this image will be exported
+       * with the INVALID<->LINEAR swap: the consumer takes INVALID to mean LINEAR
+       * and may scan the backing pages out directly.  On the DroidVM routes the
+       * pool-scanout path does exactly that, and an OPTIMAL-tiled Adreno image
+       * behind a claimed-linear scanout puts tile noise on the login screen.
+       * INVALID == LINEAR is only honest if the image really is linear.
+       */
+      ici->tiling = VK_IMAGE_TILING_LINEAR;
    else
       ici->tiling = VK_IMAGE_TILING_OPTIMAL;
    /* XXX: does this have perf implications anywhere? hopefully not */
