@@ -889,17 +889,6 @@ init_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe_r
       ici->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
    else if (bind & (PIPE_BIND_LINEAR | ZINK_BIND_DMABUF))
       ici->tiling = VK_IMAGE_TILING_LINEAR;
-   else if ((bind & PIPE_BIND_SCANOUT) &&
-            screen->driver_workarounds.can_do_invalid_linear_modifier)
-      /* No modifier negotiation happened (e.g. an X server whose KMS reports no
-       * modifiers goes through plain gbm_bo_create), so this image will be exported
-       * with the INVALID<->LINEAR swap: the consumer takes INVALID to mean LINEAR
-       * and may scan the backing pages out directly.  On the DroidVM routes the
-       * pool-scanout path does exactly that, and an OPTIMAL-tiled Adreno image
-       * behind a claimed-linear scanout puts tile noise on the login screen.
-       * INVALID == LINEAR is only honest if the image really is linear.
-       */
-      ici->tiling = VK_IMAGE_TILING_LINEAR;
    else
       ici->tiling = VK_IMAGE_TILING_OPTIMAL;
    /* XXX: does this have perf implications anywhere? hopefully not */
@@ -1997,6 +1986,23 @@ static struct pipe_resource *
 zink_resource_create(struct pipe_screen *pscreen,
                      const struct pipe_resource *templ)
 {
+   struct zink_screen *screen = zink_screen(pscreen);
+   /* A modifier-less scanout image (an X server whose KMS reports no modifiers goes
+    * through plain gbm_bo_create) is exported under the INVALID<->LINEAR swap: the
+    * consumer takes INVALID to mean LINEAR, and on the DroidVM routes the pool-scanout
+    * display path scans the backing pages out directly.  An OPTIMAL image behind that
+    * claim puts tile noise on the login screen; a plain VK_IMAGE_TILING_LINEAR image
+    * takes an untraveled path through the paravirt stack and came out black.  So take
+    * the road the WSI already proves out every frame: create the image through the
+    * modifier path with an explicit LINEAR modifier.
+    */
+   if (templ->target != PIPE_BUFFER &&
+       (templ->bind & PIPE_BIND_SCANOUT) &&
+       screen->info.have_EXT_image_drm_format_modifier &&
+       screen->driver_workarounds.can_do_invalid_linear_modifier) {
+      const uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+      return resource_create(pscreen, templ, NULL, 0, &linear, 1, NULL, NULL);
+   }
    return resource_create(pscreen, templ, NULL, 0, NULL, 0, NULL, NULL);
 }
 
