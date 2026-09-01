@@ -600,6 +600,20 @@ virtgpu_bo_create_from_dma_buf(struct vn_renderer *renderer,
             mmap_size = info.size;
          }
       }
+   } else {
+      /* Classic (non-blob) resources have no host-side memory venus could
+       * bind. The one that shows up in practice is the KMS dumb boot
+       * framebuffer (res_id 2): Xorg's -background none takeover hands its
+       * dma-buf to glamor, the render server's import fails, and the
+       * following asynchronous vkBindImageMemory2 poisons the command
+       * stream -- the ring dies and vn_relax() aborts the whole X server.
+       * Refuse the import here, synchronously, so callers see a plain
+       * VK_ERROR_INVALID_EXTERNAL_HANDLE and fall back.
+       */
+      vn_log(gpu->instance,
+             "dma-buf import failed: classic resource (blob_mem 0) cannot "
+             "back venus memory");
+      goto fail;
    }
 
    /* we check bo->gem_handle instead of bo->refcount because bo->refcount
