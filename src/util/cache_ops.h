@@ -28,6 +28,7 @@
 #include <stddef.h>
 
 #include "detect_arch.h"
+#include "detect_os.h"
 #include "u_cpu_detect.h"
 
 #ifdef __cplusplus
@@ -41,7 +42,7 @@ util_has_cache_ops(void)
    /* TODO: Port to MSVC if and when we have Windows hardware drivers that
     * need cache flushing ops.
     */
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || (DETECT_OS_WINDOWS && DETECT_ARCH_AARCH64)
    return false;
 #endif
 

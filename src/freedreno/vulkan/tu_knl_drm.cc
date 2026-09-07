@@ -7,8 +7,10 @@
 #include "tu_knl_drm.h"
 
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <sys/mman.h>
 #include <xf86drm.h>
+#endif
 
 #include "tu_device.h"
 #include "tu_queue.h"
@@ -52,11 +54,18 @@ tu_allocate_userspace_iova(struct tu_device *dev,
 int
 tu_drm_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 {
+#ifdef _WIN32
+   /* Windows guest 没有 PRIME/dmabuf（移植方案缺口 1），块 1–6 直接失败。 */
+   (void) dev;
+   (void) bo;
+   return -1;
+#else
    int prime_fd;
    int ret = drmPrimeHandleToFD(dev->fd, bo->gem_handle,
                                 DRM_CLOEXEC | DRM_RDWR, &prime_fd);
 
    return ret == 0 ? prime_fd : -1;
+#endif
 }
 
 void

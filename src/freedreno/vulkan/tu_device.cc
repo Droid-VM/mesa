@@ -246,11 +246,21 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_dynamic_rendering = true,
       .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = true,
+      /* Windows guest（vdrm_wddm）没有 POSIX fd：syncobj 是自足的
+       * tu_win_sync_type，BO 也导不出 dmabuf（bo_export_dmabuf 恒 -1）。
+       * 广告出去只会让 vk_semaphore.c:47 那类"按 import 钩子挑类型"的逻辑挑到
+       * 无法工作的路径。 */
+#ifndef _WIN32
       .KHR_external_fence_fd = true,
+#endif
       .KHR_external_memory = true,
+#ifndef _WIN32
       .KHR_external_memory_fd = true,
+#endif
       .KHR_external_semaphore = true,
+#ifndef _WIN32
       .KHR_external_semaphore_fd = true,
+#endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shading_rate = device->info->props.has_attachment_shading_rate,
       .KHR_get_memory_requirements2 = true,
@@ -3085,12 +3095,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    tu_bo_suballocator_init(&device->event_suballoc, device,
-      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+      os_page_size, TU_BO_ALLOC_INTERNAL_RESOURCE,
       "event_suballoc");
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
-      getpagesize(),
+      os_page_size,
       (enum tu_bo_alloc_flags)(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                TU_BO_ALLOC_ALLOW_DUMP),
       "vis_stream_suballoc");
@@ -3232,6 +3242,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                  "pthread condattr init");
       goto fail_timeline_cond;
    }
+   /* Only the native KGSL backend uses timed waits on timeline_cond.
+    * Windows builds use virtio and winpthreads does not support selecting
+    * CLOCK_MONOTONIC; its default condition variable suffices for broadcasts.
+    */
+#ifndef _WIN32
    if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
       pthread_condattr_destroy(&condattr);
       result = vk_startup_errorf(physical_device->instance,
@@ -3239,6 +3254,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                  "pthread condattr clock setup");
       goto fail_timeline_cond;
    }
+#endif
    if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
       pthread_condattr_destroy(&condattr);
       result = vk_startup_errorf(physical_device->instance,

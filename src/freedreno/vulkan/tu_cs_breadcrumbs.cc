@@ -3,12 +3,36 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "tu_cs.h"
+#include "tu_device.h"
+
+#if DETECT_OS_WINDOWS
+
+void
+tu_breadcrumbs_init(struct tu_device *device)
+{
+   device->breadcrumbs_ctx = NULL;
+}
+
+void
+tu_breadcrumbs_finish(struct tu_device *device)
+{
+   (void) device;
+}
+
+void
+tu_cs_emit_sync_breadcrumb(struct tu_cs *cs, uint8_t opcode, uint16_t cnt)
+{
+   (void) cs;
+   (void) opcode;
+   (void) cnt;
+}
+
+#else
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-
-#include "tu_cs.h"
-#include "tu_device.h"
 
 /* A simple implementations of breadcrumbs tracking of GPU progress
  * intended to be a last resort when debugging unrecoverable hangs.
@@ -31,14 +55,14 @@ struct breadcrumbs_context
    uint32_t breadcrumb_breakpoint_hits;
 
    bool thread_stop;
-   pthread_t breadcrumbs_thread;
+   thrd_t breadcrumbs_thread;
 
    struct tu_device *device;
 
    uint32_t breadcrumb_idx;
 };
 
-static void *
+static int
 sync_gpu_with_cpu(void *_job)
 {
    struct breadcrumbs_context *ctx = (struct breadcrumbs_context *) _job;
@@ -50,7 +74,7 @@ sync_gpu_with_cpu(void *_job)
 
    if (s < 0) {
       mesa_loge("TU_BREADCRUMBS: Error while creating socket");
-      return NULL;
+      return 0;
    }
 
    struct sockaddr_in to_addr;
@@ -93,7 +117,7 @@ sync_gpu_with_cpu(void *_job)
 fail:
    close(s);
 
-   return NULL;
+   return 0;
 }
 
 /* Same as tu_cs_emit_pkt7 but without instrumentation */
@@ -137,7 +161,10 @@ tu_breadcrumbs_init(struct tu_device *device)
    global->breadcrumb_cpu_sync_seqno = 0;
    global->breadcrumb_gpu_sync_seqno = 0;
 
-   pthread_create(&ctx->breadcrumbs_thread, NULL, sync_gpu_with_cpu, ctx);
+   if (thrd_create(&ctx->breadcrumbs_thread, sync_gpu_with_cpu, ctx) != thrd_success) {
+      device->breadcrumbs_ctx = NULL;
+      free(ctx);
+   }
 }
 
 void
@@ -148,7 +175,7 @@ tu_breadcrumbs_finish(struct tu_device *device)
       return;
 
    ctx->thread_stop = true;
-   pthread_join(ctx->breadcrumbs_thread, NULL);
+   thrd_join(ctx->breadcrumbs_thread, NULL);
 
    free(ctx);
 }
@@ -219,3 +246,5 @@ tu_cs_emit_sync_breadcrumb(struct tu_cs *cs, uint8_t opcode, uint16_t cnt)
    if (before_packet)
       cs->breadcrumb_emit_after = cnt;
 }
+
+#endif

@@ -22,7 +22,9 @@
  */
 
 %{
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "util/ralloc.h"
 #include "ir3/ir3.h"
 #include "ir3_parser.h"
@@ -37,17 +39,52 @@ extern char *current_line;
 const char *input_buffer = NULL;
 size_t input_buffer_len = 256;
 
+static int
+read_input_line(FILE *file)
+{
+  size_t used = 0;
+
+  if (!current_line) {
+    current_line = malloc(input_buffer_len);
+    if (!current_line)
+      return -1;
+  }
+
+  for (;;) {
+    if (used + 1 >= input_buffer_len) {
+      size_t new_len = input_buffer_len * 2;
+      if (new_len <= input_buffer_len)
+        return -1;
+
+      char *new_line = realloc(current_line, new_len);
+      if (!new_line)
+        return -1;
+
+      current_line = new_line;
+      input_buffer_len = new_len;
+    }
+
+    if (!fgets(current_line + used, input_buffer_len - used, file))
+      return used != 0;
+
+    used += strlen(current_line + used);
+    if ((used && current_line[used - 1] == '\n') || feof(file))
+      return 1;
+  }
+}
+
 /**
  * Return up to max_size chars from the current input_buffer.  Reads a new
  * line into the input_buffer if it is currently empty.
  */
 static size_t yy_input(char *buf, size_t max_size)
 {
-  if (!input_buffer)
-    current_line = malloc(input_buffer_len);
-
   if (!input_buffer || !strlen(input_buffer)) {
-    if (getline(&current_line, &input_buffer_len, ir3_yyin) < 0) {
+    int status = read_input_line(ir3_yyin);
+    if (status <= 0) {
+      input_buffer = "";
+      if (status < 0)
+        fprintf(stderr, "Could not allocate input buffer:\n");
       if (ferror(ir3_yyin))
         fprintf(stderr, "Could not read input:\n");
     } else {

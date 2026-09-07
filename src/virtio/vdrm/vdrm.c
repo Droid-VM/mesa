@@ -5,22 +5,31 @@
 
 #include "util/u_math.h"
 #include "util/perf/cpu_trace.h"
+#include "c11/threads.h"
 
 #include "vdrm.h"
 
+#ifdef _WIN32
+struct vdrm_device * vdrm_wddm_connect(int fd, uint32_t context_type);
+#else
 struct vdrm_device * vdrm_virtgpu_connect(int fd, uint32_t context_type);
 struct vdrm_device * vdrm_vpipe_connect(uint32_t context_type);
+#endif
 
 struct vdrm_device *
 vdrm_device_connect(int fd, uint32_t context_type)
 {
    struct vdrm_device *vdev;
 
+#ifdef _WIN32
+   vdev = vdrm_wddm_connect(fd, context_type);
+#else
    if (fd >= 0) {
       vdev = vdrm_virtgpu_connect(fd, context_type);
    } else {
       vdev = vdrm_vpipe_connect(context_type);
    }
+#endif
 
    if (!vdev)
       return NULL;
@@ -195,5 +204,5 @@ void
 vdrm_host_sync(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req)
 {
    while (fence_before(vdev->shmem->seqno, req->seqno))
-      sched_yield();
+      thrd_yield();
 }

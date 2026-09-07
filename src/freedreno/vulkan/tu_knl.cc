@@ -7,16 +7,22 @@
  * Copyright © 2015 Intel Corporation
  */
 
+#if defined(TU_HAS_KGSL) || defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
 #include <fcntl.h>
+#endif
 
+#if defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
 #ifdef MAJOR_IN_MKDEV
 #include <sys/mkdev.h>
 #endif
 #ifdef MAJOR_IN_SYSMACROS
 #include <sys/sysmacros.h>
 #endif
+#endif
 
+#if !defined(_WIN32)
 #include <sys/mman.h>
+#endif
 
 #include "util/cache_ops.h"
 #include "util/libdrm.h"
@@ -151,6 +157,13 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
 
    TU_RMV(bo_unmap, dev, bo);
 
+#if defined(_WIN32)
+   /* Windows guest：没有 mmap(PROT_NONE) 保留映射的语义；vdrm_wddm 后端
+    * (块 2+) 会在 bo_map/bo_unmap 上实现自己的 CPU map 生命周期。 */
+   bo->map = NULL;
+
+   return VK_SUCCESS;
+#else
    if (reserve) {
       void *map = mmap(bo->map, bo->size, PROT_NONE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -164,6 +177,7 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
    bo->map = NULL;
 
    return VK_SUCCESS;
+#endif
 }
 
 void
@@ -336,7 +350,45 @@ tu_queue_submit(struct tu_queue *queue, void *submit,
 VkResult
 tu_enumerate_devices(struct vk_instance *vk_instance)
 {
-#ifdef TU_HAS_KGSL
+#if defined(_WIN32)
+   /* vdrm 路线：物理设备枚举 = 一次短命 vdrm probe。vdrm_wddm_connect()
+    * 内部做 D3DKMT 枚举 → QueryAdapterInfo(VADAPINF) → capset6(DRM) →
+    * CreateDevice/CreateContext/ContextInit；拿不到 virtio+msm 就返回
+    * INCOMPATIBLE，和 Linux 上"没有可用的 drm 节点"同语义。真正的
+    * VkDevice 打开时 tu_knl_drm_virtio 的 device_init 会再连一次。
+    * 这里 probe 到的 caps 已装进 tu_physical_device（load 内部完成）。 */
+   struct tu_instance *instance =
+      container_of(vk_instance, struct tu_instance, vk);
+   struct tu_physical_device *device = NULL;
+   VkResult result = tu_knl_drm_virtio_load(instance, -1, NULL, &device);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* 仿 try_create() 的 vtest 分支：Windows 没有 DRM 节点，路径留空
+    * （virtio_device_init 见 strlen(fd_path)==0 就 fd=-1）。 */
+   device->master_fd = -1;
+   device->kgsl_dma_fd = -1;
+   device->fd_path[0] = '\0';
+   device->has_master = false;
+   device->master_major = 0;
+   device->master_minor = 0;
+   device->has_local = true;
+   device->local_major = 226;
+   device->local_minor = 128;
+
+   result = tu_physical_device_init(device, instance);
+   if (result != VK_SUCCESS) {
+      vk_free(&instance->vk.alloc, device);
+      return result;
+   }
+
+   list_addtail(&device->vk.link, &instance->vk.physical_devices.list);
+
+   if (TU_DEBUG(STARTUP))
+      mesa_logi("Found compatible device '%s'.", "virtio-gpu (WDDM)");
+
+   return VK_SUCCESS;
+#elif defined(TU_HAS_KGSL)
    struct tu_instance *instance =
       container_of(vk_instance, struct tu_instance, vk);
 
@@ -375,6 +427,14 @@ tu_physical_device_try_create(struct vk_instance *vk_instance,
                               struct _drmDevice *drm_device,
                               struct vk_physical_device **out)
 {
+#if defined(_WIN32)
+   /* DRM 节点枚举是 Linux 的事；Windows guest 的物理设备枚举走
+    * tu_enumerate_devices()（块 2 起从 D3DKMT 找 virtio_wddm 适配器）。 */
+   (void) vk_instance;
+   (void) drm_device;
+   (void) out;
+   return VK_ERROR_INCOMPATIBLE_DRIVER;
+#else
    struct tu_instance *instance =
       container_of(vk_instance, struct tu_instance, vk);
 
@@ -490,4 +550,5 @@ out:
    drmFreeVersion(version);
 
    return result;
+#endif
 }

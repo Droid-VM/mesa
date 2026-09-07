@@ -46,10 +46,17 @@ void msm_submit_add_bind(struct tu_device *device,
 static inline void
 get_abs_timeout(struct drm_msm_timespec *tv, uint64_t ns)
 {
+#ifdef _WIN32
+   /* Windows guest 不编 msm KNL（TU_HAS_MSM 恒 off），本辅助只有 msm 提交
+    * 路径用；mingw 没有 clock_gettime。 */
+   (void) tv;
+   (void) ns;
+#else
    struct timespec t;
    clock_gettime(CLOCK_MONOTONIC, &t);
    tv->tv_sec = t.tv_sec + ns / 1000000000;
    tv->tv_nsec = t.tv_nsec + ns % 1000000000;
+#endif
 }
 
 static inline bool
