@@ -38,7 +38,16 @@ tu_wsi_init(struct tu_physical_device *physical_device)
 {
    VkResult result;
 
-   const struct wsi_device_options options = { .sw_device = false };
+   /* The vDRM Windows guest has no D3D12 queue exposed to Mesa.  Use the
+    * Win32 DIB path so surface/swapchain/present can operate without DXGI
+    * composition; GPU rendering remains exercised by the Vulkan device. */
+   const struct wsi_device_options options = {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+      .sw_device = true,
+#else
+      .sw_device = false,
+#endif
+   };
    result = wsi_device_init(&physical_device->wsi_device,
                             tu_physical_device_to_handle(physical_device),
                             tu_wsi_proc_addr,

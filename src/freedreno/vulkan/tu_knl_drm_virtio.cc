@@ -811,11 +811,18 @@ tu_virtio_get_poll_sync_type(const struct vk_sync_type *base)
    type.features = (enum vk_sync_features)
       (type.features & ~VK_SYNC_FEATURE_TIMELINE);
    type.get_value = NULL;
+#ifndef _WIN32
+   /* On Linux, owner is only a cache of the kernel syncobj payload.  On
+    * Windows it is part of the payload itself: invalidating src before
+    * move would lose a pending signal permanently.  Keep the Windows base
+    * operations, including its NULL signal_many/reset_many fallbacks.
+    */
    type.signal = tu_virtio_sync_signal;
    type.signal_many = tu_virtio_sync_signal_many;
    type.reset = tu_virtio_sync_reset;
    type.reset_many = tu_virtio_sync_reset_many;
    type.move = tu_virtio_sync_move;
+#endif
 #ifdef _WIN32
    /* base（tu_win_sync_type）没有 fd 导入，这里也不能留非 NULL 的钩子：
     * vk_semaphore.c:47 / vk_fence.c:44 是"按 import_opaque_fd 是否为空"挑
@@ -832,6 +839,8 @@ tu_virtio_get_poll_sync_type(const struct vk_sync_type *base)
 }
 
 #ifdef _WIN32
+DEBUG_GET_ONCE_BOOL_OPTION(tu_win_sync_debug, "TU_WIN_SYNC_DEBUG", false)
+
 /* Windows 上没有 drm syncobj / sync_file，vk_drm_syncobj 那一套无从落地。这里给
  * VkFence 和二元 VkSemaphore 做一个自足的二元 sync：状态 = 「已确认完成」布尔 +
  * 「由哪次提交签发的 seqno」，等待就是拿 seqno 跟 turnip 自己的 userspace fence
@@ -936,6 +945,9 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
    if (wait_count == 0)
       return VK_SUCCESS;
 
+   const bool debug = debug_get_option_tu_win_sync_debug();
+   uint64_t next_log_ns = debug ? os_time_get_nano() + 1000000000ull : 0;
+
    for (;;) {
       bool all = true, any = false;
 
@@ -957,6 +969,24 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
 
       if ((wait_flags & VK_SYNC_WAIT_ANY) ? any : all)
          return VK_SUCCESS;
+
+      if (debug && (uint64_t)os_time_get_nano() >= next_log_ns) {
+         struct tu_virtio_device *vdev = dev->vdev;
+         fprintf(stderr, "tu-win32-sync: waiting flags=0x%x gpu=%u "
+                 "host_seq=%u next_req=%u async_error=%u global_faults=%u\n",
+                 (unsigned)wait_flags,
+                 dev->global_bo_map ? dev->global_bo_map->userspace_fence : 0,
+                 vdev->shmem->base.seqno, vdev->vdrm->next_seqno,
+                 vdev->shmem->async_error, vdev->shmem->global_faults);
+         for (uint32_t i = 0; i < wait_count; i++) {
+            struct tu_virtio_sync *sync = to_tu_virtio_sync(waits[i].sync);
+            fprintf(stderr, "tu-win32-sync: wait[%u] sync=%p owner=%p "
+                    "fence=%u signaled=%u\n", i, (void *)sync,
+                    (void *)p_atomic_read(&sync->owner), sync->submit_seqno,
+                    (unsigned)sync->signaled);
+         }
+         next_log_ns = os_time_get_nano() + 1000000000ull;
+      }
 
       if (abs_timeout_ns == 0 ||
           (abs_timeout_ns != OS_TIMEOUT_INFINITE &&
@@ -2007,7 +2037,24 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       .num_out_syncobjs = num_out_syncobjs,
    };
 
+#ifdef _WIN32
+   if (debug_get_option_tu_win_sync_debug())
+      fprintf(stderr, "tu-win32-sync: submit queue=%u fence=%u bos=%u "
+              "cmds=%u waits=%u signals=%u bytes=%u\n",
+              req->queue_id, fence, nr_bos, entry_count,
+              wait_count, signal_count, req_len);
+#endif
+
    ret = vdrm_execbuf(vdev->vdrm, &params);
+
+#ifdef _WIN32
+   if (debug_get_option_tu_win_sync_debug())
+      fprintf(stderr, "tu-win32-sync: enqueued ret=%d req=%u host_seq=%u "
+              "gpu=%u async_error=%u\n", ret, req->hdr.seqno,
+              vdev->shmem->base.seqno,
+              queue->device->global_bo_map->userspace_fence,
+              vdev->shmem->async_error);
+#endif
 
    mtx_unlock(&queue->device->bo_mutex);
 

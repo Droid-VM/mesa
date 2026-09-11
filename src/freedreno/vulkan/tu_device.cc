@@ -61,6 +61,18 @@
 
 uint64_t os_page_size = 4096;
 
+#ifdef _WIN32
+/* Private instance-create pNext prefix shared with the virtio D3D UMD.
+ * Only the LUID prefix is needed here; the remaining runtime callbacks are
+ * consumed by the WDDM transport as that integration is brought up. */
+#define VK_STRUCTURE_TYPE_D3DDDI_CALLBACKS_TU ((VkStructureType)4281808695u)
+struct tu_d3dddi_callbacks_prefix {
+   VkStructureType sType;
+   const void *pNext;
+   uint8_t adapter_luid[VK_LUID_SIZE];
+};
+#endif
+
 static bool
 tu_device_get_build_id(blake3_hasher *ctx)
 {
@@ -165,6 +177,9 @@ static const struct vk_instance_extension_table tu_instance_extensions_supported
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    .KHR_wayland_surface                 = true,
+#endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   .KHR_win32_surface                   = true,
 #endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
    .KHR_xcb_surface                     = true,
@@ -962,9 +977,18 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
 {
    memcpy(p->deviceUUID, pdevice->device_uuid, VK_UUID_SIZE);
    memcpy(p->driverUUID, pdevice->driver_uuid, VK_UUID_SIZE);
+#ifdef _WIN32
+   if (pdevice->instance->adapter_luid_valid) {
+      memcpy(p->deviceLUID, pdevice->instance->adapter_luid, VK_LUID_SIZE);
+      p->deviceNodeMask = 1;
+      p->deviceLUIDValid = true;
+   } else
+#endif
+   {
    memset(p->deviceLUID, 0, VK_LUID_SIZE);
    p->deviceNodeMask = 0;
    p->deviceLUIDValid = false;
+   }
 
    p->subgroupSize =
       pdevice->expose_double_threadsize ? pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
@@ -1920,7 +1944,8 @@ tu_physical_device_finish(struct tu_physical_device *device)
    tu_wsi_finish(device);
 #endif
 
-   close(device->local_fd);
+   if (device->local_fd != -1)
+      close(device->local_fd);
    if (device->master_fd != -1)
       close(device->master_fd);
 
@@ -1981,6 +2006,19 @@ tu_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    if (!instance)
       return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+#ifdef _WIN32
+   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_CALLBACKS_TU) {
+         const struct tu_d3dddi_callbacks_prefix *callbacks =
+            (const struct tu_d3dddi_callbacks_prefix *) ext;
+         memcpy(instance->adapter_luid, callbacks->adapter_luid,
+                VK_LUID_SIZE);
+         instance->adapter_luid_valid = true;
+         break;
+      }
+   }
+#endif
 
    struct vk_instance_dispatch_table dispatch_table;
    vk_instance_dispatch_table_from_entrypoints(

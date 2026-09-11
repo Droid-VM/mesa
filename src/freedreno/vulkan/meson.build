@@ -115,6 +115,10 @@ if with_platform_wayland
   tu_wsi = true
 endif
 
+if with_platform_windows
+  tu_wsi = true
+endif
+
 if system_has_kms_drm and not with_platform_android
   tu_wsi = true
 endif

@@ -218,6 +218,14 @@ struct tu_instance
 
    uint32_t instance_idx;
    uint32_t api_version;
+
+#ifdef _WIN32
+   /* Supplied by the D3D UMD when Turnip is loaded through
+    * VK_LUNARG_direct_driver_loading.  Keep the raw bytes because Vulkan and
+    * DXGI both define the LUID as the same opaque eight-byte value. */
+   uint8_t adapter_luid[VK_LUID_SIZE];
+   bool adapter_luid_valid;
+#endif
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)

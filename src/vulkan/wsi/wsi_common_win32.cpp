@@ -829,8 +829,17 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
       dptr += image->sw.bmp_row_pitch;
       ptr += image->base.row_pitches[0];
    }
-   if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY))
+   SetLastError(ERROR_SUCCESS);
+   if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY)) {
+      DWORD error = GetLastError();
+      DWORD session = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &session);
+      fprintf(stderr, "wsi-win32: StretchBlt failed: error=%lu session=%lu hwnd=%p dst_dc=%p src_dc=%p extent=%ux%u\n",
+              (unsigned long)error, (unsigned long)session,
+              (void *)chain->wnd, (void *)chain->chain_dc, (void *)image->sw.dc,
+              chain->extent.width, chain->extent.height);
       chain->status = VK_ERROR_MEMORY_MAP_FAILED;
+   }
 
    wsi_win32_set_image_idle(chain, image);
 
