@@ -71,6 +71,36 @@ struct tu_d3dddi_callbacks_prefix {
    const void *pNext;
    uint8_t adapter_luid[VK_LUID_SIZE];
 };
+
+/* Second private pNext: how to allocate a blob that must become a D3D11 shared
+ * resource. We cannot do it ourselves -- only the UMD's pfnAllocateCb, on the
+ * runtime's device, yields a kernel resource handle the application can share.
+ * Carries only plain C types (see VIRTIO_WDDM_RuntimeAllocator); the WDDM UMD
+ * callback types stay on the UMD side, which owns d3dumddi.h. */
+/* Private vkAllocateMemory pNext: this allocation backs the D3D11 resource the
+ * UMD is creating right now, so it must come from the runtime allocator (see
+ * VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU) rather than from our own
+ * device.  Only hRTResource is read here; pCreateResource is the UMD's own
+ * CreateResource argument and is not interpreted. */
+#define VK_STRUCTURE_TYPE_D3DDDI_CREATE_RESOURCE_TU ((VkStructureType)4281808696u)
+struct tu_d3dddi_create_resource {
+   VkStructureType sType;
+   const void *pNext;
+   void *hRTResource;
+   const void *pCreateResource;
+};
+
+#define VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU ((VkStructureType)4281808698u)
+struct tu_d3dddi_runtime_allocator {
+   VkStructureType sType;
+   const void *pNext;
+   void *ctx;
+   /* int (*)(void *ctx, const VIRTIO_WDDM_RuntimeAllocRequest *,
+    *         VIRTIO_WDDM_RuntimeAllocResult *) */
+   void *alloc;
+   /* int (*)(void *ctx, const VIRTIO_WDDM_RuntimeAllocResult *) */
+   void *free;
+};
 #endif
 
 static bool
@@ -2009,13 +2039,27 @@ tu_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
 #ifdef _WIN32
    vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      /* Do not break out early: the UMD may chain both private structs. */
       if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_CALLBACKS_TU) {
          const struct tu_d3dddi_callbacks_prefix *callbacks =
             (const struct tu_d3dddi_callbacks_prefix *) ext;
          memcpy(instance->adapter_luid, callbacks->adapter_luid,
                 VK_LUID_SIZE);
          instance->adapter_luid_valid = true;
-         break;
+      } else if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU) {
+         const struct tu_d3dddi_runtime_allocator *ra =
+            (const struct tu_d3dddi_runtime_allocator *) ext;
+         /* Both hooks or neither: a half-installed allocator would allocate
+          * through the runtime and then leak, because the matching free is what
+          * releases the runtime's resource association. */
+         if (ra->alloc && ra->free) {
+            instance->runtime_alloc_ctx = ra->ctx;
+            instance->runtime_alloc_fn = ra->alloc;
+            instance->runtime_free_fn = ra->free;
+         } else if (ra->alloc || ra->free) {
+            mesa_logw("tu_CreateInstance: runtime allocator has only one of "
+                      "alloc/free installed; ignoring it");
+         }
       }
    }
 #endif
@@ -3813,6 +3857,46 @@ tu_AllocateMemory(VkDevice _device,
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
 
+#ifdef _WIN32
+   /* Windows has no PRIME fd, so a shared allocation arrives as a D3DKMT
+    * allocation handle owned by the UMD (or opened from another process).  The
+    * common runtime records handleType in mem->vk but not the handle, so find
+    * the struct ourselves.
+    *
+    * Importing must not silently degrade: if we fall through to the plain
+    * allocation path, vkAllocateMemory succeeds with private memory and the two
+    * processes composite unrelated pixels instead of sharing them.  So report
+    * the failure rather than ignoring an unhandled pNext. */
+   const VkImportMemoryWin32HandleInfoKHR *w32_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
+
+   /* Private sType, so vk_find_struct_const cannot find it. */
+   const struct tu_d3dddi_create_resource *d3d_create = NULL;
+   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
+      if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_CREATE_RESOURCE_TU) {
+         d3d_create = (const struct tu_d3dddi_create_resource *) ext;
+         break;
+      }
+   }
+
+   if (w32_info && w32_info->handleType) {
+      if (w32_info->handleType !=
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT) {
+         mesa_loge("tu_AllocateMemory: unsupported Win32 import handleType 0x%x",
+                   w32_info->handleType);
+         result = vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      } else {
+         result = tu_bo_init_platform_alloc(
+            device, &mem->bo, pAllocateInfo->allocationSize, alloc_flags,
+            (uint32_t)(uintptr_t) w32_info->handle);
+         if (result != VK_SUCCESS) {
+            mesa_loge("tu_AllocateMemory: importing D3DKMT allocation 0x%x "
+                      "failed: %s", (uint32_t)(uintptr_t) w32_info->handle,
+                      vk_Result_to_str(result));
+         }
+      }
+   } else
+#endif
    if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
@@ -3877,6 +3961,25 @@ tu_AllocateMemory(VkDevice _device,
       VkMemoryPropertyFlags mem_property =
          device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
 
+#ifdef _WIN32
+      if (d3d_create && d3d_create->hRTResource) {
+         /* Backing for a D3D11 shared resource: must come from the runtime
+          * allocator.  Reporting failure is mandatory -- falling through to the
+          * ordinary path would return private memory from a call that succeeded,
+          * and the sharing processes would composite unrelated pixels. */
+         result = tu_bo_init_shared(device, &mem->vk.base, &mem->bo,
+                                    pAllocateInfo->allocationSize,
+                                    client_address, mem_property, alloc_flags,
+                                    name, d3d_create->hRTResource);
+         if (result != VK_SUCCESS) {
+            mesa_loge("tu_AllocateMemory: runtime-allocated shared BO for "
+                      "hRTResource=%p size=%" PRIu64 " failed: %s",
+                      d3d_create->hRTResource,
+                      (uint64_t) pAllocateInfo->allocationSize,
+                      vk_Result_to_str(result));
+         }
+      } else
+#endif
       result = _tu_init_memory(device, mem, mem_property, alloc_flags,
                                pAllocateInfo->allocationSize, client_address,
                                name);

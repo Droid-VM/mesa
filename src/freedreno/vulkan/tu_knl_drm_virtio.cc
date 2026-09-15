@@ -11,11 +11,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <unistd.h>
 #if !defined(_WIN32)
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <xf86drm.h>
 #else
+#include <windows.h>
 /* sys/mman.h 在 mingw 不存在；vdrm 后端的失败约定用 (void *)-1 保持一致，
  * 由 vdrm_wddm.c（块 2+）实现真正的 CPU map 语义。 */
 #define MAP_FAILED ((void *)-1)
@@ -304,6 +306,18 @@ virtio_device_init(struct tu_device *dev)
                                "failed to connect virtio DRM context");
    }
 
+#ifdef _WIN32
+   /* Shared D3D11 resources must be allocated by the UMD's pfnAllocateCb, not
+    * by the transport's own device -- only the runtime mints the kernel resource
+    * handle an application can share.  Absent when the ICD runs without a D3D
+    * UMD, which just means no shared resource support. */
+   if (instance->runtime_alloc_fn && instance->runtime_free_fn) {
+      vdrm_wddm_set_runtime_allocator(vdev->vdrm, instance->runtime_alloc_ctx,
+                                      instance->runtime_alloc_fn,
+                                      instance->runtime_free_fn);
+   }
+#endif
+
    /* The physical-device probe uses a short-lived vdrm context.  Query the
     * slice again on the real VkDevice context, otherwise every device keeps
     * allocating from the probe context's slice and defeats host isolation. */
@@ -320,7 +334,7 @@ virtio_device_init(struct tu_device *dev)
       vdev->last_submit_syncobj = 0;
 #endif
 
-   p_atomic_set(&vdev->next_blob_id, 1);
+   p_atomic_set(&vdev->next_blob_id, (uint32_t)(getpid() & 0x7fff) << 16);
    vdev->shmem = to_msm_shmem(vdev->vdrm->shmem);
 
    query_faults(dev, &dev->fault_count);
@@ -934,6 +948,43 @@ tu_win_sync_poll(struct tu_device *dev, struct tu_virtio_sync *sync)
    return true;
 }
 
+class tu_win_sync_timer {
+public:
+   ~tu_win_sync_timer()
+   {
+      if (timer)
+         CloseHandle(timer);
+   }
+
+   void wait(uint64_t duration_ns)
+   {
+      if (!initialized) {
+         timer = CreateWaitableTimerExW(NULL, NULL,
+                                       CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_MODIFY_STATE | SYNCHRONIZE);
+         initialized = true;
+      }
+
+      if (timer) {
+         LARGE_INTEGER due;
+         due.QuadPart = -(int64_t)DIV_ROUND_UP(duration_ns, 100);
+         if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0) &&
+             WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0)
+            return;
+
+         CloseHandle(timer);
+         timer = NULL;
+      }
+
+      /* Keep the original blocking fallback if high-resolution timers fail. */
+      os_time_sleep(DIV_ROUND_UP(duration_ns, 1000));
+   }
+
+private:
+   HANDLE timer = NULL;
+   bool initialized = false;
+};
+
 static VkResult
 tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
                       const struct vk_sync_wait *waits,
@@ -947,6 +998,7 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
 
    const bool debug = debug_get_option_tu_win_sync_debug();
    uint64_t next_log_ns = debug ? os_time_get_nano() + 1000000000ull : 0;
+   tu_win_sync_timer timer;
 
    for (;;) {
       bool all = true, any = false;
@@ -988,12 +1040,18 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
          next_log_ns = os_time_get_nano() + 1000000000ull;
       }
 
+      const uint64_t now = os_time_get_nano();
       if (abs_timeout_ns == 0 ||
-          (abs_timeout_ns != OS_TIMEOUT_INFINITE &&
-           (uint64_t)os_time_get_nano() >= abs_timeout_ns))
+          (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns))
          return VK_TIMEOUT;
 
-      os_time_sleep(100);
+      /* Sleep(1) can cost a whole scheduler tick on Windows. Reuse a timer
+       * while polling, and never request a wait beyond the caller's deadline.
+       * Timer expiry only prompts another fence check; it does not signal it.
+       */
+      const uint64_t remaining = abs_timeout_ns == OS_TIMEOUT_INFINITE ?
+                                 UINT64_MAX : abs_timeout_ns - now;
+      timer.wait(MIN2(remaining, 100000ull));
    }
 }
 
@@ -1441,16 +1499,25 @@ tu_bo_set_kernel_name(struct tu_device *dev, struct tu_bo *bo, const char *name)
    vdrm_send_req(dev->vdev->vdrm, &req->hdr, false);
 }
 
+/* Common body for virtio_bo_init and (on Windows) virtio_bo_init_shared.
+ *
+ * hRTResource selects where the platform allocation comes from: NULL means this
+ * driver's own device (the ordinary path), non-NULL routes it through the D3D
+ * UMD's runtime allocator so the result can become a D3D11 shared resource.
+ * Everything else -- GEM_NEW flags, blob_id, IOVA reservation, size rounding --
+ * must stay identical, because the host requires GEM_NEW and the later
+ * RESOURCE_CREATE_BLOB to agree exactly on blob_id and size. */
 static VkResult
-virtio_bo_init(struct tu_device *dev,
-               struct vk_object_base *base,
-               struct tu_bo **out_bo,
-               uint64_t size,
-               uint64_t client_iova,
-               VkMemoryPropertyFlags mem_property,
-               enum tu_bo_alloc_flags flags,
-               struct tu_sparse_vma *lazy_vma,
-               const char *name)
+virtio_bo_init_common(struct tu_device *dev,
+                      struct vk_object_base *base,
+                      struct tu_bo **out_bo,
+                      uint64_t size,
+                      uint64_t client_iova,
+                      VkMemoryPropertyFlags mem_property,
+                      enum tu_bo_alloc_flags flags,
+                      struct tu_sparse_vma *lazy_vma,
+                      const char *name,
+                      void *hRTResource)
 {
    MESA_TRACE_FUNC();
    struct tu_virtio_device *vdev = dev->vdev;
@@ -1520,6 +1587,8 @@ virtio_bo_init(struct tu_device *dev,
       result = virtio_allocate_userspace_iova_locked(dev, 0, size, client_iova,
                                                      flags, &req.iova);
       mtx_unlock(&dev->vma_mutex);
+      if (result != VK_SUCCESS && hRTResource)
+         mesa_logw("virtio_bo_init_common: iova alloc failed size=%" PRIu64, size);
    }
 
    if (result != VK_SUCCESS)
@@ -1531,8 +1600,21 @@ virtio_bo_init(struct tu_device *dev,
     */
    req.blob_id = p_atomic_inc_return(&vdev->next_blob_id);;
 
-   uint32_t handle =
-      vdrm_bo_create(vdev->vdrm, size, blob_flags, req.blob_id, 0, &req.hdr);
+   uint32_t handle;
+#ifdef _WIN32
+   if (hRTResource) {
+      /* The UMD mints hKMResource inside its alloc hook and keeps it; we only
+       * need to know the allocation succeeded. */
+      handle = vdrm_bo_create_shared(vdev->vdrm, size, blob_flags, req.blob_id,
+                                     0, &req.hdr, hRTResource, NULL);
+   } else
+#else
+   (void)hRTResource;
+#endif
+   {
+      handle =
+         vdrm_bo_create(vdev->vdrm, size, blob_flags, req.blob_id, 0, &req.hdr);
+   }
 
    if (!handle) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1586,6 +1668,41 @@ fail:
    }
    return result;
 }
+
+static VkResult
+virtio_bo_init(struct tu_device *dev,
+               struct vk_object_base *base,
+               struct tu_bo **out_bo,
+               uint64_t size,
+               uint64_t client_iova,
+               VkMemoryPropertyFlags mem_property,
+               enum tu_bo_alloc_flags flags,
+               struct tu_sparse_vma *lazy_vma,
+               const char *name)
+{
+   return virtio_bo_init_common(dev, base, out_bo, size, client_iova,
+                                mem_property, flags, lazy_vma, name, NULL);
+}
+
+#ifdef _WIN32
+static VkResult
+virtio_bo_init_shared(struct tu_device *dev,
+                      struct vk_object_base *base,
+                      struct tu_bo **out_bo,
+                      uint64_t size,
+                      uint64_t client_iova,
+                      VkMemoryPropertyFlags mem_property,
+                      enum tu_bo_alloc_flags flags,
+                      const char *name,
+                      void *hRTResource)
+{
+   /* A shared BO cannot back a sparse VMA: lazy_vma exists so several VMAs can
+    * share one BO, which has no meaning for a resource the runtime owns. */
+   assert(hRTResource);
+   return virtio_bo_init_common(dev, base, out_bo, size, client_iova,
+                                mem_property, flags, NULL, name, hRTResource);
+}
+#endif
 
 static VkResult
 virtio_bo_init_dmabuf(struct tu_device *dev,
@@ -1670,6 +1787,106 @@ out_unlock:
    u_rwlock_wrunlock(&dev->dma_bo_lock);
    return result;
 }
+
+#ifdef _WIN32
+/* Import a BO that some other component already allocated -- on Windows the UMD
+ * creates the shared WDDM allocation and another process may have opened it via
+ * OpenResource2.  Mirrors virtio_bo_init_dmabuf: the only difference is how we
+ * get from a platform handle to a vdrm handle, because Windows has no PRIME fd.
+ *
+ * The refcount keys on res_id, so two imports of the same backing inside one
+ * device collapse onto one tu_bo, exactly as two imports of one dmabuf do.
+ * Across devices/processes the iova is allocated per device, which is required:
+ * the host hands each context a disjoint VA slice (kgsl_iova_in_slice), so the
+ * same backing legitimately sits at different GPU addresses in each context.
+ */
+static VkResult
+virtio_bo_init_platform_alloc(struct tu_device *dev,
+                              struct tu_bo **out_bo,
+                              uint64_t size,
+                              enum tu_bo_alloc_flags flags,
+                              uint32_t platform_handle)
+{
+   MESA_TRACE_FUNC();
+   struct vdrm_device *vdrm = dev->vdev->vdrm;
+   VkResult result;
+   struct tu_bo *bo = NULL;
+   uint64_t real_size = 0;
+
+   /* Same serialization as the dmabuf path: importing the same backing from two
+    * threads must not race with a concurrent release of that tu_bo. */
+   u_rwlock_wrlock(&dev->dma_bo_lock);
+
+   uint32_t handle, res_id;
+   uint64_t iova;
+
+   handle = vdrm_alloc_to_handle(vdrm, platform_handle, &real_size);
+   if (!handle) {
+      /* Either this backend has no import entry point, or the handle is not a
+       * blob we can adopt.  Both are handle-level failures from the caller's
+       * point of view; tu_bo_init_platform_alloc already reported the
+       * unsupported-backend case before reaching here. */
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+
+   /* Trust the owner's size over the caller's estimate (it may have rounded up
+    * to the 64 KiB guest-alloc granule); a short iova range would only surface
+    * later as a GPU fault. Never accept less than the caller needs. */
+   if (real_size < size) {
+      vdrm_bo_close(vdrm, handle);
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+   size = real_size;
+
+   res_id = vdrm_handle_to_res_id(vdrm, handle);
+   if (!res_id) {
+      vdrm_bo_close(vdrm, handle);
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+
+   bo = tu_device_lookup_bo(dev, res_id);
+
+   if (bo->refcnt != 0) {
+      /* Already imported in this device; drop the duplicate vdrm handle so we
+       * do not leak a table slot (the allocation itself is not ours). */
+      p_atomic_inc(&bo->refcnt);
+      assert(bo->res_id == res_id);
+      vdrm_bo_close(vdrm, handle);
+      *out_bo = bo;
+      result = VK_SUCCESS;
+      goto out_unlock;
+   }
+
+   bo->res_id = res_id;
+
+   mtx_lock(&dev->vma_mutex);
+   result = virtio_allocate_userspace_iova_locked(dev, handle, size, 0, flags,
+                                                  &iova);
+   mtx_unlock(&dev->vma_mutex);
+   if (result != VK_SUCCESS) {
+      vdrm_bo_close(vdrm, handle);
+      goto out_unlock;
+   }
+
+   result = tu_bo_init(dev, NULL, bo, handle, size, iova, flags, "imported");
+   if (result != VK_SUCCESS) {
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, size);
+      mtx_unlock(&dev->vma_mutex);
+      memset(bo, 0, sizeof(*bo));
+   } else {
+      *out_bo = bo;
+      set_iova(dev, bo->res_id, iova);
+   }
+
+out_unlock:
+   u_rwlock_wrunlock(&dev->dma_bo_lock);
+   return result;
+}
+#endif /* _WIN32 */
 
 static int
 virtio_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
@@ -2128,6 +2345,10 @@ static const struct tu_knl virtio_knl_funcs = {
       .submitqueue_close = virtio_submitqueue_close,
       .bo_init = virtio_bo_init,
       .bo_init_dmabuf = virtio_bo_init_dmabuf,
+#ifdef _WIN32
+      .bo_init_platform_alloc = virtio_bo_init_platform_alloc,
+      .bo_init_shared = virtio_bo_init_shared,
+#endif
       .bo_export_dmabuf = virtio_bo_export_dmabuf,
       .bo_map = virtio_bo_map,
       .bo_allow_dump = virtio_bo_allow_dump,

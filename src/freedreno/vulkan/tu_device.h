@@ -225,6 +225,15 @@ struct tu_instance
     * DXGI both define the LUID as the same opaque eight-byte value. */
    uint8_t adapter_luid[VK_LUID_SIZE];
    bool adapter_luid_valid;
+
+   /* Also from the UMD: how to allocate a blob that has to become a D3D11
+    * shared resource.  Untyped here so tu_device.h stays free of the WDDM UMD
+    * headers; vdrm_wddm.c casts them back.  NULL when the ICD was loaded
+    * without a D3D UMD (standalone Vulkan), which simply means no shared
+    * resource support. */
+   void *runtime_alloc_ctx;
+   void *runtime_alloc_fn;
+   void *runtime_free_fn;
 #endif
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,

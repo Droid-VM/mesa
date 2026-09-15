@@ -14,8 +14,8 @@
  *  - capset6 = host 的 virgl_renderer_capset_drm（context_type==MSM 才继续）；
  *  - 顺序：CreateDevice → CreateContext → ContextInit escape → 之后才能提交；
  *    CPU map = BlobMap escape（HOST3D|MAPPABLE blob）；
- *  - 单次 escape 恰好一个 CommandHeader；Submit body 实用上限 4064 字节
- *    （KMD 单页拷贝缓冲，不是 uapi 公布的 8192，见 VDRM_WDDM_MAX_SUBMIT_BODY）；
+ *  - 单次 escape 恰好一个 CommandHeader；body 可包含多条完整 ccmd。
+ *    KMD 使用队列持有的连续 DMA 缓冲支持跨页提交；
  *  - fence_id 是 EXEC_BUF escape 的 *输出*；KMD 没有"查 escape 提交完成"的
  *    escape（kmd-contract F.2 缺口）—— 这条对 ccmd 无影响：完成信号是
  *    shmem->seqno，见 wddm_wait_fence 的注释。
@@ -31,9 +31,7 @@
  *        arena 模式下 ring 从 Drm2KgslPool 切，crosvm 回 map_info|MAP_INFO_POOL，
  *        KMD 认不出直接 IO_DEVICE_ERROR。不开 arena 时走 host 通用 memfd 路径，
  *        KMD 现有 BlobMap 就够（drm2kgsl_renderer.c:2229 的二选一）。
- *  块 5：execbuf/flush + bo_create 的 ccmd 前置提交 —— 本文件当前状态。
- *        已知边界：单条 ccmd 超 4064 字节切不动（MSM_CCMD_GEM_SUBMIT 必然会超，
- *        见 submit_ccmd_stream 的注释），根治要改 KMD 的单页限制。
+ *  块 5：execbuf/flush + bo_create 的 ccmd 前置提交，包括跨页 GEM_SUBMIT。
  *  块 6+：WSI/Present、跨进程共享（dmabuf vtable 仍是 error）。
  *
  * 未确认项（真机验证前别依赖，kmd-contract 未确认 8）：
@@ -52,6 +50,7 @@
 
 #include "util/os_time.h"
 #include "util/u_debug.h"
+#include "util/log.h"
 #include "c11/threads.h"   /* mtx_plain（simple_mtx_init 的 type 参数） */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -85,15 +84,6 @@
 /* 与 tu_knl_drm_virtio.cc 里 Windows 的 MAP_FAILED 约定一致（sys/mman.h
  * 不存在于 mingw）。 */
 #define VDRM_WDDM_MAP_FAILED ((void *)(uintptr_t)~0ull)
-/* 单包 Submit body 的字节上限。KMD 把 `CmdSubmit3d`(32B) + body 拷进一个**单页**
- * 缓冲，超页直接 STATUS_NO_MEMORY（queue.rs:389-414 的 try_from_hdr_with_body，
- * 日志 "cannot handle multi-page boxes yet"）→ 4096 - 32 = 4064。
- * uapi 公布的 MAX_SUBMIT_COMMAND_VIRTUAL_SIZE=8192 是"虚拟上下文私有数据额度"，
- * 不是这条路的真实上限（kmd-contract E.3）。
- * CmdSubmit3d = CtrlHeader(24) + size(4) + padding(4)，见 KMD 的
- * virtio-drivers/src/device/gpu/commands.rs:127-134,391-395。 */
-#define VDRM_WDDM_MAX_SUBMIT_BODY 4064
-
 DEBUG_GET_ONCE_BOOL_OPTION(vdrm_wddm_debug, "VDRM_WDDM_DEBUG", false)
 #define WDDM_DEBUG(...) do { \
    if (debug_get_option_vdrm_wddm_debug()) \
@@ -159,6 +149,15 @@ struct vdrm_wddm_alloc {
    uint32_t res_id;        /* ResourceInfo 返回的 virtio-gpu resource id */
    uint64_t size;
    void *map;              /* BlobMap 返回的 CPU 指针（unmap 时原样带回） */
+   /* 该 allocation 由外部持有（UMD 建的共享资源，或别的进程 OpenResource2 开出
+    * 来的）。我们只借用它来跑 ccmd，销毁权仍在持有者手上：bo_close 对这种项
+    * 只摘表、不调 DestroyAllocation，否则就是双重释放。 */
+   bool imported;
+   /* 经 runtime allocator（UMD 的 pfnAllocateCb）建的，必须用配对的 free hook
+    * 归还——runtime 侧还挂着资源关联，裸 DestroyAllocation 释放不掉。 */
+   D3DKMT_HANDLE source_allocation;
+   bool runtime_owned;
+   D3DKMT_HANDLE km_resource;   /* 仅 runtime_owned 有意义；free hook 要用 */
 };
 
 struct vdrm_wddm {
@@ -181,6 +180,11 @@ struct vdrm_wddm {
    uint32_t free_head;        /* 1-based，0 = 无空闲槽 */
 
    uint32_t shmem_handle;     /* ring 的表句柄（回收由 wddm_close 的通用路径做） */
+
+   /* 由 D3D UMD 安装（vdrm_wddm_set_runtime_allocator）。共享资源必须经它分配，
+    * 因为只有 runtime 的 pfnAllocateCb 会铸造 hKMResource。未安装时共享分配请求
+    * 直接失败而不是静默退化成本 device 的私有 allocation。 */
+   VIRTIO_WDDM_RuntimeAllocator runtime;
 };
 
 /* ------------------------------------------------------------------ */
@@ -220,7 +224,8 @@ wddm_destroy_alloc(struct vdrm_wddm *w, D3DKMT_HANDLE kmt)
 
 /* 占一个槽并填入。返回 1-based 句柄，0 = 失败。 */
 static uint32_t
-table_insert(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint32_t res_id, uint64_t size)
+table_insert(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint32_t res_id, uint64_t size,
+             bool imported)
 {
    uint32_t handle = 0;
 
@@ -259,6 +264,10 @@ table_insert(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint32_t res_id, uint64_t s
    w->allocs[handle - 1].res_id = res_id;
    w->allocs[handle - 1].size = size;
    w->allocs[handle - 1].map = NULL;
+   w->allocs[handle - 1].imported = imported;
+   w->allocs[handle - 1].runtime_owned = false;
+   w->allocs[handle - 1].km_resource = 0;
+   w->allocs[handle - 1].source_allocation = 0;
 
 out:
    simple_mtx_unlock(&w->table_lock);
@@ -454,14 +463,22 @@ submit_one(struct vdrm_wddm *w, const void *body, uint32_t body_len, uint8_t rin
 {
    const uint32_t body_off = offsetof(VIRTIO_WDDM_ExecBuffer, cmd) +
                              sizeof(VIRTIO_WDDM_CommandHeader);
-   uint8_t buf[offsetof(VIRTIO_WDDM_ExecBuffer, cmd) +
-               sizeof(VIRTIO_WDDM_CommandHeader) + VDRM_WDDM_MAX_SUBMIT_BODY];
+   uint8_t *buf;
    VIRTIO_WDDM_CommandHeader hdr = {0};
    VIRTIO_WDDM_ExecBuffer eb = {0};
    NTSTATUS status;
 
-   if (body_len == 0 || body_len > VDRM_WDDM_MAX_SUBMIT_BODY)
+   if (body_len == 0 || body_len > UINT32_MAX - body_off)
       return -EINVAL;
+
+   /* GEM_SUBMIT contains the device's live BO list and regularly exceeds a
+    * page in DWM. The KMD copies it into queue-owned DMA storage, so keep the
+    * complete request together and only retain this buffer for the escape.
+    * A heap allocation also avoids putting an unbounded request on the stack.
+    */
+   buf = malloc(body_off + body_len);
+   if (!buf)
+      return -ENOMEM;
 
    eb.tag = VIRTIO_WDDM_ESCAPE_EXEC_BUF_TAG;
    eb.fence_id = 0;
@@ -482,22 +499,20 @@ submit_one(struct vdrm_wddm *w, const void *body, uint32_t body_len, uint8_t rin
    memcpy(buf + body_off, body, body_len);
 
    status = wddm_escape(w, w->h_device, w->h_context, buf, body_off + body_len);
-   if (!NT_SUCCESS(status))
+   free(buf);
+   if (!NT_SUCCESS(status)) {
+      mesa_loge("wddm submit failed: bytes=%u status=0x%08lx", body_len,
+                (unsigned long)status);
       return -EIO;
+   }
 
    return 0;
 }
 
-/* 把一段 ccmd 流发出去，必要时分包。
- *
- * 分包只能按 **ccmd 边界** 切：流里是一串 vdrm_ccmd_req，每条自带 len，host 按条
- * 解析（drm_hw.h:89-140）。按字节切会让 host 从一条命令中间开始解析。
- *
- * 单条 ccmd 自己就超上限时切不动，只能 -E2BIG。这不是边缘情况：
- * MSM_CCMD_GEM_SUBMIT 的 nr_bos = 设备当前**全部**活着的 BO
- * （tu_knl_drm_virtio.cc:1659），每个 drm_msm_gem_submit_bo 16 字节 → 约 250 个 BO
- * 就撞 4064。真实渲染必然超。根治要改 KMD 的单页限制（queue.rs:389-414），属于
- * KMD ARM64 移植那一摊；在那之前 vulkaninfo 一类不提交渲染的路径不受影响。 */
+/* Validate the whole ccmd stream before submitting it. A CommandHeader may
+ * contain multiple complete ccmds; a GEM_SUBMIT's BO/command arrays must never
+ * be split across escapes. The KMD's DMA buffer handles page boundaries.
+ */
 static int
 submit_ccmd_stream(struct vdrm_wddm *w, const void *data, uint32_t len, uint8_t ring)
 {
@@ -505,35 +520,17 @@ submit_ccmd_stream(struct vdrm_wddm *w, const void *data, uint32_t len, uint8_t 
    uint32_t off = 0;
 
    while (off < len) {
-      uint32_t chunk = 0;
-      int ret;
-
-      /* 攒到再加一条就超上限为止。 */
-      while (off + chunk < len) {
-         uint32_t req_len;
-
-         if (len - (off + chunk) < sizeof(struct vdrm_ccmd_req))
-            return -EINVAL;
-         memcpy(&req_len, bytes + off + chunk + offsetof(struct vdrm_ccmd_req, len),
-                sizeof(req_len));
-         if (req_len < sizeof(struct vdrm_ccmd_req) || req_len > len - (off + chunk))
-            return -EINVAL;
-         if (chunk && chunk + req_len > VDRM_WDDM_MAX_SUBMIT_BODY)
-            break;
-         chunk += req_len;
-      }
-
-      if (chunk > VDRM_WDDM_MAX_SUBMIT_BODY)
-         return -E2BIG;   /* 单条超上限，host 按整条解析，切不动 */
-
-      ret = submit_one(w, bytes + off, chunk, ring);
-      if (ret)
-         return ret;
-
-      off += chunk;
+      uint32_t req_len;
+      if (len - off < sizeof(struct vdrm_ccmd_req))
+         return -EINVAL;
+      memcpy(&req_len, bytes + off + offsetof(struct vdrm_ccmd_req, len),
+             sizeof(req_len));
+      if (req_len < sizeof(struct vdrm_ccmd_req) || req_len > len - off)
+         return -EINVAL;
+      off += req_len;
    }
 
-   return 0;
+   return len ? submit_one(w, data, len, ring) : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -659,8 +656,11 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
 
    /* vdrm_bo_create 已经 flush 过 reqbuf 并给 req 分配了 seqno（vdrm.c:57-70），
     * 所以这条一定不在 reqbuf 里，单独发。ring 0，与 flush 同路。 */
-   if (req && submit_ccmd_stream(w, req, req->len, 0))
+   if (req && submit_ccmd_stream(w, req, req->len, 0)) {
+      mesa_logw("wddm_bo_create: submit_ccmd_stream failed blob=%llu size=%zu",
+                (unsigned long long)blob_id, size);
       return 0;
+   }
 
    res_priv.tag = VIRTIO_WDDM_CREATE_RESOURCE_TAG;
 
@@ -675,6 +675,84 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
    alloc_info.pPrivateDriverData = &alloc_priv;
    alloc_info.PrivateDriverDataSize = sizeof(alloc_priv);
 
+   /* 共享请求走 runtime allocator：本 device 上的裸 CreateAllocation 拿不到
+    * hKMResource，做不成 D3D11 共享资源。取走 pending 值（eb_lock 内，见
+    * vdrm_bo_create_shared）。 */
+   void *rt_resource = vdev->pending_shared_rt_resource;
+   vdev->pending_shared_rt_resource = NULL;
+
+   if (rt_resource) {
+      VIRTIO_WDDM_RuntimeAllocRequest rreq = {0};
+      VIRTIO_WDDM_RuntimeAllocResult rres = {0};
+
+      WDDM_DEBUG("wddm_bo_create: shared blob=%llu size=%zu rtres=%p alloc_fn=%p\n",
+                (unsigned long long)blob_id, size, rt_resource, (void *)w->runtime.alloc);
+
+      if (!w->runtime.alloc) {
+         mesa_logw("wddm_bo_create: no runtime allocator");
+         return 0;
+      }
+
+      /* Create on the context which received GEM_NEW. The runtime then
+       * acquires another allocation reference to this same backing. */
+      allocate.hDevice = w->h_device;
+      allocate.pPrivateDriverData = &res_priv;
+      allocate.PrivateDriverDataSize = sizeof(res_priv);
+      allocate.NumAllocations = 1;
+      allocate.pAllocationInfo2 = &alloc_info;
+      status = w->dispatch.CreateAllocation(&allocate);
+      if (!NT_SUCCESS(status) || !alloc_info.hAllocation)
+         return 0;
+      rreq.sourceAllocation = alloc_info.hAllocation;
+
+      rreq.blob_id = blob_id;
+      rreq.size = size;
+      rreq.mem = alloc_priv.blob.mem;
+      rreq.flags = alloc_priv.blob.flags;
+      rreq.hRTResource = rt_resource;
+
+      int alloc_rc = w->runtime.alloc(w->runtime.ctx, &rreq, &rres);
+      if (alloc_rc || !rres.hAllocation) {
+         wddm_destroy_alloc(w, alloc_info.hAllocation);
+         mesa_logw("wddm_bo_create: runtime alloc rc=%d hAllocation=0x%x",
+                   alloc_rc, rres.hAllocation);
+         return 0;
+      }
+
+      res_info.tag = VIRTIO_WDDM_ESCAPE_RESOURCE_INFO_TAG;
+      res_info.handle = rres.hAllocation;
+      status = wddm_escape(w, w->h_device, 0, &res_info, sizeof(res_info));
+      if (!NT_SUCCESS(status) || res_info.id == 0) {
+         mesa_logw("wddm_bo_create: ResourceInfo status=0x%08lx id=%u",
+                   (unsigned long)status, res_info.id);
+         w->runtime.free(w->runtime.ctx, &rres);
+         wddm_destroy_alloc(w, alloc_info.hAllocation);
+         return 0;
+      }
+
+      handle = table_insert(w, rres.hAllocation, res_info.id, size, false);
+      if (!handle) {
+         mesa_logw("wddm_bo_create: table_insert failed");
+         w->runtime.free(w->runtime.ctx, &rres);
+         wddm_destroy_alloc(w, alloc_info.hAllocation);
+         return 0;
+      }
+
+      /* 标记来源，让 bo_close 用配对的 free hook 而不是 DestroyAllocation。 */
+      simple_mtx_lock(&w->table_lock);
+      w->allocs[handle - 1].runtime_owned = true;
+      w->allocs[handle - 1].source_allocation = alloc_info.hAllocation;
+      w->allocs[handle - 1].km_resource = rres.hKMResource;
+      simple_mtx_unlock(&w->table_lock);
+
+      vdev->pending_shared_km_resource = rres.hKMResource;
+
+      WDDM_DEBUG("wddm_bo_create(shared): blob=%llu size=%zu alloc=0x%x kmres=0x%x res_id=%u\n",
+                (unsigned long long)blob_id, size, rres.hAllocation,
+                rres.hKMResource, res_info.id);
+      return handle;
+   }
+
    allocate.hDevice = w->h_device;
    allocate.pPrivateDriverData = &res_priv;
    allocate.PrivateDriverDataSize = sizeof(res_priv);
@@ -685,8 +763,11 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
    status = w->dispatch.CreateAllocation(&allocate);
    WDDM_DEBUG("CreateAllocation blob=%llu size=%zu: status=0x%08lx handle=0x%x\n",
               (unsigned long long)blob_id, size, (ULONG)status, alloc_info.hAllocation);
-   if (!NT_SUCCESS(status) || alloc_info.hAllocation == 0)
+   if (!NT_SUCCESS(status) || alloc_info.hAllocation == 0) {
+      mesa_loge("wddm CreateAllocation failed: blob=%llu size=%zu status=0x%08lx handle=0x%x",
+                (unsigned long long)blob_id, size, (ULONG)status, alloc_info.hAllocation);
       return 0;
+   }
 
    /* ResourceInfo：拿 virtio resource id（后续 ccmd 引用资源的句柄）。 */
    res_info.tag = VIRTIO_WDDM_ESCAPE_RESOURCE_INFO_TAG;
@@ -698,12 +779,111 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
    }
 
    /* 建表项。KMD 调用都在锁外做完，这里只占槽。 */
-   handle = table_insert(w, alloc_info.hAllocation, res_info.id, size);
+   handle = table_insert(w, alloc_info.hAllocation, res_info.id, size, false);
    if (!handle) {
       wddm_destroy_alloc(w, alloc_info.hAllocation);
       return 0;
    }
 
+   return handle;
+}
+
+void
+vdrm_wddm_set_runtime_allocator(struct vdrm_device *vdev, void *ctx,
+                                void *alloc_fn, void *free_fn)
+{
+   struct vdrm_wddm *w = (struct vdrm_wddm *)vdev;
+
+   /* 只在 device 建立后、任何共享分配之前调用一次；不做加锁，调用点是单线程的
+    * device 初始化路径。两个 hook 必须成对，否则宁可不装。 */
+   if (!alloc_fn || !free_fn) {
+      w->runtime.ctx = NULL;
+      w->runtime.alloc = NULL;
+      w->runtime.free = NULL;
+      return;
+   }
+
+   w->runtime.ctx = ctx;
+   w->runtime.alloc = (VIRTIO_WDDM_RuntimeAllocFn)alloc_fn;
+   w->runtime.free = (VIRTIO_WDDM_RuntimeFreeFn)free_fn;
+   WDDM_DEBUG("runtime allocator installed ctx=%p\n", ctx);
+}
+
+/* 借用一个别人建的 allocation：只做 ResourceInfo 取 res_id，不 CreateAllocation。
+ *
+ * 用途是跨进程共享——UMD（或另一个进程 OpenResource2 之后）已经有了 WDDM
+ * allocation，我们要在本 context 里用同一块 backing 跑 ccmd。res_id 是 host 侧
+ * 的资源标识，同一 backing 在任何 context 里查出来都一样；GPU 地址不是，得由调用
+ * 方在自己的 VA slice 里分配后 GEM_SET_IOVA 绑定（host drm2kgsl 按 context 切
+ * slice，见 kgsl_iova_in_slice）。
+ *
+ * size 由 KMD 报告而非调用方给定：持有者可能按 64 KiB guest-alloc 粒度向上取整，
+ * 用调用方的估算值会让 iova 区间短于实际映射，越界访问只会在 GPU fault 时才暴露。
+ */
+static uint32_t
+wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
+                     uint64_t *size)
+{
+   struct vdrm_wddm *w = (struct vdrm_wddm *)vdev;
+   VIRTIO_WDDM_ResourceInfo res_info = {0};
+   D3DKMT_HANDLE kmt = (D3DKMT_HANDLE)platform_handle;
+   NTSTATUS status;
+   uint64_t bytes;
+   uint32_t handle;
+
+   if (!kmt)
+      return 0;
+
+   res_info.tag = VIRTIO_WDDM_ESCAPE_RESOURCE_INFO_TAG;
+   res_info.handle = kmt;
+   status = wddm_escape(w, w->h_device, 0, &res_info, sizeof(res_info));
+   if (!NT_SUCCESS(status) || res_info.id == 0) {
+      WDDM_DEBUG("alloc_to_handle: ResourceInfo kmt=0x%x failed status=0x%08lx id=%u\n",
+                 kmt, (ULONG)status, res_info.id);
+      return 0;
+   }
+
+   /* 只接受 blob。3D allocation 的 backing 是 host 侧 GL 纹理，布局由 host 决定，
+    * 不能当成一块可由本进程自行排布的内存来用（那条路要 host 能导出 modifier，
+    * 当前 Android EGL/minigbm 都给不了）。 */
+   if (res_info.info.tag != VIRTIO_WDDM_ALLOCATE_BLOB_TAG) {
+      WDDM_DEBUG("alloc_to_handle: kmt=0x%x is not a blob (tag=0x%016llx)\n",
+                 kmt, (unsigned long long)res_info.info.tag);
+      return 0;
+   }
+
+   bytes = res_info.info.blob.blob.size;
+   if (!bytes)
+      return 0;
+
+   /* The runtime opened on its own device. Acquire a device-local reference
+    * so OpenAllocation attaches this backing to the ICD context as well.
+    * We own only this new handle, never the caller's platform_handle. */
+   VIRTIO_WDDM_ReuseBlobAllocation reuse = {0};
+   reuse.allocation.blob = res_info.info.blob.blob;
+   reuse.reuse_tag = VIRTIO_WDDM_REUSE_BLOB_TAG;
+   reuse.source = kmt;
+   D3DDDI_ALLOCATIONINFO2 ai = {0};
+   ai.pPrivateDriverData = &reuse;
+   ai.PrivateDriverDataSize = sizeof(reuse);
+   D3DKMT_CREATEALLOCATION ca = {0};
+   ca.hDevice = w->h_device;
+   ca.NumAllocations = 1;
+   ca.pAllocationInfo2 = &ai;
+   status = w->dispatch.CreateAllocation(&ca);
+   if (!NT_SUCCESS(status) || !ai.hAllocation)
+      return 0;
+   handle = table_insert(w, ai.hAllocation, res_info.id, bytes, false);
+   if (!handle) {
+      wddm_destroy_alloc(w, ai.hAllocation);
+      return 0;
+   }
+
+   if (size)
+      *size = bytes;
+
+   WDDM_DEBUG("alloc_to_handle: kmt=0x%x res_id=%u size=%llu -> handle=%u\n",
+              kmt, res_info.id, (unsigned long long)bytes, handle);
    return handle;
 }
 
@@ -804,12 +984,33 @@ wddm_bo_close(struct vdrm_device *vdev, uint32_t handle)
       VIRTIO_WDDM_BlobMap unmap = {0};
 
       /* UNMAP 必须把当初拿到的 ptr 原样带回（KMD 靠它撤销用户态映射，
-       * kmd-contract D.2）。 */
+       * kmd-contract D.2）。映射是本进程自己建的，导入的项也要撤。 */
       unmap.tag = VIRTIO_WDDM_ESCAPE_BLOB_MAP_TAG;
       unmap.handle = alloc.kmt;
       unmap.flags = VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP;
       unmap.ptr.ptr = alloc.map;
       wddm_escape(w, w->h_device, 0, &unmap, sizeof(unmap));
+   }
+
+   /* 导入项的 allocation 归持有者（UMD / 开出它的那个进程），这里销毁就是双重
+    * 释放：句柄可能已被 dxgkrnl 复用给别的资源。只摘表。 */
+   if (alloc.imported)
+      return;
+
+   /* runtime 建的必须用配对的 free hook：runtime 侧还挂着资源关联，裸
+    * DestroyAllocation 释放不掉，而且 hKMResource 也需要一起交回。 */
+   if (alloc.runtime_owned) {
+      VIRTIO_WDDM_RuntimeAllocResult rres = {
+         .hAllocation = alloc.kmt,
+         .hKMResource = alloc.km_resource,
+      };
+      if (alloc.source_allocation)
+         wddm_destroy_alloc(w, alloc.source_allocation);
+      if (w->runtime.free)
+         w->runtime.free(w->runtime.ctx, &rres);
+      else
+         WDDM_DEBUG("bo_close: runtime-owned alloc 0x%x but no free hook\n", alloc.kmt);
+      return;
    }
 
    wddm_destroy_alloc(w, alloc.kmt);
@@ -846,6 +1047,7 @@ static const struct vdrm_device_funcs vdrm_wddm_funcs = {
    .wait_fence = wddm_wait_fence,
    .dmabuf_to_handle = wddm_dmabuf_to_handle,
    .handle_to_res_id = wddm_handle_to_res_id,
+   .alloc_to_handle = wddm_alloc_to_handle,
    .bo_create = wddm_bo_create,
    .bo_wait = wddm_bo_wait,
    .bo_map = wddm_bo_map,
@@ -887,24 +1089,6 @@ init_shmem(struct vdrm_wddm *w)
    offset = ((struct vdrm_shmem *)ptr)->rsp_mem_offset;
    WDDM_DEBUG("ring rsp_mem_offset=%u\n", offset);
 
-   /* Opt-in bringup check: keep a failed ring alive long enough to compare its
-    * last word with the host's arena mapping. Restore it before releasing the
-    * allocation; this never runs for a valid ring or during normal startup. */
-   if (!offset && debug_get_bool_option("VDRM_WDDM_MAP_PROBE", false)) {
-      volatile uint32_t *words = ptr;
-      volatile uint32_t *tail = words + VDRM_WDDM_SHMEM_SZ / 4 - 1;
-      uint32_t saved = *tail;
-      WDDM_DEBUG("map probe ptr=%p header=%08x,%08x,%08x,%08x tail=%08x\n",
-                 ptr, words[0], words[1], words[2], words[3], saved);
-      *tail = 0x44564d31;
-      __atomic_thread_fence(__ATOMIC_SEQ_CST);
-      WDDM_DEBUG("map probe immediate readback=%08x\n", *tail);
-      Sleep(10000);
-      WDDM_DEBUG("map probe after wait header=%08x,%08x tail=%08x\n",
-                 words[0], words[1], *tail);
-      *tail = saved;
-      __atomic_thread_fence(__ATOMIC_SEQ_CST);
-   }
 
    /* host 没写（或写歪）时就地失败。offset=0 会让 vdrm_alloc_rsp 把响应头写到
     * seqno 上，症状要拖到很后面才显形。kmd-contract「未确认 8」（纯 escape

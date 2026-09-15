@@ -40,6 +40,16 @@ struct vdrm_device_funcs {
    uint32_t (*dmabuf_to_handle)(struct vdrm_device *vdev, int fd);
    uint32_t (*handle_to_res_id)(struct vdrm_device *vdev, uint32_t handle);
 
+   /* Adopt a BO the platform already allocated elsewhere, identified by an
+    * opaque platform handle (WDDM: D3DDDI_ALLOCATIONINFO2.hAllocation, which
+    * another process may have opened via OpenResource2).  Returns a vdrm BO
+    * handle that does NOT own the underlying allocation: bo_close releases the
+    * vdrm-side reference only, and the platform owner remains responsible for
+    * destroying it.  Optional; NULL on backends without a notion of externally
+    * owned allocations (see vdrm_alloc_to_handle). */
+   uint32_t (*alloc_to_handle)(struct vdrm_device *vdev, uint32_t platform_handle,
+                               uint64_t *size);
+
    uint32_t (*bo_create)(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
                          uint64_t blob_id, uint32_t blob_hints,
                          struct vdrm_ccmd_req *req);
@@ -62,6 +72,16 @@ struct vdrm_device {
     * Drivers that build their own GEM_NEW request need this to decide whether to mark the BO
     * guest-allocated; only they know which of their allocations may take that path. */
    bool supports_guest_alloc;
+
+#ifdef _WIN32
+   /* In-flight parameters for vdrm_bo_create_shared, valid only between that
+    * function taking eb_lock and the backend's bo_create consuming them.  A
+    * pending field rather than a wider bo_create signature keeps the other
+    * backends untouched; eb_lock is what makes it safe (vdrm_bo_create already
+    * serializes every bo_create there). The backend clears them. */
+   void *pending_shared_rt_resource;
+   uint32_t pending_shared_km_resource;   /* out */
+#endif
 
    struct vdrm_shmem *shmem;
    uint8_t *rsp_mem;
@@ -142,10 +162,54 @@ vdrm_handle_to_res_id(struct vdrm_device *vdev, uint32_t handle)
    return vdev->funcs->handle_to_res_id(vdev, handle);
 }
 
+/**
+ * Adopt an externally owned platform allocation, returning a vdrm BO handle.
+ * On success *size receives the allocation's size as the platform reports it,
+ * which the caller must use instead of its own estimate (the owner may have
+ * rounded up).  Returns 0 if unsupported by this backend or on failure.
+ */
+static inline uint32_t
+vdrm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
+                     uint64_t *size)
+{
+   if (!vdev->funcs->alloc_to_handle)
+      return 0;
+   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size);
+}
+
 uint32_t vdrm_bo_create(struct vdrm_device *vdev, size_t size,
                         uint32_t blob_flags, uint64_t blob_id,
                         uint32_t blob_hints,
                         struct vdrm_ccmd_req *req);
+
+#ifdef _WIN32
+/**
+ * Install the D3D UMD's allocation hooks (VIRTIO_WDDM_RuntimeAllocator).  Both
+ * pointers are untyped here so vdrm.h stays free of the WDDM UMD headers;
+ * vdrm_wddm.c casts them back.  Passing NULL for either removes the allocator,
+ * which makes subsequent shared allocations fail rather than silently fall back
+ * to a private allocation that no other process can open.
+ */
+void vdrm_wddm_set_runtime_allocator(struct vdrm_device *vdev, void *ctx,
+                                     void *alloc_fn, void *free_fn);
+
+/**
+ * Create a BO whose backing must be usable as a D3D11 shared resource.
+ *
+ * Identical to vdrm_bo_create except the platform allocation is obtained from
+ * the runtime allocator the D3D UMD installed, passing hRTResource so the
+ * runtime can associate the allocation with that resource.  On success
+ * *out_km_resource receives the kernel resource handle the application needs
+ * for IDXGIResource::GetSharedHandle; it is 0 if the runtime did not provide
+ * one.  Returns 0 if no allocator is installed or the allocation failed.
+ */
+uint32_t vdrm_bo_create_shared(struct vdrm_device *vdev, size_t size,
+                               uint32_t blob_flags, uint64_t blob_id,
+                               uint32_t blob_hints,
+                               struct vdrm_ccmd_req *req,
+                               void *hRTResource,
+                               uint32_t *out_km_resource);
+#endif
 
 static inline int
 vdrm_bo_wait(struct vdrm_device *vdev, uint32_t handle)

@@ -168,7 +168,10 @@ virtio_device_new(int fd, drmVersionPtr version)
    dev->version = caps.version_minor;
    dev->has_cached_coherent = caps.u.msm.has_cached_coherent;
 
-   p_atomic_set(&virtio_dev->next_blob_id, 1);
+   /* Blob IDs are matched across asynchronously processed WDDM contexts. Use
+    * a process-unique high range so independent device instances cannot reuse
+    * the same IDs while their requests are in flight. */
+   p_atomic_set(&virtio_dev->next_blob_id, (uint32_t)(getpid() & 0x7fff) << 16);
    virtio_dev->shmem = to_msm_shmem(vdrm->shmem);
    virtio_dev->vdrm = vdrm;
 

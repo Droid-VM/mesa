@@ -148,6 +148,27 @@ struct tu_knl {
                        const char *name);
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
                               uint64_t size, enum tu_bo_alloc_flags flags, int prime_fd);
+#ifdef _WIN32
+   /* Import a BO the platform allocated outside this driver, identified by an
+    * opaque platform handle (WDDM: D3DKMT allocation handle).  The import does
+    * not take ownership of the underlying allocation.  NULL on kernel backends
+    * with no such notion; see tu_bo_init_platform_alloc. */
+   VkResult (*bo_init_platform_alloc)(struct tu_device *dev, struct tu_bo **out_bo,
+                                      uint64_t size, enum tu_bo_alloc_flags flags,
+                                      uint32_t platform_handle);
+   /* Like bo_init, but the backing must be usable as a D3D11 shared resource,
+    * so the platform allocation comes from the D3D UMD's runtime allocator
+    * rather than from this driver's own device.  hRTResource is the UMD's
+    * CreateResource handle, passed through opaquely so the runtime can mint the
+    * kernel resource handle an application needs for GetSharedHandle.  NULL on
+    * backends with no such notion; see tu_bo_init_shared. */
+   VkResult (*bo_init_shared)(struct tu_device *dev, struct vk_object_base *base,
+                              struct tu_bo **out_bo, uint64_t size,
+                              uint64_t client_iova,
+                              VkMemoryPropertyFlags mem_property,
+                              enum tu_bo_alloc_flags flags,
+                              const char *name, void *hRTResource);
+#endif
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
@@ -225,6 +246,36 @@ tu_bo_init_dmabuf(struct tu_device *dev,
                   uint64_t size,
                   enum tu_bo_alloc_flags flags,
                   int fd);
+
+#ifdef _WIN32
+/* Import an externally owned platform allocation as a tu_bo.  Returns
+ * VK_ERROR_FEATURE_NOT_PRESENT when the kernel backend cannot do this, so
+ * callers can distinguish "unsupported here" from "this handle is bad"
+ * (VK_ERROR_INVALID_EXTERNAL_HANDLE). */
+VkResult
+tu_bo_init_platform_alloc(struct tu_device *dev,
+                          struct tu_bo **bo,
+                          uint64_t size,
+                          enum tu_bo_alloc_flags flags,
+                          uint32_t platform_handle);
+
+/* Allocate a BO whose backing can become a D3D11 shared resource.  Returns
+ * VK_ERROR_FEATURE_NOT_PRESENT when the kernel backend cannot do this, so
+ * callers can tell "unsupported here" from a genuine allocation failure.
+ *
+ * Must not silently fall back to a private allocation: vkAllocateMemory would
+ * succeed and the two processes would composite unrelated pixels. */
+VkResult
+tu_bo_init_shared(struct tu_device *dev,
+                  struct vk_object_base *base,
+                  struct tu_bo **bo,
+                  uint64_t size,
+                  uint64_t client_iova,
+                  VkMemoryPropertyFlags mem_property,
+                  enum tu_bo_alloc_flags flags,
+                  const char *name,
+                  void *hRTResource);
+#endif
 
 int
 tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo);

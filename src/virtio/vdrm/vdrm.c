@@ -71,6 +71,47 @@ vdrm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
    return handle;
 }
 
+#ifdef _WIN32
+uint32_t
+vdrm_bo_create_shared(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
+                      uint64_t blob_id, uint32_t blob_hints,
+                      struct vdrm_ccmd_req *req, void *hRTResource,
+                      uint32_t *out_km_resource)
+{
+   uint32_t handle;
+
+   if (out_km_resource)
+      *out_km_resource = 0;
+
+   simple_mtx_lock(&vdev->eb_lock);
+
+   /* Same ordering requirement as vdrm_bo_create: buffered cmds must reach the
+    * host before the ones tied to this BO. */
+   vdev->funcs->flush_locked(vdev, NULL);
+
+   req->seqno = ++vdev->next_seqno;
+
+   /* Handed to the backend under eb_lock and cleared by it. */
+   vdev->pending_shared_rt_resource = hRTResource;
+   vdev->pending_shared_km_resource = 0;
+
+   handle = vdev->funcs->bo_create(vdev, size, blob_flags, blob_id,
+                                   blob_hints, req);
+
+   if (handle && out_km_resource)
+      *out_km_resource = vdev->pending_shared_km_resource;
+
+   /* Clear unconditionally: a backend that bailed before consuming them must
+    * not leave a stale resource handle for the next plain vdrm_bo_create. */
+   vdev->pending_shared_rt_resource = NULL;
+   vdev->pending_shared_km_resource = 0;
+
+   simple_mtx_unlock(&vdev->eb_lock);
+
+   return handle;
+}
+#endif
+
 void *
 vdrm_alloc_rsp(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, uint32_t sz)
 {

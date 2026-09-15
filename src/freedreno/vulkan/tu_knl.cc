@@ -118,6 +118,56 @@ tu_bo_init_dmabuf(struct tu_device *dev,
    return VK_SUCCESS;
 }
 
+#ifdef _WIN32
+VkResult
+tu_bo_init_platform_alloc(struct tu_device *dev,
+                          struct tu_bo **bo,
+                          uint64_t size,
+                          enum tu_bo_alloc_flags flags,
+                          uint32_t platform_handle)
+{
+   assert(!(flags & ~TU_BO_ALLOC_REPLAYABLE));
+
+   if (!dev->instance->knl->bo_init_platform_alloc)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   size = align64(size, os_page_size);
+   VkResult result = dev->instance->knl->bo_init_platform_alloc(
+      dev, bo, size, flags, platform_handle);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Same reasoning as the dmabuf path: the producer is outside this driver, so
+    * assume cached non-coherent memory may need invalidate/flush. */
+   if (dev->physical_device->has_cached_non_coherent_memory)
+      (*bo)->cached_non_coherent = true;
+
+   if (!(*bo)->unique_id)
+      (*bo)->unique_id = (*bo)->gem_handle;
+
+   return VK_SUCCESS;
+}
+
+VkResult
+tu_bo_init_shared(struct tu_device *dev,
+                  struct vk_object_base *base,
+                  struct tu_bo **bo,
+                  uint64_t size,
+                  uint64_t client_iova,
+                  VkMemoryPropertyFlags mem_property,
+                  enum tu_bo_alloc_flags flags,
+                  const char *name,
+                  void *hRTResource)
+{
+   if (!dev->instance->knl->bo_init_shared)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   return dev->instance->knl->bo_init_shared(dev, base, bo, size, client_iova,
+                                             mem_property, flags, name,
+                                             hRTResource);
+}
+#endif
+
 int
 tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 {
