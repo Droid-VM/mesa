@@ -13,6 +13,7 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
+#include "util/u_cpu_detect.h"
 
 #include "nir/tgsi_to_nir.h"
 #include "freedreno_screen.h"
@@ -539,7 +540,7 @@ ir3_screen_init(struct pipe_screen *pscreen)
     * big cores.  OTOH if they are sitting idle, maybe it is useful to
     * use them?
     */
-   unsigned num_threads = sysconf(_SC_NPROCESSORS_ONLN) / 2;
+   unsigned num_threads = util_get_cpu_caps()->nr_cpus / 2;
 
    /* Create at least one thread - even on single core CPU systems. */
    num_threads = MAX2(1, num_threads);

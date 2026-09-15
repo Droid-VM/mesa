@@ -7,7 +7,9 @@
 #include <inttypes.h>
 #include <pthread.h>
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/os_file.h"
 
 #include "drm/freedreno_ringbuffer_sp.h"
@@ -165,7 +167,11 @@ flush_submit_list(struct list_head *submit_list)
     * This way, if we have to block waiting for the fence, we can do
     * it in the guest, rather than in the single-threaded host.
     */
+#ifdef _WIN32
+   out_fence->use_fence_fd = false;
+#else
    out_fence->use_fence_fd = true;
+#endif
 
    if (pipe->no_implicit_sync) {
       req->flags |= MSM_SUBMIT_NO_IMPLICIT;
@@ -177,7 +183,7 @@ flush_submit_list(struct list_head *submit_list)
       .handles = guest_handles,
       .num_handles = nr_guest_handles,
       .has_in_fence_fd = !!(fd_submit->in_fence_fd != -1),
-      .needs_out_fence_fd = true,
+      .needs_out_fence_fd = out_fence->use_fence_fd,
       .fence_fd = fd_submit->in_fence_fd,
       .ring_idx = virtio_pipe->ring_idx,
    };

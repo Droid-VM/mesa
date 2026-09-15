@@ -75,10 +75,25 @@ static bool use_zink = false;
 
 static const char *created_driver_name = NULL;
 
+#ifdef GALLIUM_FREEDRENO
+#include "wgl_freedreno.h"
+static bool use_freedreno;
+#endif
+
 static struct pipe_screen *
 wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
 {
    struct pipe_screen* screen = NULL;
+
+#ifdef GALLIUM_FREEDRENO
+   if (strcmp(driver, "freedreno") == 0) {
+      screen = fd_wgl_create_screen();
+      if (screen) {
+         use_freedreno = true;
+         winsys->destroy(winsys);
+      }
+   }
+#endif
 
 #ifdef GALLIUM_LLVMPIPE
    if (strcmp(driver, "llvmpipe") == 0) {
@@ -122,6 +137,9 @@ wgl_screen_create(HDC hDC)
 
    const char *const drivers[] = {
       debug_get_option("GALLIUM_DRIVER", ""),
+#ifdef GALLIUM_FREEDRENO
+      sw_only ? "" : "freedreno",
+#endif
 #ifdef GALLIUM_D3D12
       sw_only ? "" : "d3d12",
 #endif
@@ -194,6 +212,13 @@ wgl_present(struct pipe_screen *screen,
 #ifdef GALLIUM_ZINK
    if (use_zink) {
       screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
+      return;
+   }
+#endif
+
+#ifdef GALLIUM_FREEDRENO
+   if (use_freedreno) {
+      fd_wgl_present(ctx, res, hDC);
       return;
    }
 #endif

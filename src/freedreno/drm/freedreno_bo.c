@@ -6,7 +6,9 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
+#ifndef _WIN32
 #include "util/os_mman.h"
+#endif
 
 #include "freedreno_drmif.h"
 #include "freedreno_drm_perfetto.h"
@@ -102,10 +104,15 @@ import_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
 
    bo = dev->funcs->bo_from_handle(dev, size, handle);
    if (!bo) {
+#ifndef _WIN32
       struct drm_gem_close req = {
          .handle = handle,
       };
       drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
+#else
+      struct fd_bo imported = {.dev = dev, .handle = handle};
+      dev->funcs->bo_close_handle(&imported);
+#endif
       return NULL;
    }
 
@@ -219,11 +226,15 @@ out_unlock:
 uint32_t
 fd_handle_from_dmabuf_drm(struct fd_device *dev, int fd)
 {
+#ifdef _WIN32
+   return 0;
+#else
    uint32_t handle;
    int ret = drmPrimeFDToHandle(dev->fd, fd, &handle);
    if (ret)
       return 0;
    return handle;
+#endif
 }
 
 struct fd_bo *
@@ -271,6 +282,9 @@ fd_bo_from_dmabuf(struct fd_device *dev, int fd)
 struct fd_bo *
 fd_bo_from_name(struct fd_device *dev, uint32_t name)
 {
+#ifdef _WIN32
+   return NULL;
+#else
    struct drm_gem_open req = {
       .name = name,
    };
@@ -306,6 +320,7 @@ out_unlock:
       goto restart;
 
    return bo;
+#endif
 }
 
 void
@@ -449,10 +464,14 @@ fd_bo_fini_fences(struct fd_bo *bo)
 void
 fd_bo_close_handle_drm(struct fd_bo *bo)
 {
+#ifndef _WIN32
    struct drm_gem_close req = {
       .handle = bo->handle,
    };
    drmIoctl(bo->dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
+#else
+   UNREACHABLE("DRM GEM close is unavailable on Windows");
+#endif
 }
 
 /**
@@ -473,8 +492,10 @@ fd_bo_fini_common(struct fd_bo *bo)
 
    fd_bo_fini_fences(bo);
 
+#ifndef _WIN32
    if (bo->map)
       os_munmap(bo->map, bo->size);
+#endif
 
    if (handle) {
       simple_mtx_lock(&table_lock);
@@ -509,6 +530,9 @@ bo_flush(struct fd_bo *bo)
 int
 fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
 {
+#ifdef _WIN32
+   return -ENOTSUP;
+#else
    if (suballoc_bo(bo))
       return -1;
 
@@ -534,6 +558,7 @@ fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
    *name = bo->name;
 
    return 0;
+#endif
 }
 
 uint32_t
@@ -550,6 +575,9 @@ fd_bo_handle(struct fd_bo *bo)
 int
 fd_bo_dmabuf_drm(struct fd_bo *bo)
 {
+#ifdef _WIN32
+   return -ENOTSUP;
+#else
    int ret, prime_fd;
 
    ret = drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
@@ -558,6 +586,7 @@ fd_bo_dmabuf_drm(struct fd_bo *bo)
       return ret;
 
    return prime_fd;
+#endif
 }
 
 int
@@ -612,6 +641,9 @@ fd_bo_get_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
 void *
 fd_bo_map_os_mmap(struct fd_bo *bo)
 {
+#ifdef _WIN32
+   return NULL;
+#else
    uint64_t offset;
    int ret;
    ret = bo->funcs->offset(bo, &offset);
@@ -620,6 +652,7 @@ fd_bo_map_os_mmap(struct fd_bo *bo)
    }
    return os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                   bo->dev->fd, offset);
+#endif
 }
 
 /* For internal use only, does not check FD_BO_NOMAP: */
@@ -628,7 +661,7 @@ __fd_bo_map(struct fd_bo *bo)
 {
    if (!bo->map) {
       bo->map = bo->funcs->map(bo);
-      if (bo->map == MAP_FAILED) {
+      if (bo->map == (void *)-1) {
          ERROR_MSG("mmap failed: %s", strerror(errno));
          bo->map = NULL;
       }
@@ -844,4 +877,3 @@ fd_bo_state(struct fd_bo *bo)
 
    return FD_BO_STATE_BUSY;
 }
-

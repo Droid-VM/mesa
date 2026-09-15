@@ -19,9 +19,11 @@
 #include "freedreno_drm_perfetto.h"
 #include "freedreno_priv.h"
 
+#ifndef _WIN32
 struct fd_device *msm_device_new(int fd, drmVersionPtr version);
+#endif
 #ifdef HAVE_FREEDRENO_VIRTIO
-struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
+struct fd_device *virtio_device_new(int fd);
 #endif
 
 uint64_t os_page_size = 4096;
@@ -30,10 +32,15 @@ struct fd_device *
 fd_device_new(int fd)
 {
    struct fd_device *dev = NULL;
-   drmVersionPtr version;
    bool use_heap = false;
 
    os_get_page_size(&os_page_size);
+
+#ifdef _WIN32
+   dev = virtio_device_new(-1);
+   use_heap = true;
+#else
+   drmVersionPtr version;
 
    /* figure out if we are kgsl or msm drm driver: */
    version = drmGetVersion(fd);
@@ -45,7 +52,7 @@ fd_device_new(int fd)
 #ifdef HAVE_FREEDRENO_VIRTIO
    if (debug_get_bool_option("FD_FORCE_VTEST", false)) {
       DEBUG_MSG("virtio_gpu vtest device");
-      dev = virtio_device_new(-1, version);
+      dev = virtio_device_new(-1);
    } else
 #endif
    if (!strcmp(version->name, "msm")) {
@@ -60,7 +67,7 @@ fd_device_new(int fd)
 #ifdef HAVE_FREEDRENO_VIRTIO
    } else if (!strcmp(version->name, "virtio_gpu")) {
       DEBUG_MSG("virtio_gpu DRM device");
-      dev = virtio_device_new(fd, version);
+      dev = virtio_device_new(fd);
       /* Only devices that support a hypervisor are a6xx+, so avoid the
        * extra guest<->host round trips associated with pipe creation:
        */
@@ -80,6 +87,7 @@ fd_device_new(int fd)
 
 out:
    drmFreeVersion(version);
+#endif
 
    if (!dev)
       return NULL;
@@ -135,6 +143,9 @@ fail:
 struct fd_device *
 fd_device_new_dup(int fd)
 {
+#ifdef _WIN32
+   return fd_device_new(fd);
+#else
    int dup_fd = os_dupfd_cloexec(fd);
    struct fd_device *dev = fd_device_new(dup_fd);
    if (dev)
@@ -142,6 +153,7 @@ fd_device_new_dup(int fd)
    else
       close(dup_fd);
    return dev;
+#endif
 }
 
 /* Convenience helper to open the drm device and return new fd_device:
@@ -149,6 +161,9 @@ fd_device_new_dup(int fd)
 struct fd_device *
 fd_device_open(void)
 {
+#ifdef _WIN32
+   return fd_device_new(-1);
+#else
    int fd;
 
    fd = drmOpenWithType("msm", NULL, DRM_NODE_RENDER);
@@ -160,6 +175,7 @@ fd_device_open(void)
       return NULL;
 
    return fd_device_new(fd);
+#endif
 }
 
 struct fd_device *
@@ -245,8 +261,12 @@ fd_dbg(void)
 bool
 fd_has_syncobj(struct fd_device *dev)
 {
+#ifdef _WIN32
+   return false;
+#else
    uint64_t value;
    if (drmGetCap(dev->fd, DRM_CAP_SYNCOBJ, &value))
       return false;
    return value && dev->version >= FD_VERSION_FENCE_FD;
+#endif
 }

@@ -311,8 +311,19 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
 
    /* different display platforms have, by vulkan spec, different sizing methodologies */
    switch (cdt->type) {
-   case KOPPER_X11:
    case KOPPER_WIN32:
+      /* Tiny helper windows and minimized windows can have a zero client area.
+       * Win32 permits swapchain extents different from currentExtent, but Vulkan
+       * images must stay within the advertised nonzero extent limits.
+       */
+      cswap->scci.imageExtent.width = CLAMP(
+         cdt->caps.currentExtent.width == UINT32_MAX ? w : cdt->caps.currentExtent.width,
+         cdt->caps.minImageExtent.width, cdt->caps.maxImageExtent.width);
+      cswap->scci.imageExtent.height = CLAMP(
+         cdt->caps.currentExtent.height == UINT32_MAX ? h : cdt->caps.currentExtent.height,
+         cdt->caps.minImageExtent.height, cdt->caps.maxImageExtent.height);
+      break;
+   case KOPPER_X11:
       /* With Xcb, minImageExtent, maxImageExtent, and currentExtent must always equal the window size.
        * ...
        * Due to above restrictions, it is only possible to create a new swapchain on this

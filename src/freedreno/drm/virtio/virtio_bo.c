@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 
 #include "virtio_priv.h"
 
@@ -297,6 +299,13 @@ struct fd_bo *
 virtio_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
 {
    struct virtio_device *virtio_dev = to_virtio_device(dev);
+#ifdef _WIN32
+   if (virtio_dev->vdrm->supports_guest_alloc) {
+      if (size > UINT32_MAX - 65535)
+         return NULL;
+      size = align(size, 65536);
+   }
+#endif
    struct msm_ccmd_gem_new_req req = {
          .hdr = MSM_CCMD(GEM_NEW, sizeof(req)),
          .size = size,
@@ -316,6 +325,12 @@ virtio_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
    } else {
       req.flags |= MSM_BO_WC;
    }
+#ifdef _WIN32
+   if (virtio_dev->vdrm->supports_guest_alloc) {
+      req.flags &= ~MSM_BO_WC;
+      req.flags |= MSM_BO_CACHED_COHERENT;
+   }
+#endif
 
    uint32_t blob_flags = 0;
    if (flags & (FD_BO_SHARED | FD_BO_SCANOUT)) {

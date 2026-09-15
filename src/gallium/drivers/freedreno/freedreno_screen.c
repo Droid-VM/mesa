@@ -683,6 +683,10 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->uma = true;
    caps->memobj = fd_device_version(screen->dev) >= FD_VERSION_MEMORY_FD;
    caps->native_fence_fd = fd_device_version(screen->dev) >= FD_VERSION_FENCE_FD;
+#ifdef _WIN32
+   caps->memobj = false;
+   caps->native_fence_fd = false;
+#endif
    caps->fence_signal = screen->has_syncobj;
    caps->cull_distance = is_a6xx(screen);
    caps->shader_stencil_export = is_a6xx(screen);
@@ -767,6 +771,9 @@ fd_screen_bo_get_handle(struct pipe_screen *pscreen, struct fd_bo *bo,
                         struct renderonly_scanout *scanout, unsigned stride,
                         struct winsys_handle *whandle)
 {
+#ifdef _WIN32
+   return false;
+#else
    struct fd_screen *screen = fd_screen(pscreen);
 
    whandle->stride = stride;
@@ -792,6 +799,7 @@ fd_screen_bo_get_handle(struct pipe_screen *pscreen, struct fd_bo *bo,
    } else {
       return false;
    }
+#endif
 }
 
 static bool
@@ -856,6 +864,9 @@ struct fd_bo *
 fd_screen_bo_from_handle(struct pipe_screen *pscreen,
                          struct winsys_handle *whandle)
 {
+#ifdef _WIN32
+   return NULL;
+#else
    struct fd_screen *screen = fd_screen(pscreen);
    struct fd_bo *bo;
 
@@ -876,6 +887,7 @@ fd_screen_bo_from_handle(struct pipe_screen *pscreen,
    }
 
    return bo;
+#endif
 }
 
 static void

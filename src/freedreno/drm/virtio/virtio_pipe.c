@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/slab.h"
 
 #include "freedreno_ringbuffer_sp.h"
@@ -128,8 +130,10 @@ virtio_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t ti
 
    vdrm_flush(vdrm);
 
+#ifndef _WIN32
    if (fence->use_fence_fd)
       return sync_wait(fence->fence_fd, timeout / 1000000);
+#endif
 
    do {
       rsp = vdrm_alloc_rsp(vdrm, &req.hdr, sizeof(*rsp));
@@ -263,6 +267,10 @@ virtio_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
    pipe->wait_spin_ns =
       (int64_t)debug_get_num_option("FD_POLL_SPIN_US", 1200) * 1000;
    pipe->control_needs_inval = vdrm->supports_guest_alloc;
+#ifdef _WIN32
+   /* WDDM maps MmCached pages imported by KGSL with IOCOHERENT. */
+   pipe->control_needs_inval = false;
+#endif
 
    virtio_pipe->gpu_id = vdrm->caps.u.msm.gpu_id;
    virtio_pipe->gmem = vdrm->caps.u.msm.gmem_size;

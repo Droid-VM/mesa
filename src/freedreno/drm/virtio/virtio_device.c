@@ -7,7 +7,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/u_process.h"
 
 #include "virtio_priv.h"
@@ -46,6 +48,10 @@ virtio_device_destroy(struct fd_device *dev)
    struct virtio_device *virtio_dev = to_virtio_device(dev);
 
    util_vma_heap_finish(&virtio_dev->address_space);
+#ifdef _WIN32
+   simple_mtx_destroy(&virtio_dev->address_space_lock);
+   vdrm_device_close(virtio_dev->vdrm);
+#endif
 }
 
 static uint32_t
@@ -106,7 +112,7 @@ set_debuginfo(struct fd_device *dev)
 }
 
 struct fd_device *
-virtio_device_new(int fd, drmVersionPtr version)
+virtio_device_new(int fd)
 {
    struct virgl_renderer_capset_drm caps;
    struct virtio_device *virtio_dev;

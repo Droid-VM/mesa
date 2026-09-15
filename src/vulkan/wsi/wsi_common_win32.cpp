@@ -841,6 +841,11 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
       chain->status = VK_ERROR_MEMORY_MAP_FAILED;
    }
 
+   /* GDI may batch the blit. Complete it before the DIB can be reused or
+    * the presenting thread goes idle waiting for the next Vulkan frame. */
+   if (!GdiFlush())
+      chain->status = VK_ERROR_MEMORY_MAP_FAILED;
+
    wsi_win32_set_image_idle(chain, image);
 
    return chain->status;
