@@ -943,8 +943,15 @@ wddm_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size, void *placed
 
    if (!handle || handle > w->allocs_capacity || !w->allocs[handle - 1].used)
       goto out;
-   if (w->allocs[handle - 1].map)
-      goto out;   /* 先 unmap 再 map */
+   if (w->allocs[handle - 1].map) {
+      /* 已映射：tu_bo_unmap（tu_knl.cc 的 _WIN32 分支）只清 bo->map，KMD 侧
+       * 的映射和本表项都保留，因此 map→unmap→map 是常态而不是异常。重复
+       * map 直接复用现有指针，等价于 Linux 上 munmap 后重新 mmap；真正的
+       * UNMAP 在 bo_close 里统一做。这里若返回失败，vkMapMemory 会得到
+       * VK_ERROR_MEMORY_MAP_FAILED（FurMark VK 首帧即崩的根因）。 */
+      ret = w->allocs[handle - 1].map;
+      goto out;
+   }
 
    map.tag = VIRTIO_WDDM_ESCAPE_BLOB_MAP_TAG;
    map.handle = w->allocs[handle - 1].kmt;
