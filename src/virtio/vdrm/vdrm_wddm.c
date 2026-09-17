@@ -100,7 +100,7 @@ _Static_assert(sizeof(VIRTIO_WDDM_Capset) == 16, "Capset");
 _Static_assert(sizeof(VIRTIO_WDDM_ContextInit) == 80, "ContextInit");
 _Static_assert(sizeof(VIRTIO_WDDM_ResourceInfo) == 148, "ResourceInfo");
 _Static_assert(sizeof(VIRTIO_WDDM_ResourceBusy) == 22, "ResourceBusy");
-_Static_assert(sizeof(VIRTIO_WDDM_BlobInfoSet) == 72, "BlobInfoSet");
+_Static_assert(sizeof(VIRTIO_WDDM_BlobInfoSet) == 76, "BlobInfoSet");
 _Static_assert(sizeof(VIRTIO_WDDM_BlobMap) == 24, "BlobMap");
 _Static_assert(sizeof(VIRTIO_WDDM_ExecBuffer) == 16, "ExecBuffer");
 _Static_assert(sizeof(VIRTIO_WDDM_Escape) == 148, "Escape union");
