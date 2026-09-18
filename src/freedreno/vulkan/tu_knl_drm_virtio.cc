@@ -1286,10 +1286,11 @@ tu_free_zombie_vma_locked(struct tu_device *dev, bool wait)
    struct tu_virtio_device *vdev = dev->vdev;
    MESA_TRACE_FUNC();
 
-   if (!u_vector_length(&dev->zombie_vmas))
+   if (!u_vector_length(&dev->zombie_vmas) &&
+       !u_vector_length(&vdev->zombie_vmas_stage_2))
       return VK_SUCCESS;
 
-   if (wait) {
+   if (wait && u_vector_length(&dev->zombie_vmas)) {
       struct tu_zombie_vma *vma = (struct tu_zombie_vma *)
             u_vector_head(&dev->zombie_vmas);
       /* Wait for 3s (arbitrary timeout) */
@@ -1329,6 +1330,16 @@ tu_free_zombie_vma_locked(struct tu_device *dev, bool wait)
          *vma2 = *vma;
       }
    }
+
+#if defined(_WIN32)
+   /* Unlike virtgpu_bo_close(), the WDDM close path does not flush buffered
+    * ccmds. Submit SET_IOVA before DestroyAllocation detaches its resource;
+    * otherwise the host sees a cleanup command referencing an already closed
+    * BO. On failure retain the handles instead of overtaking those commands.
+    */
+   if (u_vector_length(&vdev->zombie_vmas_stage_2) && vdrm_flush(vdev->vdrm))
+      return VK_ERROR_UNKNOWN;
+#endif
 
    /* And _then_ close the GEM handles: */
    while (u_vector_length(&vdev->zombie_vmas_stage_2) > 0) {
@@ -1941,6 +1952,22 @@ virtio_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 
    assert(dev->physical_device->has_set_iova);
    tu_bo_make_zombie(dev, bo);
+
+#if defined(_WIN32)
+   /* VidMm owns the allocation's commitment until vdrm_bo_close(). Waiting
+    * for the next BO allocation to reap zombies leaves freed memory charged
+    * indefinitely in an idle process. Reuse the nonblocking fence-checked
+    * retirement path; unrelated in-flight work must still keep its BOs alive.
+    */
+   /* Device setup/teardown can release BOs before the fence mapping exists
+    * or after global_bo itself has become a zombie. Leave those to device
+    * destruction, since tu_wait_fence() reads that mapping. */
+   if (dev->global_bo && dev->global_bo->gem_handle && dev->global_bo_map) {
+      mtx_lock(&dev->vma_mutex);
+      tu_free_zombie_vma_locked(dev, false);
+      mtx_unlock(&dev->vma_mutex);
+   }
+#endif
 
    u_rwlock_rdunlock(&dev->dma_bo_lock);
 }
