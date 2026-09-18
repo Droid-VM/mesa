@@ -3736,9 +3736,29 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->total_video_mem = get_video_mem(screen);
    screen->clamp_video_mem = screen->total_video_mem * 0.8;
    if (!os_get_total_physical_memory(&screen->total_mem)) {
+      /* DroidVM P-4: do NOT refuse the screen over this.  A sandboxed process
+       * cannot ask the kernel how much RAM the system has: Firefox answers
+       * sysinfo(2) with EPERM in every child but the content one
+       * (SandboxPolicyCommon, security/sandbox/linux/SandboxFilter.cpp --
+       * "glibc's qsort calls sysinfo to check the memory size"), and glibc's
+       * sysconf(_SC_PHYS_PAGES), which is what os_get_total_physical_memory()
+       * calls, is that syscall.  glibc does not even check it failed, so the
+       * value here is uninitialised stack and usually reads as <= 0.
+       *
+       * Failing screen creation over it took the whole GL stack down inside
+       * Firefox's RDD (media) process: gbm_create_device() then degraded to
+       * kms_swrast, whose only allocator is DRM_IOCTL_MODE_CREATE_DUMB, which
+       * a DRM RENDER node refuses with EACCES by construction -- so a VA-API
+       * driver that allocates its surfaces through GBM (DroidVM's
+       * libva-v4l2) could not export one dma-buf and the browser fell back to
+       * software decoding after a single frame.
+       *
+       * screen->total_mem is written here and read nowhere else in the tree,
+       * so there is nothing to be strict about: fall back to the device-local
+       * heap size and keep going. */
+      screen->total_mem = screen->total_video_mem;
       if (!screen->driver_name_is_inferred)
-         mesa_loge("ZINK: failed to get total physical memory");
-      goto fail;
+         mesa_logw("ZINK: no system memory size (sandboxed?); using the device heap");
    }
 
    if (screen->info.have_EXT_sample_locations) {
