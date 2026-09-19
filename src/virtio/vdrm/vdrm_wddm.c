@@ -50,6 +50,7 @@
 
 #include "util/os_time.h"
 #include "util/u_debug.h"
+#include "util/u_atomic.h"
 #include "util/log.h"
 #include "c11/threads.h"   /* mtx_plain（simple_mtx_init 的 type 参数） */
 
@@ -65,6 +66,7 @@
 #endif
 #include <windows.h>
 #include <winternl.h>
+#include <ntstatus.h>
 
 #include "virtio_wddm_uapi.h"   /* -I$WDDM_INC（build_turnip.sh 会同步此头） */
 
@@ -112,6 +114,10 @@ _Static_assert(sizeof(VIRTIO_WDDM_CommandHeader) == 8, "CommandHeader");
 _Static_assert(sizeof(VIRTIO_WDDM_CommandTransfer) == 48, "CommandTransfer");
 _Static_assert(sizeof(VIRTIO_WDDM_Box3D) == 24, "Box3D");
 _Static_assert(sizeof(VIRTIO_WDDM_SubmitCommand) == 8, "SubmitCommand");
+_Static_assert(sizeof(D3DDDI_MAPGPUVIRTUALADDRESS) == 104, "MAPGPUVIRTUALADDRESS");
+_Static_assert(offsetof(D3DDDI_MAPGPUVIRTUALADDRESS, VirtualAddress) == 88, "MAP.VA");
+_Static_assert(offsetof(D3DDDI_MAPGPUVIRTUALADDRESS, PagingFenceValue) == 96, "MAP.Fence");
+_Static_assert(offsetof(D3DDDI_ALLOCATIONINFO2, GpuVirtualAddress) == 40, "ALLOCINFO2.GVA");
 
 /* 关键偏移：KMD 按固定偏移切载荷（EXEC_BUF 的 command_slice 从 16 起，
  * adapter.rs:1770-1773；capset 数据同样紧跟 16 字节头）。 */
@@ -140,7 +146,55 @@ struct vdrm_wddm_dispatch {
    PFND3DKMT_ESCAPE Escape;
    PFND3DKMT_CREATEALLOCATION2 CreateAllocation;
    PFND3DKMT_DESTROYALLOCATION DestroyAllocation;
+   /* Optional: only needed by the VDRM_WDDM_VIRTUAL_SUBMIT experiment. */
+   PFND3DKMT_CREATECONTEXTVIRTUAL CreateContextVirtual;
+   PFND3DKMT_SUBMITCOMMAND SubmitCommand;
+   PFND3DKMT_CREATEPAGINGQUEUE CreatePagingQueue;
+   PFND3DKMT_DESTROYPAGINGQUEUE DestroyPagingQueue;
+   PFND3DKMT_MAPGPUVIRTUALADDRESS MapGpuVirtualAddress;
+   PFND3DKMT_MAKERESIDENT MakeResident;
+   /* Optional: only needed by the VDRM_WDDM_PHYSICAL_RENDER experiment. */
+   PFND3DKMT_RENDER Render;
 };
+
+/* M2 experiment (docs/gpu-stats-plan.md §5): route ccmd streams through
+ * D3DKMTSubmitCommand on a virtual context so they enter the dxgkrnl/VidSch
+ * scheduling and statistics chain. Off by default; only a dedicated test
+ * process should set VDRM_WDDM_VIRTUAL_SUBMIT=1. */
+enum vdrm_wddm_vsub_state {
+   VDRM_WDDM_VSUB_OFF = 0,   /* Escape only (default and after a rejected submit) */
+   VDRM_WDDM_VSUB_ON,        /* virtual context created, submissions go through VidSch */
+   VDRM_WDDM_VSUB_LOST,      /* an accepted submission never reached the host: the
+                              * command cannot be replayed, the device is lost */
+};
+
+DEBUG_GET_ONCE_BOOL_OPTION(vdrm_wddm_virtual_submit, "VDRM_WDDM_VIRTUAL_SUBMIT", false)
+/* NodeOrdinal of the virtual context. 2 = Copy node (8192-byte private data,
+ * verified by probe_turnip kmt-virtual on 976 / r10). 0 = Graphics: dxgkrnl
+ * rejects CreateContextVirtual (kmt-nodes 0xc000000d); forcing GpuMmu on
+ * the 3D node BSODed (979). Leave the default at Copy. */
+DEBUG_GET_ONCE_NUM_OPTION(vdrm_wddm_virtual_node, "VDRM_WDDM_VIRTUAL_NODE", 2)
+/* Bounded wait for the host to consume an accepted virtual submission. */
+DEBUG_GET_ONCE_NUM_OPTION(vdrm_wddm_virtual_timeout_ms, "VDRM_WDDM_VIRTUAL_TIMEOUT_MS", 5000)
+/* Route GPU execbuf (ring>=1) through D3DKMTRender on the existing
+ * physical Graphics context so VidSch accounts it as 3D engine time
+ * (Task Manager "3D" for every VK/GL process). On by default since 980:
+ * validated equal to Escape on FurMark VK/GL (gpu-stats-plan.md
+ * §11.12.1/§11.12.2). VDRM_WDDM_PHYSICAL_RENDER=0 restores Escape-only.
+ * Mutually exclusive with VIRTUAL_SUBMIT: Graphics stays a 1 MB physical
+ * DMA context (979 GpuMmu BSODed). Ring 0 stays Escape (r4–r9: protocol
+ * traffic in VidSch AVs). Any failure falls back to Escape per submit. */
+DEBUG_GET_ONCE_BOOL_OPTION(vdrm_wddm_physical_render, "VDRM_WDDM_PHYSICAL_RENDER", true)
+/* Make every BO this connection creates resident through D3DKMTMakeResident
+ * on a paging queue (981). VidMm only counts an allocation towards the
+ * per-process segment-group Usage (Task Manager "Dedicated"/"Shared GPU
+ * memory") once it is resident; Total Committed does not need this. This
+ * KMD reports WDDM 2.0 with GpuMmu, so dxgkrnl rejects D3DKMTRender
+ * allocation lists (0xC0000001) and residency is the UMD's job, exactly
+ * what virtio-d3d11 resource.c make_resource_resident does for DWM. The
+ * KMD's paging TRANSFER for BlobHost3D is a no-op; the host BO is not
+ * affected. VDRM_WDDM_RESIDENCY=0 disables it. */
+DEBUG_GET_ONCE_BOOL_OPTION(vdrm_wddm_residency, "VDRM_WDDM_RESIDENCY", true)
 
 struct vdrm_wddm_alloc {
    bool used;
@@ -158,6 +212,10 @@ struct vdrm_wddm_alloc {
    D3DKMT_HANDLE source_allocation;
    bool runtime_owned;
    D3DKMT_HANDLE km_resource;   /* 仅 runtime_owned 有意义；free hook 要用 */
+   /* CreateAllocation2 回写的 GPU VA。M2 虚拟提交实验用它填
+    * D3DKMT_SUBMITCOMMAND.Commands：CommandLength=0 时 dxgkrnl 接受提交
+    * 但从不排队（ETW 无 QueuePacket）。 */
+   uint64_t gpu_va;
 };
 
 struct vdrm_wddm {
@@ -168,6 +226,43 @@ struct vdrm_wddm {
    D3DKMT_HANDLE h_adapter;
    D3DKMT_HANDLE h_device;
    D3DKMT_HANDLE h_context;
+
+   /* Virtual-submit experiment state (all touched under eb_lock: every
+    * submission path already runs *_locked). */
+   enum vdrm_wddm_vsub_state vsub_state;
+   D3DKMT_HANDLE h_vsub_context;   /* D3DKMTCreateContextVirtual handle */
+   uint32_t vsub_node;
+   uint64_t vsub_submitted;        /* accepted D3DKMTSubmitCommand calls */
+   uint64_t vsub_escaped;          /* streams too large for the 8192-byte private data */
+   /* Read outside eb_lock by bo_close, hence atomic. */
+   uint32_t vsub_last_seqno;       /* seqno of the last ccmd accepted virtually */
+   uint32_t vsub_pending;          /* non-zero until vsub_sync saw that seqno */
+   uint64_t vsub_cmd_va;           /* D3DKMT_SUBMITCOMMAND.Commands */
+   uint8_t vsub_dummy_pad0[16];
+   uint8_t vsub_dummy_commands[16]; /* owned CPU buffer; canaries detect writes */
+   uint8_t vsub_dummy_pad1[16];
+   D3DKMT_HANDLE h_paging_queue;
+   D3DKMT_HANDLE h_paging_sync;
+   volatile uint64_t *paging_fence_cpu;
+
+   /* Physical-render experiment: D3DKMTRender on the Graphics context that
+    * CreateContext already allocated. Captured at connect; updated after
+    * each Render (dxgkrnl hands back the next command buffer). */
+   enum vdrm_wddm_vsub_state prender_state;
+   void *prender_cmd;
+   UINT prender_cmd_size;
+   D3DDDI_ALLOCATIONLIST *prender_allocs;
+   UINT prender_allocs_size;
+   D3DDDI_PATCHLOCATIONLIST *prender_patches;
+   UINT prender_patches_size;
+   uint64_t prender_submitted;
+   uint64_t prender_escaped;
+   /* Residency accounting (981): MakeResident per BO on h_paging_queue.
+    * residency_ok clears for the rest of the connection on the first
+    * failure so a broken queue costs one call, never a BO. */
+   bool residency_ok;
+   uint64_t resident_ok;
+   uint64_t resident_fail;
 
    /* BO 句柄表。Linux 后端把句柄交给 drm/virtio 内核管，Windows 这边得自己管。
     * 必须自带锁：turnip 会从多个应用线程 create/map/close BO，而 vdrm.c 只在
@@ -225,7 +320,7 @@ wddm_destroy_alloc(struct vdrm_wddm *w, D3DKMT_HANDLE kmt)
 /* 占一个槽并填入。返回 1-based 句柄，0 = 失败。 */
 static uint32_t
 table_insert(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint32_t res_id, uint64_t size,
-             bool imported)
+             bool imported, uint64_t gpu_va)
 {
    uint32_t handle = 0;
 
@@ -268,6 +363,7 @@ table_insert(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint32_t res_id, uint64_t s
    w->allocs[handle - 1].runtime_owned = false;
    w->allocs[handle - 1].km_resource = 0;
    w->allocs[handle - 1].source_allocation = 0;
+   w->allocs[handle - 1].gpu_va = gpu_va;
 
 out:
    simple_mtx_unlock(&w->table_lock);
@@ -347,6 +443,23 @@ dispatch_init(struct vdrm_wddm_dispatch *d)
          return false;
       }
    }
+
+   /* Optional entry points: absence only disables the virtual-submit
+    * experiment, never the Escape path. */
+   d->CreateContextVirtual = (PFND3DKMT_CREATECONTEXTVIRTUAL)
+      GetProcAddress(d->gdi32, "D3DKMTCreateContextVirtual");
+   d->SubmitCommand = (PFND3DKMT_SUBMITCOMMAND)
+      GetProcAddress(d->gdi32, "D3DKMTSubmitCommand");
+   d->CreatePagingQueue = (PFND3DKMT_CREATEPAGINGQUEUE)
+      GetProcAddress(d->gdi32, "D3DKMTCreatePagingQueue");
+   d->DestroyPagingQueue = (PFND3DKMT_DESTROYPAGINGQUEUE)
+      GetProcAddress(d->gdi32, "D3DKMTDestroyPagingQueue");
+   d->MapGpuVirtualAddress = (PFND3DKMT_MAPGPUVIRTUALADDRESS)
+      GetProcAddress(d->gdi32, "D3DKMTMapGpuVirtualAddress");
+   d->MakeResident = (PFND3DKMT_MAKERESIDENT)
+      GetProcAddress(d->gdi32, "D3DKMTMakeResident");
+   d->Render = (PFND3DKMT_RENDER)
+      GetProcAddress(d->gdi32, "D3DKMTRender");
    return true;
 }
 
@@ -429,6 +542,22 @@ context_init(struct vdrm_wddm *w)
 static void
 wddm_close_handles(struct vdrm_wddm *w)
 {
+   if (w->h_vsub_context && w->h_vsub_context != w->h_context) {
+      D3DKMT_DESTROYCONTEXT destroy = {0};
+      destroy.hContext = w->h_vsub_context;
+      if (NT_SUCCESS(w->dispatch.DestroyContext(&destroy)))
+         w->h_vsub_context = 0;
+   }
+   w->h_vsub_context = 0;
+   if (w->h_paging_queue && w->dispatch.DestroyPagingQueue) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {0};
+      destroy.hPagingQueue = w->h_paging_queue;
+      if (NT_SUCCESS(w->dispatch.DestroyPagingQueue(&destroy))) {
+         w->h_paging_queue = 0;
+         w->h_paging_sync = 0;
+         w->paging_fence_cpu = NULL;
+      }
+   }
    if (w->h_context) {
       D3DKMT_DESTROYCONTEXT destroy = {0};
       destroy.hContext = w->h_context;
@@ -447,6 +576,375 @@ wddm_close_handles(struct vdrm_wddm *w)
       if (NT_SUCCESS(w->dispatch.CloseAdapter(&close)))
          w->h_adapter = 0;
    }
+}
+
+static uint32_t wddm_bo_create(struct vdrm_device *vdev, size_t size,
+                               uint32_t blob_flags, uint64_t blob_id,
+                               uint32_t blob_hints, struct vdrm_ccmd_req *req);
+
+/* ------------------------------------------------------------------ */
+/* M2 experiment: D3DKMTSubmitCommand on a virtual context                 */
+
+static bool
+seqno_before(uint32_t a, uint32_t b)
+{
+   return (int32_t)(a - b) < 0;
+}
+
+/* Wait until the host has consumed every ccmd accepted through the virtual
+ * path. Required before anything that reaches the virtio control queue by a
+ * different route (Escape submit, CreateAllocation, DestroyAllocation):
+ * VidSch may delay a virtual submission, while those calls enter the queue
+ * immediately, and the ccmd stream must stay in seqno order on the host.
+ * Returns false on timeout; the caller must then treat the device as lost. */
+static bool
+vsub_sync(struct vdrm_wddm *w)
+{
+   uint32_t target = p_atomic_read(&w->vsub_last_seqno);
+   int64_t deadline;
+
+   if (!w->base.shmem || !p_atomic_read(&w->vsub_pending))
+      return true;
+
+   deadline = os_time_get_nano() +
+              debug_get_option_vdrm_wddm_virtual_timeout_ms() * 1000000ll;
+   while (seqno_before(w->base.shmem->seqno, target)) {
+      if (os_time_get_nano() > deadline) {
+         mesa_loge("vdrm-wddm: virtual submission seqno %u not consumed (host %u)",
+                   target, w->base.shmem->seqno);
+         return false;
+      }
+      thrd_yield();
+   }
+   p_atomic_set(&w->vsub_pending, 0);
+   return true;
+}
+
+/* Bounded wait for a paging-queue fence. STATUS_PENDING from MapGpuVirtualAddress
+ * means VidMm queued the work; the CPU mapping of the paging fence is how UMD
+ * observes completion (same pattern as D3D11 make_resource_resident). */
+static bool
+vsub_wait_paging(struct vdrm_wddm *w, uint64_t fence)
+{
+   int64_t deadline;
+
+   if (!w->paging_fence_cpu)
+      return false;
+   deadline = os_time_get_nano() +
+              debug_get_option_vdrm_wddm_virtual_timeout_ms() * 1000000ll;
+   while (*w->paging_fence_cpu < fence) {
+      if (os_time_get_nano() > deadline) {
+         mesa_loge("vdrm-wddm: paging fence %llu not reached (cpu %llu)",
+                   (unsigned long long)fence,
+                   (unsigned long long)*w->paging_fence_cpu);
+         return false;
+      }
+      thrd_yield();
+   }
+   return true;
+}
+
+/* Called under eb_lock after the main context exists. Never fails the
+ * connection: any problem leaves the Escape path in charge. */
+/* One paging queue per connection, used by residency (981) and by the
+ * virtual-submit experiment. Called under eb_lock after CreateDevice; never
+ * fails the connection. */
+static void
+paging_init(struct vdrm_wddm *w)
+{
+   D3DKMT_CREATEPAGINGQUEUE pq = {0};
+   NTSTATUS status;
+
+   w->residency_ok = false;
+   if (!w->dispatch.CreatePagingQueue || !w->dispatch.MakeResident) {
+      WDDM_DEBUG("paging_init: gdi32 lacks CreatePagingQueue/MakeResident\n");
+      return;
+   }
+   pq.hDevice = w->h_device;
+   pq.Priority = D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL;
+   pq.PhysicalAdapterIndex = 0;
+   status = w->dispatch.CreatePagingQueue(&pq);
+   if (!NT_SUCCESS(status) || !pq.hPagingQueue) {
+      mesa_logw("vdrm-wddm: CreatePagingQueue failed: 0x%08lx", (unsigned long)status);
+      return;
+   }
+   w->h_paging_queue = pq.hPagingQueue;
+   w->h_paging_sync = pq.hSyncObject;
+   w->paging_fence_cpu = (volatile uint64_t *)pq.FenceValueCPUVirtualAddress;
+   w->residency_ok = debug_get_option_vdrm_wddm_residency();
+   WDDM_DEBUG("paging_init: queue=0x%x sync=0x%x residency=%d\n",
+              w->h_paging_queue, w->h_paging_sync, w->residency_ok ? 1 : 0);
+}
+
+/* Make one allocation of h_device resident so VidMm charges it to this
+ * process's Dedicated/Shared Usage. Same call and flags as virtio-d3d11
+ * make_resource_resident, minus MustSucceed: a refusal must not put the
+ * device in error. STATUS_PENDING is fine: the paging fence is never
+ * needed because the GPU never depends on VidMm placement of a blob.
+ * Safe without eb_lock (kernel call on immutable handles). */
+static void
+residency_make_resident(struct vdrm_wddm *w, D3DKMT_HANDLE kmt, uint64_t size)
+{
+   D3DDDI_MAKERESIDENT mr = {0};
+   NTSTATUS status;
+
+   if (!w->residency_ok || !kmt)
+      return;
+   mr.hPagingQueue = w->h_paging_queue;
+   mr.NumAllocations = 1;
+   mr.AllocationList = &kmt;
+   mr.Flags.CantTrimFurther = 1;
+   status = w->dispatch.MakeResident(&mr);
+   if (NT_SUCCESS(status) && mr.NumAllocations == 1) {
+      w->resident_ok++;
+      WDDM_DEBUG("MakeResident alloc=0x%x size=%llu status=0x%08lx fence=%llu (#%llu)\n",
+                 kmt, (unsigned long long)size, (unsigned long)status,
+                 (unsigned long long)mr.PagingFenceValue,
+                 (unsigned long long)w->resident_ok);
+      return;
+   }
+   w->resident_fail++;
+   mesa_logw("vdrm-wddm: MakeResident alloc=0x%x size=%llu failed: status=0x%08lx n=%u trim=%llu; "
+             "disabling residency", kmt, (unsigned long long)size, (unsigned long)status,
+             mr.NumAllocations, (unsigned long long)mr.NumBytesToTrim);
+   w->residency_ok = false;
+}
+
+static void
+vsub_init(struct vdrm_wddm *w)
+{
+   D3DKMT_CREATECONTEXTVIRTUAL cv = {0};
+   NTSTATUS status;
+   int64_t node = debug_get_option_vdrm_wddm_virtual_node();
+
+   w->vsub_state = VDRM_WDDM_VSUB_OFF;
+   WDDM_DEBUG("vsub_init: enabled=%d node=%lld CreateContextVirtual=%p SubmitCommand=%p\n",
+              debug_get_option_vdrm_wddm_virtual_submit() ? 1 : 0,
+              (long long)node,
+              (void *)w->dispatch.CreateContextVirtual,
+              (void *)w->dispatch.SubmitCommand);
+   if (!debug_get_option_vdrm_wddm_virtual_submit())
+      return;
+   if (!w->dispatch.CreateContextVirtual || !w->dispatch.SubmitCommand ||
+       !w->h_paging_queue || !w->dispatch.MapGpuVirtualAddress ||
+       !w->dispatch.MakeResident) {
+      mesa_logw("vdrm-wddm: virtual submit requested but gdi32 lacks paging/submit entry points");
+      WDDM_DEBUG("vsub_init: missing gdi32 paging/submit entry points\n");
+      return;
+   }
+   if (node < 0 || node > 2) {
+      mesa_logw("vdrm-wddm: VDRM_WDDM_VIRTUAL_NODE=%lld out of range", (long long)node);
+      return;
+   }
+   /* Graphics/node 0 cannot be virtual: dxgkrnl rejects CreateContextVirtual
+    * (kmt-nodes 0xc000000d), and forcing GpuMmuSupported on the 3D node
+    * BSODed (979). Stay on Escape. Copy/node 2 is the only verified path. */
+   if (node == 0) {
+      mesa_logw("vdrm-wddm: refusing virtual Graphics (node=0); 979 BSODed");
+      return;
+   }
+
+   /* Copy/node 2 (and PhysicalOther=1, which also fails) get their own
+    * virtual context beside the physical Escape context on node 0. */
+   cv.hDevice = w->h_device;
+   cv.NodeOrdinal = (UINT)node;
+   cv.EngineAffinity = 1;
+   cv.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
+   status = w->dispatch.CreateContextVirtual(&cv);
+   if (!NT_SUCCESS(status) || !cv.hContext) {
+      mesa_logw("vdrm-wddm: CreateContextVirtual(node=%lld) failed: 0x%08lx",
+                (long long)node, (unsigned long)status);
+      return;
+   }
+   w->h_vsub_context = cv.hContext;
+   w->vsub_node = (uint32_t)node;
+
+   /* CreateAllocation2 leaves GpuVirtualAddress=0 on this KMD (WDDM 2.0 GpuMmu).
+    * VidSch will not queue a D3DKMTSubmitCommand whose CommandLength is 0, so
+    * map the ring into GPU VA and use that as a dummy Commands range. The
+    * real ccmd still travels in pPrivateDriverData (VSUBCMDV). The paging
+    * queue itself comes from paging_init (shared with residency). */
+
+   /* Isolation step: CommandLength=0 is accepted but never queued (ETW: no
+    * QueuePacket). r4/r7 mapped the live ring and AV'd; r8 used unmapped
+    * GPU VA 0x100000000 as Commands and still AV'd after five GEM_NEWs.
+    * 0x10000 and 0x100000000 are also plausible usermode addresses, so
+    * dxgkrnl may copy/patch Commands as a CPU pointer. Point it at an
+    * owned 16-byte buffer with canaries; the real ccmd stays in
+    * pPrivateDriverData. */
+   memset(w->vsub_dummy_pad0, 0xA5, sizeof(w->vsub_dummy_pad0));
+   memset(w->vsub_dummy_commands, 0, sizeof(w->vsub_dummy_commands));
+   memset(w->vsub_dummy_pad1, 0xA5, sizeof(w->vsub_dummy_pad1));
+   w->vsub_cmd_va = (uint64_t)(uintptr_t)w->vsub_dummy_commands;
+
+   w->vsub_state = VDRM_WDDM_VSUB_ON;
+   mesa_logi("vdrm-wddm: virtual submit enabled: node=%u context=0x%x private=%u cmdva=0x%llx",
+             w->vsub_node, w->h_vsub_context,
+             VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE,
+             (unsigned long long)w->vsub_cmd_va);
+}
+
+/* One D3DKMTSubmitCommand = SubmitCommand tag(8) + one CommandHeader(8) + body,
+ * bounded by the context's DmaBufferPrivateDataSize (8192). The KMD decodes it
+ * in DxgkDdiSubmitCommandVirtual exactly like the Escape body and signals
+ * DXGK DMA_COMPLETED from the virtio response, which crosvm defers until the
+ * host GPU fence for ring>0 retires. That is what feeds VidSch engine time.
+ *
+ * Returns 0 when accepted, -EAGAIN when dxgkrnl rejected the call before
+ * queuing it (safe to send the same bytes via Escape), -EIO when the device
+ * is lost. */
+static int
+vsub_submit_one(struct vdrm_wddm *w, const void *body, uint32_t body_len, uint8_t ring,
+                uint32_t last_seqno)
+{
+   uint8_t packet[VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE];
+   const uint32_t body_off = sizeof(VIRTIO_WDDM_SubmitCommand) +
+                             sizeof(VIRTIO_WDDM_CommandHeader);
+   VIRTIO_WDDM_SubmitCommand sc = {0};
+   VIRTIO_WDDM_CommandHeader hdr = {0};
+   D3DKMT_SUBMITCOMMAND submit = {0};
+   NTSTATUS status;
+
+   if (body_len > sizeof(packet) - body_off)
+      return -EAGAIN;
+
+   sc.tag = VIRTIO_WDDM_SUBMIT_COMMAND_VIRTUAL_TAG;
+   hdr.id = VIRTIO_WDDM_COMMAND_ID_SUBMIT;
+   hdr.flags = VIRTIO_WDDM_COMMAND_FLAG_RING_IDX;
+   hdr.ring = ring;
+   hdr.size = body_len;
+   memcpy(packet, &sc, sizeof(sc));
+   memcpy(packet + sizeof(sc), &hdr, sizeof(hdr));
+   memcpy(packet + body_off, body, body_len);
+
+   /* Payload stays in private data. CommandLength=0 is accepted by
+    * D3DKMTSubmitCommand but dxgkrnl never queues a packet (ETW: no
+    * QueuePacket, context later SUSPENDED_BY_VIDMM). Point Commands at
+    * the ring allocation's GPU VA so VidSch has a non-empty DMA range.
+    * The KMD reads VSUBCMDV from pDmaBufferPrivateData, not this VA. */
+   submit.Commands = w->vsub_cmd_va;
+   submit.CommandLength = w->vsub_cmd_va ? 16 : 0;
+   submit.BroadcastContextCount = 1;
+   submit.BroadcastContext[0] = w->h_vsub_context;
+   submit.pPrivateDriverData = packet;
+   submit.PrivateDriverDataSize = body_off + body_len;
+
+   status = w->dispatch.SubmitCommand(&submit);
+   if (!NT_SUCCESS(status)) {
+      mesa_logw("vdrm-wddm: D3DKMTSubmitCommand rejected: status=0x%08lx bytes=%u node=%u cmdva=0x%llx",
+                (unsigned long)status, body_off + body_len, w->vsub_node,
+                (unsigned long long)w->vsub_cmd_va);
+      return -EAGAIN;
+   }
+
+   w->vsub_submitted++;
+   p_atomic_set(&w->vsub_last_seqno, last_seqno);
+   p_atomic_set(&w->vsub_pending, 1);
+   {
+      unsigned i;
+      uint32_t pad0 = 0, pad1 = 0, body = 0;
+      for (i = 0; i < sizeof(w->vsub_dummy_pad0); i++) {
+         pad0 += w->vsub_dummy_pad0[i] != 0xA5;
+         pad1 += w->vsub_dummy_pad1[i] != 0xA5;
+         body += w->vsub_dummy_commands[i] != 0;
+      }
+      WDDM_DEBUG("vsub submit #%llu: bytes=%u ring=%u seqno=%u cmdva=0x%llx cmdlen=%u pad0=%u body=%u pad1=%u\n",
+                 (unsigned long long)w->vsub_submitted, body_off + body_len, ring, last_seqno,
+                 (unsigned long long)submit.Commands, submit.CommandLength, pad0, body, pad1);
+   }
+   return 0;
+}
+
+/* Called under eb_lock after the main Graphics context exists. Never
+ * fails the connection: any problem leaves the Escape path in charge.
+ * Uses the command buffer dxgkrnl already mapped for this physical
+ * context (CreateContext.pCommandBuffer). */
+static void
+prender_init(struct vdrm_wddm *w)
+{
+   w->prender_state = VDRM_WDDM_VSUB_OFF;
+   WDDM_DEBUG("prender_init: enabled=%d Render=%p cmd=%p size=%u allocs=%u patches=%u\n",
+              debug_get_option_vdrm_wddm_physical_render() ? 1 : 0,
+              (void *)w->dispatch.Render,
+              w->prender_cmd, w->prender_cmd_size,
+              w->prender_allocs_size, w->prender_patches_size);
+   if (!debug_get_option_vdrm_wddm_physical_render())
+      return;
+   if (!w->dispatch.Render) {
+      mesa_logw("vdrm-wddm: physical render requested but gdi32 lacks D3DKMTRender");
+      return;
+   }
+   if (!w->prender_cmd || w->prender_cmd_size < sizeof(VIRTIO_WDDM_CommandHeader)) {
+      mesa_logw("vdrm-wddm: physical render requested but CreateContext gave no command buffer");
+      return;
+   }
+   w->prender_state = VDRM_WDDM_VSUB_ON;
+   mesa_logi("vdrm-wddm: physical render enabled: context=0x%x cmd=%p size=%u",
+             w->h_context, w->prender_cmd, w->prender_cmd_size);
+}
+
+/* One D3DKMTRender = CommandHeader(8) + body, written into the physical
+ * Graphics command buffer. The KMD DxgkDdiRender decoder is the same
+ * CommandHeader/Submit path D3D11 already uses; VidSch then accounts the
+ * DMA as 3D engine time. Empty allocation/patch lists: Escape-style
+ * execbuf does not name allocations. Returns 0 when accepted, -EAGAIN
+ * when the packet was never queued (safe to send the same bytes via
+ * Escape), -EIO when the device is lost. */
+static int
+prender_submit_one(struct vdrm_wddm *w, const void *body, uint32_t body_len, uint8_t ring,
+                   uint32_t last_seqno)
+{
+   const uint32_t needed = sizeof(VIRTIO_WDDM_CommandHeader) + body_len;
+   VIRTIO_WDDM_CommandHeader hdr = {0};
+   D3DKMT_RENDER render = {0};
+   NTSTATUS status;
+
+   if (!w->prender_cmd || needed > w->prender_cmd_size)
+      return -EAGAIN;
+
+   hdr.id = VIRTIO_WDDM_COMMAND_ID_SUBMIT;
+   hdr.flags = VIRTIO_WDDM_COMMAND_FLAG_RING_IDX;
+   hdr.ring = ring;
+   hdr.size = body_len;
+   memcpy(w->prender_cmd, &hdr, sizeof(hdr));
+   memcpy((uint8_t *)w->prender_cmd + sizeof(hdr), body, body_len);
+
+   render.hContext = w->h_context;
+   render.CommandOffset = 0;
+   render.CommandLength = needed;
+   /* Empty allocation list: dxgkrnl rejects lists on this WDDM 2.0/GpuMmu
+    * KMD (0xC0000001, 981 r1). Residency is handled by MakeResident at BO
+    * creation instead. */
+   render.AllocationCount = 0;
+   render.PatchLocationCount = 0;
+   render.NewCommandBufferSize = w->prender_cmd_size;
+   render.NewAllocationListSize = w->prender_allocs_size;
+   render.NewPatchLocationListSize = w->prender_patches_size;
+
+   status = w->dispatch.Render(&render);
+   if (!NT_SUCCESS(status)) {
+      mesa_logw("vdrm-wddm: D3DKMTRender rejected: status=0x%08lx bytes=%u cmdsize=%u",
+                (unsigned long)status, needed, w->prender_cmd_size);
+      return -EAGAIN;
+   }
+
+   if (render.pNewCommandBuffer) {
+      w->prender_cmd = render.pNewCommandBuffer;
+      w->prender_cmd_size = render.NewCommandBufferSize;
+      w->prender_allocs = render.pNewAllocationList;
+      w->prender_allocs_size = render.NewAllocationListSize;
+      w->prender_patches = render.pNewPatchLocationList;
+      w->prender_patches_size = render.NewPatchLocationListSize;
+   }
+
+   w->prender_submitted++;
+   p_atomic_set(&w->vsub_last_seqno, last_seqno);
+   p_atomic_set(&w->vsub_pending, 1);
+   WDDM_DEBUG("prender submit #%llu: bytes=%u ring=%u seqno=%u queued=%lu nextcmd=%p nextsize=%u\n",
+              (unsigned long long)w->prender_submitted, needed, ring, last_seqno,
+              (unsigned long)render.QueuedBufferCount,
+              w->prender_cmd, w->prender_cmd_size);
+   return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -518,6 +1016,7 @@ submit_ccmd_stream(struct vdrm_wddm *w, const void *data, uint32_t len, uint8_t 
 {
    const uint8_t *bytes = (const uint8_t *)data;
    uint32_t off = 0;
+   uint32_t last_seqno = 0;
 
    while (off < len) {
       uint32_t req_len;
@@ -527,10 +1026,66 @@ submit_ccmd_stream(struct vdrm_wddm *w, const void *data, uint32_t len, uint8_t 
              sizeof(req_len));
       if (req_len < sizeof(struct vdrm_ccmd_req) || req_len > len - off)
          return -EINVAL;
+      memcpy(&last_seqno, bytes + off + offsetof(struct vdrm_ccmd_req, seqno),
+             sizeof(last_seqno));
       off += req_len;
    }
 
-   return len ? submit_one(w, data, len, ring) : 0;
+   if (!len)
+      return 0;
+
+   if (w->vsub_state == VDRM_WDDM_VSUB_LOST ||
+       w->prender_state == VDRM_WDDM_VSUB_LOST) {
+      /* An accepted submission never completed. Replaying it through Escape
+       * would execute the same GPU command twice; fail instead. */
+      return -EIO;
+   }
+
+   /* Protocol traffic (flush, GEM_NEW) is ring 0. r4–r9 all AV'd in
+    * vkEnumeratePhysicalDevices after five virtual GEM_NEWs. Keep ring 0
+    * on Escape; only GPU execbuf (turnip queue->priority+1) enters VidSch. */
+   if (ring != 0 && w->prender_state == VDRM_WDDM_VSUB_ON) {
+      int ret = prender_submit_one(w, data, len, ring, last_seqno);
+      if (ret == 0)
+         return 0;
+      if (ret != -EAGAIN)
+         return ret;
+      if (len + sizeof(VIRTIO_WDDM_CommandHeader) > w->prender_cmd_size) {
+         w->prender_escaped++;
+      } else {
+         mesa_logw("vdrm-wddm: physical render disabled after %llu submissions",
+                   (unsigned long long)w->prender_submitted);
+         w->prender_state = VDRM_WDDM_VSUB_OFF;
+      }
+      if (!vsub_sync(w)) {
+         w->prender_state = VDRM_WDDM_VSUB_LOST;
+         return -EIO;
+      }
+   } else if (ring != 0 && w->vsub_state == VDRM_WDDM_VSUB_ON) {
+      int ret = vsub_submit_one(w, data, len, ring, last_seqno);
+      if (ret == 0)
+         return 0;
+      if (ret != -EAGAIN)
+         return ret;
+      /* Not accepted: either too large for the private data budget (keep the
+       * experiment running, count it) or rejected by dxgkrnl (disable it).
+       * Either way the bytes were never queued, so Escape may carry them
+       * once every earlier virtual submission has reached the host. */
+      if (len + sizeof(VIRTIO_WDDM_SubmitCommand) + sizeof(VIRTIO_WDDM_CommandHeader) >
+          VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE) {
+         w->vsub_escaped++;
+      } else {
+         mesa_logw("vdrm-wddm: virtual submit disabled after %llu submissions",
+                   (unsigned long long)w->vsub_submitted);
+         w->vsub_state = VDRM_WDDM_VSUB_OFF;
+      }
+      if (!vsub_sync(w)) {
+         w->vsub_state = VDRM_WDDM_VSUB_LOST;
+         return -EIO;
+      }
+   }
+
+   return submit_one(w, data, len, ring);
 }
 
 /* ------------------------------------------------------------------ */
@@ -662,6 +1217,19 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
       return 0;
    }
 
+   /* The KMD turns CreateAllocation into RESOURCE_CREATE_BLOB on the same
+    * control queue; the host must already have seen GEM_NEW (drm2kgsl
+    * get_blob looks the blob_id up). A VidSch submission may still be
+    * parked, so drain it first. */
+   if ((w->vsub_state == VDRM_WDDM_VSUB_ON ||
+        w->prender_state == VDRM_WDDM_VSUB_ON) && !vsub_sync(w)) {
+      if (w->prender_state == VDRM_WDDM_VSUB_ON)
+         w->prender_state = VDRM_WDDM_VSUB_LOST;
+      else
+         w->vsub_state = VDRM_WDDM_VSUB_LOST;
+      return 0;
+   }
+
    res_priv.tag = VIRTIO_WDDM_CREATE_RESOURCE_TAG;
 
    alloc_priv.blob.tag = VIRTIO_WDDM_ALLOCATE_BLOB_TAG;
@@ -730,7 +1298,8 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
          return 0;
       }
 
-      handle = table_insert(w, rres.hAllocation, res_info.id, size, false);
+      handle = table_insert(w, rres.hAllocation, res_info.id, size, false,
+                            alloc_info.GpuVirtualAddress);
       if (!handle) {
          mesa_logw("wddm_bo_create: table_insert failed");
          w->runtime.free(w->runtime.ctx, &rres);
@@ -746,6 +1315,9 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
       simple_mtx_unlock(&w->table_lock);
 
       vdev->pending_shared_km_resource = rres.hKMResource;
+      /* rres.hAllocation lives on the runtime's device; only the source
+       * allocation (same backing, our device) can go on our paging queue. */
+      residency_make_resident(w, alloc_info.hAllocation, size);
 
       WDDM_DEBUG("wddm_bo_create(shared): blob=%llu size=%zu alloc=0x%x kmres=0x%x res_id=%u\n",
                 (unsigned long long)blob_id, size, rres.hAllocation,
@@ -779,12 +1351,16 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
    }
 
    /* 建表项。KMD 调用都在锁外做完，这里只占槽。 */
-   handle = table_insert(w, alloc_info.hAllocation, res_info.id, size, false);
+   handle = table_insert(w, alloc_info.hAllocation, res_info.id, size, false,
+                         alloc_info.GpuVirtualAddress);
    if (!handle) {
       wddm_destroy_alloc(w, alloc_info.hAllocation);
       return 0;
    }
 
+   WDDM_DEBUG("CreateAllocation gpu_va=0x%llx handle=%u\n",
+              (unsigned long long)alloc_info.GpuVirtualAddress, handle);
+   residency_make_resident(w, alloc_info.hAllocation, size);
    return handle;
 }
 
@@ -873,7 +1449,8 @@ wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
    status = w->dispatch.CreateAllocation(&ca);
    if (!NT_SUCCESS(status) || !ai.hAllocation)
       return 0;
-   handle = table_insert(w, ai.hAllocation, res_info.id, bytes, false);
+   handle = table_insert(w, ai.hAllocation, res_info.id, bytes, false,
+                         ai.GpuVirtualAddress);
    if (!handle) {
       wddm_destroy_alloc(w, ai.hAllocation);
       return 0;
@@ -881,6 +1458,7 @@ wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
 
    if (size)
       *size = bytes;
+   residency_make_resident(w, ai.hAllocation, bytes);
 
    WDDM_DEBUG("alloc_to_handle: kmt=0x%x res_id=%u size=%llu -> handle=%u\n",
               kmt, res_info.id, (unsigned long long)bytes, handle);
@@ -1020,6 +1598,14 @@ wddm_bo_close(struct vdrm_device *vdev, uint32_t handle)
       return;
    }
 
+   /* DestroyAllocation detaches the host resource synchronously. The
+    * SET_IOVA/close ccmds flushed by tu_free_zombie_vma_locked may still be
+    * queued in VidSch when the virtual path is on; let them land first.
+    * Not under eb_lock here, so only the atomics are consulted. */
+   if (p_atomic_read(&w->vsub_pending) && !vsub_sync(w))
+      mesa_loge("vdrm-wddm: destroying allocation 0x%x with unconsumed VidSch submission",
+                alloc.kmt);
+
    wddm_destroy_alloc(w, alloc.kmt);
 }
 
@@ -1109,6 +1695,13 @@ init_shmem(struct vdrm_wddm *w)
    vdev->shmem = (struct vdrm_shmem *)ptr;
    vdev->rsp_mem = (uint8_t *)ptr + offset;
    vdev->rsp_mem_len = VDRM_WDDM_SHMEM_SZ - offset;
+
+   {
+      struct vdrm_wddm_alloc ring;
+      if (table_get(w, handle, &ring) && ring.gpu_va)
+         w->vsub_cmd_va = ring.gpu_va;
+      WDDM_DEBUG("ring gpu_va=0x%llx\n", (unsigned long long)w->vsub_cmd_va);
+   }
 
    return true;
 }
@@ -1230,10 +1823,18 @@ vdrm_wddm_connect(int fd, uint32_t context_type)
       /* win3d KMD 不读 CreateContext 私有数据（参数走 ContextInit escape，
        * lib.rs:1162-1163）。 */
       status = w->dispatch.CreateContext(&create);
-      WDDM_DEBUG("CreateContext: status=0x%08lx\n", (ULONG)status);
+      WDDM_DEBUG("CreateContext: status=0x%08lx cmd=%p size=%u allocs=%u patches=%u\n",
+                 (ULONG)status, create.pCommandBuffer, create.CommandBufferSize,
+                 create.AllocationListSize, create.PatchLocationListSize);
       if (!NT_SUCCESS(status) || !create.hContext)
          goto out;
       w->h_context = create.hContext;
+      w->prender_cmd = create.pCommandBuffer;
+      w->prender_cmd_size = create.CommandBufferSize;
+      w->prender_allocs = create.pAllocationList;
+      w->prender_allocs_size = create.AllocationListSize;
+      w->prender_patches = create.pPatchLocationList;
+      w->prender_patches_size = create.PatchLocationListSize;
    }
 
    /* 6. ContextInit(capset=DRM)。KMD 会顺带建 shadow virgl（host 必须同时
@@ -1260,6 +1861,28 @@ vdrm_wddm_connect(int fd, uint32_t context_type)
    stage = "shared ring";
    if (!init_shmem(w))
       goto out;
+
+   /* 8. VidSch submission path. Needs the ring (vsub_sync polls seqno).
+    *    Default: GPU execbuf goes through D3DKMTRender on the physical
+    *    Graphics context (3D engine %). Alternative experiment: Copy/node 2
+    *    virtual submit. Graphics stays a physical DMA context (979
+    *    Graphics-virtual KMD BSODed). The two switches are mutually
+    *    exclusive: PHYSICAL_RENDER wins so 3D % can be tested without
+    *    Copy accounting; set VDRM_WDDM_PHYSICAL_RENDER=0 to try vsub. */
+   paging_init(w);
+   if (debug_get_option_vdrm_wddm_physical_render()) {
+      if (debug_get_option_vdrm_wddm_virtual_submit())
+         mesa_logw("vdrm-wddm: PHYSICAL_RENDER overrides VIRTUAL_SUBMIT");
+      prender_init(w);
+   } else {
+      vsub_init(w);
+   }
+   /* The ring blob was created before the paging queue existed. */
+   {
+      struct vdrm_wddm_alloc ring;
+      if (table_get(w, w->shmem_handle, &ring) && !ring.runtime_owned && !ring.imported)
+         residency_make_resident(w, ring.kmt, ring.size);
+   }
 
    ok = true;
 
