@@ -268,6 +268,13 @@ struct wsi_swapchain {
       struct vk_queue *queue;
    } blit;
 
+   /* Software backends normally need the pre-present submit to have landed
+    * before they can read the image, so wsi_common_queue_present() waits on
+    * swapchain->fences[image_index] on the calling thread. A backend that
+    * presents from its own thread sets this to take over that wait, so the
+    * app's render thread is not blocked on GPU completion. */
+   bool defers_sw_present_wait;
+
    struct {
       mtx_t lock;
       bool active;

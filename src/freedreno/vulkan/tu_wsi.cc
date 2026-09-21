@@ -58,6 +58,22 @@ tu_wsi_init(struct tu_physical_device *physical_device)
    if (result != VK_SUCCESS)
       return result;
 
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   /* The GDI present path needs the pixels in a host-visible linear
+    * allocation. Without wants_linear the common WSI code picks
+    * WSI_SWAPCHAIN_BUFFER_BLIT, which adds a second command-buffer submit per
+    * frame (tiled image -> linear buffer) that vkQueuePresentKHR then waits on
+    * synchronously because sw_device is set. On vDRM that extra submit costs a
+    * full guest->host->GPU->fence round trip, so render a linear swapchain
+    * image directly instead. TU_WSI_BUFFER_BLIT=1 restores the blit path for
+    * an A/B. */
+   {
+      const char *env = getenv("TU_WSI_BUFFER_BLIT");
+      if (!(env && *env && *env != '0'))
+         physical_device->wsi_device.wants_linear = true;
+   }
+#endif
+
    physical_device->wsi_device.supports_modifiers = true;
    physical_device->wsi_device.can_present_on_device =
       tu_wsi_can_present_on_device;
