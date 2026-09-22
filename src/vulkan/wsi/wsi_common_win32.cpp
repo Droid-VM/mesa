@@ -192,11 +192,18 @@ struct wsi_win32_swapchain {
    HWND wnd;
    HDC chain_dc;
 
+   /* GDI present is one SetDIBitsToDevice straight from the image's CPU
+    * mapping. gdi_dib selects the older two-step path instead (memcpy into a
+    * per-image DIB section, then StretchBlt): TU_WSI_GDI_DIB=1 forces it, and
+    * the present thread flips to it for the rest of the swapchain's life if
+    * SetDIBitsToDevice ever fails. The DIB sections are created lazily. */
+   bool                       gdi_dib;
+
    /* GDI present thread. vkQueuePresentKHR only pushes an image index here and
     * returns, so the app's render thread is free to record the next frame while
     * this thread waits for the pre-present submit to land and then does the
-    * memcpy/StretchBlt. Only this thread touches chain_dc and the image DCs
-    * after creation. Unused on the DXGI path. */
+    * GDI copy. Only this thread touches chain_dc and the image DCs after
+    * creation. Unused on the DXGI path. */
    bool                       present_thread_active;
    thrd_t                     present_thread;
    struct wsi_win32_present_ring present_ring;
@@ -632,6 +639,46 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
    return VK_SUCCESS;
 }
 
+/* Per-image DIB section plus memory DC, only needed by the StretchBlt
+ * fallback. Created lazily, possibly from the present thread. */
+static VkResult
+wsi_win32_image_init_dib(struct wsi_win32_swapchain *chain,
+                         struct wsi_win32_image *image)
+{
+   image->sw.dc = CreateCompatibleDC(chain->chain_dc);
+   if (!image->sw.dc)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   BITMAPINFO info = {};
+   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+   info.bmiHeader.biWidth = chain->extent.width;
+   info.bmiHeader.biHeight = -(LONG)chain->extent.height;
+   info.bmiHeader.biPlanes = 1;
+   info.bmiHeader.biBitCount = 32;
+   info.bmiHeader.biCompression = BI_RGB;
+
+   HBITMAP bmp = CreateDIBSection(image->sw.dc, &info, DIB_RGB_COLORS,
+                                  &image->sw.ppvBits, NULL, 0);
+   if (!bmp || !image->sw.ppvBits) {
+      if (bmp)
+         DeleteObject(bmp);
+      DeleteDC(image->sw.dc);
+      image->sw.dc = NULL;
+      image->sw.ppvBits = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   SelectObject(image->sw.dc, bmp);
+
+   BITMAP header;
+   int status = GetObject(bmp, sizeof(BITMAP), &header);
+   (void)status;
+   image->sw.bmp_row_pitch = header.bmWidthBytes;
+   image->sw.bmp = bmp;
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 wsi_win32_image_init(VkDevice device_h,
                      struct wsi_win32_swapchain *chain,
@@ -644,37 +691,12 @@ wsi_win32_image_init(VkDevice device_h,
    if (result != VK_SUCCESS)
       return result;
 
-   VkIcdSurfaceWin32 *win32_surface = (VkIcdSurfaceWin32 *)create_info->surface;
-   chain->wnd = win32_surface->hwnd;
    image->chain = chain;
 
-   if (chain->dxgi)
+   if (chain->dxgi || !chain->gdi_dib)
       return VK_SUCCESS;
 
-   chain->chain_dc = GetDC(chain->wnd);
-   image->sw.dc = CreateCompatibleDC(chain->chain_dc);
-   HBITMAP bmp = NULL;
-
-   BITMAPINFO info = { 0 };
-   info.bmiHeader.biSize = sizeof(BITMAPINFO);
-   info.bmiHeader.biWidth = create_info->imageExtent.width;
-   info.bmiHeader.biHeight = -create_info->imageExtent.height;
-   info.bmiHeader.biPlanes = 1;
-   info.bmiHeader.biBitCount = 32;
-   info.bmiHeader.biCompression = BI_RGB;
-
-   bmp = CreateDIBSection(image->sw.dc, &info, DIB_RGB_COLORS, &image->sw.ppvBits, NULL, 0);
-   assert(bmp && image->sw.ppvBits);
-
-   SelectObject(image->sw.dc, bmp);
-
-   BITMAP header;
-   int status = GetObject(bmp, sizeof(BITMAP), &header);
-   (void)status;
-   image->sw.bmp_row_pitch = header.bmWidthBytes;
-   image->sw.bmp = bmp;
-
-   return VK_SUCCESS;
+   return wsi_win32_image_init_dib(chain, image);
 }
 
 static void
@@ -711,7 +733,8 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
 
-   DeleteDC(chain->chain_dc);
+   if (chain->chain_dc)
+      ReleaseDC(chain->wnd, chain->chain_dc);
 
    if (chain->surface->current_swapchain == chain)
       chain->surface->current_swapchain = NULL;
@@ -929,19 +952,19 @@ wsi_win32_now_ms(void)
    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
 }
 
-/* The GDI half of a present: copy the image into the DIB and blit it to the
- * window. Runs on the present thread when there is one, otherwise inline on the
- * caller. Sets chain->status on failure. */
+/* Fallback: memcpy into the image's DIB section, then StretchBlt it to the
+ * window. Two full-frame CPU passes. */
 static void
-wsi_win32_present_to_gdi(struct wsi_win32_swapchain *chain,
-                         uint32_t image_index)
+wsi_win32_present_to_gdi_dib(struct wsi_win32_swapchain *chain,
+                             struct wsi_win32_image *image,
+                             double *t_copied, bool stats)
 {
-   struct wsi_win32_image *image = &chain->images[image_index];
-
-   const bool stats = wsi_win32_present_stats_enabled();
-   static double acc_copy, acc_blt, acc_flush, acc_next_log;
-   static unsigned acc_n;
-   double t0 = stats ? wsi_win32_now_ms() : 0;
+   if (!image->sw.bmp &&
+       wsi_win32_image_init_dib(chain, image) != VK_SUCCESS) {
+      chain->status = VK_ERROR_OUT_OF_HOST_MEMORY;
+      *t_copied = stats ? wsi_win32_now_ms() : 0;
+      return;
+   }
 
    char *ptr = (char *)image->base.cpu_map;
    char *dptr = (char *)image->sw.ppvBits;
@@ -951,7 +974,8 @@ wsi_win32_present_to_gdi(struct wsi_win32_swapchain *chain,
       dptr += image->sw.bmp_row_pitch;
       ptr += image->base.row_pitches[0];
    }
-   double t1 = stats ? wsi_win32_now_ms() : 0;
+   *t_copied = stats ? wsi_win32_now_ms() : 0;
+
    SetLastError(ERROR_SUCCESS);
    if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY)) {
       DWORD error = GetLastError();
@@ -963,11 +987,73 @@ wsi_win32_present_to_gdi(struct wsi_win32_swapchain *chain,
               chain->extent.width, chain->extent.height);
       chain->status = VK_ERROR_MEMORY_MAP_FAILED;
    }
+}
+
+/* Default: hand the image's CPU mapping to GDI as a top-down 32bpp DIB and let
+ * it draw straight into the window, one pass over the pixels instead of two.
+ * The row pitch is folded into biWidth (the blit buffer pitch is a multiple of
+ * 128 bytes, a linear image's a multiple of 64) and the destination width
+ * clips the padding. Same pixel layout as the DIB section path, so the
+ * surface formats behave identically. Returns false to ask for the fallback. */
+static bool
+wsi_win32_present_to_gdi_direct(struct wsi_win32_swapchain *chain,
+                                struct wsi_win32_image *image)
+{
+   const uint32_t pitch = image->base.row_pitches[0];
+
+   if (pitch % 4 != 0)
+      return false;
+
+   BITMAPINFO info = {};
+   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+   info.bmiHeader.biWidth = pitch / 4;
+   info.bmiHeader.biHeight = -(LONG)chain->extent.height;
+   info.bmiHeader.biPlanes = 1;
+   info.bmiHeader.biBitCount = 32;
+   info.bmiHeader.biCompression = BI_RGB;
+
+   SetLastError(ERROR_SUCCESS);
+   int lines = SetDIBitsToDevice(chain->chain_dc, 0, 0,
+                                 chain->extent.width, chain->extent.height,
+                                 0, 0, 0, chain->extent.height,
+                                 image->base.cpu_map, &info, DIB_RGB_COLORS);
+   if (lines == (int)chain->extent.height)
+      return true;
+
+   fprintf(stderr, "wsi-win32: SetDIBitsToDevice drew %d of %u lines "
+           "(error=%lu pitch=%u extent=%ux%u), falling back to DIB section\n",
+           lines, chain->extent.height, (unsigned long)GetLastError(),
+           pitch, chain->extent.width, chain->extent.height);
+   return false;
+}
+
+/* The GDI half of a present: get the image's pixels onto the window. Runs on
+ * the present thread when there is one, otherwise inline on the caller. Sets
+ * chain->status on failure. */
+static void
+wsi_win32_present_to_gdi(struct wsi_win32_swapchain *chain,
+                         uint32_t image_index)
+{
+   struct wsi_win32_image *image = &chain->images[image_index];
+
+   const bool stats = wsi_win32_present_stats_enabled();
+   static double acc_copy, acc_blt, acc_flush, acc_next_log;
+   static unsigned acc_n;
+   double t0 = stats ? wsi_win32_now_ms() : 0;
+   double t1 = t0;
+
+   if (!chain->gdi_dib && !wsi_win32_present_to_gdi_direct(chain, image))
+      chain->gdi_dib = true;
+
+   if (chain->gdi_dib)
+      wsi_win32_present_to_gdi_dib(chain, image, &t1, stats);
 
    double t2 = stats ? wsi_win32_now_ms() : 0;
 
-   /* GDI may batch the blit. Complete it before the DIB can be reused or
-    * the presenting thread goes idle waiting for the next Vulkan frame. */
+   /* GDI may batch the draw. Complete it before the source (the image's CPU
+    * mapping, or the DIB) is handed back to the next blit by marking the
+    * image idle, or the presenting thread goes idle waiting for the next
+    * Vulkan frame. */
    if (!GdiFlush())
       chain->status = VK_ERROR_MEMORY_MAP_FAILED;
 
@@ -1203,11 +1289,21 @@ wsi_win32_surface_create_swapchain(
    chain->status = VK_SUCCESS;
 
    chain->surface = surface;
+   chain->wnd = surface->base.hwnd;
 
    if (image_params->image_type == WSI_IMAGE_TYPE_DXGI) {
       result = wsi_win32_surface_create_swapchain_dxgi(surface, device, wsi, create_info, chain);
       if (result != VK_SUCCESS)
          goto fail;
+   } else {
+      chain->chain_dc = GetDC(chain->wnd);
+      if (!chain->chain_dc) {
+         result = VK_ERROR_SURFACE_LOST_KHR;
+         goto fail;
+      }
+
+      const char *env = getenv("TU_WSI_GDI_DIB");
+      chain->gdi_dib = env && *env && *env != '0';
    }
 
    for (uint32_t image = 0; image < num_images; image++) {
