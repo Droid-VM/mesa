@@ -69,39 +69,56 @@ enum wsi_win32_image_state {
 };
 
 /* Image-index handoff to the GDI present thread. wsi_common_queue.h does the
- * same job but does not compile as C++, and the bound here is known (one slot
- * per swapchain image plus the shutdown token), so a fixed ring is enough. */
-#define WSI_WIN32_PRESENT_RING 8
-
+ * same job but does not compile as C++, and the bound here is known exactly:
+ * an image cannot be presented again until the consumer has marked it idle,
+ * so at most one slot per swapchain image plus the shutdown token is ever in
+ * flight. The GDI path reports maxImageCount = 0 (no limit), so the ring is
+ * sized per swapchain rather than fixed. */
 struct wsi_win32_present_ring {
    mtx_t mutex;
    struct u_cnd_monotonic cond;
-   uint32_t slots[WSI_WIN32_PRESENT_RING];
+   uint32_t *slots;
+   unsigned size;
    unsigned head, count;
    bool initialized;
 };
 
 static VkResult
-wsi_win32_present_ring_init(struct wsi_win32_present_ring *ring)
+wsi_win32_present_ring_init(struct wsi_win32_present_ring *ring,
+                            unsigned size,
+                            const VkAllocationCallbacks *allocator)
 {
-   if (mtx_init(&ring->mutex, mtx_plain) != thrd_success)
+   ring->slots = (uint32_t *)vk_alloc(allocator, size * sizeof(*ring->slots),
+                                      8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!ring->slots)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
-   if (u_cnd_monotonic_init(&ring->cond) != thrd_success) {
-      mtx_destroy(&ring->mutex);
+   if (mtx_init(&ring->mutex, mtx_plain) != thrd_success) {
+      vk_free(allocator, ring->slots);
+      ring->slots = NULL;
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
+   if (u_cnd_monotonic_init(&ring->cond) != thrd_success) {
+      mtx_destroy(&ring->mutex);
+      vk_free(allocator, ring->slots);
+      ring->slots = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   ring->size = size;
    ring->head = ring->count = 0;
    ring->initialized = true;
    return VK_SUCCESS;
 }
 
 static void
-wsi_win32_present_ring_finish(struct wsi_win32_present_ring *ring)
+wsi_win32_present_ring_finish(struct wsi_win32_present_ring *ring,
+                              const VkAllocationCallbacks *allocator)
 {
    if (!ring->initialized)
       return;
    u_cnd_monotonic_destroy(&ring->cond);
    mtx_destroy(&ring->mutex);
+   vk_free(allocator, ring->slots);
+   ring->slots = NULL;
    ring->initialized = false;
 }
 
@@ -110,9 +127,10 @@ wsi_win32_present_ring_push(struct wsi_win32_present_ring *ring, uint32_t index)
 {
    mtx_lock(&ring->mutex);
    /* The producer never outruns the ring: an image cannot be presented again
-    * until the consumer has marked it idle. */
-   assert(ring->count < WSI_WIN32_PRESENT_RING);
-   ring->slots[(ring->head + ring->count) % WSI_WIN32_PRESENT_RING] = index;
+    * until the consumer has marked it idle, and the ring has one slot per
+    * image plus one for the shutdown token. */
+   assert(ring->count < ring->size);
+   ring->slots[(ring->head + ring->count) % ring->size] = index;
    ring->count++;
    u_cnd_monotonic_signal(&ring->cond);
    mtx_unlock(&ring->mutex);
@@ -125,7 +143,7 @@ wsi_win32_present_ring_pull(struct wsi_win32_present_ring *ring)
    while (ring->count == 0)
       u_cnd_monotonic_wait(&ring->cond, &ring->mutex);
    uint32_t index = ring->slots[ring->head];
-   ring->head = (ring->head + 1) % WSI_WIN32_PRESENT_RING;
+   ring->head = (ring->head + 1) % ring->size;
    ring->count--;
    mtx_unlock(&ring->mutex);
    return index;
@@ -686,7 +704,7 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    if (chain->present_thread_active) {
       wsi_win32_present_ring_push(&chain->present_ring, UINT32_MAX);
       thrd_join(chain->present_thread, NULL);
-      wsi_win32_present_ring_finish(&chain->present_ring);
+      wsi_win32_present_ring_finish(&chain->present_ring, allocator);
       chain->present_thread_active = false;
    }
 
@@ -1210,7 +1228,10 @@ wsi_win32_surface_create_swapchain(
    if (!chain->dxgi) {
       const char *env = getenv("TU_WSI_PRESENT_THREAD");
       if (!(env && *env == '0')) {
-         result = wsi_win32_present_ring_init(&chain->present_ring);
+         /* One slot per image plus the shutdown token. */
+         result = wsi_win32_present_ring_init(&chain->present_ring,
+                                              chain->base.image_count + 1,
+                                              allocator);
          if (result == VK_SUCCESS) {
             if (thrd_create(&chain->present_thread,
                             wsi_win32_manage_present_queue,
@@ -1218,7 +1239,7 @@ wsi_win32_surface_create_swapchain(
                chain->present_thread_active = true;
                chain->base.defers_sw_present_wait = true;
             } else {
-               wsi_win32_present_ring_finish(&chain->present_ring);
+               wsi_win32_present_ring_finish(&chain->present_ring, allocator);
             }
          }
       }

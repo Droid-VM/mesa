@@ -60,16 +60,21 @@ tu_wsi_init(struct tu_physical_device *physical_device)
 
 #ifdef VK_USE_PLATFORM_WIN32_KHR
    /* The GDI present path needs the pixels in a host-visible linear
-    * allocation. Without wants_linear the common WSI code picks
-    * WSI_SWAPCHAIN_BUFFER_BLIT, which adds a second command-buffer submit per
-    * frame (tiled image -> linear buffer) that vkQueuePresentKHR then waits on
-    * synchronously because sw_device is set. On vDRM that extra submit costs a
-    * full guest->host->GPU->fence round trip, so render a linear swapchain
-    * image directly instead. TU_WSI_BUFFER_BLIT=1 restores the blit path for
-    * an A/B. */
+    * allocation. By default the common WSI code picks
+    * WSI_SWAPCHAIN_BUFFER_BLIT: the app renders a tiled+UBWC swapchain image
+    * and the pre-present submit copies it into a linear buffer with one
+    * 2D-engine pass (vkCmdCopyImageToBuffer). The GDI present thread waits
+    * for that submit instead of the render thread (see wsi_common_win32.cpp),
+    * so the extra guest->host->GPU->fence round trip no longer sits on the
+    * app's critical path.
+    *
+    * TU_WSI_LINEAR=1 renders a VK_IMAGE_TILING_LINEAR swapchain image directly
+    * and skips the blit submit. That path hangs on some GPUs of the same
+    * generation (root cause not yet identified), so it stays opt-in for A/B
+    * runs only. */
    {
-      const char *env = getenv("TU_WSI_BUFFER_BLIT");
-      if (!(env && *env && *env != '0'))
+      const char *env = getenv("TU_WSI_LINEAR");
+      if (env && *env && *env != '0')
          physical_device->wsi_device.wants_linear = true;
    }
 #endif
