@@ -948,6 +948,23 @@ tu_win_sync_poll(struct tu_device *dev, struct tu_virtio_sync *sync)
    return true;
 }
 
+/* 便宜版 query_faults()：只读共享页，不发 GET_PARAM 往返，给等待循环每几毫秒
+ * 调一次。drm2kgsl 在 KGSL ioctl 失败（GPU fault 后 context 被 KGSL 作废，
+ * 下一次 GPU_COMMAND 回 -EDEADLK）时给 async_error++；global_faults 这台 host
+ * 目前不写，一并比较不亏。fault_count 是 device_check_status 记的上一次总和。 */
+static bool
+tu_win_sync_faulted(struct tu_device *dev)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+
+   if (!vdrm_shmem_has_field(vdev->shmem, global_faults))
+      return false;
+
+   uint64_t faults = (uint64_t)vdev->shmem->global_faults +
+                     vdev->shmem->async_error;
+   return faults != dev->fault_count;
+}
+
 class tu_win_sync_timer {
 public:
    ~tu_win_sync_timer()
@@ -998,6 +1015,7 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
 
    const bool debug = debug_get_option_tu_win_sync_debug();
    uint64_t next_log_ns = debug ? os_time_get_nano() + 1000000000ull : 0;
+   uint64_t next_fault_check_ns = 0;
    tu_win_sync_timer timer;
 
    for (;;) {
@@ -1044,6 +1062,19 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
       if (abs_timeout_ns == 0 ||
           (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns))
          return VK_TIMEOUT;
+
+      /* GPU fault 在 Windows 上没有 syncobj 那样的完成通路：出错的提交永远写
+       * 不到 userspace_fence，这个循环会无限期等下去（present 线程卡 fence、
+       * 应用卡 acquire，看起来跟死锁一样）。每隔几毫秒看一眼 host 的错误
+       * 计数，变了就走 check_status 统一记账并置 device lost。lost 的判定
+       * 单独再读一次：另一个线程可能已经先把计数记走了。 */
+      if (now >= next_fault_check_ns) {
+         if (tu_win_sync_faulted(dev))
+            vk_device_check_status(&dev->vk);
+         if (vk_device_is_lost(&dev->vk))
+            return VK_ERROR_DEVICE_LOST;
+         next_fault_check_ns = now + 4000000ull;
+      }
 
       /* Sleep(1) can cost a whole scheduler tick on Windows. Reuse a timer
        * while polling, and never request a wait beyond the caller's deadline.
