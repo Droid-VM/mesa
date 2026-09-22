@@ -192,11 +192,19 @@ struct wsi_win32_swapchain {
    HWND wnd;
    HDC chain_dc;
 
-   /* GDI present is one SetDIBitsToDevice straight from the image's CPU
-    * mapping. gdi_dib selects the older two-step path instead (memcpy into a
-    * per-image DIB section, then StretchBlt): TU_WSI_GDI_DIB=1 forces it, and
-    * the present thread flips to it for the rest of the swapchain's life if
-    * SetDIBitsToDevice ever fails. The DIB sections are created lazily. */
+   /* GDI present: memcpy the image into a per-image DIB section, then
+    * StretchBlt it to the window (gdi_dib, the default), or hand the image's
+    * CPU mapping straight to SetDIBitsToDevice (TU_WSI_GDI_DIRECT=1).
+    *
+    * The direct path saves the present thread 0.2-0.3 ms/frame at 720p-900p,
+    * but measured no faster end to end and 4-10% slower under light load
+    * (probe_wsi_fps, Adreno 830 guest, 2026-09-22): the source is a GPU
+    * allocation mapping rather than a DIB section, so win32k has to lock the
+    * pages and wrap them in a temporary surface, and the render thread's
+    * vkQueuePresentKHR p50 rose from 0.01 to 0.09 ms alongside it. Keep the
+    * DIB section path as default; the direct path stays for A/B and flips
+    * back to DIB for the rest of the swapchain's life if SetDIBitsToDevice
+    * ever fails. DIB sections are created lazily. */
    bool                       gdi_dib;
 
    /* GDI present thread. vkQueuePresentKHR only pushes an image index here and
@@ -952,8 +960,9 @@ wsi_win32_now_ms(void)
    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
 }
 
-/* Fallback: memcpy into the image's DIB section, then StretchBlt it to the
- * window. Two full-frame CPU passes. */
+/* Default: memcpy into the image's DIB section, then StretchBlt it to the
+ * window. Two full-frame CPU passes, but the kernel side is a plain
+ * surface-to-surface blit. */
 static void
 wsi_win32_present_to_gdi_dib(struct wsi_win32_swapchain *chain,
                              struct wsi_win32_image *image,
@@ -989,12 +998,13 @@ wsi_win32_present_to_gdi_dib(struct wsi_win32_swapchain *chain,
    }
 }
 
-/* Default: hand the image's CPU mapping to GDI as a top-down 32bpp DIB and let
- * it draw straight into the window, one pass over the pixels instead of two.
- * The row pitch is folded into biWidth (the blit buffer pitch is a multiple of
- * 128 bytes, a linear image's a multiple of 64) and the destination width
- * clips the padding. Same pixel layout as the DIB section path, so the
- * surface formats behave identically. Returns false to ask for the fallback. */
+/* TU_WSI_GDI_DIRECT=1: hand the image's CPU mapping to GDI as a top-down
+ * 32bpp DIB and let it draw straight into the window, one user-mode pass over
+ * the pixels instead of two. The row pitch is folded into biWidth (the blit
+ * buffer pitch is a multiple of 128 bytes, a linear image's a multiple of 64)
+ * and the destination width clips the padding. Same pixel layout as the DIB
+ * section path, so the surface formats behave identically. Returns false to
+ * ask for the fallback. */
 static bool
 wsi_win32_present_to_gdi_direct(struct wsi_win32_swapchain *chain,
                                 struct wsi_win32_image *image)
@@ -1302,8 +1312,8 @@ wsi_win32_surface_create_swapchain(
          goto fail;
       }
 
-      const char *env = getenv("TU_WSI_GDI_DIB");
-      chain->gdi_dib = env && *env && *env != '0';
+      const char *env = getenv("TU_WSI_GDI_DIRECT");
+      chain->gdi_dib = !(env && *env && *env != '0');
    }
 
    for (uint32_t image = 0; image < num_images; image++) {
