@@ -27,6 +27,7 @@
 #if !defined(_WIN32)
 #include "util/libsync.h"
 #endif
+#include "util/stack_array.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
 #include "vk_drm_syncobj.h"
@@ -1113,6 +1114,70 @@ static const struct vk_sync_type tu_win_sync_type = {
    .wait = tu_win_sync_wait,
    .wait_many = tu_win_sync_wait_many,
 };
+
+DEBUG_GET_ONCE_BOOL_OPTION(tu_win_submit_cpu_wait, "TU_WIN_SUBMIT_CPU_WAIT", false)
+
+/* Windows 没有 drm syncobj，execbuf 带不了 in syncobj（vdrm_wddm 的
+ * execbuf_locked 见到非 0 计数直接 -ENOSYS），提交前的等待只能在 CPU 做。
+ * 但不是每个 wait 都需要真等：
+ *
+ * - 由本队列已提交工作签发的 sync（owner == queue）：本队列对应 host 一个
+ *   submitqueue，ccmd 经 VidSch 单 context 按序送达，drm2kgsl 在同一个 KGSL
+ *   context 内按序执行（大提交拆批也保序），所以直接入 ring 即可——Linux 上
+ *   内核对同队列 syncobj 也是这么处理的。每帧的 present 提交等的正是本队列的
+ *   render-finished semaphore，CPU 等它会把 vkQueuePresentKHR 卡到本帧渲染
+ *   结束，GPU 在 render 结束到 blit 抵达之间空转，应用的下一帧 CPU 工作也
+ *   无法与 GPU 重叠。
+ * - 已确认完成的（signaled）：不用等。
+ * - 其余（跨队列、尚未签发、timeline 模拟点、dummy 之类的其他类型）：保留
+ *   CPU 等待，保守但正确。
+ *
+ * 判定与 tu_empty_submit_can_skip() 的 owner 检查一致。
+ * TU_WIN_SUBMIT_CPU_WAIT=1 恢复对所有 wait 的 CPU 等待，用来隔离 host 侧
+ * 不保序的问题（症状：present 拷到比 render 更早的旧帧）。 */
+static VkResult
+tu_win_submit_wait_syncs(struct tu_queue *queue,
+                         struct vk_sync_wait *waits, uint32_t wait_count)
+{
+   struct tu_device *dev = queue->device;
+   const struct vk_sync_type *base_type = &dev->physical_device->syncobj_type;
+   const struct vk_sync_type *poll_type = &dev->physical_device->poll_sync_type;
+   const bool force_wait = debug_get_option_tu_win_submit_cpu_wait();
+   VkResult result = VK_SUCCESS;
+
+   if (wait_count == 0)
+      return VK_SUCCESS;
+
+   STACK_ARRAY(struct vk_sync_wait, pending, wait_count);
+   uint32_t pending_count = 0;
+
+   for (uint32_t i = 0; i < wait_count; i++) {
+      struct vk_sync *sync = waits[i].sync;
+
+      if (!force_wait && (sync->type == base_type || sync->type == poll_type)) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(sync);
+
+         if (s->signaled || p_atomic_read(&s->owner) == queue)
+            continue;
+      }
+
+      pending[pending_count++] = waits[i];
+   }
+
+   if (debug_get_option_tu_win_sync_debug() && pending_count != wait_count)
+      fprintf(stderr, "tu-win32-sync: submit queue=%u skipped %u of %u "
+              "same-queue waits\n", queue->msm_queue_id,
+              wait_count - pending_count, wait_count);
+
+   if (pending_count) {
+      result = vk_sync_wait_many(&dev->vk, pending_count, pending,
+                                 (enum vk_sync_wait_flags)0,
+                                 OS_TIMEOUT_INFINITE);
+   }
+
+   STACK_ARRAY_FINISH(pending);
+   return result;
+}
 #endif /* _WIN32 */
 static bool
 tu_virtio_single_queue(struct tu_device *dev)
@@ -2138,17 +2203,12 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    }
 
 #ifdef _WIN32
-   /* Windows 没有 drm syncobj，execbuf 带不了 in/out syncobj（vdrm_wddm 的
-    * execbuf_locked 见到非 0 计数直接 -ENOSYS）。等待改成提交前的 CPU 等待：
-    * 保守但正确——等到之后再入 ring，host 按序执行，语义强于 GPU 侧等待。
+   /* Windows 没有 drm syncobj，execbuf 带不了 in/out syncobj。等待在提交前
+    * 于 CPU 完成（同队列已签发的 sync 免等，见 tu_win_submit_wait_syncs），
     * 放在拿 bo_mutex 之前，别拿着锁睡。信号见下面提交后的 seqno 记录。 */
-   if (wait_count) {
-      result = vk_sync_wait_many(&queue->device->vk, wait_count, waits,
-                                 (enum vk_sync_wait_flags)0,
-                                 OS_TIMEOUT_INFINITE);
-      if (result != VK_SUCCESS)
-         return result;
-   }
+   result = tu_win_submit_wait_syncs(queue, waits, wait_count);
+   if (result != VK_SUCCESS)
+      return result;
    num_in_syncobjs = 0;
 #endif
 
