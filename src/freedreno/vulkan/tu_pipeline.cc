@@ -5001,6 +5001,11 @@ tu_compute_pipeline_create(VkDevice device,
       nir_shader *nir = tu_spirv_to_nir(dev, pipeline_mem_ctx, flags,
                                         stage_info, &key, MESA_SHADER_COMPUTE);
 
+      if (!nir) {
+         result = VK_ERROR_INVALID_SHADER_NV;
+         goto fail;
+      }
+
       nir_initial_disasm = executable_info ?
          nir_shader_as_str(nir, pipeline->base.executables_mem_ctx) : NULL;
 

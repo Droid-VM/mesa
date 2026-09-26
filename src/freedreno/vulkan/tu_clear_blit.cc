@@ -2421,7 +2421,9 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
     */
 
    unsigned blit_param = rotate[mirror_y][mirror_x];
-   if (dst_image->layout[0].nr_samples > 1 ||
+   if (dst_image->vk.image_type == VK_IMAGE_TYPE_3D ||
+       src_image->vk.image_type == VK_IMAGE_TYPE_3D ||
+       dst_image->layout[0].nr_samples > 1 ||
        src_image->vk.format == VK_FORMAT_BC1_RGB_UNORM_BLOCK ||
        src_image->vk.format == VK_FORMAT_BC1_RGB_SRGB_BLOCK ||
        filter == VK_FILTER_CUBIC_EXT ||
@@ -2566,7 +2568,8 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
       copy_format(dst_image->vk.format, info->imageSubresource.aspectMask);
    enum pipe_format dst_format =
       copy_format(dst_image->vk.format, info->imageSubresource.aspectMask);
-   const struct blit_ops *ops = &r2d_ops<CHIP>;
+   const struct blit_ops *ops =
+      dst_image->vk.image_type == VK_IMAGE_TYPE_3D ? &r3d_ops<CHIP> : &r2d_ops<CHIP>;
 
    /* special case for buffer to stencil */
    if (dst_image->vk.format == VK_FORMAT_D24_UNORM_S8_UINT &&
@@ -2575,7 +2578,9 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
    }
 
    /* note: could use "R8_UNORM" when no UBWC */
-   bool has_unaligned = CHIP >= A7XX; /* If unaligned buffer copies are supported. */
+   bool has_unaligned = CHIP >= A7XX &&
+                        dst_image->vk.image_type != VK_IMAGE_TYPE_3D;
+   /* A7XX's unaligned path programs 2D A2D registers, not the 3D blit path. */
    unsigned blit_param = 0;
    if (src_format == PIPE_FORMAT_Y8_UNORM) {
       ops = &r3d_ops<CHIP>;
@@ -2791,7 +2796,8 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
       copy_format(src_image->vk.format, info->imageSubresource.aspectMask);
    enum pipe_format src_format =
       copy_format(src_image->vk.format, info->imageSubresource.aspectMask);
-   const struct blit_ops *ops = &r2d_ops<CHIP>;
+   const struct blit_ops *ops =
+      src_image->vk.image_type == VK_IMAGE_TYPE_3D ? &r3d_ops<CHIP> : &r2d_ops<CHIP>;
 
    if (src_image->vk.format == VK_FORMAT_D24_UNORM_S8_UINT &&
        info->imageSubresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -3020,7 +3026,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
    const struct blit_ops *ops = &r2d_ops<CHIP>;
    struct tu_cs *cs = &cmd->cs;
 
-   if (dst_image->layout[0].nr_samples > 1)
+   if (src_image->vk.image_type == VK_IMAGE_TYPE_3D ||
+       dst_image->vk.image_type == VK_IMAGE_TYPE_3D ||
+       dst_image->layout[0].nr_samples > 1)
       ops = &r3d_ops<CHIP>;
 
    VkOffset3D src_offset = info->srcOffset;
@@ -3881,7 +3889,9 @@ clear_image_cp_blit(struct tu_cmd_buffer *cmd,
       assert(range->baseArrayLayer == 0);
    }
 
-   const struct blit_ops *ops = image->layout[0].nr_samples > 1 ? &r3d_ops<CHIP> : &r2d_ops<CHIP>;
+   const struct blit_ops *ops =
+      image->vk.image_type == VK_IMAGE_TYPE_3D ||
+      image->layout[0].nr_samples > 1 ? &r3d_ops<CHIP> : &r2d_ops<CHIP>;
 
    ops->setup(cmd, cs, format, format, aspect_mask, 0, true, image->layout[0].ubwc,
               (VkSampleCountFlagBits) image->layout[0].nr_samples,
@@ -3895,10 +3905,15 @@ clear_image_cp_blit(struct tu_cmd_buffer *cmd,
       if (image->layout[0].depth0 > 1)
          layer_count = u_minify(image->layout[0].depth0, range->baseMipLevel + j);
 
-      ops->coords(cmd, cs, (VkOffset2D) {}, blt_no_coord, (VkExtent2D) {
-                     u_minify(image->layout[0].width0, range->baseMipLevel + j),
-                     u_minify(image->layout[0].height0, range->baseMipLevel + j)
-                  });
+      uint32_t width =
+         u_minify(image->layout[0].width0, range->baseMipLevel + j);
+      uint32_t height =
+         u_minify(image->layout[0].height0, range->baseMipLevel + j);
+
+      if (ops != &r3d_ops<CHIP>) {
+         ops->coords(cmd, cs, (VkOffset2D) {}, blt_no_coord,
+                     (VkExtent2D) { width, height });
+      }
 
       struct fdl6_view dst;
       const VkImageSubresourceLayers subresource = {
@@ -3910,6 +3925,16 @@ clear_image_cp_blit(struct tu_cmd_buffer *cmd,
       tu_image_view_copy_blit<CHIP>(&dst, image, format, &subresource, 0, false);
 
       for (uint32_t i = 0; i < layer_count; i++) {
+         if (ops == &r3d_ops<CHIP>) {
+            const float coords[] = {
+               /* r3d_dst() already selects the slice through the MRT base.
+                * The clear vertex shader still writes VARYING_SLOT_LAYER,
+                * so keep that layer at zero for this single-slice view. */
+               0, 0, 0, 0,
+               width, height, 0, 1,
+            };
+            r3d_coords_raw(cmd, cs, coords);
+         }
          ops->dst(cs, &dst, i, format);
          ops->run(cmd, cs);
       }
@@ -4003,6 +4028,7 @@ use_generic_clear_for_image_clear(struct tu_cmd_buffer *cmd,
 {
    const struct fd_dev_info *info = cmd->device->physical_device->info;
    return info->props.has_generic_clear &&
+          image->vk.image_type != VK_IMAGE_TYPE_3D &&
           /* Clearing VK_FORMAT_R8G8_* with fast-clear value, certain
            * dimensions (e.g. 960x540), and having GMEM renderpass afterwards
            * may lead to a GPU fault on A7XX.
