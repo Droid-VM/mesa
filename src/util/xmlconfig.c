@@ -45,12 +45,42 @@
 #include <sys/stat.h>
 #endif
 #ifdef NO_REGEX
-typedef int regex_t;
+/* Without a regex library, still honor literal alternatives such as
+ * "DXVK|vkd3d" in the built-in driver configuration. Reject the whole pattern
+ * if it needs other ERE operators rather than accidentally applying a rule
+ * more broadly than intended. Matching is unanchored, like regexec(). */
+typedef const char *regex_t;
 #define REG_EXTENDED 0
 #define REG_NOSUB 0
 #define REG_NOMATCH 1
-static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
-static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
+static inline int
+regcomp(regex_t *r, const char *s, int f)
+{
+   *r = strpbrk(s, ".^$[]()\\*+?{}") ? NULL : s;
+   return 0;
+}
+
+static inline int
+regexec(regex_t *r, const char *s, int n, void *p, int f)
+{
+   if (!*r)
+      return REG_NOMATCH;
+
+   const char *alternative = *r;
+   do {
+      const char *end = strchr(alternative, '|');
+      size_t len = end ? (size_t)(end - alternative) : strlen(alternative);
+      if (!len)
+         return 0;
+      for (const char *candidate = s; *candidate; candidate++) {
+         if (strncmp(candidate, alternative, len) == 0)
+            return 0;
+      }
+      alternative = end ? end + 1 : NULL;
+   } while (alternative);
+
+   return REG_NOMATCH;
+}
 static inline void regfree(regex_t* r) {}
 #else
 #include <regex.h>
