@@ -417,6 +417,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
@@ -846,6 +847,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_EXT_image_2d_view_of_3d  */
    features->image2DViewOf3D = true;
    features->sampler2DViewOf3D = true;
+
+   /* VK_EXT_image_sliced_view_of_3d */
+   features->imageSlicedViewOf3D = true;
 
    /* VK_EXT_image_view_min_lod */
    features->minLod = true;
