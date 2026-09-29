@@ -36,7 +36,10 @@
 
 #define TU_MAX_QUEUE_FAMILIES 2
 
-#define TU_BORDER_COLOR_COUNT 4096
+/* Allow four full D3D12 sampler heaps to use distinct custom border colors.
+ * The sampler descriptor's BCOLOR index can address more than 4K entries.
+ */
+#define TU_BORDER_COLOR_COUNT 8192
 #define TU_BORDER_COLOR_BUILTIN 6
 
 #define TU_BLIT_SHADER_SIZE 4096
