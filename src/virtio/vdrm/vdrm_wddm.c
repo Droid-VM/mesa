@@ -117,7 +117,8 @@ _Static_assert(sizeof(VIRTIO_WDDM_SubmitCommand) == 8, "SubmitCommand");
 _Static_assert(sizeof(D3DDDI_MAPGPUVIRTUALADDRESS) == 104, "MAPGPUVIRTUALADDRESS");
 _Static_assert(offsetof(D3DDDI_MAPGPUVIRTUALADDRESS, VirtualAddress) == 88, "MAP.VA");
 _Static_assert(offsetof(D3DDDI_MAPGPUVIRTUALADDRESS, PagingFenceValue) == 96, "MAP.Fence");
-_Static_assert(offsetof(D3DDDI_ALLOCATIONINFO2, GpuVirtualAddress) == 40, "ALLOCINFO2.GVA");
+_Static_assert(offsetof(D3DDDI_ALLOCATIONINFO2, GpuVirtualAddress) ==
+               (sizeof(void *) == 8 ? 40 : 24), "ALLOCINFO2.GVA");
 
 /* 关键偏移：KMD 按固定偏移切载荷（EXEC_BUF 的 command_slice 从 16 起，
  * adapter.rs:1770-1773；capset 数据同样紧跟 16 字节头）。 */
