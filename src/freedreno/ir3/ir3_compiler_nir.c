@@ -2026,6 +2026,32 @@ emit_readonly_load_uav(struct ir3_context *ctx,
    }
 }
 
+static bool
+prefer_ldib_for_ssbo(struct ir3_context *ctx, nir_intrinsic_instr *intr)
+{
+   /* A8xx compute loops can spend substantially longer waiting on repeated
+    * vector ISAM loads than on LDIB, even with identical register allocation
+    * and scheduling. Keep the preference local to 32-bit vector loop loads.
+    */
+   if (ctx->compiler->gen != 8 || ctx->s->info.stage != MESA_SHADER_COMPUTE ||
+       intr->def.bit_size != 32 || intr->def.num_components < 2)
+      return false;
+
+   /* opt_offsets may already have folded an 8-bit ISAM immediate. LDIB only
+    * has 7 bits; retain ISAM when its folded base does not fit LDIB.
+    */
+   if (nir_intrinsic_base(intr) >= 128)
+      return false;
+
+   for (nir_cf_node *node = intr->instr.block->cf_node.parent; node;
+        node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         return true;
+   }
+
+   return false;
+}
+
 /* src[] = { buffer_index, offset }. No const_index */
 static void
 emit_intrinsic_load_ssbo(struct ir3_context *ctx,
@@ -2042,7 +2068,7 @@ emit_intrinsic_load_ssbo(struct ir3_context *ctx,
    if (!(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER) ||
        (intr->def.num_components > 1 && !ctx->compiler->info->props.has_isam_v) ||
        (ctx->compiler->options.storage_8bit && intr->def.bit_size == 8) ||
-       !ctx->compiler->has_isam_ssbo) {
+       !ctx->compiler->has_isam_ssbo || prefer_ldib_for_ssbo(ctx, intr)) {
       ctx->funcs->emit_intrinsic_load_ssbo(ctx, intr, dst);
       return;
    }
