@@ -188,6 +188,8 @@ virtio_simple_ioctl(struct vdrm_device *vdrm, unsigned cmd, void *_req)
          vdrm_alloc_rsp(vdrm, &req->hdr, rsp_len);
 
    int ret = vdrm_send_req(vdrm, &req->hdr, true);
+   if (ret)
+      return ret;
 
    if (cmd & IOC_OUT)
       memcpy(_req, rsp->payload, _IOC_SIZE(cmd));

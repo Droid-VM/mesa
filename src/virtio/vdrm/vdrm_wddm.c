@@ -1086,6 +1086,17 @@ submit_ccmd_stream(struct vdrm_wddm *w, const void *data, uint32_t len, uint8_t 
       }
    }
 
+   /* Escape reaches the host directly while Render/SubmitCommandVirtual may
+    * still be queued in VidSch. Preserve ccmd order before switching paths:
+    * a fault-status query that overtakes GEM_SUBMIT can publish a newer seqno
+    * which the delayed submit then overwrites, leaving host_sync spinning.
+    * eb_lock prevents another submission from entering during this drain. */
+   if (!vsub_sync(w)) {
+      w->prender_state = VDRM_WDDM_VSUB_LOST;
+      w->vsub_state = VDRM_WDDM_VSUB_LOST;
+      return -EIO;
+   }
+
    return submit_one(w, data, len, ring);
 }
 
