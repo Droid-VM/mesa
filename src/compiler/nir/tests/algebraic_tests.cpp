@@ -70,8 +70,8 @@ void algebraic_test_base::test_op(nir_op op, nir_def *src0, nir_def *src1,
    ASSERT_TRUE(nir_src_is_const(ref_instr->src[1]));
    ASSERT_TRUE(nir_src_is_const(optimized_instr->src[1]));
 
-   int32_t ref = nir_src_as_int(ref_instr->src[1]);
-   int32_t optimized = nir_src_as_int(optimized_instr->src[1]);
+   uint64_t ref = nir_src_as_uint(ref_instr->src[1]);
+   uint64_t optimized = nir_src_as_uint(optimized_instr->src[1]);
 
    EXPECT_EQ(ref, optimized) << "Test input: " << desc;
 
@@ -151,6 +151,45 @@ TEST_F(nir_opt_algebraic_test, irem_pow2_src2)
    test_2src_op(nir_op_irem, INT32_MAX, -4);
    test_2src_op(nir_op_irem, INT32_MIN, 4);
    test_2src_op(nir_op_irem, INT32_MIN, -4);
+}
+
+TEST_F(nir_opt_algebraic_test, idiv_pow2_signed_rounding)
+{
+   for (unsigned bits : {8, 16, 32, 64}) {
+      res_var = nir_local_variable_create(b->impl, glsl_intN_t_type(bits), "res");
+      const uint64_t sign_bit = UINT64_C(1) << (bits - 1);
+
+      for (unsigned shift = 0; shift < bits; shift++) {
+         const uint64_t magnitude = UINT64_C(1) << shift;
+         for (bool negative : {false, true}) {
+            if (!negative && magnitude == sign_bit)
+               continue;
+            const uint64_t divisor = negative ? -magnitude : magnitude;
+            uint64_t random = UINT64_C(0x4d595df4d0f33173);
+            const uint64_t edges[] = {
+               0, 1, UINT64_MAX, sign_bit, sign_bit + 1, sign_bit - 1,
+               magnitude - 1, magnitude, magnitude + 1,
+               -magnitude - 1, -magnitude, -magnitude + 1,
+            };
+            for (unsigned i = 0; i < ARRAY_SIZE(edges) + 256; i++) {
+               random = random * UINT64_C(6364136223846793005) + 1;
+               const uint64_t dividend = i < ARRAY_SIZE(edges) ? edges[i] :
+                  bits == 8 ? i - ARRAY_SIZE(edges) : random;
+               /* Signed division overflow is undefined. Constant folding
+                * chooses zero, while both lowerings can wrap to INT_MIN.
+                */
+               const uint64_t mask = UINT64_MAX >> (64 - bits);
+               if (negative && shift == 0 && (dividend & mask) == sign_bit)
+                  continue;
+               char desc[128];
+               snprintf(desc, sizeof(desc), "idiv%u(0x%" PRIx64 ", 0x%" PRIx64 ")",
+                        bits, dividend, divisor);
+               test_op(nir_op_idiv, nir_imm_intN_t(b, dividend, bits),
+                       nir_imm_intN_t(b, divisor, bits), NULL, NULL, desc);
+            }
+         }
+      }
+   }
 }
 
 TEST_F(nir_opt_algebraic_test, msad)
