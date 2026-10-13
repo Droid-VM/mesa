@@ -216,9 +216,14 @@ query_faults(struct tu_device *dev, uint64_t *value)
    uint32_t async_error = 0;
    uint64_t global_faults;
 
-   if (vdrm_shmem_has_field(vdev->shmem, async_error))
-      async_error = vdev->shmem->async_error;
-
+#ifdef _WIN32
+   /* KGSL recovery can skip a faulted batch and execute a later userspace
+    * fence. Refresh per-context faults synchronously before accepting that
+    * fence; an asynchronously published shared counter can arrive too late. */
+   int ret = tu_drm_get_param(vdev->vdrm, MSM_PARAM_FAULTS, &global_faults);
+   if (ret)
+      return ret;
+#else
    if (vdrm_shmem_has_field(vdev->shmem, global_faults)) {
       global_faults = vdev->shmem->global_faults;
    } else {
@@ -226,6 +231,10 @@ query_faults(struct tu_device *dev, uint64_t *value)
       if (ret)
          return ret;
    }
+#endif
+
+   if (vdrm_shmem_has_field(vdev->shmem, async_error))
+      async_error = vdev->shmem->async_error;
 
    *value = global_faults + async_error;
 
@@ -493,9 +502,12 @@ virtio_device_check_status(struct tu_device *device)
 {
    uint64_t last_fault_count = device->fault_count;
 
-   query_faults(device, &device->fault_count);
-
-   if (last_fault_count != device->fault_count)
+   uint64_t fault_count;
+   if (query_faults(device, &fault_count))
+      return vk_device_set_lost(&device->vk, "Failed to query GPU fault status");
+   /* Keep the initial baseline immutable: concurrent waiters must not consume
+    * one another's observation before device-lost has been published. */
+   if (last_fault_count != fault_count)
       return vk_device_set_lost(&device->vk, "GPU faulted or hung");
 
    return VK_SUCCESS;
@@ -559,8 +571,13 @@ tu_wait_fence(struct tu_device *dev,
    struct vdrm_device *vdrm = dev->vdev->vdrm;
    MESA_TRACE_FUNC();
 
-   if (!fence_before(dev->global_bo_map->userspace_fence, fence))
+   if (!fence_before(dev->global_bo_map->userspace_fence, fence)) {
+#ifdef _WIN32
+      return vk_device_check_status(&dev->vk);
+#else
       return VK_SUCCESS;
+#endif
+   }
 
    if (!timeout_ns)
       return VK_TIMEOUT;
@@ -764,6 +781,12 @@ tu_virtio_sync_wait_many(struct vk_device *device, uint32_t wait_count,
    const struct vk_sync_type *base = &dev->physical_device->syncobj_type;
    const struct vk_sync_type *poll_type = &dev->physical_device->poll_sync_type;
 
+#ifdef _WIN32
+   /* The Windows base wait also validates host fault status. Do not bypass
+    * it merely because a later batch wrote the userspace fence. */
+   return base->wait_many(device, wait_count, waits, wait_flags, abs_timeout_ns);
+#endif
+
    if ((wait_flags & VK_SYNC_WAIT_PENDING) || wait_count == 0 ||
        !dev->global_bo_map)
       return base->wait_many(device, wait_count, waits, wait_flags,
@@ -949,23 +972,6 @@ tu_win_sync_poll(struct tu_device *dev, struct tu_virtio_sync *sync)
    return true;
 }
 
-/* 便宜版 query_faults()：只读共享页，不发 GET_PARAM 往返，给等待循环每几毫秒
- * 调一次。drm2kgsl 在 KGSL ioctl 失败（GPU fault 后 context 被 KGSL 作废，
- * 下一次 GPU_COMMAND 回 -EDEADLK）时给 async_error++；global_faults 这台 host
- * 目前不写，一并比较不亏。fault_count 是 device_check_status 记的上一次总和。 */
-static bool
-tu_win_sync_faulted(struct tu_device *dev)
-{
-   struct tu_virtio_device *vdev = dev->vdev;
-
-   if (!vdrm_shmem_has_field(vdev->shmem, global_faults))
-      return false;
-
-   uint64_t faults = (uint64_t)vdev->shmem->global_faults +
-                     vdev->shmem->async_error;
-   return faults != dev->fault_count;
-}
-
 class tu_win_sync_timer {
 public:
    ~tu_win_sync_timer()
@@ -1020,6 +1026,8 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
    tu_win_sync_timer timer;
 
    for (;;) {
+      if (vk_device_is_lost(&dev->vk))
+         return VK_ERROR_DEVICE_LOST;
       bool all = true, any = false;
 
       for (uint32_t i = 0; i < wait_count; i++) {
@@ -1039,7 +1047,7 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
       }
 
       if ((wait_flags & VK_SYNC_WAIT_ANY) ? any : all)
-         return VK_SUCCESS;
+         return vk_device_check_status(&dev->vk);
 
       if (debug && (uint64_t)os_time_get_nano() >= next_log_ns) {
          struct tu_virtio_device *vdev = dev->vdev;
@@ -1064,14 +1072,10 @@ tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
           (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns))
          return VK_TIMEOUT;
 
-      /* GPU fault 在 Windows 上没有 syncobj 那样的完成通路：出错的提交永远写
-       * 不到 userspace_fence，这个循环会无限期等下去（present 线程卡 fence、
-       * 应用卡 acquire，看起来跟死锁一样）。每隔几毫秒看一眼 host 的错误
-       * 计数，变了就走 check_status 统一记账并置 device lost。lost 的判定
-       * 单独再读一次：另一个线程可能已经先把计数记走了。 */
+      /* Refresh even when no later batch writes a fence, so a faulted last
+       * submission becomes device-lost instead of an unbounded wait. */
       if (now >= next_fault_check_ns) {
-         if (tu_win_sync_faulted(dev))
-            vk_device_check_status(&dev->vk);
+         vk_device_check_status(&dev->vk);
          if (vk_device_is_lost(&dev->vk))
             return VK_ERROR_DEVICE_LOST;
          next_fault_check_ns = now + 4000000ull;
