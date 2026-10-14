@@ -1031,10 +1031,15 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
          progress |= OPT(s, nir_opt_gcm, true, true);
       else if (gcm == 2)
          progress |= OPT(s, nir_opt_gcm, false, true);
+      /* A8xx compute keeps ifs around expensive ALU (rsq, sqrt, ...) as
+       * branches, as the blob does: flattening executes them for every lane
+       * and turns the enclosing if into a predicated block.
+       */
       nir_opt_peephole_select_options peephole_select_options = {
          .limit = 16,
          .indirect_load_ok = true,
-         .expensive_alu_ok = true,
+         .expensive_alu_ok = !(compiler->gen == 8 &&
+                               s->info.stage == MESA_SHADER_COMPUTE),
       };
       progress |= OPT(s, nir_opt_peephole_select, &peephole_select_options);
       progress |= OPT(s, nir_opt_intrinsics);
