@@ -158,6 +158,13 @@ struct tu_virtio_device {
     * This gives us a place to stash the VMAs between the two steps.
     */
    struct u_vector zombie_vmas_stage_2;
+
+#ifdef _WIN32
+   /* Freed BOs kept for reuse, oldest first; see tu_bo_cache. Protected by
+    * tu_device::vma_mutex. */
+   struct util_dynarray bo_cache;
+   uint64_t bo_cache_bytes;
+#endif
 };
 
 static int tu_drm_get_param(struct vdrm_device *vdrm, uint32_t param, uint64_t *value);
@@ -304,6 +311,9 @@ virtio_device_init(struct tu_device *dev)
    };
 
    u_vector_init(&vdev->zombie_vmas_stage_2, 64, sizeof(struct tu_zombie_vma));
+#ifdef _WIN32
+   util_dynarray_init(&vdev->bo_cache, NULL);
+#endif
 
    dev->vdev = vdev;
    dev->fd = fd;
@@ -375,6 +385,11 @@ virtio_device_finish(struct tu_device *dev)
    struct tu_virtio_device *vdev = dev->vdev;
 
    u_vector_finish(&vdev->zombie_vmas_stage_2);
+#ifdef _WIN32
+   /* Cached BOs are released with the device's allocations by
+    * vdrm_device_close(), like zombies left at teardown. */
+   util_dynarray_fini(&vdev->bo_cache);
+#endif
 
 #if !defined(_WIN32)
    if (vdev->last_submit_syncobj)
@@ -1612,6 +1627,159 @@ tu_bo_set_kernel_name(struct tu_device *dev, struct tu_bo *bo, const char *name)
    vdrm_send_req(dev->vdev->vdrm, &req->hdr, false);
 }
 
+#ifdef _WIN32
+/* Reuse of freed allocations.
+ *
+ * In the guest a WDDM allocation plus its host blob costs 0.5-40 ms per
+ * vkAllocateMemory (natively 6 us-1 ms) and its first CPU map ~0.2 ms. Freed
+ * vkAllocateMemory BOs that never left this device are kept with their IOVA
+ * and handed out again for an allocation of the same size and kind once the
+ * GPU is past the fence recorded when they were freed. They are cleared on
+ * reuse, so a reused allocation reads as zero just like a fresh one. Entries
+ * older than two seconds, or beyond TU_WIN_BO_CACHE_MB, take the zombie path.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(tu_win_bo_cache_mb, "TU_WIN_BO_CACHE_MB", 256)
+#define TU_BO_CACHE_MAX_AGE_NS 2000000000ll
+
+struct tu_bo_cache_entry {
+   uint64_t key, size, iova;
+   uint32_t gem_handle, res_id;
+   int fence;
+   int64_t freed_ns;
+};
+
+static void
+tu_bo_cache_zombie_locked(struct tu_device *dev,
+                          const struct tu_bo_cache_entry *e)
+{
+   struct tu_zombie_vma *vma = (struct tu_zombie_vma *)
+         u_vector_add(&dev->zombie_vmas);
+   vma->fence = e->fence;
+   vma->gem_handle = e->gem_handle;
+   vma->res_id = e->res_id;
+   vma->iova = e->iova;
+   vma->size = e->size;
+}
+
+static void
+tu_bo_cache_remove_locked(struct tu_virtio_device *vdev, unsigned idx)
+{
+   struct tu_bo_cache_entry *entries =
+      (struct tu_bo_cache_entry *) vdev->bo_cache.data;
+   unsigned count =
+      util_dynarray_num_elements(&vdev->bo_cache, struct tu_bo_cache_entry);
+
+   vdev->bo_cache_bytes -= entries[idx].size;
+   memmove(&entries[idx], &entries[idx + 1],
+           (count - idx - 1) * sizeof(*entries));
+   vdev->bo_cache.size -= sizeof(*entries);
+}
+
+/* Evict stale entries, and the oldest ones until incoming bytes fit. */
+static void
+tu_bo_cache_trim_locked(struct tu_device *dev, int64_t now, uint64_t incoming)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   uint64_t budget = (uint64_t) debug_get_option_tu_win_bo_cache_mb() << 20;
+
+   while (util_dynarray_num_elements(&vdev->bo_cache,
+                                     struct tu_bo_cache_entry)) {
+      struct tu_bo_cache_entry *oldest = util_dynarray_element(
+         &vdev->bo_cache, struct tu_bo_cache_entry, 0);
+      if (now - oldest->freed_ns < TU_BO_CACHE_MAX_AGE_NS &&
+          vdev->bo_cache_bytes + incoming <= budget)
+         break;
+      tu_bo_cache_zombie_locked(dev, oldest);
+      tu_bo_cache_remove_locked(vdev, 0);
+   }
+}
+
+static bool
+tu_bo_cache_reap_allowed(struct tu_device *dev)
+{
+   /* tu_wait_fence() reads the global BO's fence mapping. */
+   return dev->global_bo && dev->global_bo->gem_handle && dev->global_bo_map;
+}
+
+/* Keeps a freed BO for reuse. The BO must already be off the submit list. */
+static bool
+tu_bo_cache_put(struct tu_device *dev, struct tu_bo *bo)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   uint64_t budget = (uint64_t) debug_get_option_tu_win_bo_cache_mb() << 20;
+
+   if (bo->size > budget || !tu_bo_cache_reap_allowed(dev))
+      return false;
+
+   tu_bo_list_del(dev, bo);
+
+   mtx_lock(&dev->vma_mutex);
+   int64_t now = os_time_get_nano();
+   tu_bo_cache_trim_locked(dev, now, bo->size);
+   struct tu_bo_cache_entry e = {
+      .key = bo->cache_key,
+      .size = bo->size,
+      .iova = bo->iova,
+      .gem_handle = bo->gem_handle,
+      .res_id = bo->res_id,
+      .fence = dev->queue_count[0] > 0 ?
+               p_atomic_read(&dev->queues[0]->fence) : -1,
+      .freed_ns = now,
+   };
+   util_dynarray_append(&vdev->bo_cache, e);
+   vdev->bo_cache_bytes += e.size;
+   /* As in tu_bo_make_zombie: clear under the VMA mutex. */
+   memset(bo, 0, sizeof(*bo));
+   tu_free_zombie_vma_locked(dev, false);
+   mtx_unlock(&dev->vma_mutex);
+
+   return true;
+}
+
+/* Takes the most recently freed idle entry of this kind, if any. */
+static bool
+tu_bo_cache_take(struct tu_device *dev, uint64_t key, uint64_t size,
+                 struct tu_bo_cache_entry *out)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   bool found = false;
+
+   if (!tu_bo_cache_reap_allowed(dev))
+      return false;
+
+   mtx_lock(&dev->vma_mutex);
+   tu_bo_cache_trim_locked(dev, os_time_get_nano(), 0);
+   for (unsigned i = util_dynarray_num_elements(&vdev->bo_cache,
+                                                struct tu_bo_cache_entry);
+        i-- > 0;) {
+      struct tu_bo_cache_entry *e = util_dynarray_element(
+         &vdev->bo_cache, struct tu_bo_cache_entry, i);
+      if (e->key != key || e->size != size)
+         continue;
+      if (e->fence >= 0 &&
+          tu_wait_fence(dev, dev->queues[0]->msm_queue_id, e->fence, 0) !=
+             VK_SUCCESS)
+         continue;
+      *out = *e;
+      tu_bo_cache_remove_locked(vdev, i);
+      found = true;
+      break;
+   }
+   tu_free_zombie_vma_locked(dev, false);
+   mtx_unlock(&dev->vma_mutex);
+
+   return found;
+}
+
+static void
+tu_bo_cache_discard(struct tu_device *dev, const struct tu_bo_cache_entry *e)
+{
+   mtx_lock(&dev->vma_mutex);
+   tu_bo_cache_zombie_locked(dev, e);
+   mtx_unlock(&dev->vma_mutex);
+}
+#endif
+
 /* Common body for virtio_bo_init and (on Windows) virtio_bo_init_shared.
  *
  * hRTResource selects where the platform allocation comes from: NULL means this
@@ -1693,6 +1861,58 @@ virtio_bo_init_common(struct tu_device *dev,
 
    assert(!(flags & TU_BO_ALLOC_DMABUF));
 
+#ifdef _WIN32
+   /* Only CPU-mappable vkAllocateMemory BOs that stay private to this device
+    * are cached: reuse clears them through the mapping. */
+   uint64_t cache_key = 0;
+   if (!lazy_vma && !client_iova && !hRTResource && base &&
+       base->type == VK_OBJECT_TYPE_DEVICE_MEMORY &&
+       (blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) &&
+       !(flags & (TU_BO_ALLOC_REPLAYABLE | TU_BO_ALLOC_INTERNAL_RESOURCE |
+                  TU_BO_ALLOC_SHAREABLE | TU_BO_ALLOC_IMPLICIT_SYNC)) &&
+       debug_get_option_tu_win_bo_cache_mb() > 0) {
+      cache_key = (uint64_t) req.flags << 32 | (uint64_t) blob_flags << 16 |
+                  (uint64_t) flags << 1 | 1;
+   }
+
+   struct tu_bo_cache_entry cached;
+   if (cache_key && tu_bo_cache_take(dev, cache_key, size, &cached)) {
+      bo = tu_device_lookup_bo(dev, cached.res_id);
+      assert(bo && bo->gem_handle == 0);
+      bo->res_id = cached.res_id;
+      result = tu_bo_init(dev, base, bo, cached.gem_handle, cached.size,
+                          cached.iova, flags, name);
+      if (result == VK_SUCCESS) {
+         bo->cache_key = cache_key;
+         result = tu_bo_map(dev, bo, NULL);
+         if (result == VK_SUCCESS) {
+            memset(bo->map, 0, bo->size);
+            if ((mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+                !(mem_property & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+               tu_bo_sync_cache(dev, bo, 0, VK_WHOLE_SIZE,
+                                TU_MEM_SYNC_CACHE_TO_GPU);
+            *out_bo = bo;
+            return VK_SUCCESS;
+         }
+         /* Fall back to a fresh allocation. */
+         tu_bo_list_del(dev, bo);
+         tu_debug_bos_del(dev, bo);
+         tu_dump_bo_del(dev, bo);
+         mtx_lock(&dev->vma_mutex);
+         memset(bo, 0, sizeof(*bo));
+         mtx_unlock(&dev->vma_mutex);
+         tu_bo_cache_discard(dev, &cached);
+      } else {
+         /* tu_bo_init() already closed the handle. */
+         memset(bo, 0, sizeof(*bo));
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, cached.iova, cached.size);
+         mtx_unlock(&dev->vma_mutex);
+         return result;
+      }
+   }
+#endif
+
    if (lazy_vma) {
       req.iova = lazy_vma->msm.iova;
    } else {
@@ -1745,6 +1965,9 @@ virtio_bo_init_common(struct tu_device *dev,
       memset(bo, 0, sizeof(*bo));
       goto fail;
    }
+#ifdef _WIN32
+   bo->cache_key = cache_key;
+#endif
 
    if (lazy_vma) {
       lazy_vma->msm.backs_lazy_bo = true;
@@ -2041,6 +2264,13 @@ virtio_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
+
+#if defined(_WIN32)
+   if (bo->cache_key && tu_bo_cache_put(dev, bo)) {
+      u_rwlock_rdunlock(&dev->dma_bo_lock);
+      return;
+   }
+#endif
 
    if (bo->map) {
 #if defined(_WIN32)

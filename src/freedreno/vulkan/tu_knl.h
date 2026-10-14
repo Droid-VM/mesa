@@ -66,6 +66,11 @@ struct tu_bo {
    int shared_fd;
 #endif
 
+#ifdef _WIN32
+   /* Nonzero if the BO may be kept for reuse when freed; see tu_bo_cache. */
+   uint64_t cache_key;
+#endif
+
    bool implicit_sync : 1;
    bool never_unmap : 1;
    bool cached_non_coherent : 1;
