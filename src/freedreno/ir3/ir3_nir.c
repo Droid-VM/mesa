@@ -695,8 +695,20 @@ struct ir3_unroll_loop {
 static bool
 ir3_unroll_invariant(nir_def *def, nir_block *header)
 {
-   return nir_def_instr_type(def) == nir_instr_type_load_const ||
-          nir_def_block(def)->index < header->index;
+   if (nir_def_instr_type(def) == nir_instr_type_load_const ||
+       nir_def_block(def)->index < header->index)
+      return true;
+
+   /* Invariant ALU left in the header is hoisted before unrolling. */
+   if (nir_def_block(def) != header ||
+       nir_def_instr_type(def) != nir_instr_type_alu)
+      return false;
+   nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(def));
+   for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
+      if (!ir3_unroll_invariant(alu->src[i].src.ssa, header))
+         return false;
+   }
+   return true;
 }
 
 /* Whether def is a header phi stepped by one per iteration. */
@@ -731,7 +743,7 @@ ir3_unroll_contiguous_load(nir_intrinsic_instr *intr, nir_block *header,
                            nir_block *latch)
 {
    if (intr->intrinsic != nir_intrinsic_load_ssbo ||
-       intr->def.num_components != 1 || intr->def.bit_size != 32)
+       intr->def.num_components != 1)
       return false;
    nir_def *offset = intr->src[1].ssa;
    if (ir3_unroll_unit_phi(offset, header, latch))
@@ -801,14 +813,16 @@ ir3_unroll_match(nir_loop *loop, struct ir3_unroll_loop *m)
        nir_instr_as_jump(brk)->type != nir_jump_break)
       return false;
 
-   /* The header only holds phis and the exit compare. */
+   /* The header only holds phis, invariant ALU and the exit compare. */
    nir_instr *cond_instr = nir_def_instr(nif->condition.ssa);
    if (cond_instr->type != nir_instr_type_alu ||
        cond_instr->block != m->header)
       return false;
    m->cond = nir_instr_as_alu(cond_instr);
    nir_foreach_instr(instr, m->header) {
-      if (instr->type != nir_instr_type_phi && instr != cond_instr)
+      if (instr->type != nir_instr_type_phi && instr != cond_instr &&
+          !(instr->type == nir_instr_type_alu &&
+            ir3_unroll_invariant(&nir_instr_as_alu(instr)->def, m->header)))
          return false;
    }
    if (!list_is_singular(&m->cond->def.uses))
@@ -887,6 +901,11 @@ ir3_unroll_loop(nir_shader *shader, struct ir3_unroll_loop *m)
    nir_phi_instr **old_phis = ralloc_array(mem_ctx, nir_phi_instr *, num_phis);
    nir_phi_instr **new_phis = ralloc_array(mem_ctx, nir_phi_instr *, num_phis);
    nir_def **values = ralloc_array(mem_ctx, nir_def *, num_phis);
+
+   nir_foreach_instr_safe(instr, m->header) {
+      if (instr->type == nir_instr_type_alu && instr != &m->cond->instr)
+         nir_instr_move(nir_before_cf_node(&loop->cf_node), instr);
+   }
 
    nir_builder b = nir_builder_at(nir_before_cf_node(&loop->cf_node));
    nir_loop *unrolled = nir_push_loop(&b);
