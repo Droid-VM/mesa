@@ -319,6 +319,358 @@ ir3_licm_nested_imul(nir_instr *instr, nir_loop *loop,
    return false;
 }
 
+/* Induction-variable strength reduction for innermost loops.
+ *
+ * A value is "linear" when its value in iteration k is init + k * step, with
+ * init and step computable before the loop.  Header phis updated by
+ * iadd(phi, invariant) are the basic induction variables; iadd, ineg, ishl by
+ * an invariant and imul by an invariant preserve linearity.  A varying 32-bit
+ * imul (plus any chain of single-use iadds above it) is replaced by a new
+ * header phi stepped by one add per iteration.  Integer arithmetic wraps, so
+ * the distributive identities used here are exact.
+ */
+struct ir3_iv_form {
+   bool linear, varies;
+   nir_def *init, *step;
+};
+
+struct ir3_iv_state {
+   nir_block *header, *preheader, *latch;
+   unsigned first_index, last_index;
+   struct hash_table *forms;
+   nir_builder b;
+};
+
+static bool
+ir3_iv_in_loop(struct ir3_iv_state *state, nir_block *block)
+{
+   return block->index >= state->first_index &&
+          block->index <= state->last_index;
+}
+
+static struct ir3_iv_form *ir3_iv_analyze(struct ir3_iv_state *state,
+                                          nir_def *def);
+
+/* Invariant scalars may be components of vectors defined before the loop, or
+ * constants defined inside it.
+ */
+static bool
+ir3_iv_is_invariant(struct ir3_iv_state *state, nir_scalar s)
+{
+   return nir_scalar_is_const(s) || !ir3_iv_in_loop(state, nir_def_block(s.def));
+}
+
+static bool
+ir3_iv_analyze_src(struct ir3_iv_state *state, nir_scalar s, bool *varies)
+{
+   if (s.def->bit_size != 32)
+      return false;
+   if (ir3_iv_is_invariant(state, s)) {
+      *varies = false;
+      return true;
+   }
+   if (s.def->num_components != 1)
+      return false;
+   struct ir3_iv_form *form = ir3_iv_analyze(state, s.def);
+   *varies = form->varies;
+   return form->linear;
+}
+
+static bool
+ir3_iv_basic(struct ir3_iv_state *state, nir_phi_instr *phi,
+             nir_scalar *step)
+{
+   if (nir_def_block(&phi->def) != state->header)
+      return false;
+   nir_phi_src *src = nir_phi_get_src_from_block(phi, state->latch);
+   nir_scalar next = nir_get_scalar(src->src.ssa, 0);
+   if (!nir_scalar_is_alu(next) || nir_scalar_alu_op(next) != nir_op_iadd ||
+       next.def->num_components != 1)
+      return false;
+   for (unsigned i = 0; i < 2; i++) {
+      nir_scalar a = nir_scalar_chase_alu_src(next, i);
+      nir_scalar b = nir_scalar_chase_alu_src(next, 1 - i);
+      if (a.def == &phi->def && ir3_iv_is_invariant(state, b)) {
+         *step = b;
+         return true;
+      }
+   }
+   return false;
+}
+
+static struct ir3_iv_form *
+ir3_iv_analyze(struct ir3_iv_state *state, nir_def *def)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(state->forms, def);
+   if (entry)
+      return entry->data;
+
+   struct ir3_iv_form *form = rzalloc(state->forms, struct ir3_iv_form);
+   _mesa_hash_table_insert(state->forms, def, form);
+
+   nir_instr *instr = nir_def_instr(def);
+   nir_scalar s = nir_get_scalar(def, 0);
+   nir_scalar step;
+   bool va = false, vb = false;
+
+   if (instr->type == nir_instr_type_phi) {
+      form->linear = ir3_iv_basic(state, nir_instr_as_phi(instr), &step);
+      form->varies = form->linear;
+   } else if (instr->type == nir_instr_type_alu) {
+      switch (nir_instr_as_alu(instr)->op) {
+      case nir_op_iadd:
+         form->linear =
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 0), &va) &&
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 1), &vb);
+         break;
+      case nir_op_ineg:
+         form->linear =
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 0), &va);
+         break;
+      case nir_op_imul:
+         form->linear =
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 0), &va) &&
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 1), &vb) &&
+            !(va && vb);
+         break;
+      case nir_op_ishl:
+         form->linear =
+            ir3_iv_analyze_src(state, nir_scalar_chase_alu_src(s, 0), &va) &&
+            ir3_iv_is_invariant(state, nir_scalar_chase_alu_src(s, 1));
+         break;
+      default:
+         break;
+      }
+      form->varies = form->linear && (va || vb);
+   }
+
+   return form;
+}
+
+static nir_def *
+ir3_iv_build_invariant(struct ir3_iv_state *state, nir_scalar s)
+{
+   if (nir_scalar_is_const(s))
+      return nir_imm_intN_t(&state->b, nir_scalar_as_uint(s), s.def->bit_size);
+   return nir_channel(&state->b, s.def, s.comp);
+}
+
+static void ir3_iv_build(struct ir3_iv_state *state, nir_def *def);
+
+static void
+ir3_iv_build_src(struct ir3_iv_state *state, nir_scalar s, nir_def **init,
+                 nir_def **step)
+{
+   if (ir3_iv_is_invariant(state, s)) {
+      *init = ir3_iv_build_invariant(state, s);
+      *step = NULL;
+      return;
+   }
+   ir3_iv_build(state, s.def);
+   struct ir3_iv_form *form = ir3_iv_analyze(state, s.def);
+   *init = form->init;
+   *step = form->step;
+}
+
+static nir_def *
+ir3_iv_add(nir_builder *b, nir_def *x, nir_def *y)
+{
+   if (!x)
+      return y;
+   if (!y)
+      return x;
+   return nir_iadd(b, x, y);
+}
+
+/* Emits init and step at the end of the preheader.  A NULL step is zero. */
+static void
+ir3_iv_build(struct ir3_iv_state *state, nir_def *def)
+{
+   struct ir3_iv_form *form = ir3_iv_analyze(state, def);
+   assert(form->linear);
+   if (form->init)
+      return;
+
+   nir_builder *b = &state->b;
+   nir_instr *instr = nir_def_instr(def);
+   nir_scalar s = nir_get_scalar(def, 0);
+   nir_def *ia, *sa, *ib, *sb;
+
+   if (instr->type == nir_instr_type_phi) {
+      nir_phi_instr *phi = nir_instr_as_phi(instr);
+      nir_scalar step;
+      ir3_iv_basic(state, phi, &step);
+      form->init = nir_phi_get_src_from_block(phi, state->preheader)->src.ssa;
+      form->step = ir3_iv_build_invariant(state, step);
+      return;
+   }
+
+   ir3_iv_build_src(state, nir_scalar_chase_alu_src(s, 0), &ia, &sa);
+   switch (nir_instr_as_alu(instr)->op) {
+   case nir_op_iadd:
+      ir3_iv_build_src(state, nir_scalar_chase_alu_src(s, 1), &ib, &sb);
+      form->init = nir_iadd(b, ia, ib);
+      form->step = ir3_iv_add(b, sa, sb);
+      break;
+   case nir_op_ineg:
+      form->init = nir_ineg(b, ia);
+      form->step = sa ? nir_ineg(b, sa) : NULL;
+      break;
+   case nir_op_imul:
+      ir3_iv_build_src(state, nir_scalar_chase_alu_src(s, 1), &ib, &sb);
+      if (sb) {
+         nir_def *tmp = ia;
+         ia = ib, ib = tmp;
+         sa = sb;
+      }
+      form->init = nir_imul(b, ia, ib);
+      form->step = sa ? nir_imul(b, sa, ib) : NULL;
+      break;
+   case nir_op_ishl:
+      ib = ir3_iv_build_invariant(state, nir_scalar_chase_alu_src(s, 1));
+      form->init = nir_ishl(b, ia, ib);
+      form->step = sa ? nir_ishl(b, sa, ib) : NULL;
+      break;
+   default:
+      UNREACHABLE("not a linear op");
+   }
+}
+
+/* All uses must be inside the loop, where the new phi has the same value. */
+static bool
+ir3_iv_uses_in_loop(struct ir3_iv_state *state, nir_def *def)
+{
+   nir_foreach_use_including_if(src, def) {
+      nir_block *block = nir_src_is_if(src)
+         ? nir_cf_node_as_block(nir_cf_node_prev(&nir_src_use_if(src)->cf_node))
+         : nir_src_use_instr(src)->block;
+      if (!ir3_iv_in_loop(state, block))
+         return false;
+   }
+   return true;
+}
+
+static bool
+ir3_iv_is_target_add(struct ir3_iv_state *state, nir_def *def)
+{
+   if (!list_is_singular(&def->uses))
+      return false;
+   nir_src *use = list_first_entry(&def->uses, nir_src, use_link);
+   if (nir_src_is_if(use))
+      return false;
+   nir_instr *instr = nir_src_use_instr(use);
+   if (instr->type != nir_instr_type_alu ||
+       nir_instr_as_alu(instr)->op != nir_op_iadd)
+      return false;
+   nir_def *add = &nir_instr_as_alu(instr)->def;
+   return add->num_components == 1 && ir3_iv_analyze(state, add)->linear;
+}
+
+static bool
+ir3_iv_strength_reduce_loop(nir_shader *shader, nir_loop *loop)
+{
+   if (nir_loop_has_continue_construct(loop))
+      return false;
+
+   struct ir3_iv_state state = {
+      .header = nir_loop_first_block(loop),
+      .preheader = nir_loop_predecessor_block(loop),
+   };
+   if (nir_block_num_preds(state.header) != 2)
+      return false;
+   nir_foreach_pred(pred, state.header) {
+      if (pred != state.preheader)
+         state.latch = pred;
+   }
+   state.first_index = state.header->index;
+   state.last_index = nir_loop_last_block(loop)->index;
+
+   /* Only innermost loops: a phi kept across an inner loop costs a register
+    * for the whole inner loop.
+    */
+   nir_foreach_block_in_cf_node(block, &loop->cf_node) {
+      for (nir_cf_node *parent = block->cf_node.parent;
+           parent != &loop->cf_node; parent = parent->parent) {
+         if (parent->type == nir_cf_node_loop)
+            return false;
+      }
+   }
+
+   void *mem_ctx = ralloc_context(NULL);
+   state.forms = _mesa_pointer_hash_table_create(mem_ctx);
+   struct util_dynarray targets;
+   util_dynarray_init(&targets, mem_ctx);
+
+   nir_foreach_block_in_cf_node(block, &loop->cf_node) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         nir_alu_instr *alu = nir_instr_as_alu(instr);
+         if (alu->op != nir_op_imul || alu->def.bit_size != 32 ||
+             alu->def.num_components != 1)
+            continue;
+         struct ir3_iv_form *form = ir3_iv_analyze(&state, &alu->def);
+         if (!form->linear || !form->varies)
+            continue;
+
+         nir_def *target = &alu->def;
+         while (ir3_iv_is_target_add(&state, target))
+            target = &nir_instr_as_alu(nir_src_use_instr(
+               list_first_entry(&target->uses, nir_src, use_link)))->def;
+         if (!ir3_iv_uses_in_loop(&state, target))
+            continue;
+
+         bool dup = false;
+         util_dynarray_foreach(&targets, nir_def *, t)
+            dup |= *t == target;
+         if (!dup)
+            util_dynarray_append(&targets, target);
+      }
+   }
+
+   /* Build every init and step before rewriting any use, so the analysis
+    * sees the original loop body.
+    */
+   state.b = nir_builder_at(nir_after_block_before_jump(state.preheader));
+   util_dynarray_foreach(&targets, nir_def *, t)
+      ir3_iv_build(&state, *t);
+
+   util_dynarray_foreach(&targets, nir_def *, t) {
+      struct ir3_iv_form *form = ir3_iv_analyze(&state, *t);
+      nir_phi_instr *phi = nir_phi_instr_create(shader);
+      nir_def_init(&phi->instr, &phi->def, 1, 32);
+      nir_builder lb =
+         nir_builder_at(nir_after_block_before_jump(state.latch));
+      nir_def *next = nir_iadd(&lb, &phi->def, form->step);
+      nir_phi_instr_add_src(phi, state.preheader, form->init);
+      nir_phi_instr_add_src(phi, state.latch, next);
+      nir_instr_insert(nir_before_block(state.header), &phi->instr);
+      nir_def_rewrite_uses(*t, &phi->def);
+   }
+
+   bool progress = util_dynarray_num_elements(&targets, nir_def *) > 0;
+   ralloc_free(mem_ctx);
+   return progress;
+}
+
+static bool
+ir3_nir_opt_iv_strength(nir_shader *shader)
+{
+   bool progress = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_metadata_require(impl, nir_metadata_block_index);
+      bool impl_progress = false;
+      nir_foreach_block(block, impl) {
+         nir_loop *loop = nir_block_get_following_loop(block);
+         if (loop && nir_loop_has_back_edge(loop))
+            impl_progress |= ir3_iv_strength_reduce_loop(shader, loop);
+      }
+      progress |= nir_progress(impl_progress, impl,
+                               nir_metadata_control_flow);
+   }
+   return progress;
+}
+
 bool
 ir3_optimize_loop(struct ir3_compiler *compiler,
                   struct ir3_optimize_options *options, nir_shader *s)
@@ -425,8 +777,10 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       }
       progress |= OPT(s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       progress |= OPT(s, nir_opt_loop_unroll);
-      if (compiler->gen == 8 && s->info.stage == MESA_SHADER_COMPUTE)
+      if (compiler->gen == 8 && s->info.stage == MESA_SHADER_COMPUTE) {
          progress |= OPT(s, nir_opt_licm, ir3_licm_nested_imul);
+         progress |= OPT(s, ir3_nir_opt_iv_strength);
+      }
       progress |= OPT(s, nir_opt_remove_phis);
       progress |= OPT(s, nir_opt_undef);
       did_progress |= progress;
