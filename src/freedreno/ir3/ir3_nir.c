@@ -319,7 +319,7 @@ ir3_licm_nested_imul(nir_instr *instr, nir_loop *loop,
    return false;
 }
 
-/* Induction-variable strength reduction for innermost loops.
+/* Induction-variable strength reduction.
  *
  * A value is "linear" when its value in iteration k is init + k * step, with
  * init and step computable before the loop.  Header phis updated by
@@ -351,13 +351,60 @@ ir3_iv_in_loop(struct ir3_iv_state *state, nir_block *block)
 static struct ir3_iv_form *ir3_iv_analyze(struct ir3_iv_state *state,
                                           nir_def *def);
 
+/* A push constant deref with only constant indices. */
+static bool
+ir3_iv_direct_push_const(nir_deref_instr *deref)
+{
+   if (!nir_deref_mode_is(deref, nir_var_mem_push_const))
+      return false;
+   for (; deref->deref_type != nir_deref_type_var;
+        deref = nir_deref_instr_parent(deref)) {
+      if (deref->deref_type != nir_deref_type_struct &&
+          !(deref->deref_type == nir_deref_type_array &&
+            nir_src_is_const(deref->arr.index)))
+         return false;
+   }
+   return true;
+}
+
+static nir_deref_instr *
+ir3_iv_clone_deref(nir_builder *b, nir_deref_instr *deref)
+{
+   if (deref->deref_type == nir_deref_type_var)
+      return nir_build_deref_var(b, deref->var);
+   nir_deref_instr *parent =
+      ir3_iv_clone_deref(b, nir_deref_instr_parent(deref));
+   if (deref->deref_type == nir_deref_type_struct)
+      return nir_build_deref_struct(b, parent, deref->strct.index);
+   return nir_build_deref_array_imm(b, parent,
+                                    nir_src_as_int(deref->arr.index));
+}
+
 /* Invariant scalars may be components of vectors defined before the loop, or
  * constants defined inside it.
  */
 static bool
 ir3_iv_is_invariant(struct ir3_iv_state *state, nir_scalar s)
 {
-   return nir_scalar_is_const(s) || !ir3_iv_in_loop(state, nir_def_block(s.def));
+   if (nir_scalar_is_const(s) || !ir3_iv_in_loop(state, nir_def_block(s.def)))
+      return true;
+
+   /* Reorderable reads at constant addresses (push constants) left inside
+    * the loop are invariant too.
+    */
+   nir_instr *instr = nir_def_instr(s.def);
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic == nir_intrinsic_load_deref)
+      return ir3_iv_direct_push_const(nir_src_as_deref(intr->src[0]));
+   if (!nir_intrinsic_can_reorder(intr))
+      return false;
+   for (unsigned i = 0; i < nir_intrinsic_infos[intr->intrinsic].num_srcs; i++) {
+      if (!nir_src_is_const(intr->src[i]))
+         return false;
+   }
+   return true;
 }
 
 static bool
@@ -452,6 +499,19 @@ ir3_iv_build_invariant(struct ir3_iv_state *state, nir_scalar s)
 {
    if (nir_scalar_is_const(s))
       return nir_imm_intN_t(&state->b, nir_scalar_as_uint(s), s.def->bit_size);
+   if (ir3_iv_in_loop(state, nir_def_block(s.def))) {
+      /* A constant-address read inside the loop: read it again here. */
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(nir_def_instr(s.def));
+      if (intr->intrinsic == nir_intrinsic_load_deref) {
+         nir_deref_instr *deref =
+            ir3_iv_clone_deref(&state->b, nir_src_as_deref(intr->src[0]));
+         return nir_channel(&state->b, nir_load_deref(&state->b, deref),
+                            s.comp);
+      }
+      nir_instr *copy = nir_instr_clone(state->b.shader, &intr->instr);
+      nir_builder_instr_insert(&state->b, copy);
+      return nir_channel(&state->b, nir_instr_def(copy), s.comp);
+   }
    return nir_channel(&state->b, s.def, s.comp);
 }
 
@@ -585,23 +645,20 @@ ir3_iv_strength_reduce_loop(nir_shader *shader, nir_loop *loop)
    state.first_index = state.header->index;
    state.last_index = nir_loop_last_block(loop)->index;
 
-   /* Only innermost loops: a phi kept across an inner loop costs a register
-    * for the whole inner loop.
-    */
-   nir_foreach_block_in_cf_node(block, &loop->cf_node) {
-      for (nir_cf_node *parent = block->cf_node.parent;
-           parent != &loop->cf_node; parent = parent->parent) {
-         if (parent->type == nir_cf_node_loop)
-            return false;
-      }
-   }
-
    void *mem_ctx = ralloc_context(NULL);
    state.forms = _mesa_pointer_hash_table_create(mem_ctx);
    struct util_dynarray targets;
    util_dynarray_init(&targets, mem_ctx);
 
    nir_foreach_block_in_cf_node(block, &loop->cf_node) {
+      /* Multiplies inside an inner loop are left to that loop. */
+      bool nested = false;
+      for (nir_cf_node *parent = block->cf_node.parent;
+           parent != &loop->cf_node; parent = parent->parent)
+         nested |= parent->type == nir_cf_node_loop;
+      if (nested)
+         continue;
+
       nir_foreach_instr(instr, block) {
          if (instr->type != nir_instr_type_alu)
             continue;
