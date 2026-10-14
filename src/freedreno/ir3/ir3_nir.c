@@ -286,6 +286,39 @@ ir3_lower_bit_size(const nir_instr *instr, UNUSED void *data)
       this_progress;                                                           \
    })
 
+static bool
+ir3_licm_nested_imul(nir_instr *instr, nir_loop *loop,
+                    bool block_dominates_exit)
+{
+   if (instr->type == nir_instr_type_intrinsic) {
+      /* Constant-file reads are operands rather than instructions in ir3.
+       * Hoisting them lets multiplies by push constants leave the loop too.
+       */
+      nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+      if (op != nir_intrinsic_load_const_ir3 &&
+          op != nir_intrinsic_load_uniform)
+         return false;
+   } else if (instr->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if (alu->op != nir_op_imul || alu->def.bit_size != 32)
+         return false;
+   } else {
+      return false;
+   }
+
+   /* A row address is often invariant in an inner pixel loop.  A full-width
+    * multiply takes several instructions, so retain its result for the row.
+    * Limit the lifetime extension to nested loops.  Integer multiplication
+    * has no side effects and can also be hoisted from a zero-trip loop.
+    */
+   for (nir_cf_node *parent = loop->cf_node.parent;
+        parent && parent->type != nir_cf_node_function; parent = parent->parent) {
+      if (parent->type == nir_cf_node_loop)
+         return true;
+   }
+   return false;
+}
+
 bool
 ir3_optimize_loop(struct ir3_compiler *compiler,
                   struct ir3_optimize_options *options, nir_shader *s)
@@ -392,6 +425,8 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       }
       progress |= OPT(s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       progress |= OPT(s, nir_opt_loop_unroll);
+      if (compiler->gen == 8 && s->info.stage == MESA_SHADER_COMPUTE)
+         progress |= OPT(s, nir_opt_licm, ir3_licm_nested_imul);
       progress |= OPT(s, nir_opt_remove_phis);
       progress |= OPT(s, nir_opt_undef);
       did_progress |= progress;
