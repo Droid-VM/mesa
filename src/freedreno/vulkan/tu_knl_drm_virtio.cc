@@ -229,9 +229,15 @@ query_faults(struct tu_device *dev, uint64_t *value)
    /* KGSL recovery can skip a faulted batch and execute a later userspace
     * fence. Refresh per-context faults synchronously before accepting that
     * fence; an asynchronously published shared counter can arrive too late. */
-   int ret = tu_drm_get_param(vdev->vdrm, MSM_PARAM_FAULTS, &global_faults);
-   if (ret)
-      return ret;
+   static const bool sync_query =
+      debug_get_bool_option("TU_WIN_SYNC_FAULT_QUERY", true);
+   if (!sync_query && vdrm_shmem_has_field(vdev->shmem, global_faults)) {
+      global_faults = vdev->shmem->global_faults;
+   } else {
+      int ret = tu_drm_get_param(vdev->vdrm, MSM_PARAM_FAULTS, &global_faults);
+      if (ret)
+         return ret;
+   }
 #else
    if (vdrm_shmem_has_field(vdev->shmem, global_faults)) {
       global_faults = vdev->shmem->global_faults;
@@ -2446,6 +2452,30 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    if (result != VK_SUCCESS)
       return result;
    num_in_syncobjs = 0;
+
+   /* A command-less submit (fence- or semaphore-only) needs no host round
+    * trip, which costs 0.2-1.3 ms here: with its waits met as above, its
+    * signals complete together with this queue's last real submit, the same
+    * seqno record a real submit leaves below. TU_NO_EMPTY_SUBMIT=1 sends it
+    * to the host instead. */
+   if (submit->commands.size == 0 && submit->binds.size == 0 &&
+       !u_trace_submission_data && !tu_empty_submit_disabled()) {
+      for (uint32_t i = 0; i < signal_count; i++) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+
+         if (queue->fence <= 0) {
+            /* Nothing submitted on this queue yet. */
+            s->submit_seqno = 0;
+            s->signaled = true;
+            p_atomic_set(&s->owner, (struct tu_queue *) NULL);
+         } else {
+            s->submit_seqno = queue->fence;
+            s->signaled = false;
+            p_atomic_set(&s->owner, queue);
+         }
+      }
+      return VK_SUCCESS;
+   }
 #endif
 
 #if HAVE_PERFETTO
