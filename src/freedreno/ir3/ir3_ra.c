@@ -2550,12 +2550,33 @@ calc_target_full_pressure(struct ir3_shader_variant *v, unsigned pressure)
    bool double_threadsize = ir3_should_double_threadsize(v, reg_count);
 
    unsigned target = reg_count;
+
+   /* max_waves also sizes the API workgroup limit, so it stays at 16 on A8xx,
+    * but an A8xx SP keeps fibers_per_sp / threadsize_base waves resident (64
+    * on A830; the blob's occupancy statistics follow that limit). Budgeting
+    * compute registers against 16 lets RA spread values over registers that
+    * actually cost occupancy.
+    */
+   const struct ir3_compiler *compiler = v->compiler;
+   unsigned max_waves = compiler->info->max_waves;
+   if (compiler->gen >= 8 && ir3_shader_compute(v))
+      max_waves = MAX2(max_waves, compiler->info->fibers_per_sp /
+                                  compiler->info->threadsize_base);
+
    unsigned reg_independent_max_waves =
-      ir3_get_reg_independent_max_waves(v, double_threadsize);
+      ir3_get_reg_independent_max_waves_limit(v, double_threadsize, max_waves);
    unsigned reg_dependent_max_waves = ir3_get_reg_dependent_max_waves(
       v->compiler, reg_count, double_threadsize);
    unsigned target_waves =
       MIN2(reg_independent_max_waves, reg_dependent_max_waves);
+   /* Packing below eight registers measured slower on A8xx (orb keypoints
+    * +12% at six, +80% with no floor), so RA may still spread up to eight.
+    */
+   if (compiler->gen >= 8 && ir3_shader_compute(v)) {
+      target_waves = MIN2(target_waves,
+                          ir3_get_reg_dependent_max_waves(compiler, 8,
+                                                          double_threadsize));
+   }
 
    while (target <= RA_FULL_SIZE / (2 * 4) &&
           ir3_should_double_threadsize(v, target) == double_threadsize &&
