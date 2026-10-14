@@ -164,6 +164,10 @@ struct tu_virtio_device {
     * tu_device::vma_mutex. */
    struct util_dynarray bo_cache;
    uint64_t bo_cache_bytes;
+
+   /* Last synchronous fault query; see query_faults(). */
+   int64_t fault_query_ns;
+   uint64_t fault_query_value;
 #endif
 };
 
@@ -228,15 +232,26 @@ query_faults(struct tu_device *dev, uint64_t *value)
 #ifdef _WIN32
    /* KGSL recovery can skip a faulted batch and execute a later userspace
     * fence. Refresh per-context faults synchronously before accepting that
-    * fence; an asynchronously published shared counter can arrive too late. */
-   static const bool sync_query =
-      debug_get_bool_option("TU_WIN_SYNC_FAULT_QUERY", true);
-   if (!sync_query && vdrm_shmem_has_field(vdev->shmem, global_faults)) {
-      global_faults = vdev->shmem->global_faults;
+    * fence; an asynchronously published shared counter can arrive too late
+    * (the host only refreshes it when queried).
+    *
+    * Each query costs ~0.5 ms, about half of a submit+wait round trip, so a
+    * result is reused for TU_WIN_FAULT_QUERY_MS (default 4, 0 = always
+    * query). Pending waits already check at that interval, so a fault during
+    * a wait is still seen; a completed wait accepts a result at most that
+    * old. */
+   static const int64_t interval_ns =
+      (int64_t) debug_get_num_option("TU_WIN_FAULT_QUERY_MS", 4) * 1000000;
+   int64_t now = os_time_get_nano();
+   int64_t last_ns = p_atomic_read(&vdev->fault_query_ns);
+   if (interval_ns > 0 && last_ns && now - last_ns < interval_ns) {
+      global_faults = p_atomic_read(&vdev->fault_query_value);
    } else {
       int ret = tu_drm_get_param(vdev->vdrm, MSM_PARAM_FAULTS, &global_faults);
       if (ret)
          return ret;
+      p_atomic_set(&vdev->fault_query_value, global_faults);
+      p_atomic_set(&vdev->fault_query_ns, now);
    }
 #else
    if (vdrm_shmem_has_field(vdev->shmem, global_faults)) {
