@@ -1991,14 +1991,14 @@ emit_readonly_load_uav(struct ir3_context *ctx,
                        nir_src *index,
                        struct ir3_instruction *coords,
                        unsigned imm_offset,
-                       bool uav_load,
+                       bool use_isam_v,
                        struct ir3_instruction **dst)
 {
    struct ir3_builder *b = &ctx->build;
    struct tex_src_info info = get_image_ssbo_samp_tex_src(ctx, index, false);
 
    struct ir3_instruction *src1;
-   if (ctx->compiler->info->props.has_isam_v && !uav_load) {
+   if (use_isam_v) {
       src1 = create_immed(b, imm_offset);
    } else {
       assert(imm_offset == 0);
@@ -2007,7 +2007,7 @@ emit_readonly_load_uav(struct ir3_context *ctx,
 
    unsigned num_components = intr->def.num_components;
    struct ir3_instruction *sam =
-      emit_sam(ctx, OPC_ISAM, info, utype_for_size(intr->def.bit_size),
+      emit_sam(ctx, OPC_ISAM, info, utype_for_size(MAX2(intr->def.bit_size, 16)),
                MASK(num_components), coords, src1);
 
    ir3_handle_nonuniform(sam, intr);
@@ -2017,7 +2017,7 @@ emit_readonly_load_uav(struct ir3_context *ctx,
 
    ir3_split_dest(b, dst, sam, 0, num_components);
 
-   if (ctx->compiler->info->props.has_isam_v && !uav_load) {
+   if (use_isam_v) {
       sam->flags |= (IR3_INSTR_V | IR3_INSTR_INV_1D);
 
       if (imm_offset) {
@@ -2061,13 +2061,22 @@ emit_intrinsic_load_ssbo(struct ir3_context *ctx,
    assert(nir_intrinsic_offset_shift(intr) ==
           util_logbase2(intr->def.bit_size / 8));
 
-   /* Note: we can only use isam for vectorized loads/stores if isam.v is
-    * available.
-    * Note: isam also can't handle 8-bit loads.
+   /* Ordinary ISAM can read a scalar byte through the dedicated R8_UINT
+    * descriptor, returning the value in a half register. ISAM.V cannot.
+    * Prefer it for repeated loads in A8xx compute loops. Keep folded offsets
+    * and non-uniform descriptors on the LDIB path.
     */
+   bool use_r8_isam = ctx->compiler->gen == 8 &&
+      ctx->s->info.stage == MESA_SHADER_COMPUTE &&
+      ctx->loop_depth > 0 &&
+      ctx->compiler->options.storage_8bit && intr->def.bit_size == 8 &&
+      intr->def.num_components == 1 && nir_intrinsic_base(intr) == 0 &&
+      !(nir_intrinsic_access(intr) & ACCESS_NON_UNIFORM);
+
+   /* Vectorized loads require ISAM.V. */
    if (!(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER) ||
        (intr->def.num_components > 1 && !ctx->compiler->info->props.has_isam_v) ||
-       (ctx->compiler->options.storage_8bit && intr->def.bit_size == 8) ||
+       (intr->def.bit_size == 8 && !use_r8_isam) ||
        !ctx->compiler->has_isam_ssbo || prefer_ldib_for_ssbo(ctx, intr)) {
       ctx->funcs->emit_intrinsic_load_ssbo(ctx, intr, dst);
       return;
@@ -2077,15 +2086,16 @@ emit_intrinsic_load_ssbo(struct ir3_context *ctx,
    nir_src *offset_src = &intr->src[2];
    struct ir3_instruction *coords = NULL;
    unsigned imm_offset = 0;
+   bool use_isam_v = ctx->compiler->info->props.has_isam_v && !use_r8_isam;
 
-   if (ctx->compiler->info->props.has_isam_v) {
+   if (use_isam_v) {
       ir3_lower_imm_offset(ctx, intr, offset_src, 8, &coords, &imm_offset);
    } else {
       coords =
          ir3_collect(b, ir3_get_src(ctx, offset_src)[0], create_immed(b, 0));
    }
 
-   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, imm_offset, false, dst);
+   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, imm_offset, use_isam_v, dst);
 }
 
 static void
@@ -2104,7 +2114,7 @@ emit_intrinsic_load_uav(struct ir3_context *ctx,
    struct ir3_builder *b = &ctx->build;
    struct ir3_instruction *coords =
       ir3_create_collect(b, ir3_get_src(ctx, &intr->src[1]), 2);
-   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, 0, true, dst);
+   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, 0, false, dst);
 }
 
 static void
