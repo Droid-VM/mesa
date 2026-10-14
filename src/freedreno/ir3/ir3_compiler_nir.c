@@ -4812,6 +4812,14 @@ emit_predicated_branch(struct ir3_context *ctx, nir_if *nif)
    if (!nif_can_be_predicated(nif))
       return NULL;
 
+   /* Every predicated block pays the prede quirk's nops. Inside an A8xx
+    * compute loop that is paid per iteration, where a branch is cheaper; the
+    * blob only predicates outside loops.
+    */
+   if (ctx->compiler->gen == 8 && ctx->so->type == MESA_SHADER_COMPUTE &&
+       ctx->loop_depth > 0)
+      return NULL;
+
    struct ir3_block *then_block = get_block(ctx, nir_if_first_then_block(nif));
    struct ir3_block *else_block = get_block(ctx, nir_if_first_else_block(nif));
    assert(list_is_empty(&then_block->instr_list) &&
