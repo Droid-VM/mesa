@@ -586,6 +586,19 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       alu->op != nir_op_sudot_4x8_iadd &&
       alu->op != nir_op_sudot_4x8_iadd_sat;
 
+   /* Keep values derived from a non-shared loop phi out of the scalar ALU,
+    * see emit_phi().
+    */
+   if (use_shared) {
+      for (int i = 0; i < info->num_inputs; i++) {
+         if (_mesa_set_search(ctx->noshared_defs, alu->src[i].src.ssa)) {
+            use_shared = false;
+            _mesa_set_add(ctx->noshared_defs, &alu->def);
+            break;
+         }
+      }
+   }
+
    struct ir3_instruction **def = ir3_get_def(ctx, &alu->def, dst_sz);
 
    /* Vectors are special in that they have non-scalarized writemasks,
@@ -4298,6 +4311,23 @@ emit_tex_txs(struct ir3_context *ctx, nir_tex_instr *tex)
    ir3_put_def(ctx, &tex->def);
 }
 
+/* Whether uniform header phis of this loop should stay out of shared
+ * registers: loops without barriers, where the per-iteration (ss) wait for
+ * the scalar ALU is not hidden by other synchronization.
+ */
+static bool
+loop_avoids_shared_phis(nir_loop *loop)
+{
+   nir_foreach_block_in_cf_node (block, &loop->cf_node) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_barrier)
+            return false;
+      }
+   }
+   return true;
+}
+
 /* phi instructions are left partially constructed.  We don't resolve
  * their srcs until the end of the shader, since (eg. loops) one of
  * the phi's srcs might be defined after the phi due to back edges in
@@ -4323,6 +4353,25 @@ emit_phi(struct ir3_context *ctx, nir_phi_instr *nphi)
       }
    }
 
+   /* A uniform loop counter in a shared register is updated and compared by
+    * the scalar ALU, and the loop branch must then wait with (ss) for the
+    * scalar ALU every iteration. In a short A8xx compute loop this wait costs
+    * far more than the per-fiber ALU work. Keep uniform loop-header phis of
+    * such loops, and the uniform ALU results computed from them, in normal
+    * registers.
+    */
+   bool shared = ctx->compiler->info->props.has_scalar_alu &&
+                 !nphi->def.divergent;
+   nir_cf_node *parent = nphi->instr.block->cf_node.parent;
+   if (shared && ctx->compiler->gen == 8 &&
+       ctx->so->type == MESA_SHADER_COMPUTE &&
+       parent->type == nir_cf_node_loop &&
+       nir_loop_first_block(nir_cf_node_as_loop(parent)) == nphi->instr.block &&
+       loop_avoids_shared_phis(nir_cf_node_as_loop(parent))) {
+      shared = false;
+      _mesa_set_add(ctx->noshared_defs, &nphi->def);
+   }
+
    for (unsigned i = 0; i < num_components; i++) {
       phi = ir3_build_instr(&ctx->build, OPC_META_PHI, 1,
                             exec_list_length(&nphi->srcs));
@@ -4330,7 +4379,7 @@ emit_phi(struct ir3_context *ctx, nir_phi_instr *nphi)
       phi->phi.nphi = nphi;
       phi->phi.comp = i;
 
-      if (ctx->compiler->info->props.has_scalar_alu && !nphi->def.divergent)
+      if (shared)
          phi->dsts[0]->flags |= IR3_REG_SHARED;
 
       dst[i] = phi;
