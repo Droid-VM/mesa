@@ -1426,6 +1426,7 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
+        GPUId(chip_id=0x44030a00, name="Adreno (TM) 829"), # virtio/WDDM: host drm2kgsl reports patch-0 chip_id
     ], A6xxGPUInfo(
         CHIP.A8XX,
         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
