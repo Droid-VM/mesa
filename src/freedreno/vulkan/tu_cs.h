@@ -76,6 +76,9 @@ struct tu_bo_array {
    uint32_t bo_count;
    uint32_t bo_capacity;
    uint32_t *start;
+   /* Bounds of the last allocation, which may be a slice of a BO. */
+   uint32_t *base;
+   uint32_t *end;
 };
 
 #define TU_COND_EXEC_STACK_SIZE 4
@@ -94,6 +97,7 @@ struct tu_cs
    struct tu_device *device;
    enum tu_cs_mode mode;
    bool writeable;
+   bool allow_suballoc;
    uint32_t next_bo_size;
    VkResult status;
 

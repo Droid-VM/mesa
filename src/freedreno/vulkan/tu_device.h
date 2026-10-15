@@ -382,8 +382,13 @@ struct tu_device
 
    uint32_t implicit_sync_bo_count;
 
+   /* Small read-only CS slices. At most one partially filled BO is held. */
+   struct tu_bo *cs_suballoc_bo;
+   uint32_t cs_suballoc_offset;
+   mtx_t cs_suballoc_mutex;
+
    /* Device-global BO suballocator for reducing BO management overhead for
-    * (read-only) pipeline state.  Synchronized by pipeline_mutex.
+    * (read-only) pipeline state. Synchronized by pipeline_mutex.
     */
    struct tu_suballocator pipeline_suballoc;
    mtx_t pipeline_mutex;

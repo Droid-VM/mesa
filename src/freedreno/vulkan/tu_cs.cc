@@ -139,6 +139,52 @@ tu_cs_get_cur_iova(const struct tu_cs *cs)
    return tu_cs_current_bo(cs)->iova + ((char *) cs->cur - (char *) tu_cs_current_bo(cs)->map);
 }
 
+/* Allocate only unused space: no slice can be recycled while a CS owns it.
+ * The allocator owns one reference to its current BO, and each slice owns one.
+ * All allocator state is protected independently of submission's bo_mutex.
+ */
+static VkResult
+tu_cs_alloc_slice(struct tu_device *device, uint32_t size,
+                  struct tu_bo **bo, uint32_t *offset)
+{
+   const uint32_t slab_size = 64 * 1024;
+   const uint32_t slice_size = align(size, 4096);
+   mtx_lock(&device->cs_suballoc_mutex);
+   if (device->cs_suballoc_bo &&
+       device->cs_suballoc_offset + slice_size > slab_size) {
+      tu_bo_finish(device, device->cs_suballoc_bo);
+      device->cs_suballoc_bo = NULL;
+   }
+
+   if (!device->cs_suballoc_bo) {
+      struct tu_bo *new_bo;
+      VkResult result = tu_bo_init_new(device, NULL, &new_bo, slab_size,
+         (enum tu_bo_alloc_flags)(TU_BO_ALLOC_GPU_READ_ONLY | TU_BO_ALLOC_ALLOW_DUMP),
+         "cs suballoc");
+      if (result == VK_SUCCESS) {
+         result = tu_bo_map(device, new_bo, NULL);
+         if (result != VK_SUCCESS)
+            tu_bo_finish(device, new_bo);
+      }
+      if (result != VK_SUCCESS) {
+         mtx_unlock(&device->cs_suballoc_mutex);
+         return result;
+      }
+      device->cs_suballoc_bo = new_bo;
+      device->cs_suballoc_offset = 0;
+   }
+
+   *bo = tu_bo_get_ref(device->cs_suballoc_bo);
+   *offset = device->cs_suballoc_offset;
+   device->cs_suballoc_offset += slice_size;
+   if (device->cs_suballoc_offset == slab_size) {
+      tu_bo_finish(device, device->cs_suballoc_bo);
+      device->cs_suballoc_bo = NULL;
+   }
+   mtx_unlock(&device->cs_suballoc_mutex);
+   return VK_SUCCESS;
+}
+
 /*
  * Allocate and add a BO to a command stream.  Following command packets will
  * be emitted to the new BO.
@@ -169,28 +215,34 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
    }
 
    struct tu_bo *new_bo;
-
-   VkResult result =
-      tu_bo_init_new(cs->device, NULL, &new_bo, size * sizeof(uint32_t),
-                     (enum tu_bo_alloc_flags)(COND(!cs->writeable,
-                                                   TU_BO_ALLOC_GPU_READ_ONLY) |
-                                              TU_BO_ALLOC_ALLOW_DUMP),
-                     cs->name);
-   if (result != VK_SUCCESS) {
-      return result;
-   }
-
-   result = tu_bo_map(cs->device, new_bo, NULL);
-   if (result != VK_SUCCESS) {
-      tu_bo_finish(cs->device, new_bo);
-      return result;
+   uint32_t offset = 0;
+   const bool suballocate = cs->allow_suballoc && !cs->writeable &&
+                            size <= 8192;
+   VkResult result;
+   if (suballocate) {
+      result = tu_cs_alloc_slice(cs->device, size * sizeof(uint32_t),
+                                &new_bo, &offset);
+      if (result != VK_SUCCESS)
+         return result;
+   } else {
+      result = tu_bo_init_new(cs->device, NULL, &new_bo, size * sizeof(uint32_t),
+         (enum tu_bo_alloc_flags)(COND(!cs->writeable, TU_BO_ALLOC_GPU_READ_ONLY) |
+                                 TU_BO_ALLOC_ALLOW_DUMP), cs->name);
+      if (result != VK_SUCCESS)
+         return result;
+      result = tu_bo_map(cs->device, new_bo, NULL);
+      if (result != VK_SUCCESS) {
+         tu_bo_finish(cs->device, new_bo);
+         return result;
+      }
    }
 
    TU_RMV(cmd_buffer_bo_create, cs->device, new_bo);
-
    bos->bos[bos->bo_count++] = new_bo;
-
-   cs->start = cs->cur = cs->reserved_end = (uint32_t *) new_bo->map;
+   bos->base = (uint32_t *) ((char *) new_bo->map + offset);
+   bos->end = bos->base + (suballocate ? size :
+      tu_sanitize_ib_size(new_bo->size / sizeof(uint32_t)));
+   cs->start = cs->cur = cs->reserved_end = bos->base;
    cs->end = cs->start + size;
 
    return VK_SUCCESS;
@@ -319,13 +371,7 @@ tu_cs_set_writeable(struct tu_cs *cs, bool writeable)
 
       old_bos->start = cs->start;
       cs->start = cs->cur = cs->reserved_end = new_bos->start;
-      if (new_bos->bo_count) {
-         struct tu_bo *bo = new_bos->bos[new_bos->bo_count - 1];
-         cs->end = (uint32_t *) bo->map +
-                   tu_sanitize_ib_size(bo->size / sizeof(uint32_t));
-      } else {
-         cs->end = NULL;
-      }
+      cs->end = new_bos->end;
 
       cs->writeable = writeable;
    }
@@ -347,7 +393,14 @@ tu_cs_begin_sub_stream_aligned(struct tu_cs *cs, uint32_t count,
    assert(size);
 
    VkResult result;
-   if (tu_cs_get_space(cs) < count * size) {
+   if (cs->allow_suballoc) {
+      /* A fresh slice need not start at BO offset zero. Include padding even
+       * when reserve_space grows, then align relative to the backing BO.
+       */
+      result = tu_cs_reserve_space(cs, count * size + size - 1);
+      if (result == VK_SUCCESS)
+         cs->start += (size - tu_cs_get_offset(cs) % size) % size;
+   } else if (tu_cs_get_space(cs) < count * size) {
       /* When we have to allocate a new BO, assume that the alignment of the
        * BO is sufficient.
        */
@@ -560,16 +613,15 @@ tu_cs_reset(struct tu_cs *cs)
       cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
       cs->read_only.bo_count = 1;
 
-      cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
-      cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
-                                                sizeof(uint32_t));
+      cs->start = cs->cur = cs->reserved_end = cs->read_only.base;
+      cs->end = cs->read_only.end;
    }
 
    if (cs->read_write.bo_count) {
       cs->read_write.bos[0] = cs->read_write.bos[cs->read_write.bo_count - 1];
       cs->read_write.bo_count = 1;
 
-      cs->read_write.start = (uint32_t *) cs->read_write.bos[0]->map;
+      cs->read_write.start = cs->read_write.base;
    }
 
    cs->entry_count = 0;

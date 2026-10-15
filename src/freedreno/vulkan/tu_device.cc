@@ -2920,6 +2920,7 @@ tu_device_destroy_mutexes(struct tu_device *device)
 {
    mtx_destroy(&device->bo_mutex);
    mtx_destroy(&device->pipeline_mutex);
+   mtx_destroy(&device->cs_suballoc_mutex);
    mtx_destroy(&device->kgsl_profiling_mutex);
    mtx_destroy(&device->event_mutex);
    mtx_destroy(&device->trace_mutex);
@@ -3033,6 +3034,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    mtx_init(&device->bo_mutex, mtx_plain);
    mtx_init(&device->pipeline_mutex, mtx_plain);
+   mtx_init(&device->cs_suballoc_mutex, mtx_plain);
    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
    mtx_init(&device->event_mutex, mtx_plain);
    mtx_init(&device->trace_mutex, mtx_plain);
@@ -3519,6 +3521,9 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    delete device->autotune;
 
    fd_perfcntr_state_free(device->perfcntrs);
+
+   if (device->cs_suballoc_bo)
+      tu_bo_finish(device, device->cs_suballoc_bo);
 
    tu_bo_suballocator_finish(&device->pipeline_suballoc);
    tu_bo_suballocator_finish(&device->kgsl_profiling_suballoc);

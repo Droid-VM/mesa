@@ -30,6 +30,10 @@
 #include "tu_tracepoints.h"
 #include "tu_trace_bin_layout.h"
 
+#ifdef _WIN32
+DEBUG_GET_ONCE_BOOL_OPTION(tu_cs_suballoc, "TU_CS_SUBALLOC", false)
+#endif
+
 enum tu_cmd_buffer_status {
    TU_CMD_BUFFER_STATUS_IDLE = 0,
    TU_CMD_BUFFER_STATUS_ACTIVE = 1,
@@ -4217,6 +4221,15 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
    tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 2048, "draw sub cs");
    tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw cs");
    tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw epiligoue cs");
+
+#ifdef _WIN32
+   /* RMV currently identifies CS resources by whole BO, not by slice. */
+   if (debug_get_option_tu_cs_suballoc() &&
+       !device->vk.memory_trace_data.is_enabled) {
+      cmd_buffer->cs.allow_suballoc = true;
+      cmd_buffer->sub_cs.allow_suballoc = true;
+   }
+#endif
 
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
       cmd_buffer->descriptors[i].push_set.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
