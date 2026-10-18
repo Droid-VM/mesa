@@ -61,6 +61,21 @@ struct stw_context *stw_create_context_attribs(HDC hdc, INT iLayerPlane,
                                                const struct stw_pixelformat_info *pfi,
                                                int resetStrategy);
 
+/* Same as stw_create_context_attribs(), but also reports why a context could
+ * not be created: out_ctx_err receives an ST_CONTEXT_ERROR_* value, or -1 if
+ * the failure happened before st_api_create_context() was reached (bad layer
+ * plane, OOM, ...).  out_ctx_err may be NULL.  Added for the WGL GL-version
+ * fallback; stw_create_context_attribs() is a thin wrapper around this and
+ * keeps its previous behaviour. */
+struct stw_context *stw_create_context_attribs_err(HDC hdc, INT iLayerPlane,
+                                                   struct stw_context *shareCtx,
+                                                   struct pipe_frontend_screen *fscreen,
+                                                   int majorVersion, int minorVersion,
+                                                   int contextFlags, int profileMask,
+                                                   const struct stw_pixelformat_info *pfi,
+                                                   int resetStrategy,
+                                                   int *out_ctx_err);
+
 DHGLRC stw_create_context_handle(struct stw_context *context, DHGLRC handle);
 
 void stw_destroy_context(struct stw_context *);
