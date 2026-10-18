@@ -231,6 +231,9 @@ struct util_queue {
    unsigned flags;
    int num_queued;
    unsigned max_threads;
+   /* Number of util_queue_finish() calls waiting on a published barrier.
+    * The pool must not shrink while this is non-zero. */
+   unsigned finish_in_flight;
    unsigned num_threads; /* decreasing this number will terminate threads */
    int max_jobs;
    int write_idx, read_idx; /* ring buffer pointers */

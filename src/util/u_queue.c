@@ -42,6 +42,8 @@
 #endif
 
 
+#include "util/os_time.h"
+
 /* Define 256MB */
 #define S_256MB (256 * 1024 * 1024)
 
@@ -521,9 +523,22 @@ util_queue_kill_threads(struct util_queue *queue, unsigned keep_num_threads,
 static void
 util_queue_finish_execute(void *data, void *gdata, int num_thread)
 {
-   util_barrier *barrier = data;
-   if (util_barrier_wait(barrier))
-      util_barrier_destroy(barrier);
+   /* Variant C: deliberately a no-op.  util_queue_finish() used to hand a
+    * stack-allocated barrier to num_threads finish jobs and wait for all of
+    * them to meet.  Nothing guarantees that many workers are still alive (a
+    * concurrent util_queue_adjust_num_threads() shrink lets workers with
+    * thread_index >= num_threads exit without running their finish job), so
+    * the barrier could never be reached and every remaining worker blocked
+    * forever.  The queue framework already signals the per-job fence after
+    * job.execute() returns, so this body needs to do nothing.
+    *
+    * Deadlock freedom: no thread waits for another worker any more; the caller
+    * only waits for fences completed by any single live worker, and at least
+    * one worker exists because util_queue_finish() returns early when
+    * num_threads == 0.  The fence wait happens without holding queue->lock. */
+   (void)data;
+   (void)gdata;
+   (void)num_thread;
 }
 
 void
@@ -689,7 +704,6 @@ util_queue_drop_job(struct util_queue *queue, struct util_queue_fence *fence)
 void
 util_queue_finish(struct util_queue *queue)
 {
-   util_barrier barrier;
    struct util_queue_fence *fences;
 
    /* If 2 threads were adding jobs for 2 different barries at the same time,
@@ -712,13 +726,13 @@ util_queue_finish(struct util_queue *queue)
     */
    queue->create_threads_on_demand = false;
 
+
    fences = malloc(queue->num_threads * sizeof(*fences));
    unsigned num_fences = queue->num_threads;
-   util_barrier_init(&barrier, queue->num_threads);
 
    for (unsigned i = 0; i < queue->num_threads; ++i) {
       util_queue_fence_init(&fences[i]);
-      util_queue_add_job_locked(queue, &barrier, &fences[i],
+      util_queue_add_job_locked(queue, &fences[i], &fences[i],
                                 util_queue_finish_execute, NULL, 0, true);
    }
    queue->create_threads_on_demand = true;
