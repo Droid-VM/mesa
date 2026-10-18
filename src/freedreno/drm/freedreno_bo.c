@@ -13,6 +13,7 @@
 #include "freedreno_drmif.h"
 #include "freedreno_drm_perfetto.h"
 #include "freedreno_priv.h"
+#include "util/os_time.h"
 
 simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
 simple_mtx_t fence_lock = SIMPLE_MTX_INITIALIZER;
@@ -168,6 +169,20 @@ struct fd_bo *
 _fd_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
 {
    struct fd_bo *bo = bo_new(dev, size, flags, &dev->bo_cache);
+
+   /* The WDDM host can transiently refuse a GEM allocation while its control
+    * queue drains (submit_ccmd_stream / CreateAllocation).  One bounded retry
+    * keeps that recoverable stall from becoming a NULL deref in callers that
+    * pass the result straight to fd_bo_mark_for_dump() without checking.
+    */
+   if (unlikely(!bo)) {
+      os_time_sleep(2000);
+      bo = bo_new(dev, size, flags, &dev->bo_cache);
+      if (unlikely(!bo))
+         mesa_loge("fd_bo_new: allocation failed after retry: size=%u flags=0x%x",
+                   size, flags);
+   }
+
    if (bo)
       bo->bo_reuse = BO_CACHE;
    return bo;
@@ -326,6 +341,16 @@ out_unlock:
 void
 fd_bo_mark_for_dump(struct fd_bo *bo)
 {
+   /* Callers pass the result of fd_bo_new() straight in; on allocation
+    * failure that is NULL and the deref below is the crash at +0x4887e8
+    * (reading address 0x18).  Do not turn a recoverable allocation failure
+    * into an access violation. */
+   if (unlikely(!bo)) {
+      static uint32_t logged;
+      if (logged++ == 0)
+         mesa_loge("fd_bo_mark_for_dump: NULL bo (fd_bo_new failed)");
+      return;
+   }
    bo->reloc_flags |= FD_RELOC_DUMP;
 }
 

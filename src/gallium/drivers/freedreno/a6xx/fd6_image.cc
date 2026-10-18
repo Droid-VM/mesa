@@ -229,6 +229,11 @@ fd6_build_bindless_state(struct fd_context *ctx, mesa_shader_stage shader,
              */
             FD_BO_GPUREADONLY | FD_BO_CACHED_COHERENT,
             "%s bindless", _mesa_shader_stage_to_abbrev(shader));
+      if (unlikely(!set->bo)) {
+         mesa_loge("fd6: bindless descriptor BO allocation failed (%s)",
+                   _mesa_shader_stage_to_abbrev(shader));
+         return cs;
+      }
       fd_bo_mark_for_dump(set->bo);
 
       uint32_t *desc_buf = (uint32_t *)fd_bo_map(set->bo);

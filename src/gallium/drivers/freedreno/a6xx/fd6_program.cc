@@ -260,8 +260,8 @@ template <chip CHIP>
 void
 fd6_emit_shader(struct fd_screen *screen, fd_cs &cs, const struct ir3_shader_variant *so)
 {
-   if (!so) {
-      /* shader stage disabled */
+   if (!so || !so->bo) {
+      /* shader stage disabled, or its BO allocation failed */
       return;
    }
 
