@@ -664,8 +664,13 @@ fd_init_screen_caps(struct fd_screen *screen)
       is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen);
    caps->query_timestamp =
    caps->query_time_elapsed =
-      /* only a4xx, requires new enough kernel so we know max_freq: */
-      (screen->max_freq > 0) && (is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen));
+      /* a6xx+ timestamps are the 19.2MHz always-on timer and are converted by
+       * ticks_to_ns(), which does not need max_freq.  a4xx/a5xx still need the
+       * kernel-reported max_freq for cycle->ns conversion.  The virtio
+       * transport does not report max_freq, which used to hide
+       * ARB_timer_query and cap desktop GL at 3.2 on a6xx+ (Adreno 830). */
+      is_a6xx(screen) ||
+      ((screen->max_freq > 0) && (is_a4xx(screen) || is_a5xx(screen)));
    caps->timer_resolution = ticks_to_ns(1);
    caps->query_buffer_object =
    caps->query_so_overflow =
