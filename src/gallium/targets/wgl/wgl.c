@@ -275,7 +275,11 @@ static const struct stw_winsys stw_winsys = {
 #endif
    NULL, /* shared_surface_open */
    NULL, /* shared_surface_close */
+#ifdef GALLIUM_FREEDRENO
+   &fd_wgl_compose,
+#else
    NULL, /* compose */
+#endif
    &wgl_create_framebuffer,
    &wgl_get_name,
 };

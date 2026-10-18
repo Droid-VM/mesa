@@ -33,6 +33,7 @@
 #include "state_tracker/st_context.h"
 
 #include "stw_st.h"
+#include "stw_context.h"
 #include "stw_device.h"
 #include "stw_framebuffer.h"
 #include "stw_pixelformat.h"
@@ -414,6 +415,17 @@ notify_before_flush_cb(void* _args)
       pipe->flush_resource(pipe, args->stwfb->textures[ST_ATTACHMENT_BACK_LEFT]);
 }
 
+/* Pipe context of the current WGL context.  Lives here because
+ * wgl_freedreno.c cannot include state_tracker/st_context.h (it would pull
+ * <windows.h> into mesa/main/dd.h, which rejects it) and must not poke at
+ * struct stw_context itself. */
+struct pipe_context *
+stw_st_get_pipe(void)
+{
+   struct stw_context *ctx = stw_current_context();
+   return ctx ? ctx->st->pipe : NULL;
+}
+
 void
 stw_st_flush(struct st_context *st,
              struct pipe_frontend_drawable *drawable,
@@ -584,7 +596,8 @@ stw_st_swap_framebuffer_locked(struct st_context *st,
    struct pipe_resource *ptex;
    unsigned mask;
 
-   bool ret = stw_st_framebuffer_present_locked(hdc, &stwfb->base, back);
+   bool ret;
+   ret = stw_st_framebuffer_present_locked(hdc, &stwfb->base, back);
    if (!ret)
       return false;
 
