@@ -198,7 +198,15 @@ virtio_device_new(int fd)
       INFO_MSG("context va_size:     0x%0" PRIx64, context_va_size);
    }
 
-   util_queue_init(&dev->submit_queue, "sq", 8, 1, 0, NULL);
+   /* The submit queue is fed by virtio_execbuf_flush() from the GL/EGL
+    * submission thread.  On Windows/vdrm a blocking guest->host round trip can
+    * stall the single worker for longer than it takes to enqueue 8 jobs, and
+    * with flags=0 util_queue_add_job() then busy-waits forever in
+    * u_queue.c's "while (queue->num_queued == queue->max_jobs) cnd_wait(...)".
+    * Grow the ring instead of dead-locking.
+    */
+   util_queue_init(&dev->submit_queue, "sq", 8, 1,
+                   UTIL_QUEUE_INIT_RESIZE_IF_FULL, NULL);
 
    dev->bo_size = sizeof(struct virtio_bo);
 
