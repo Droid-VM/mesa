@@ -25,6 +25,13 @@ libvdrm = static_library(
     inc_src,
     inc_virtio,
     inc_virtio_gpu,
+    # DroidVM: vdrm_wddm.c includes the Windows WDDM user-mode headers by
+    # their flat WDK names (<d3dkmthk.h>, <d3dukmdt.h>).  Point at
+    # include/winddk, where the builder drops the real DDK headers
+    # (see include/winddk/README.txt).  The fork's vendored
+    # include/drm-uapi/d3dkmthk.h is the Linux UAPI text and must NOT be
+    # on the include path here: its D3DKMT/D3DDDI types are incomplete.
+    inc_winddk,
   ],
   c_args : libvdrm_c_args,
   gnu_symbol_visibility: 'hidden',

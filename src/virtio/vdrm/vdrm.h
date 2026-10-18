@@ -92,6 +92,10 @@ struct vdrm_device {
 
    uint32_t next_seqno;
 
+   /* Highest seqno whose host consumption we deferred out of the frame
+    * budget; drained before the next enqueue.  0 = nothing pending. */
+   uint32_t pending_sync_seqno;
+
    /*
     * Buffering for requests to host:
     */
@@ -146,6 +150,14 @@ struct vdrm_execbuf_params {
 int vdrm_execbuf(struct vdrm_device *vdev, struct vdrm_execbuf_params *p);
 
 void vdrm_host_sync(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req);
+
+/**
+ * Same as vdrm_host_sync(), but never defers: waits (bounded) until the host
+ * has consumed @req->seqno.  Must be used on paths where the guest is about to
+ * touch the resource itself (e.g. BO mmap after upload), where returning early
+ * would let the guest race the host.
+ */
+void vdrm_host_sync_blocking(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req);
 
 /**
  * Import dmabuf fd returning a GEM handle

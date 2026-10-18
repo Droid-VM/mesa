@@ -23,7 +23,7 @@ virtio_bo_mmap(struct fd_bo *bo)
       virtio_bo->has_upload_seqno = false;
 
       vdrm_flush(vdrm);
-      vdrm_host_sync(vdrm, &(struct vdrm_ccmd_req) {
+      vdrm_host_sync_blocking(vdrm, &(struct vdrm_ccmd_req) {
          .seqno = virtio_bo->upload_seqno,
       });
    }
