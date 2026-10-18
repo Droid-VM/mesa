@@ -96,6 +96,10 @@ upload_shader_variant(struct ir3_shader_variant *v, void *arg)
    v->bo =
       fd_bo_new(compiler->dev, v->info.size, FD_BO_NOMAP,
                 "%s:%s", ir3_shader_stage(v), v->name);
+   if (unlikely(!v->bo)) {
+      mesa_loge("ir3: shader BO allocation failed: %s", v->name);
+      return;
+   }
 
    /* Always include shaders in kernel crash dumps. */
    fd_bo_mark_for_dump(v->bo);
