@@ -25,6 +25,7 @@
  *
  **************************************************************************/
 
+#include "util/log.h"
 #include "state_tracker/st_context.h"
 
 #include <windows.h>
@@ -599,6 +600,23 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
    if (fb == NULL)
       return false;
 
+   /* One-shot: is the DWM/opengl32 device-side present entry point used at
+    * all in this guest?  hSurface != 0 would mean the display driver is
+    * handing us a shared surface, i.e. the P2 path is genuinely reachable. */
+   {
+      static bool _pblog = false;
+      if (!_pblog) {
+         _pblog = true;
+         mesa_loge("DrvPresentBuffers: enter hSurface=%p pPrivData=%p "
+                   "hdc=%p shared_surface_open=%p compose=%p",
+                   (void *)(uintptr_t)data->hSurface,
+                   data->pPrivData,
+                   (void *)(uintptr_t)hdc,
+                   (void *)(uintptr_t)stw_dev->stw_winsys->shared_surface_open,
+                   (void *)(uintptr_t)stw_dev->stw_winsys->compose);
+      }
+   }
+
    screen = stw_dev->screen;
    ctx = stw_current_context();
    pipe = ctx ? ctx->st->pipe : NULL;
@@ -623,6 +641,11 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
 
    if (!fb->minimized) {
       if (fb->shared_surface) {
+         /* Device-side present actually taken with a real shared surface --
+          * completing without a GDI readback requires fd_wgl_compose to be
+          * able to open it as a GPU resource. */
+         mesa_loge_once("DrvPresentBuffers: DEVICE-SIDE compose with shared "
+                        "surface %p", (void *)fb->shared_surface);
          stw_dev->stw_winsys->compose(screen,
                                       res,
                                       fb->shared_surface,
@@ -630,6 +653,10 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
                                       data->ullPresentToken);
       }
       else {
+         mesa_loge_once("DrvPresentBuffers: P2 taken but the display driver "
+                        "supplied no shared surface (hSurface=%p) -- GDI "
+                        "readback present",
+                        (void *)(uintptr_t)data->hSurface);
          stw_dev->stw_winsys->present( screen, pipe, res, hdc );
       }
    }
@@ -654,9 +681,24 @@ stw_framebuffer_present_locked(HDC hdc,
                                struct stw_framebuffer *fb,
                                struct pipe_resource *res)
 {
+   {
+      static bool _blog = false;
+      if (!_blog) {
+         _blog = true;
+         mesa_loge("stw_present: branch=%s winsys_fb=%p pfnPresentBuffers=%p compose=%p shared_surface_open=%p",
+                   fb->winsys_framebuffer ? "P1(winsys_framebuffer->present)" :
+                   (stw_dev->callbacks.pfnPresentBuffers && stw_dev->stw_winsys->compose)
+                      ? "P2(entries available)" : "P3(stw_winsys->present GDI readback)",
+                   (void *)fb->winsys_framebuffer,
+                   (void *)(uintptr_t)stw_dev->callbacks.pfnPresentBuffers,
+                   (void *)(uintptr_t)stw_dev->stw_winsys->compose,
+                   (void *)(uintptr_t)stw_dev->stw_winsys->shared_surface_open);
+      }
+   }
    if (fb->winsys_framebuffer) {
       int interval = fb->swap_interval == -1 ? stw_dev->swap_interval : fb->swap_interval;
-      BOOL result = fb->winsys_framebuffer->present(fb->winsys_framebuffer, interval);
+      BOOL result;
+      result = fb->winsys_framebuffer->present(fb->winsys_framebuffer, interval);
 
       stw_framebuffer_update(fb);
       stw_notify_current_locked(fb);
@@ -678,7 +720,11 @@ stw_framebuffer_present_locked(HDC hdc,
       stw_notify_current_locked(fb);
       stw_framebuffer_unlock(fb);
 
-      return stw_dev->callbacks.pfnPresentBuffers(hdc, &data);
+      {
+         BOOL r;
+         r = stw_dev->callbacks.pfnPresentBuffers(hdc, &data);
+         return r;
+      }
    }
    else {
       struct pipe_screen *screen = stw_dev->screen;

@@ -38,7 +38,16 @@ tu_wsi_init(struct tu_physical_device *physical_device)
 {
    VkResult result;
 
-   const struct wsi_device_options options = { .sw_device = false };
+   /* The vDRM Windows guest has no D3D12 queue exposed to Mesa.  Use the
+    * Win32 DIB path so surface/swapchain/present can operate without DXGI
+    * composition; GPU rendering remains exercised by the Vulkan device. */
+   const struct wsi_device_options options = {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+      .sw_device = true,
+#else
+      .sw_device = false,
+#endif
+   };
    result = wsi_device_init(&physical_device->wsi_device,
                             tu_physical_device_to_handle(physical_device),
                             tu_wsi_proc_addr,
@@ -48,6 +57,27 @@ tu_wsi_init(struct tu_physical_device *physical_device)
                             &options);
    if (result != VK_SUCCESS)
       return result;
+
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   /* The GDI present path needs the pixels in a host-visible linear
+    * allocation. By default the common WSI code picks
+    * WSI_SWAPCHAIN_BUFFER_BLIT: the app renders a tiled+UBWC swapchain image
+    * and the pre-present submit copies it into a linear buffer with one
+    * 2D-engine pass (vkCmdCopyImageToBuffer). The GDI present thread waits
+    * for that submit instead of the render thread (see wsi_common_win32.cpp),
+    * so the extra guest->host->GPU->fence round trip no longer sits on the
+    * app's critical path.
+    *
+    * TU_WSI_LINEAR=1 renders a VK_IMAGE_TILING_LINEAR swapchain image directly
+    * and skips the blit submit. That path hangs on some GPUs of the same
+    * generation (root cause not yet identified), so it stays opt-in for A/B
+    * runs only. */
+   {
+      const char *env = getenv("TU_WSI_LINEAR");
+      if (env && *env && *env != '0')
+         physical_device->wsi_device.wants_linear = true;
+   }
+#endif
 
    physical_device->wsi_device.supports_modifiers = true;
    physical_device->wsi_device.can_present_on_device =

@@ -130,22 +130,27 @@ DrvCreateContext(HDC hdc)
 DHGLRC APIENTRY
 DrvCreateLayerContext(HDC hdc, INT iLayerPlane)
 {
-   if (!stw_dev)
+   if (!stw_dev) {
       return 0;
+   }
 
    const struct stw_pixelformat_info *pfi = stw_pixelformat_get_info_from_hdc(hdc);
-   if (!pfi)
+   if (!pfi) {
       return 0;
+   }
 
    struct stw_context *ctx = stw_create_context_attribs(hdc, iLayerPlane, NULL, stw_dev->fscreen, 1, 0, 0,
                                                         WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
                                                         pfi, WGL_NO_RESET_NOTIFICATION_ARB);
-   if (!ctx)
+   if (!ctx) {
       return 0;
+   }
 
    DHGLRC ret = stw_create_context_handle(ctx, 0);
-   if (!ret)
+   if (!ret) {
       stw_destroy_context(ctx);
+      return 0;
+   }
 
    return ret;
 }
@@ -162,22 +167,47 @@ stw_create_context_attribs(HDC hdc, INT iLayerPlane, struct stw_context *shareCt
                            const struct stw_pixelformat_info *pfi,
                            int resetStrategy)
 {
+   /* Unchanged behaviour: the caller does not care about the failure reason. */
+   return stw_create_context_attribs_err(hdc, iLayerPlane, shareCtx, fscreen,
+                                         majorVersion, minorVersion, contextFlags,
+                                         profileMask, pfi, resetStrategy, NULL);
+}
+
+/**
+ * Implementation of stw_create_context_attribs() with the driver's
+ * st_context_error exposed through out_ctx_err (see stw_context.h).
+ */
+struct stw_context *
+stw_create_context_attribs_err(HDC hdc, INT iLayerPlane, struct stw_context *shareCtx,
+                               struct pipe_frontend_screen *fscreen,
+                               int majorVersion, int minorVersion,
+                               int contextFlags, int profileMask,
+                               const struct stw_pixelformat_info *pfi,
+                               int resetStrategy, int *out_ctx_err)
+{
    struct st_context_attribs attribs;
    struct stw_context *ctx = NULL;
    enum st_context_error ctx_err = 0;
 
-   if (!stw_dev)
-      return 0;
+   /* -1: failed before st_api_create_context(), i.e. not a version error. */
+   if (out_ctx_err)
+      *out_ctx_err = -1;
 
-   if (iLayerPlane != 0)
+   if (!stw_dev) {
       return 0;
+   }
+
+   if (iLayerPlane != 0) {
+      return 0;
+   }
 
    if (shareCtx != NULL)
       shareCtx->shared = true;
 
    ctx = CALLOC_STRUCT( stw_context );
-   if (ctx == NULL)
+   if (ctx == NULL) {
       goto no_ctx;
+   }
 
    ctx->hDrawDC = hdc;
    ctx->hReadDC = hdc;
@@ -247,8 +277,11 @@ stw_create_context_attribs(HDC hdc, INT iLayerPlane, struct stw_context *shareCt
 
    ctx->st = st_api_create_context(
          fscreen, &attribs, &ctx_err, shareCtx ? shareCtx->st : NULL);
-   if (ctx->st == NULL)
+   if (out_ctx_err)
+      *out_ctx_err = (int) ctx_err;
+   if (ctx->st == NULL) {
       goto no_st_ctx;
+   }
 
    ctx->st->frontend_context = (void *) ctx;
 

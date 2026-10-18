@@ -7,11 +7,16 @@ libfreedreno_perfcntrs_files = files(
   'fd6_perfcntr.c',
   'fd7_perfcntr.c',
   'fd8_perfcntr.c',
-  'freedreno_dt.c',
-  'freedreno_dt.h',
   'freedreno_perfcntr.c',
   'freedreno_perfcntr.h',
 )
+
+if system_has_kms_drm
+  libfreedreno_perfcntrs_files += files(
+    'freedreno_dt.c',
+    'freedreno_dt.h',
+  )
+endif
 
 libfreedreno_perfcntrs = static_library(
   'freedreno_perfcntrs',

@@ -7,7 +7,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/u_process.h"
 
 #include "virtio_priv.h"
@@ -46,6 +48,10 @@ virtio_device_destroy(struct fd_device *dev)
    struct virtio_device *virtio_dev = to_virtio_device(dev);
 
    util_vma_heap_finish(&virtio_dev->address_space);
+#ifdef _WIN32
+   simple_mtx_destroy(&virtio_dev->address_space_lock);
+   vdrm_device_close(virtio_dev->vdrm);
+#endif
 }
 
 static uint32_t
@@ -106,7 +112,7 @@ set_debuginfo(struct fd_device *dev)
 }
 
 struct fd_device *
-virtio_device_new(int fd, drmVersionPtr version)
+virtio_device_new(int fd)
 {
    struct virgl_renderer_capset_drm caps;
    struct virtio_device *virtio_dev;
@@ -168,7 +174,10 @@ virtio_device_new(int fd, drmVersionPtr version)
    dev->version = caps.version_minor;
    dev->has_cached_coherent = caps.u.msm.has_cached_coherent;
 
-   p_atomic_set(&virtio_dev->next_blob_id, 1);
+   /* Blob IDs are matched across asynchronously processed WDDM contexts. Use
+    * a process-unique high range so independent device instances cannot reuse
+    * the same IDs while their requests are in flight. */
+   p_atomic_set(&virtio_dev->next_blob_id, (uint32_t)(getpid() & 0x7fff) << 16);
    virtio_dev->shmem = to_msm_shmem(vdrm->shmem);
    virtio_dev->vdrm = vdrm;
 
@@ -189,7 +198,15 @@ virtio_device_new(int fd, drmVersionPtr version)
       INFO_MSG("context va_size:     0x%0" PRIx64, context_va_size);
    }
 
-   util_queue_init(&dev->submit_queue, "sq", 8, 1, 0, NULL);
+   /* The submit queue is fed by virtio_execbuf_flush() from the GL/EGL
+    * submission thread.  On Windows/vdrm a blocking guest->host round trip can
+    * stall the single worker for longer than it takes to enqueue 8 jobs, and
+    * with flags=0 util_queue_add_job() then busy-waits forever in
+    * u_queue.c's "while (queue->num_queued == queue->max_jobs) cnd_wait(...)".
+    * Grow the ring instead of dead-locking.
+    */
+   util_queue_init(&dev->submit_queue, "sq", 8, 1,
+                   UTIL_QUEUE_INIT_RESIZE_IF_FULL, NULL);
 
    dev->bo_size = sizeof(struct virtio_bo);
 

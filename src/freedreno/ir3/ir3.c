@@ -248,14 +248,14 @@ ir3_should_double_threadsize(struct ir3_shader_variant *v, unsigned regs_count)
 }
 
 /* Get the maximum number of waves that could be used even if this shader
- * didn't use any registers.
+ * didn't use any registers, starting from the given device limit.
  */
 unsigned
-ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
-                                  bool double_threadsize)
+ir3_get_reg_independent_max_waves_limit(struct ir3_shader_variant *v,
+                                        bool double_threadsize,
+                                        unsigned max_waves)
 {
    const struct ir3_compiler *compiler = v->compiler;
-   unsigned max_waves = compiler->info->max_waves;
 
    /* Compute the limit based on branchstack */
    if (v->branchstack > 0) {
@@ -315,6 +315,14 @@ ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
    }
 
    return max_waves;
+}
+
+unsigned
+ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
+                                  bool double_threadsize)
+{
+   return ir3_get_reg_independent_max_waves_limit(v, double_threadsize,
+                                                  v->compiler->info->max_waves);
 }
 
 /* Get the maximum number of waves that could be launched limited by reg size.

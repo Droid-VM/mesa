@@ -64,7 +64,12 @@ vtn_ssa_value_add_to_call_params(struct vtn_builder *b,
       nir_deref_instr *src_deref = vtn_get_deref_for_ssa_value(b, value);
       call->params[(*param_idx)++] = nir_src_for_ssa(&src_deref->def);
    } else if (glsl_type_is_vector_or_scalar(value->type)) {
-      call->params[(*param_idx)++] = nir_src_for_ssa(value->def);
+      nir_def *def = value->def;
+      if (!def) {
+         def = nir_imm_zero(&b->nb, glsl_get_vector_elements(value->type),
+                            glsl_get_bit_size(value->type));
+      }
+      call->params[(*param_idx)++] = nir_src_for_ssa(def);
    } else {
       unsigned elems = glsl_get_length(value->type);
       for (unsigned i = 0; i < elems; i++) {
@@ -207,6 +212,15 @@ vtn_handle_function_call(struct vtn_builder *b, SpvOp opcode,
       vtn_ssa_value_add_to_call_params(b, vtn_ssa_value(b, w[4 + i]),
                                        call, &param_idx);
    }
+
+   for (unsigned i = 0; i < call->num_params; i++) {
+      const struct glsl_type *type = call->callee->params[i].type;
+      if (!call->params[i].ssa && glsl_type_is_vector_or_scalar(type)) {
+         call->params[i] = nir_src_for_ssa(nir_imm_zero(
+            &b->nb, glsl_get_vector_elements(type), glsl_get_bit_size(type)));
+      }
+   }
+
    assert(param_idx == call->num_params);
 
    nir_builder_instr_insert(&b->nb, &call->instr);

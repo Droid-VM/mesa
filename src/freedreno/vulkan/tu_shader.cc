@@ -229,6 +229,10 @@ tu_spirv_to_nir(struct tu_device *dev,
    }
 
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
+   NIR_PASS(_, nir, nir_lower_returns);
+   NIR_PASS(_, nir, nir_inline_functions);
+   NIR_PASS(_, nir, nir_lower_undef_to_zero, NULL);
 
    /* Older glslang missing bf6efd0316d8 ("SPV: Fix #2293: keep relaxed
     * precision on arg passed to relaxed param") will pass function args through
@@ -2948,10 +2952,10 @@ tu_upload_shader(struct tu_device *dev,
       size += vpc_size;
    }
 
-   pthread_mutex_lock(&dev->pipeline_mutex);
+   mtx_lock(&dev->pipeline_mutex);
    VkResult result = tu_suballoc_bo_alloc(&shader->bo, &dev->pipeline_suballoc,
                                           size * 4, 128);
-   pthread_mutex_unlock(&dev->pipeline_mutex);
+   mtx_unlock(&dev->pipeline_mutex);
 
    if (result != VK_SUCCESS)
       return result;
@@ -2981,9 +2985,9 @@ tu_upload_shader(struct tu_device *dev,
 
    result = tu_setup_pvtmem(dev, shader, &pvtmem_config, pvtmem_size, per_wave);
    if (result != VK_SUCCESS) {
-      pthread_mutex_lock(&dev->pipeline_mutex);
+      mtx_lock(&dev->pipeline_mutex);
       tu_suballoc_bo_free(&dev->pipeline_suballoc, &shader->bo);
-      pthread_mutex_unlock(&dev->pipeline_mutex);
+      mtx_unlock(&dev->pipeline_mutex);
       return result;
    }
 
@@ -3807,10 +3811,10 @@ tu_empty_shader_create(struct tu_device *dev,
    if (!shader)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   pthread_mutex_lock(&dev->pipeline_mutex);
+   mtx_lock(&dev->pipeline_mutex);
    VkResult result = tu_suballoc_bo_alloc(&shader->bo, &dev->pipeline_suballoc,
                                           32 * 4, 128);
-   pthread_mutex_unlock(&dev->pipeline_mutex);
+   mtx_unlock(&dev->pipeline_mutex);
 
    if (result != VK_SUCCESS) {
       vk_free(&dev->vk.alloc, shader);
@@ -3921,9 +3925,9 @@ tu_shader_destroy(struct tu_device *dev,
    tu_cs_finish(&shader->cs);
    TU_RMV(resource_destroy, dev, &shader->bo);
 
-   pthread_mutex_lock(&dev->pipeline_mutex);
+   mtx_lock(&dev->pipeline_mutex);
    tu_suballoc_bo_free(&dev->pipeline_suballoc, &shader->bo);
-   pthread_mutex_unlock(&dev->pipeline_mutex);
+   mtx_unlock(&dev->pipeline_mutex);
 
    if (shader->pvtmem_bo)
       tu_bo_finish(dev, shader->pvtmem_bo);

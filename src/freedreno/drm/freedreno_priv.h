@@ -15,10 +15,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-
 #include <xf86drm.h>
+#endif
 
 #include "util/hash_table.h"
 #include "util/list.h"

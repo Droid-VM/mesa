@@ -479,6 +479,18 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
       fd6_color_swap(args->format, (enum a6xx_tile_mode)layout->tile_mode,
                      layout->is_mutable);
 
+   /* Slicing only changes storage accesses. Sampled descriptors and
+    * attachment addresses must continue to describe the original view. */
+   uint64_t storage_base_addr = base_addr;
+   uint64_t storage_ubwc_addr = ubwc_addr;
+   if (args->type == FDL_VIEW_TYPE_3D && args->storage_z_slice_count) {
+      assert(args->storage_z_slice_offset < storage_depth);
+      assert(args->storage_z_slice_count <= storage_depth - args->storage_z_slice_offset);
+      storage_depth = args->storage_z_slice_count;
+      storage_base_addr += (uint64_t)args->storage_z_slice_offset * layer_size;
+      storage_ubwc_addr += (uint64_t)args->storage_z_slice_offset * layout->ubwc_layer_size;
+   }
+
    memset(view->storage_descriptor, 0, sizeof(view->storage_descriptor));
 
    if (CHIP <= A7XX) {
@@ -493,21 +505,32 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          A6XX_TEX_MEMOBJ_2_PITCH(pitch) |
          A6XX_TEX_MEMOBJ_2_TYPE(fdl6_tex_type(args->type, true));
       view->storage_descriptor[3] = view->descriptor[3];
-      view->storage_descriptor[4] = base_addr;
-      view->storage_descriptor[5] = (base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
+      view->storage_descriptor[4] = storage_base_addr;
+      view->storage_descriptor[5] = (storage_base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
       for (unsigned i = 6; i <= 10; i++)
          view->storage_descriptor[i] = view->descriptor[i];
+      if (ubwc_enabled) {
+         view->storage_descriptor[7] = storage_ubwc_addr;
+         view->storage_descriptor[8] = storage_ubwc_addr >> 32;
+      }
    } else if (CHIP >= A8XX) {
       memcpy(view->storage_descriptor, view->descriptor, sizeof(view->storage_descriptor));
 
       uint32_t *descriptor = view->storage_descriptor;
 
-      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr >> 32) |
+      descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(storage_base_addr);
+      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(storage_base_addr >> 32) |
                       A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, true)) |
                       A8XX_TEX_MEMOBJ_1_DEPTH(storage_depth);
       descriptor[3] = A8XX_TEX_MEMOBJ_3_FMT(storage_format) |
                       A8XX_TEX_MEMOBJ_3_SWAP(swap) |
                       fdl6_texswiz<CHIP>(args, has_z24uint_s8uint);
+      if (ubwc_enabled) {
+         descriptor[4] = (descriptor[4] & ~A8XX_TEX_MEMOBJ_4_FLAG_LO__MASK) |
+                         A8XX_TEX_MEMOBJ_4_FLAG_LO(storage_ubwc_addr);
+         descriptor[5] = (descriptor[5] & ~A8XX_TEX_MEMOBJ_5_FLAG_HI__MASK) |
+                         A8XX_TEX_MEMOBJ_5_FLAG_HI(storage_ubwc_addr >> 32);
+      }
    }
 
    enum a6xx_format color_format =

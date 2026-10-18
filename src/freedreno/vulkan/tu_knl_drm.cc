@@ -7,8 +7,10 @@
 #include "tu_knl_drm.h"
 
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <sys/mman.h>
 #include <xf86drm.h>
+#endif
 
 #include "tu_device.h"
 #include "tu_queue.h"
@@ -22,6 +24,13 @@ tu_allocate_userspace_iova(struct tu_device *dev,
                            uint64_t *iova)
 {
    *iova = 0;
+   uint64_t alignment = os_page_size;
+#ifdef _WIN32
+   /* D3D12 buffer addresses require 64 KiB alignment, independently of
+    * the CPU page size. Align the VA reservation rather than padding or
+    * shifting the bound Vulkan allocation. */
+   alignment = MAX2(alignment, 65536);
+#endif
 
    if (flags & TU_BO_ALLOC_REPLAYABLE) {
       if (client_iova) {
@@ -36,11 +45,11 @@ tu_allocate_userspace_iova(struct tu_device *dev,
           * them from the other end of the address space.
           */
          dev->vma.alloc_high = true;
-         *iova = util_vma_heap_alloc(&dev->vma, size, os_page_size);
+         *iova = util_vma_heap_alloc(&dev->vma, size, alignment);
       }
    } else {
       dev->vma.alloc_high = false;
-      *iova = util_vma_heap_alloc(&dev->vma, size, os_page_size);
+      *iova = util_vma_heap_alloc(&dev->vma, size, alignment);
    }
 
    if (!*iova)
@@ -52,11 +61,18 @@ tu_allocate_userspace_iova(struct tu_device *dev,
 int
 tu_drm_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 {
+#ifdef _WIN32
+   /* Windows guest 没有 PRIME/dmabuf（移植方案缺口 1），块 1–6 直接失败。 */
+   (void) dev;
+   (void) bo;
+   return -1;
+#else
    int prime_fd;
    int ret = drmPrimeHandleToFD(dev->fd, bo->gem_handle,
                                 DRM_CLOEXEC | DRM_RDWR, &prime_fd);
 
    return ret == 0 ? prime_fd : -1;
+#endif
 }
 
 void

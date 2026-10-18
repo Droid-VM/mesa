@@ -58,9 +58,9 @@
 #define DETECT_ARCH_X86 1
 #endif
 
-#if defined(__x86_64__) /* gcc */ || \
+#if !defined(_M_ARM64EC) && (defined(__x86_64__) /* gcc */ || \
     ((defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC)) /* msvc */ || \
-    defined(__x86_64) /* Sun cc */
+    defined(__x86_64)) /* Sun cc */
 #define DETECT_ARCH_X86_64 1
 #endif
 

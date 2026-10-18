@@ -6,11 +6,14 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
+#ifndef _WIN32
 #include "util/os_mman.h"
+#endif
 
 #include "freedreno_drmif.h"
 #include "freedreno_drm_perfetto.h"
 #include "freedreno_priv.h"
+#include "util/os_time.h"
 
 simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
 simple_mtx_t fence_lock = SIMPLE_MTX_INITIALIZER;
@@ -102,10 +105,15 @@ import_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
 
    bo = dev->funcs->bo_from_handle(dev, size, handle);
    if (!bo) {
+#ifndef _WIN32
       struct drm_gem_close req = {
          .handle = handle,
       };
       drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
+#else
+      struct fd_bo imported = {.dev = dev, .handle = handle};
+      dev->funcs->bo_close_handle(&imported);
+#endif
       return NULL;
    }
 
@@ -161,6 +169,20 @@ struct fd_bo *
 _fd_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
 {
    struct fd_bo *bo = bo_new(dev, size, flags, &dev->bo_cache);
+
+   /* The WDDM host can transiently refuse a GEM allocation while its control
+    * queue drains (submit_ccmd_stream / CreateAllocation).  One bounded retry
+    * keeps that recoverable stall from becoming a NULL deref in callers that
+    * pass the result straight to fd_bo_mark_for_dump() without checking.
+    */
+   if (unlikely(!bo)) {
+      os_time_sleep(2000);
+      bo = bo_new(dev, size, flags, &dev->bo_cache);
+      if (unlikely(!bo))
+         mesa_loge("fd_bo_new: allocation failed after retry: size=%u flags=0x%x",
+                   size, flags);
+   }
+
    if (bo)
       bo->bo_reuse = BO_CACHE;
    return bo;
@@ -219,11 +241,15 @@ out_unlock:
 uint32_t
 fd_handle_from_dmabuf_drm(struct fd_device *dev, int fd)
 {
+#ifdef _WIN32
+   return 0;
+#else
    uint32_t handle;
    int ret = drmPrimeFDToHandle(dev->fd, fd, &handle);
    if (ret)
       return 0;
    return handle;
+#endif
 }
 
 struct fd_bo *
@@ -271,6 +297,9 @@ fd_bo_from_dmabuf(struct fd_device *dev, int fd)
 struct fd_bo *
 fd_bo_from_name(struct fd_device *dev, uint32_t name)
 {
+#ifdef _WIN32
+   return NULL;
+#else
    struct drm_gem_open req = {
       .name = name,
    };
@@ -306,11 +335,22 @@ out_unlock:
       goto restart;
 
    return bo;
+#endif
 }
 
 void
 fd_bo_mark_for_dump(struct fd_bo *bo)
 {
+   /* Callers pass the result of fd_bo_new() straight in; on allocation
+    * failure that is NULL and the deref below is the crash at +0x4887e8
+    * (reading address 0x18).  Do not turn a recoverable allocation failure
+    * into an access violation. */
+   if (unlikely(!bo)) {
+      static uint32_t logged;
+      if (logged++ == 0)
+         mesa_loge("fd_bo_mark_for_dump: NULL bo (fd_bo_new failed)");
+      return;
+   }
    bo->reloc_flags |= FD_RELOC_DUMP;
 }
 
@@ -449,10 +489,14 @@ fd_bo_fini_fences(struct fd_bo *bo)
 void
 fd_bo_close_handle_drm(struct fd_bo *bo)
 {
+#ifndef _WIN32
    struct drm_gem_close req = {
       .handle = bo->handle,
    };
    drmIoctl(bo->dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
+#else
+   UNREACHABLE("DRM GEM close is unavailable on Windows");
+#endif
 }
 
 /**
@@ -473,8 +517,10 @@ fd_bo_fini_common(struct fd_bo *bo)
 
    fd_bo_fini_fences(bo);
 
+#ifndef _WIN32
    if (bo->map)
       os_munmap(bo->map, bo->size);
+#endif
 
    if (handle) {
       simple_mtx_lock(&table_lock);
@@ -509,6 +555,9 @@ bo_flush(struct fd_bo *bo)
 int
 fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
 {
+#ifdef _WIN32
+   return -ENOTSUP;
+#else
    if (suballoc_bo(bo))
       return -1;
 
@@ -534,6 +583,7 @@ fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
    *name = bo->name;
 
    return 0;
+#endif
 }
 
 uint32_t
@@ -550,6 +600,9 @@ fd_bo_handle(struct fd_bo *bo)
 int
 fd_bo_dmabuf_drm(struct fd_bo *bo)
 {
+#ifdef _WIN32
+   return -ENOTSUP;
+#else
    int ret, prime_fd;
 
    ret = drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
@@ -558,6 +611,7 @@ fd_bo_dmabuf_drm(struct fd_bo *bo)
       return ret;
 
    return prime_fd;
+#endif
 }
 
 int
@@ -612,6 +666,9 @@ fd_bo_get_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
 void *
 fd_bo_map_os_mmap(struct fd_bo *bo)
 {
+#ifdef _WIN32
+   return NULL;
+#else
    uint64_t offset;
    int ret;
    ret = bo->funcs->offset(bo, &offset);
@@ -620,6 +677,7 @@ fd_bo_map_os_mmap(struct fd_bo *bo)
    }
    return os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                   bo->dev->fd, offset);
+#endif
 }
 
 /* For internal use only, does not check FD_BO_NOMAP: */
@@ -628,7 +686,7 @@ __fd_bo_map(struct fd_bo *bo)
 {
    if (!bo->map) {
       bo->map = bo->funcs->map(bo);
-      if (bo->map == MAP_FAILED) {
+      if (bo->map == (void *)-1) {
          ERROR_MSG("mmap failed: %s", strerror(errno));
          bo->map = NULL;
       }
@@ -844,4 +902,3 @@ fd_bo_state(struct fd_bo *bo)
 
    return FD_BO_STATE_BUSY;
 }
-

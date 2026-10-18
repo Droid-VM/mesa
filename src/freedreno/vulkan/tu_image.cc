@@ -259,6 +259,8 @@ tu_image_view_init(struct tu_device *device,
       args.type = FDL_VIEW_TYPE_CUBE;
       break;
    case VK_IMAGE_VIEW_TYPE_3D:
+      args.storage_z_slice_offset = iview->vk.storage.z_slice_offset;
+      args.storage_z_slice_count = iview->vk.storage.z_slice_count;
       args.type = FDL_VIEW_TYPE_3D;
       break;
    default:

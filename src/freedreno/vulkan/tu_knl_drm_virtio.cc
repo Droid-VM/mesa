@@ -11,12 +11,23 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <unistd.h>
+#if !defined(_WIN32)
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <xf86drm.h>
+#else
+#include <windows.h>
+/* sys/mman.h 在 mingw 不存在；vdrm 后端的失败约定用 (void *)-1 保持一致，
+ * 由 vdrm_wddm.c（块 2+）实现真正的 CPU map 语义。 */
+#define MAP_FAILED ((void *)-1)
+#endif
 
 #include "util/hash_table.h"
+#if !defined(_WIN32)
 #include "util/libsync.h"
+#endif
+#include "util/stack_array.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
 #include "vk_drm_syncobj.h"
@@ -36,6 +47,81 @@
 #include "msm_proto.h"
 /* clang-format on */
 /* NOLINTEND */
+
+/* Windows guest BOs use MmCached mappings and KGSL IOCOHERENT imports.
+ * Publish/observe coherent fence memory without entering cache_ops_null.
+ * Linux guest-pool backing still requires its explicit cache maintenance.
+ */
+static void
+virtio_sync_guest_bo_cache(struct tu_device *dev, struct tu_bo *bo,
+                          VkDeviceSize offset, VkDeviceSize size,
+                          enum tu_mem_sync_op op)
+{
+#ifdef _WIN32
+   __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#else
+   tu_bo_sync_cache(dev, bo, offset, size, op);
+#endif
+}
+
+#if defined(_WIN32)
+/* vk_drm_syncobj.c 只在 libdrm 可用时编入；Windows 上没有任何真实的 drm
+ * syncobj，vulkan runtime 侧也走不到。这里给一个占位实现，仅让
+ * vk_sync_as_drm_syncobj() 的内联 finish 指针比较可链接。 */
+extern "C" void
+vk_drm_syncobj_finish(struct vk_device *device, struct vk_sync *sync)
+{
+   (void) device;
+   (void) sync;
+}
+#endif
+
+#if defined(_WIN32)
+/*
+ * Linux <asm-generic/ioctl.h> 的 _IOC 编码。msm_proto 的 IOCTL_SIMPLE ccmd
+ * 里携带的是内核 DRM_IOCTL_* 编号（宿主 drm2kgsl 按 Linux 规则解码），mingw
+ * 没有这套宏，这里按 asm-generic（与 Linux arm64 相同、与架构无关的编码）
+ * 原样补一份，保证 DRM_IOCTL_MSM_* 常量值两边一致。
+ */
+#ifndef _IOC_NRBITS
+#define _IOC_NRBITS 8
+#define _IOC_TYPEBITS 8
+#define _IOC_SIZEBITS 14
+#define _IOC_DIRBITS 2
+
+#define _IOC_NRMASK ((1 << _IOC_NRBITS) - 1)
+#define _IOC_TYPEMASK ((1 << _IOC_TYPEBITS) - 1)
+#define _IOC_SIZEMASK ((1 << _IOC_SIZEBITS) - 1)
+#define _IOC_DIRMASK ((1 << _IOC_DIRBITS) - 1)
+
+#define _IOC_NRSHIFT 0
+#define _IOC_TYPESHIFT (_IOC_NRSHIFT + _IOC_NRBITS)
+#define _IOC_SIZESHIFT (_IOC_TYPESHIFT + _IOC_TYPEBITS)
+#define _IOC_DIRSHIFT (_IOC_SIZESHIFT + _IOC_SIZEBITS)
+
+#define _IOC_NONE 0U
+#define _IOC_WRITE 1U
+#define _IOC_READ 2U
+
+#define _IOC(dir, type, nr, size) \
+   (((dir) << _IOC_DIRSHIFT) | ((type) << _IOC_TYPESHIFT) | \
+    ((nr) << _IOC_NRSHIFT) | ((size) << _IOC_SIZESHIFT))
+
+#define _IO(type, nr) _IOC(_IOC_NONE, (type), (nr), 0)
+#define _IOR(type, nr, size) _IOC(_IOC_READ, (type), (nr), sizeof(size))
+#define _IOW(type, nr, size) _IOC(_IOC_WRITE, (type), (nr), sizeof(size))
+#define _IOWR(type, nr, size) \
+   _IOC(_IOC_READ | _IOC_WRITE, (type), (nr), sizeof(size))
+
+#define _IOC_DIR(nr) (((nr) >> _IOC_DIRSHIFT) & _IOC_DIRMASK)
+#define _IOC_TYPE(nr) (((nr) >> _IOC_TYPESHIFT) & _IOC_TYPEMASK)
+#define _IOC_NR(nr) (((nr) >> _IOC_NRSHIFT) & _IOC_NRMASK)
+#define _IOC_SIZE(nr) (((nr) >> _IOC_SIZESHIFT) & _IOC_SIZEMASK)
+
+#define IOC_IN (_IOC_WRITE << _IOC_DIRSHIFT)
+#define IOC_OUT (_IOC_READ << _IOC_DIRSHIFT)
+#endif
+#endif
 
 struct tu_userspace_fence_cmd {
    uint32_t pkt[4];    /* first 4 dwords of packet */
@@ -72,6 +158,17 @@ struct tu_virtio_device {
     * This gives us a place to stash the VMAs between the two steps.
     */
    struct u_vector zombie_vmas_stage_2;
+
+#ifdef _WIN32
+   /* Freed BOs kept for reuse, oldest first; see tu_bo_cache. Protected by
+    * tu_device::vma_mutex. */
+   struct util_dynarray bo_cache;
+   uint64_t bo_cache_bytes;
+
+   /* Last synchronous fault query; see query_faults(). */
+   int64_t fault_query_ns;
+   uint64_t fault_query_value;
+#endif
 };
 
 static int tu_drm_get_param(struct vdrm_device *vdrm, uint32_t param, uint64_t *value);
@@ -102,6 +199,8 @@ virtio_simple_ioctl(struct vdrm_device *vdrm, unsigned cmd, void *_req)
          vdrm_alloc_rsp(vdrm, &req->hdr, rsp_len);
 
    int ret = vdrm_send_req(vdrm, &req->hdr, true);
+   if (ret)
+      return ret;
 
    if (cmd & IOC_OUT)
       memcpy(_req, rsp->payload, _IOC_SIZE(cmd));
@@ -130,9 +229,31 @@ query_faults(struct tu_device *dev, uint64_t *value)
    uint32_t async_error = 0;
    uint64_t global_faults;
 
-   if (vdrm_shmem_has_field(vdev->shmem, async_error))
-      async_error = vdev->shmem->async_error;
-
+#ifdef _WIN32
+   /* KGSL recovery can skip a faulted batch and execute a later userspace
+    * fence. Refresh per-context faults synchronously before accepting that
+    * fence; an asynchronously published shared counter can arrive too late
+    * (the host only refreshes it when queried).
+    *
+    * Each query costs ~0.5 ms, about half of a submit+wait round trip, so a
+    * result is reused for TU_WIN_FAULT_QUERY_MS (default 4, 0 = always
+    * query). Pending waits already check at that interval, so a fault during
+    * a wait is still seen; a completed wait accepts a result at most that
+    * old. */
+   static const int64_t interval_ns =
+      (int64_t) debug_get_num_option("TU_WIN_FAULT_QUERY_MS", 4) * 1000000;
+   int64_t now = os_time_get_nano();
+   int64_t last_ns = p_atomic_read(&vdev->fault_query_ns);
+   if (interval_ns > 0 && last_ns && now - last_ns < interval_ns) {
+      global_faults = p_atomic_read(&vdev->fault_query_value);
+   } else {
+      int ret = tu_drm_get_param(vdev->vdrm, MSM_PARAM_FAULTS, &global_faults);
+      if (ret)
+         return ret;
+      p_atomic_set(&vdev->fault_query_value, global_faults);
+      p_atomic_set(&vdev->fault_query_ns, now);
+   }
+#else
    if (vdrm_shmem_has_field(vdev->shmem, global_faults)) {
       global_faults = vdev->shmem->global_faults;
    } else {
@@ -140,6 +261,10 @@ query_faults(struct tu_device *dev, uint64_t *value)
       if (ret)
          return ret;
    }
+#endif
+
+   if (vdrm_shmem_has_field(vdev->shmem, async_error))
+      async_error = vdev->shmem->async_error;
 
    *value = global_faults + async_error;
 
@@ -182,6 +307,11 @@ virtio_device_init(struct tu_device *dev)
    struct tu_instance *instance = dev->physical_device->instance;
    int fd;
 
+#if defined(_WIN32)
+   /* Windows guest：没有 /dev/dri 节点；vdrm_wddm 后端直接从 D3DKMT 枚举
+    * 适配器（块 2），fd 概念不存在，恒 -1。 */
+   fd = -1;
+#else
    if (strlen(dev->physical_device->fd_path) == 0) {
       fd = -1;
    } else {
@@ -191,6 +321,7 @@ virtio_device_init(struct tu_device *dev)
                                  "failed to open device %s", dev->physical_device->fd_path);
       }
    }
+#endif
 
    struct tu_virtio_device *vdev = (struct tu_virtio_device *)
             vk_zalloc(&instance->vk.alloc, sizeof(*vdev), 8,
@@ -201,6 +332,9 @@ virtio_device_init(struct tu_device *dev)
    };
 
    u_vector_init(&vdev->zombie_vmas_stage_2, 64, sizeof(struct tu_zombie_vma));
+#ifdef _WIN32
+   util_dynarray_init(&vdev->bo_cache, NULL);
+#endif
 
    dev->vdev = vdev;
    dev->fd = fd;
@@ -215,6 +349,18 @@ virtio_device_init(struct tu_device *dev)
                                "failed to connect virtio DRM context");
    }
 
+#ifdef _WIN32
+   /* Shared D3D11 resources must be allocated by the UMD's pfnAllocateCb, not
+    * by the transport's own device -- only the runtime mints the kernel resource
+    * handle an application can share.  Absent when the ICD runs without a D3D
+    * UMD, which just means no shared resource support. */
+   if (instance->runtime_alloc_fn && instance->runtime_free_fn) {
+      vdrm_wddm_set_runtime_allocator(vdev->vdrm, instance->runtime_alloc_ctx,
+                                      instance->runtime_alloc_fn,
+                                      instance->runtime_free_fn);
+   }
+#endif
+
    /* The physical-device probe uses a short-lived vdrm context.  Query the
     * slice again on the real VkDevice context, otherwise every device keeps
     * allocating from the probe context's slice and defeats host isolation. */
@@ -226,21 +372,29 @@ virtio_device_init(struct tu_device *dev)
       dev->va_size = va_size;
    }
 
+#if !defined(_WIN32)
    if (fd >= 0 && drmSyncobjCreate(fd, 0, &vdev->last_submit_syncobj))
       vdev->last_submit_syncobj = 0;
+#endif
 
-   p_atomic_set(&vdev->next_blob_id, 1);
+   p_atomic_set(&vdev->next_blob_id, (uint32_t)(getpid() & 0x7fff) << 16);
    vdev->shmem = to_msm_shmem(vdev->vdrm->shmem);
 
    query_faults(dev, &dev->fault_count);
 
    set_debuginfo(dev);
 
+#if defined(_WIN32)
+   /* TODO(块 3/5): vdrm_wddm 的 fence/sync 模型（ResourceBusy event / fence
+    * id），现在连 connect 都失败，运行期到不了这里。 */
+   (void) vdev;
+#else
    if (fd < 0)
       dev->vk.sync = vdrm_vpipe_get_sync(vdev->vdrm);
 
    if (fd >= 0)
       dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
+#endif
 
    return VK_SUCCESS;
 }
@@ -252,16 +406,27 @@ virtio_device_finish(struct tu_device *dev)
    struct tu_virtio_device *vdev = dev->vdev;
 
    u_vector_finish(&vdev->zombie_vmas_stage_2);
+#ifdef _WIN32
+   /* Cached BOs are released with the device's allocations by
+    * vdrm_device_close(), like zombies left at teardown. */
+   util_dynarray_fini(&vdev->bo_cache);
+#endif
 
+#if !defined(_WIN32)
    if (vdev->last_submit_syncobj)
       drmSyncobjDestroy(dev->fd, vdev->last_submit_syncobj);
+#endif
 
    vdrm_device_close(vdev->vdrm);
 
    vk_free(&instance->vk.alloc, vdev);
    dev->vdev = NULL;
 
+#if !defined(_WIN32)
    close(dev->fd);
+#else
+   dev->fd = -1;
+#endif
 }
 
 static int
@@ -375,9 +540,12 @@ virtio_device_check_status(struct tu_device *device)
 {
    uint64_t last_fault_count = device->fault_count;
 
-   query_faults(device, &device->fault_count);
-
-   if (last_fault_count != device->fault_count)
+   uint64_t fault_count;
+   if (query_faults(device, &fault_count))
+      return vk_device_set_lost(&device->vk, "Failed to query GPU fault status");
+   /* Keep the initial baseline immutable: concurrent waiters must not consume
+    * one another's observation before device-lost has been published. */
+   if (last_fault_count != fault_count)
       return vk_device_set_lost(&device->vk, "GPU faulted or hung");
 
    return VK_SUCCESS;
@@ -441,8 +609,13 @@ tu_wait_fence(struct tu_device *dev,
    struct vdrm_device *vdrm = dev->vdev->vdrm;
    MESA_TRACE_FUNC();
 
-   if (!fence_before(dev->global_bo_map->userspace_fence, fence))
+   if (!fence_before(dev->global_bo_map->userspace_fence, fence)) {
+#ifdef _WIN32
+      return vk_device_check_status(&dev->vk);
+#else
       return VK_SUCCESS;
+#endif
+   }
 
    if (!timeout_ns)
       return VK_TIMEOUT;
@@ -526,6 +699,12 @@ struct tu_virtio_sync {
     * client's external-sync rules order those accesses. */
    struct tu_queue *owner;
    uint32_t submit_seqno;
+#ifdef _WIN32
+   /* Windows 没有 drm syncobj（drm.syncobj 恒 0），二元状态存这里：
+    * true = 已确认完成（CPU signal 过，或等到过 userspace_fence）。
+    * 见 tu_win_sync_type。 */
+   bool signaled;
+#endif
 };
 
 static inline struct tu_virtio_sync *
@@ -640,6 +819,12 @@ tu_virtio_sync_wait_many(struct vk_device *device, uint32_t wait_count,
    const struct vk_sync_type *base = &dev->physical_device->syncobj_type;
    const struct vk_sync_type *poll_type = &dev->physical_device->poll_sync_type;
 
+#ifdef _WIN32
+   /* The Windows base wait also validates host fault status. Do not bypass
+    * it merely because a later batch wrote the userspace fence. */
+   return base->wait_many(device, wait_count, waits, wait_flags, abs_timeout_ns);
+#endif
+
    if ((wait_flags & VK_SYNC_WAIT_PENDING) || wait_count == 0 ||
        !dev->global_bo_map)
       return base->wait_many(device, wait_count, waits, wait_flags,
@@ -662,7 +847,7 @@ tu_virtio_sync_wait_many(struct vk_device *device, uint32_t wait_count,
 
    for (;;) {
       if (dev->vdev->vdrm->supports_guest_alloc) {
-         tu_bo_sync_cache(dev, dev->global_bo, gb_offset(userspace_fence),
+         virtio_sync_guest_bo_cache(dev, dev->global_bo, gb_offset(userspace_fence),
                           sizeof(dev->global_bo_map->userspace_fence),
                           TU_MEM_SYNC_CACHE_FROM_GPU);
       }
@@ -702,18 +887,340 @@ tu_virtio_get_poll_sync_type(const struct vk_sync_type *base)
    type.features = (enum vk_sync_features)
       (type.features & ~VK_SYNC_FEATURE_TIMELINE);
    type.get_value = NULL;
+#ifndef _WIN32
+   /* On Linux, owner is only a cache of the kernel syncobj payload.  On
+    * Windows it is part of the payload itself: invalidating src before
+    * move would lose a pending signal permanently.  Keep the Windows base
+    * operations, including its NULL signal_many/reset_many fallbacks.
+    */
    type.signal = tu_virtio_sync_signal;
    type.signal_many = tu_virtio_sync_signal_many;
    type.reset = tu_virtio_sync_reset;
    type.reset_many = tu_virtio_sync_reset_many;
    type.move = tu_virtio_sync_move;
+#endif
+#ifdef _WIN32
+   /* base（tu_win_sync_type）没有 fd 导入，这里也不能留非 NULL 的钩子：
+    * vk_semaphore.c:47 / vk_fence.c:44 是"按 import_opaque_fd 是否为空"挑
+    * sync 类型的，留着会挑中它然后在 base 的 NULL 指针上崩。 */
+   type.import_opaque_fd = NULL;
+   type.import_sync_file = NULL;
+#else
    type.import_opaque_fd = tu_virtio_sync_import_opaque_fd;
    type.import_sync_file = tu_virtio_sync_import_sync_file;
+#endif
    type.wait_many = tu_virtio_sync_wait_many;
 
    return type;
 }
 
+#ifdef _WIN32
+DEBUG_GET_ONCE_BOOL_OPTION(tu_win_sync_debug, "TU_WIN_SYNC_DEBUG", false)
+
+/* Windows 上没有 drm syncobj / sync_file，vk_drm_syncobj 那一套无从落地。这里给
+ * VkFence 和二元 VkSemaphore 做一个自足的二元 sync：状态 = 「已确认完成」布尔 +
+ * 「由哪次提交签发的 seqno」，等待就是拿 seqno 跟 turnip 自己的 userspace fence
+ * （global_bo_map->userspace_fence，GPU 侧 CACHE_FLUSH_TS 写）比。
+ *
+ * 载体沿用 Linux 的 struct tu_virtio_sync（drm.syncobj 在 Windows 恒 0 不用），
+ * 这样 tu_virtio_get_poll_sync_type() 那层包装在 Windows 上也能照常套上去：
+ * size / owner / submit_seqno 全部对得上，它只覆盖若干 op 并回落到 base（本类型）。
+ * timeline 语义不做（features 不含 TIMELINE），交给 vk_sync_timeline 模拟。 */
+
+static VkResult
+tu_win_sync_init(struct vk_device *device, struct vk_sync *base,
+                 uint64_t initial_value)
+{
+   struct tu_virtio_sync *sync = to_tu_virtio_sync(base);
+
+   (void)device;
+   sync->drm.syncobj = 0;
+   sync->submit_seqno = 0;
+   sync->signaled = initial_value != 0;
+   p_atomic_set(&sync->owner, (struct tu_queue *)NULL);
+
+   return VK_SUCCESS;
+}
+
+static void
+tu_win_sync_finish(struct vk_device *device, struct vk_sync *base)
+{
+   (void)device;
+   (void)base;
+}
+
+static VkResult
+tu_win_sync_signal(struct vk_device *device, struct vk_sync *base, uint64_t value)
+{
+   struct tu_virtio_sync *sync = to_tu_virtio_sync(base);
+
+   (void)device;
+   (void)value;
+   sync->submit_seqno = 0;
+   sync->signaled = true;
+   p_atomic_set(&sync->owner, (struct tu_queue *)NULL);
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+tu_win_sync_reset(struct vk_device *device, struct vk_sync *base)
+{
+   struct tu_virtio_sync *sync = to_tu_virtio_sync(base);
+
+   (void)device;
+   sync->submit_seqno = 0;
+   sync->signaled = false;
+   p_atomic_set(&sync->owner, (struct tu_queue *)NULL);
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+tu_win_sync_move(struct vk_device *device, struct vk_sync *dst_base,
+                 struct vk_sync *src_base)
+{
+   struct tu_virtio_sync *dst = to_tu_virtio_sync(dst_base);
+   struct tu_virtio_sync *src = to_tu_virtio_sync(src_base);
+
+   (void)device;
+   dst->submit_seqno = src->submit_seqno;
+   dst->signaled = src->signaled;
+   p_atomic_set(&dst->owner, p_atomic_read(&src->owner));
+
+   src->submit_seqno = 0;
+   src->signaled = false;
+   p_atomic_set(&src->owner, (struct tu_queue *)NULL);
+
+   return VK_SUCCESS;
+}
+
+/* 已完成？signaled 是"确认过"的缓存，避免每次都读共享页。 */
+static bool
+tu_win_sync_poll(struct tu_device *dev, struct tu_virtio_sync *sync)
+{
+   if (sync->signaled)
+      return true;
+   if (!p_atomic_read(&sync->owner) || !dev->global_bo_map)
+      return false;
+   if (fence_before(dev->global_bo_map->userspace_fence, sync->submit_seqno))
+      return false;
+
+   sync->signaled = true;
+   return true;
+}
+
+class tu_win_sync_timer {
+public:
+   ~tu_win_sync_timer()
+   {
+      if (timer)
+         CloseHandle(timer);
+   }
+
+   void wait(uint64_t duration_ns)
+   {
+      if (!initialized) {
+         timer = CreateWaitableTimerExW(NULL, NULL,
+                                       CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_MODIFY_STATE | SYNCHRONIZE);
+         initialized = true;
+      }
+
+      if (timer) {
+         LARGE_INTEGER due;
+         due.QuadPart = -(int64_t)DIV_ROUND_UP(duration_ns, 100);
+         if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0) &&
+             WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0)
+            return;
+
+         CloseHandle(timer);
+         timer = NULL;
+      }
+
+      /* Keep the original blocking fallback if high-resolution timers fail. */
+      os_time_sleep(DIV_ROUND_UP(duration_ns, 1000));
+   }
+
+private:
+   HANDLE timer = NULL;
+   bool initialized = false;
+};
+
+static VkResult
+tu_win_sync_wait_many(struct vk_device *_device, uint32_t wait_count,
+                      const struct vk_sync_wait *waits,
+                      enum vk_sync_wait_flags wait_flags,
+                      uint64_t abs_timeout_ns)
+{
+   struct tu_device *dev = container_of(_device, struct tu_device, vk);
+
+   if (wait_count == 0)
+      return VK_SUCCESS;
+
+   const bool debug = debug_get_option_tu_win_sync_debug();
+   uint64_t next_log_ns = debug ? os_time_get_nano() + 1000000000ull : 0;
+   uint64_t next_fault_check_ns = 0;
+   tu_win_sync_timer timer;
+
+   for (;;) {
+      if (vk_device_is_lost(&dev->vk))
+         return VK_ERROR_DEVICE_LOST;
+      bool all = true, any = false;
+
+      for (uint32_t i = 0; i < wait_count; i++) {
+         struct tu_virtio_sync *sync = to_tu_virtio_sync(waits[i].sync);
+         bool done;
+
+         /* WAIT_PENDING 只问"有没有被提交出去"，不等真正完成。 */
+         if (wait_flags & VK_SYNC_WAIT_PENDING)
+            done = sync->signaled || p_atomic_read(&sync->owner) != NULL;
+         else
+            done = tu_win_sync_poll(dev, sync);
+
+         if (done)
+            any = true;
+         else
+            all = false;
+      }
+
+      if ((wait_flags & VK_SYNC_WAIT_ANY) ? any : all)
+         return vk_device_check_status(&dev->vk);
+
+      if (debug && (uint64_t)os_time_get_nano() >= next_log_ns) {
+         struct tu_virtio_device *vdev = dev->vdev;
+         fprintf(stderr, "tu-win32-sync: waiting flags=0x%x gpu=%u "
+                 "host_seq=%u next_req=%u async_error=%u global_faults=%u\n",
+                 (unsigned)wait_flags,
+                 dev->global_bo_map ? dev->global_bo_map->userspace_fence : 0,
+                 vdev->shmem->base.seqno, vdev->vdrm->next_seqno,
+                 vdev->shmem->async_error, vdev->shmem->global_faults);
+         for (uint32_t i = 0; i < wait_count; i++) {
+            struct tu_virtio_sync *sync = to_tu_virtio_sync(waits[i].sync);
+            fprintf(stderr, "tu-win32-sync: wait[%u] sync=%p owner=%p "
+                    "fence=%u signaled=%u\n", i, (void *)sync,
+                    (void *)p_atomic_read(&sync->owner), sync->submit_seqno,
+                    (unsigned)sync->signaled);
+         }
+         next_log_ns = os_time_get_nano() + 1000000000ull;
+      }
+
+      const uint64_t now = os_time_get_nano();
+      if (abs_timeout_ns == 0 ||
+          (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns))
+         return VK_TIMEOUT;
+
+      /* Refresh even when no later batch writes a fence, so a faulted last
+       * submission becomes device-lost instead of an unbounded wait. */
+      if (now >= next_fault_check_ns) {
+         vk_device_check_status(&dev->vk);
+         if (vk_device_is_lost(&dev->vk))
+            return VK_ERROR_DEVICE_LOST;
+         next_fault_check_ns = now + 4000000ull;
+      }
+
+      /* Sleep(1) can cost a whole scheduler tick on Windows. Reuse a timer
+       * while polling, and never request a wait beyond the caller's deadline.
+       * Timer expiry only prompts another fence check; it does not signal it.
+       */
+      const uint64_t remaining = abs_timeout_ns == OS_TIMEOUT_INFINITE ?
+                                 UINT64_MAX : abs_timeout_ns - now;
+      timer.wait(MIN2(remaining, 100000ull));
+   }
+}
+
+static VkResult
+tu_win_sync_wait(struct vk_device *device, struct vk_sync *base,
+                 uint64_t wait_value, enum vk_sync_wait_flags wait_flags,
+                 uint64_t abs_timeout_ns)
+{
+   struct vk_sync_wait wait = { .sync = base, .wait_value = wait_value };
+
+   return tu_win_sync_wait_many(device, 1, &wait, wait_flags, abs_timeout_ns);
+}
+
+static const struct vk_sync_type tu_win_sync_type = {
+   .size = sizeof(struct tu_virtio_sync),
+   .features = (enum vk_sync_features)(VK_SYNC_FEATURE_BINARY |
+                                       VK_SYNC_FEATURE_GPU_WAIT |
+                                       VK_SYNC_FEATURE_CPU_WAIT |
+                                       VK_SYNC_FEATURE_CPU_RESET |
+                                       VK_SYNC_FEATURE_CPU_SIGNAL |
+                                       VK_SYNC_FEATURE_WAIT_ANY |
+                                       VK_SYNC_FEATURE_WAIT_PENDING),
+   .init = tu_win_sync_init,
+   .finish = tu_win_sync_finish,
+   .signal = tu_win_sync_signal,
+   .reset = tu_win_sync_reset,
+   .move = tu_win_sync_move,
+   .wait = tu_win_sync_wait,
+   .wait_many = tu_win_sync_wait_many,
+};
+
+DEBUG_GET_ONCE_BOOL_OPTION(tu_win_submit_cpu_wait, "TU_WIN_SUBMIT_CPU_WAIT", false)
+
+/* Windows 没有 drm syncobj，execbuf 带不了 in syncobj（vdrm_wddm 的
+ * execbuf_locked 见到非 0 计数直接 -ENOSYS），提交前的等待只能在 CPU 做。
+ * 但不是每个 wait 都需要真等：
+ *
+ * - 由本队列已提交工作签发的 sync（owner == queue）：本队列对应 host 一个
+ *   submitqueue，ccmd 经 VidSch 单 context 按序送达，drm2kgsl 在同一个 KGSL
+ *   context 内按序执行（大提交拆批也保序），所以直接入 ring 即可——Linux 上
+ *   内核对同队列 syncobj 也是这么处理的。每帧的 present 提交等的正是本队列的
+ *   render-finished semaphore，CPU 等它会把 vkQueuePresentKHR 卡到本帧渲染
+ *   结束，GPU 在 render 结束到 blit 抵达之间空转，应用的下一帧 CPU 工作也
+ *   无法与 GPU 重叠。
+ * - 已确认完成的（signaled）：不用等。
+ * - 其余（跨队列、尚未签发、timeline 模拟点、dummy 之类的其他类型）：保留
+ *   CPU 等待，保守但正确。
+ *
+ * 判定与 tu_empty_submit_can_skip() 的 owner 检查一致。
+ * TU_WIN_SUBMIT_CPU_WAIT=1 恢复对所有 wait 的 CPU 等待，用来隔离 host 侧
+ * 不保序的问题（症状：present 拷到比 render 更早的旧帧）。 */
+static VkResult
+tu_win_submit_wait_syncs(struct tu_queue *queue,
+                         struct vk_sync_wait *waits, uint32_t wait_count)
+{
+   struct tu_device *dev = queue->device;
+   const struct vk_sync_type *base_type = &dev->physical_device->syncobj_type;
+   const struct vk_sync_type *poll_type = &dev->physical_device->poll_sync_type;
+   const bool force_wait = debug_get_option_tu_win_submit_cpu_wait();
+   VkResult result = VK_SUCCESS;
+
+   if (wait_count == 0)
+      return VK_SUCCESS;
+
+   STACK_ARRAY(struct vk_sync_wait, pending, wait_count);
+   uint32_t pending_count = 0;
+
+   for (uint32_t i = 0; i < wait_count; i++) {
+      struct vk_sync *sync = waits[i].sync;
+
+      if (!force_wait && (sync->type == base_type || sync->type == poll_type)) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(sync);
+
+         if (s->signaled || p_atomic_read(&s->owner) == queue)
+            continue;
+      }
+
+      pending[pending_count++] = waits[i];
+   }
+
+   if (debug_get_option_tu_win_sync_debug() && pending_count != wait_count)
+      fprintf(stderr, "tu-win32-sync: submit queue=%u skipped %u of %u "
+              "same-queue waits\n", queue->msm_queue_id,
+              wait_count - pending_count, wait_count);
+
+   if (pending_count) {
+      result = vk_sync_wait_many(&dev->vk, pending_count, pending,
+                                 (enum vk_sync_wait_flags)0,
+                                 OS_TIMEOUT_INFINITE);
+   }
+
+   STACK_ARRAY_FINISH(pending);
+   return result;
+}
+#endif /* _WIN32 */
 static bool
 tu_virtio_single_queue(struct tu_device *dev)
 {
@@ -835,6 +1342,14 @@ static VkResult
 tu_empty_submit_inherit(struct tu_queue *queue,
                         struct vk_sync_signal *signals, uint32_t signal_count)
 {
+#ifdef _WIN32
+   /* Windows 没有 drm syncobj TRANSFER；空提交快路径（块 5）要换成 wddm
+    * fence 语义。现在编译期内不可达（fd<0 使 can_skip 恒 false）。 */
+   (void) queue;
+   (void) signals;
+   (void) signal_count;
+   return VK_ERROR_FEATURE_NOT_PRESENT;
+#else
    struct tu_device *dev = queue->device;
    struct tu_virtio_device *vdev = dev->vdev;
    const struct vk_sync_type *poll_type =
@@ -862,6 +1377,7 @@ tu_empty_submit_inherit(struct tu_queue *queue,
    }
 
    return VK_SUCCESS;
+#endif
 }
 
 static VkResult
@@ -908,10 +1424,11 @@ tu_free_zombie_vma_locked(struct tu_device *dev, bool wait)
    struct tu_virtio_device *vdev = dev->vdev;
    MESA_TRACE_FUNC();
 
-   if (!u_vector_length(&dev->zombie_vmas))
+   if (!u_vector_length(&dev->zombie_vmas) &&
+       !u_vector_length(&vdev->zombie_vmas_stage_2))
       return VK_SUCCESS;
 
-   if (wait) {
+   if (wait && u_vector_length(&dev->zombie_vmas)) {
       struct tu_zombie_vma *vma = (struct tu_zombie_vma *)
             u_vector_head(&dev->zombie_vmas);
       /* Wait for 3s (arbitrary timeout) */
@@ -951,6 +1468,16 @@ tu_free_zombie_vma_locked(struct tu_device *dev, bool wait)
          *vma2 = *vma;
       }
    }
+
+#if defined(_WIN32)
+   /* Unlike virtgpu_bo_close(), the WDDM close path does not flush buffered
+    * ccmds. Submit SET_IOVA before DestroyAllocation detaches its resource;
+    * otherwise the host sees a cleanup command referencing an already closed
+    * BO. On failure retain the handles instead of overtaking those commands.
+    */
+   if (u_vector_length(&vdev->zombie_vmas_stage_2) && vdrm_flush(vdev->vdrm))
+      return VK_ERROR_UNKNOWN;
+#endif
 
    /* And _then_ close the GEM handles: */
    while (u_vector_length(&vdev->zombie_vmas_stage_2) > 0) {
@@ -1121,19 +1648,191 @@ tu_bo_set_kernel_name(struct tu_device *dev, struct tu_bo *bo, const char *name)
    vdrm_send_req(dev->vdev->vdrm, &req->hdr, false);
 }
 
+#ifdef _WIN32
+/* Reuse of freed allocations.
+ *
+ * In the guest a WDDM allocation plus its host blob costs 0.5-40 ms per
+ * vkAllocateMemory (natively 6 us-1 ms) and its first CPU map ~0.2 ms. Freed
+ * vkAllocateMemory BOs that never left this device are kept with their IOVA
+ * and handed out again for an allocation of the same size and kind once the
+ * GPU is past the fence recorded when they were freed. They are cleared on
+ * reuse, so a reused allocation reads as zero just like a fresh one. Entries
+ * older than two seconds, or beyond TU_WIN_BO_CACHE_MB, take the zombie path.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(tu_win_bo_cache_mb, "TU_WIN_BO_CACHE_MB", 256)
+#define TU_BO_CACHE_MAX_AGE_NS 2000000000ll
+
+struct tu_bo_cache_entry {
+   uint64_t key, size, iova;
+   uint32_t gem_handle, res_id;
+   int fence;
+   int64_t freed_ns;
+};
+
+static void
+tu_bo_cache_zombie_locked(struct tu_device *dev,
+                          const struct tu_bo_cache_entry *e)
+{
+   struct tu_zombie_vma *vma = (struct tu_zombie_vma *)
+         u_vector_add(&dev->zombie_vmas);
+   vma->fence = e->fence;
+   vma->gem_handle = e->gem_handle;
+   vma->res_id = e->res_id;
+   vma->iova = e->iova;
+   vma->size = e->size;
+}
+
+static void
+tu_bo_cache_remove_locked(struct tu_virtio_device *vdev, unsigned idx)
+{
+   struct tu_bo_cache_entry *entries =
+      (struct tu_bo_cache_entry *) vdev->bo_cache.data;
+   unsigned count =
+      util_dynarray_num_elements(&vdev->bo_cache, struct tu_bo_cache_entry);
+
+   vdev->bo_cache_bytes -= entries[idx].size;
+   memmove(&entries[idx], &entries[idx + 1],
+           (count - idx - 1) * sizeof(*entries));
+   vdev->bo_cache.size -= sizeof(*entries);
+}
+
+/* Evict stale entries, and the oldest ones until incoming bytes fit. */
+static void
+tu_bo_cache_trim_locked(struct tu_device *dev, int64_t now, uint64_t incoming)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   uint64_t budget = (uint64_t) debug_get_option_tu_win_bo_cache_mb() << 20;
+
+   while (util_dynarray_num_elements(&vdev->bo_cache,
+                                     struct tu_bo_cache_entry)) {
+      struct tu_bo_cache_entry *oldest = util_dynarray_element(
+         &vdev->bo_cache, struct tu_bo_cache_entry, 0);
+      if (now - oldest->freed_ns < TU_BO_CACHE_MAX_AGE_NS &&
+          vdev->bo_cache_bytes + incoming <= budget)
+         break;
+      tu_bo_cache_zombie_locked(dev, oldest);
+      tu_bo_cache_remove_locked(vdev, 0);
+   }
+}
+
+static bool
+tu_bo_cache_reap_allowed(struct tu_device *dev)
+{
+   /* tu_wait_fence() reads the global BO's fence mapping. */
+   return dev->global_bo && dev->global_bo->gem_handle && dev->global_bo_map;
+}
+
+/* Keeps a freed BO for reuse. The BO must already be off the submit list. */
+static bool
+tu_bo_cache_put(struct tu_device *dev, struct tu_bo *bo)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   uint64_t budget = (uint64_t) debug_get_option_tu_win_bo_cache_mb() << 20;
+
+   if (bo->size > budget || !tu_bo_cache_reap_allowed(dev))
+      return false;
+
+   tu_bo_list_del(dev, bo);
+
+   mtx_lock(&dev->vma_mutex);
+   int64_t now = os_time_get_nano();
+   tu_bo_cache_trim_locked(dev, now, bo->size);
+   struct tu_bo_cache_entry e = {
+      .key = bo->cache_key,
+      .size = bo->size,
+      .iova = bo->iova,
+      .gem_handle = bo->gem_handle,
+      .res_id = bo->res_id,
+      .fence = dev->queue_count[0] > 0 ?
+               p_atomic_read(&dev->queues[0]->fence) : -1,
+      .freed_ns = now,
+   };
+   util_dynarray_append(&vdev->bo_cache, e);
+   vdev->bo_cache_bytes += e.size;
+   /* As in tu_bo_make_zombie: clear under the VMA mutex. */
+   memset(bo, 0, sizeof(*bo));
+   tu_free_zombie_vma_locked(dev, false);
+   mtx_unlock(&dev->vma_mutex);
+
+   return true;
+}
+
+/* Takes the most recently freed idle entry of this kind, if any. */
+static bool
+tu_bo_cache_take(struct tu_device *dev, uint64_t key, uint64_t size,
+                 struct tu_bo_cache_entry *out)
+{
+   struct tu_virtio_device *vdev = dev->vdev;
+   bool found = false;
+
+   if (!tu_bo_cache_reap_allowed(dev))
+      return false;
+
+   mtx_lock(&dev->vma_mutex);
+   tu_bo_cache_trim_locked(dev, os_time_get_nano(), 0);
+   for (unsigned i = util_dynarray_num_elements(&vdev->bo_cache,
+                                                struct tu_bo_cache_entry);
+        i-- > 0;) {
+      struct tu_bo_cache_entry *e = util_dynarray_element(
+         &vdev->bo_cache, struct tu_bo_cache_entry, i);
+      if (e->key != key || e->size != size)
+         continue;
+      if (e->fence >= 0 &&
+          tu_wait_fence(dev, dev->queues[0]->msm_queue_id, e->fence, 0) !=
+             VK_SUCCESS)
+         continue;
+      *out = *e;
+      tu_bo_cache_remove_locked(vdev, i);
+      found = true;
+      break;
+   }
+   tu_free_zombie_vma_locked(dev, false);
+   mtx_unlock(&dev->vma_mutex);
+
+   return found;
+}
+
+static void
+tu_bo_cache_discard(struct tu_device *dev, const struct tu_bo_cache_entry *e)
+{
+   mtx_lock(&dev->vma_mutex);
+   tu_bo_cache_zombie_locked(dev, e);
+   mtx_unlock(&dev->vma_mutex);
+}
+#endif
+
+/* Common body for virtio_bo_init and (on Windows) virtio_bo_init_shared.
+ *
+ * hRTResource selects where the platform allocation comes from: NULL means this
+ * driver's own device (the ordinary path), non-NULL routes it through the D3D
+ * UMD's runtime allocator so the result can become a D3D11 shared resource.
+ * Everything else -- GEM_NEW flags, blob_id, IOVA reservation, size rounding --
+ * must stay identical, because the host requires GEM_NEW and the later
+ * RESOURCE_CREATE_BLOB to agree exactly on blob_id and size. */
 static VkResult
-virtio_bo_init(struct tu_device *dev,
-               struct vk_object_base *base,
-               struct tu_bo **out_bo,
-               uint64_t size,
-               uint64_t client_iova,
-               VkMemoryPropertyFlags mem_property,
-               enum tu_bo_alloc_flags flags,
-               struct tu_sparse_vma *lazy_vma,
-               const char *name)
+virtio_bo_init_common(struct tu_device *dev,
+                      struct vk_object_base *base,
+                      struct tu_bo **out_bo,
+                      uint64_t size,
+                      uint64_t client_iova,
+                      VkMemoryPropertyFlags mem_property,
+                      enum tu_bo_alloc_flags flags,
+                      struct tu_sparse_vma *lazy_vma,
+                      const char *name,
+                      void *hRTResource)
 {
    MESA_TRACE_FUNC();
    struct tu_virtio_device *vdev = dev->vdev;
+#ifdef _WIN32
+   /* The WDDM guest allocator uses 64 KiB alignment. Round before reserving
+    * the IOVA as well as before GEM_NEW/CREATE_BLOB, so adjacent BOs cannot
+    * overlap when imported by hosts with larger pages. */
+   if (vdev->vdrm->supports_guest_alloc) {
+      if (size > UINT64_MAX - 65535)
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      size = ALIGN_POT(size, 65536);
+   }
+#endif
    struct msm_ccmd_gem_new_req req = {
          .hdr = MSM_CCMD(GEM_NEW, sizeof(req)),
          .size = size,
@@ -1157,8 +1856,15 @@ virtio_bo_init(struct tu_device *dev,
     * pages. vdrm sets the blob flags that make that happen; this is the half the host's msm
     * command stream needs, because GEM_NEW arrives before the pages do and would otherwise
     * allocate a second, unused backing. */
-   if (vdev->vdrm->supports_guest_alloc)
+   if (vdev->vdrm->supports_guest_alloc) {
       req.flags |= MSM_BO_GUEST_ALLOC;
+#ifdef _WIN32
+      /* KMD's contiguous allocation and its userspace alias are cacheable.
+       * Import it IO-coherently; do not claim a WC CPU mapping to KGSL. */
+      req.flags &= ~(MSM_BO_CACHED | MSM_BO_WC | MSM_BO_UNCACHED);
+      req.flags |= MSM_BO_CACHED_COHERENT;
+#endif
+   }
 
    uint32_t blob_flags = 0;
    if (mem_property & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
@@ -1176,6 +1882,58 @@ virtio_bo_init(struct tu_device *dev,
 
    assert(!(flags & TU_BO_ALLOC_DMABUF));
 
+#ifdef _WIN32
+   /* Only CPU-mappable vkAllocateMemory BOs that stay private to this device
+    * are cached: reuse clears them through the mapping. */
+   uint64_t cache_key = 0;
+   if (!lazy_vma && !client_iova && !hRTResource && base &&
+       base->type == VK_OBJECT_TYPE_DEVICE_MEMORY &&
+       (blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) &&
+       !(flags & (TU_BO_ALLOC_REPLAYABLE | TU_BO_ALLOC_INTERNAL_RESOURCE |
+                  TU_BO_ALLOC_SHAREABLE | TU_BO_ALLOC_IMPLICIT_SYNC)) &&
+       debug_get_option_tu_win_bo_cache_mb() > 0) {
+      cache_key = (uint64_t) req.flags << 32 | (uint64_t) blob_flags << 16 |
+                  (uint64_t) flags << 1 | 1;
+   }
+
+   struct tu_bo_cache_entry cached;
+   if (cache_key && tu_bo_cache_take(dev, cache_key, size, &cached)) {
+      bo = tu_device_lookup_bo(dev, cached.res_id);
+      assert(bo && bo->gem_handle == 0);
+      bo->res_id = cached.res_id;
+      result = tu_bo_init(dev, base, bo, cached.gem_handle, cached.size,
+                          cached.iova, flags, name);
+      if (result == VK_SUCCESS) {
+         bo->cache_key = cache_key;
+         result = tu_bo_map(dev, bo, NULL);
+         if (result == VK_SUCCESS) {
+            memset(bo->map, 0, bo->size);
+            if ((mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+                !(mem_property & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+               tu_bo_sync_cache(dev, bo, 0, VK_WHOLE_SIZE,
+                                TU_MEM_SYNC_CACHE_TO_GPU);
+            *out_bo = bo;
+            return VK_SUCCESS;
+         }
+         /* Fall back to a fresh allocation. */
+         tu_bo_list_del(dev, bo);
+         tu_debug_bos_del(dev, bo);
+         tu_dump_bo_del(dev, bo);
+         mtx_lock(&dev->vma_mutex);
+         memset(bo, 0, sizeof(*bo));
+         mtx_unlock(&dev->vma_mutex);
+         tu_bo_cache_discard(dev, &cached);
+      } else {
+         /* tu_bo_init() already closed the handle. */
+         memset(bo, 0, sizeof(*bo));
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, cached.iova, cached.size);
+         mtx_unlock(&dev->vma_mutex);
+         return result;
+      }
+   }
+#endif
+
    if (lazy_vma) {
       req.iova = lazy_vma->msm.iova;
    } else {
@@ -1183,6 +1941,8 @@ virtio_bo_init(struct tu_device *dev,
       result = virtio_allocate_userspace_iova_locked(dev, 0, size, client_iova,
                                                      flags, &req.iova);
       mtx_unlock(&dev->vma_mutex);
+      if (result != VK_SUCCESS && hRTResource)
+         mesa_logw("virtio_bo_init_common: iova alloc failed size=%" PRIu64, size);
    }
 
    if (result != VK_SUCCESS)
@@ -1194,8 +1954,21 @@ virtio_bo_init(struct tu_device *dev,
     */
    req.blob_id = p_atomic_inc_return(&vdev->next_blob_id);;
 
-   uint32_t handle =
-      vdrm_bo_create(vdev->vdrm, size, blob_flags, req.blob_id, 0, &req.hdr);
+   uint32_t handle;
+#ifdef _WIN32
+   if (hRTResource) {
+      /* The UMD mints hKMResource inside its alloc hook and keeps it; we only
+       * need to know the allocation succeeded. */
+      handle = vdrm_bo_create_shared(vdev->vdrm, size, blob_flags, req.blob_id,
+                                     0, &req.hdr, hRTResource, NULL);
+   } else
+#else
+   (void)hRTResource;
+#endif
+   {
+      handle =
+         vdrm_bo_create(vdev->vdrm, size, blob_flags, req.blob_id, 0, &req.hdr);
+   }
 
    if (!handle) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1213,6 +1986,9 @@ virtio_bo_init(struct tu_device *dev,
       memset(bo, 0, sizeof(*bo));
       goto fail;
    }
+#ifdef _WIN32
+   bo->cache_key = cache_key;
+#endif
 
    if (lazy_vma) {
       lazy_vma->msm.backs_lazy_bo = true;
@@ -1249,6 +2025,41 @@ fail:
    }
    return result;
 }
+
+static VkResult
+virtio_bo_init(struct tu_device *dev,
+               struct vk_object_base *base,
+               struct tu_bo **out_bo,
+               uint64_t size,
+               uint64_t client_iova,
+               VkMemoryPropertyFlags mem_property,
+               enum tu_bo_alloc_flags flags,
+               struct tu_sparse_vma *lazy_vma,
+               const char *name)
+{
+   return virtio_bo_init_common(dev, base, out_bo, size, client_iova,
+                                mem_property, flags, lazy_vma, name, NULL);
+}
+
+#ifdef _WIN32
+static VkResult
+virtio_bo_init_shared(struct tu_device *dev,
+                      struct vk_object_base *base,
+                      struct tu_bo **out_bo,
+                      uint64_t size,
+                      uint64_t client_iova,
+                      VkMemoryPropertyFlags mem_property,
+                      enum tu_bo_alloc_flags flags,
+                      const char *name,
+                      void *hRTResource)
+{
+   /* A shared BO cannot back a sparse VMA: lazy_vma exists so several VMAs can
+    * share one BO, which has no meaning for a resource the runtime owns. */
+   assert(hRTResource);
+   return virtio_bo_init_common(dev, base, out_bo, size, client_iova,
+                                mem_property, flags, NULL, name, hRTResource);
+}
+#endif
 
 static VkResult
 virtio_bo_init_dmabuf(struct tu_device *dev,
@@ -1334,6 +2145,106 @@ out_unlock:
    return result;
 }
 
+#ifdef _WIN32
+/* Import a BO that some other component already allocated -- on Windows the UMD
+ * creates the shared WDDM allocation and another process may have opened it via
+ * OpenResource2.  Mirrors virtio_bo_init_dmabuf: the only difference is how we
+ * get from a platform handle to a vdrm handle, because Windows has no PRIME fd.
+ *
+ * The refcount keys on res_id, so two imports of the same backing inside one
+ * device collapse onto one tu_bo, exactly as two imports of one dmabuf do.
+ * Across devices/processes the iova is allocated per device, which is required:
+ * the host hands each context a disjoint VA slice (kgsl_iova_in_slice), so the
+ * same backing legitimately sits at different GPU addresses in each context.
+ */
+static VkResult
+virtio_bo_init_platform_alloc(struct tu_device *dev,
+                              struct tu_bo **out_bo,
+                              uint64_t size,
+                              enum tu_bo_alloc_flags flags,
+                              uint32_t platform_handle)
+{
+   MESA_TRACE_FUNC();
+   struct vdrm_device *vdrm = dev->vdev->vdrm;
+   VkResult result;
+   struct tu_bo *bo = NULL;
+   uint64_t real_size = 0;
+
+   /* Same serialization as the dmabuf path: importing the same backing from two
+    * threads must not race with a concurrent release of that tu_bo. */
+   u_rwlock_wrlock(&dev->dma_bo_lock);
+
+   uint32_t handle, res_id;
+   uint64_t iova;
+
+   handle = vdrm_alloc_to_handle(vdrm, platform_handle, &real_size);
+   if (!handle) {
+      /* Either this backend has no import entry point, or the handle is not a
+       * blob we can adopt.  Both are handle-level failures from the caller's
+       * point of view; tu_bo_init_platform_alloc already reported the
+       * unsupported-backend case before reaching here. */
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+
+   /* Trust the owner's size over the caller's estimate (it may have rounded up
+    * to the 64 KiB guest-alloc granule); a short iova range would only surface
+    * later as a GPU fault. Never accept less than the caller needs. */
+   if (real_size < size) {
+      vdrm_bo_close(vdrm, handle);
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+   size = real_size;
+
+   res_id = vdrm_handle_to_res_id(vdrm, handle);
+   if (!res_id) {
+      vdrm_bo_close(vdrm, handle);
+      result = vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      goto out_unlock;
+   }
+
+   bo = tu_device_lookup_bo(dev, res_id);
+
+   if (bo->refcnt != 0) {
+      /* Already imported in this device; drop the duplicate vdrm handle so we
+       * do not leak a table slot (the allocation itself is not ours). */
+      p_atomic_inc(&bo->refcnt);
+      assert(bo->res_id == res_id);
+      vdrm_bo_close(vdrm, handle);
+      *out_bo = bo;
+      result = VK_SUCCESS;
+      goto out_unlock;
+   }
+
+   bo->res_id = res_id;
+
+   mtx_lock(&dev->vma_mutex);
+   result = virtio_allocate_userspace_iova_locked(dev, handle, size, 0, flags,
+                                                  &iova);
+   mtx_unlock(&dev->vma_mutex);
+   if (result != VK_SUCCESS) {
+      vdrm_bo_close(vdrm, handle);
+      goto out_unlock;
+   }
+
+   result = tu_bo_init(dev, NULL, bo, handle, size, iova, flags, "imported");
+   if (result != VK_SUCCESS) {
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, size);
+      mtx_unlock(&dev->vma_mutex);
+      memset(bo, 0, sizeof(*bo));
+   } else {
+      *out_bo = bo;
+      set_iova(dev, bo->res_id, iova);
+   }
+
+out_unlock:
+   u_rwlock_wrunlock(&dev->dma_bo_lock);
+   return result;
+}
+#endif /* _WIN32 */
+
 static int
 virtio_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 {
@@ -1375,13 +2286,41 @@ virtio_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
 
-   if (bo->map)
+#if defined(_WIN32)
+   if (bo->cache_key && tu_bo_cache_put(dev, bo)) {
+      u_rwlock_rdunlock(&dev->dma_bo_lock);
+      return;
+   }
+#endif
+
+   if (bo->map) {
+#if defined(_WIN32)
+      /* TODO(块 4): vdrm_wddm 的 UNMAP（VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP）。 */
+#else
       munmap(bo->map, bo->size);
+#endif
+   }
 
    tu_bo_list_del(dev, bo);
 
    assert(dev->physical_device->has_set_iova);
    tu_bo_make_zombie(dev, bo);
+
+#if defined(_WIN32)
+   /* VidMm owns the allocation's commitment until vdrm_bo_close(). Waiting
+    * for the next BO allocation to reap zombies leaves freed memory charged
+    * indefinitely in an idle process. Reuse the nonblocking fence-checked
+    * retirement path; unrelated in-flight work must still keep its BOs alive.
+    */
+   /* Device setup/teardown can release BOs before the fence mapping exists
+    * or after global_bo itself has become a zombie. Leave those to device
+    * destruction, since tu_wait_fence() reads that mapping. */
+   if (dev->global_bo && dev->global_bo->gem_handle && dev->global_bo_map) {
+      mtx_lock(&dev->vma_mutex);
+      tu_free_zombie_vma_locked(dev, false);
+      mtx_unlock(&dev->vma_mutex);
+   }
+#endif
 
    u_rwlock_rdunlock(&dev->dma_bo_lock);
 }
@@ -1475,10 +2414,10 @@ setup_fence_cmds(struct tu_device *dev)
     */
    dev->global_bo_map->userspace_fence = 0;
    if (vdev->vdrm->supports_guest_alloc) {
-      tu_bo_sync_cache(dev, dev->global_bo, gb_offset(userspace_fence),
+      virtio_sync_guest_bo_cache(dev, dev->global_bo, gb_offset(userspace_fence),
                        sizeof(dev->global_bo_map->userspace_fence),
                        TU_MEM_SYNC_CACHE_TO_GPU);
-      tu_bo_sync_cache(dev, vdev->fence_cmds_mem, 0, VK_WHOLE_SIZE,
+      virtio_sync_guest_bo_cache(dev, vdev->fence_cmds_mem, 0, VK_WHOLE_SIZE,
                        TU_MEM_SYNC_CACHE_TO_GPU);
    }
 
@@ -1501,6 +2440,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    uint64_t gpu_offset = 0;
    int ring_idx = queue->priority + 1;
    uint32_t num_out_syncobjs = 0;
+   uint32_t num_in_syncobjs = wait_count;
    struct vdrm_execbuf_params params;
 
    if (tu_empty_submit_can_skip(queue, submit, waits, wait_count,
@@ -1518,6 +2458,40 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
          return VK_SUCCESS;
       /* FEATURE_NOT_PRESENT or disabled → fall through to real submit */
    }
+
+#ifdef _WIN32
+   /* Windows 没有 drm syncobj，execbuf 带不了 in/out syncobj。等待在提交前
+    * 于 CPU 完成（同队列已签发的 sync 免等，见 tu_win_submit_wait_syncs），
+    * 放在拿 bo_mutex 之前，别拿着锁睡。信号见下面提交后的 seqno 记录。 */
+   result = tu_win_submit_wait_syncs(queue, waits, wait_count);
+   if (result != VK_SUCCESS)
+      return result;
+   num_in_syncobjs = 0;
+
+   /* A command-less submit (fence- or semaphore-only) needs no host round
+    * trip, which costs 0.2-1.3 ms here: with its waits met as above, its
+    * signals complete together with this queue's last real submit, the same
+    * seqno record a real submit leaves below. TU_NO_EMPTY_SUBMIT=1 sends it
+    * to the host instead. */
+   if (submit->commands.size == 0 && submit->binds.size == 0 &&
+       !u_trace_submission_data && !tu_empty_submit_disabled()) {
+      for (uint32_t i = 0; i < signal_count; i++) {
+         struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+
+         if (queue->fence <= 0) {
+            /* Nothing submitted on this queue yet. */
+            s->submit_seqno = 0;
+            s->signaled = true;
+            p_atomic_set(&s->owner, (struct tu_queue *) NULL);
+         } else {
+            s->submit_seqno = queue->fence;
+            s->signaled = false;
+            p_atomic_set(&s->owner, queue);
+         }
+      }
+      return VK_SUCCESS;
+   }
+#endif
 
 #if HAVE_PERFETTO
    struct tu_perfetto_clocks clocks;
@@ -1542,7 +2516,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
    int idx = fence % ARRAY_SIZE(fcmds->cmds);
    fcmds->cmds[idx].fence = fence;
    if (vdev->vdrm->supports_guest_alloc) {
-      tu_bo_sync_cache(queue->device, vdev->fence_cmds_mem,
+      virtio_sync_guest_bo_cache(queue->device, vdev->fence_cmds_mem,
                        (uintptr_t)&fcmds->cmds[idx] - (uintptr_t)fcmds,
                        sizeof(fcmds->cmds[idx]), TU_MEM_SYNC_CACHE_TO_GPU);
    }
@@ -1585,7 +2559,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       goto fail_out_syncobjs;
    }
 
-   for (uint32_t i = 0; i < wait_count; i++) {
+   for (uint32_t i = 0; i < num_in_syncobjs; i++) {
       struct vk_sync *sync = waits[i].sync;
 
       in_syncobjs[i] = (struct drm_virtgpu_execbuffer_syncobj) {
@@ -1595,6 +2569,10 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       };
    }
 
+#ifdef _WIN32
+   /* 信号也不走 syncobj：见提交之后的 seqno 记录。 */
+   num_out_syncobjs = 0;
+#else
    num_out_syncobjs = signal_count;
    for (uint32_t i = 0; i < signal_count; i++) {
       struct vk_sync *sync = signals[i].sync;
@@ -1616,8 +2594,9 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
          .point = 0,
       };
    }
+#endif /* !_WIN32 */
 
-   if (wait_count)
+   if (num_in_syncobjs)
       flags |= MSM_SUBMIT_SYNCOBJ_IN;
 
    if (num_out_syncobjs)
@@ -1670,11 +2649,28 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       .req = &req->hdr,
       .in_syncobjs = in_syncobjs,
       .out_syncobjs = out_syncobjs,
-      .num_in_syncobjs = wait_count,
+      .num_in_syncobjs = num_in_syncobjs,
       .num_out_syncobjs = num_out_syncobjs,
    };
 
+#ifdef _WIN32
+   if (debug_get_option_tu_win_sync_debug())
+      fprintf(stderr, "tu-win32-sync: submit queue=%u fence=%u bos=%u "
+              "cmds=%u waits=%u signals=%u bytes=%u\n",
+              req->queue_id, fence, nr_bos, entry_count,
+              wait_count, signal_count, req_len);
+#endif
+
    ret = vdrm_execbuf(vdev->vdrm, &params);
+
+#ifdef _WIN32
+   if (debug_get_option_tu_win_sync_debug())
+      fprintf(stderr, "tu-win32-sync: enqueued ret=%d req=%u host_seq=%u "
+              "gpu=%u async_error=%u\n", ret, req->hdr.seqno,
+              vdev->shmem->base.seqno,
+              queue->device->global_bo_map->userspace_fence,
+              vdev->shmem->async_error);
+#endif
 
    mtx_unlock(&queue->device->bo_mutex);
 
@@ -1683,6 +2679,22 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
       goto fail_submit;
    }
 
+#ifdef _WIN32
+   /* Windows 上这是**唯一**的信号机制（没有 syncobj）：把本次提交的 seqno 记到
+    * 每个 signal sync 上，等待方拿它跟 userspace_fence 比（tu_win_sync_type /
+    * tu_virtio_sync_wait_many）。signal sync 一定是 syncobj_type 或它的 poll
+    * 包装，两者载体同为 struct tu_virtio_sync，所以直接转型——与 Linux 那边对
+    * vk_sync_as_drm_syncobj() 的无条件转型同理。
+    * 多队列时 userspace_fence 有多个写者，seqno 不再全序 —— 与 Linux 的
+    * tu_virtio_single_queue 限制相同，Windows 上没有退路可走，先记下来。 */
+   for (uint32_t i = 0; i < signal_count; i++) {
+      struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
+
+      s->submit_seqno = fence;
+      s->signaled = false;
+      p_atomic_set(&s->owner, queue);
+   }
+#else
    /* Record the seqno on poll-type signal syncs so CPU waits can take the
     * userspace-fence fast path.  Only valid while this queue is the sole
     * writer of global_bo->userspace_fence. */
@@ -1698,6 +2710,7 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
          }
       }
    }
+#endif
 
 #if HAVE_PERFETTO
    clocks = tu_perfetto_end_submit(queue, queue->device->submit_count,
@@ -1731,6 +2744,10 @@ static const struct tu_knl virtio_knl_funcs = {
       .submitqueue_close = virtio_submitqueue_close,
       .bo_init = virtio_bo_init,
       .bo_init_dmabuf = virtio_bo_init_dmabuf,
+#ifdef _WIN32
+      .bo_init_platform_alloc = virtio_bo_init_platform_alloc,
+      .bo_init_shared = virtio_bo_init_shared,
+#endif
       .bo_export_dmabuf = virtio_bo_export_dmabuf,
       .bo_map = virtio_bo_map,
       .bo_allow_dump = virtio_bo_allow_dump,
@@ -1758,6 +2775,7 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
    if (debug_get_bool_option("TU_NO_VIRTIO", false))
       return VK_ERROR_INCOMPATIBLE_DRIVER;
 
+#if !defined(_WIN32)
    /* Note: in vtest case, where we don't open a device fd directly, we
     * can't do drm ioctls directly.  But we can assume that the server
     * side supports syncobjs.
@@ -1767,6 +2785,7 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
                                "kernel driver for device %s does not support DRM_CAP_SYNC_OBJ",
                                version->name);
    }
+#endif
 
    /* Try to connect. If this doesn't work, it's probably because we're running
     * in a non-Adreno VM. Unless startup debug info is specifically requested,
@@ -1774,12 +2793,17 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
     */
    vdrm = vdrm_device_connect(fd, VIRTGPU_DRM_CONTEXT_MSM);
    if (!vdrm) {
+#if defined(_WIN32)
+      /* vdrm_wddm 还没实现（块 2 起），Windows 上 probe 必然到此为止。 */
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+#else
       if (TU_DEBUG(STARTUP)) {
          return vk_startup_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
                                   "could not get connect vdrm: %s", strerror(errno));
       } else {
          return VK_ERROR_INCOMPATIBLE_DRIVER;
       }
+#endif
    }
 
    caps = vdrm->caps;
@@ -1795,6 +2819,13 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
    enum fdl_macrotile_mode macrotile_mode = tu_drm_get_macrotile_mode(vdrm);
    uint64_t uche_trap_base = tu_drm_get_uche_trap_base(vdrm);
 
+#if defined(_WIN32)
+   /* 没有 drm syncobj：用 userspace-fence 支撑的自足二元类型（块 5）。
+    * poll 包装层照样套在它上面（载体同为 struct tu_virtio_sync）。 */
+   (void) vdrm;
+   (void) val;
+   struct vk_sync_type syncobj_type = tu_win_sync_type;
+#else
    /* If using vtest, vtest provides it's own sync provider.  Otherwise this
     * returns NULL and we fall back to using the syncobj ioctls directly:
     */
@@ -1803,6 +2834,7 @@ tu_knl_drm_virtio_load(struct tu_instance *instance,
       sync = util_sync_provider_drm(fd);
    struct vk_sync_type syncobj_type = vk_drm_syncobj_get_type_from_provider(sync);
    sync->finalize(sync);
+#endif
 
    bool has_raytracing = tu_drm_get_raytracing(vdrm);
 

@@ -45,7 +45,9 @@ libfreedreno_drm_msm_files = files(
   'msm/msm_ringbuffer.c',
   'msm/msm_ringbuffer_sp.c',
 )
-libfreedreno_drm_files += libfreedreno_drm_msm_files
+if system_has_kms_drm
+  libfreedreno_drm_files += libfreedreno_drm_msm_files
+endif
 
 libfreedreno_drm_virtio_files = files(
   'virtio/virtio_bo.c',
@@ -77,4 +79,3 @@ libfreedreno_drm = static_library(
   link_with : libfreedreno_drm_link_with,
   build_by_default : false,
 )
-

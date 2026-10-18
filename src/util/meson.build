@@ -186,7 +186,9 @@ files_mesa_util = files(
 
 libmesa_util_links = []
 
-if host_machine.cpu_family() == 'aarch64' and cc.get_id() != 'msvc'
+# Windows ARM64 does not expose the Linux EL0 cache-maintenance contract.
+# Use the unavailable implementation until a Windows cache-ops backend exists.
+if host_machine.cpu_family() == 'aarch64' and cc.get_id() != 'msvc' and host_machine.system() != 'windows'
   files_mesa_util += files('cache_ops_aarch64.c')
 elif host_machine.cpu_family() in ['x86', 'x86_64'] and cc.get_id() != 'msvc'
   libmesa_util_clflush = static_library(

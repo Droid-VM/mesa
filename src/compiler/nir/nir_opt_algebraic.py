@@ -205,7 +205,6 @@ optimizations = [
    (('irem', a, 1), 0),
    (('irem', a, -1), 0),
    (('udiv', a, '#b(is_pos_power_of_two)'), ('ushr', a, ('find_lsb', b)), '!options->lower_bitops'),
-   (('idiv', a, '#b(is_pos_power_of_two)'), ('imul', ('isign', a), ('ushr', ('iabs', a), ('find_lsb', b))), '!options->lower_bitops'),
    (('idiv', a, '#b(is_neg_power_of_two)'), ('ineg', ('imul', ('isign', a), ('ushr', ('iabs', a), ('find_lsb', ('iabs', b))))), '!options->lower_bitops'),
    (('umod', a, '#b(is_pos_power_of_two)'), ('iand', a, ('isub', b, 1)), '!options->lower_bitops'),
    (('imod', a, '#b(is_pos_power_of_two)'), ('iand', a, ('isub', b, 1)), '!options->lower_bitops'),
@@ -216,6 +215,17 @@ optimizations = [
     '!options->lower_bitops'),
    (('irem', a, '#b(is_neg_power_of_two)'), ('irem', a, ('iabs', b)), '!options->lower_bitops'),
 ]
+
+# Bias negative dividends before the arithmetic shift so division rounds
+# towards zero.  Unlike multiplying by isign(a), this does not need a multiply
+# or an absolute value, including when a is the minimum signed integer.
+for bit_size in [8, 16, 32, 64]:
+   bias = ('iand', ('ishr', a, bit_size - 1), ('isub', b, 1))
+   optimizations += [
+      ((f'idiv@{bit_size}', a, '#b(is_pos_power_of_two)'),
+       ('ishr', ('iadd', a, bias), ('find_lsb', b)),
+       '!options->lower_bitops'),
+   ]
 
 # An instruction with src = bcsel selecting between 2 constants makes that src
 # non-constant, but we can make it constant by folding the operation into bcsel.

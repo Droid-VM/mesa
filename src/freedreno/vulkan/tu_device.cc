@@ -61,6 +61,48 @@
 
 uint64_t os_page_size = 4096;
 
+#ifdef _WIN32
+/* Private instance-create pNext prefix shared with the virtio D3D UMD.
+ * Only the LUID prefix is needed here; the remaining runtime callbacks are
+ * consumed by the WDDM transport as that integration is brought up. */
+#define VK_STRUCTURE_TYPE_D3DDDI_CALLBACKS_TU ((VkStructureType)4281808695u)
+struct tu_d3dddi_callbacks_prefix {
+   VkStructureType sType;
+   const void *pNext;
+   uint8_t adapter_luid[VK_LUID_SIZE];
+};
+
+/* Second private pNext: how to allocate a blob that must become a D3D11 shared
+ * resource. We cannot do it ourselves -- only the UMD's pfnAllocateCb, on the
+ * runtime's device, yields a kernel resource handle the application can share.
+ * Carries only plain C types (see VIRTIO_WDDM_RuntimeAllocator); the WDDM UMD
+ * callback types stay on the UMD side, which owns d3dumddi.h. */
+/* Private vkAllocateMemory pNext: this allocation backs the D3D11 resource the
+ * UMD is creating right now, so it must come from the runtime allocator (see
+ * VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU) rather than from our own
+ * device.  Only hRTResource is read here; pCreateResource is the UMD's own
+ * CreateResource argument and is not interpreted. */
+#define VK_STRUCTURE_TYPE_D3DDDI_CREATE_RESOURCE_TU ((VkStructureType)4281808696u)
+struct tu_d3dddi_create_resource {
+   VkStructureType sType;
+   const void *pNext;
+   void *hRTResource;
+   const void *pCreateResource;
+};
+
+#define VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU ((VkStructureType)4281808698u)
+struct tu_d3dddi_runtime_allocator {
+   VkStructureType sType;
+   const void *pNext;
+   void *ctx;
+   /* int (*)(void *ctx, const VIRTIO_WDDM_RuntimeAllocRequest *,
+    *         VIRTIO_WDDM_RuntimeAllocResult *) */
+   void *alloc;
+   /* int (*)(void *ctx, const VIRTIO_WDDM_RuntimeAllocResult *) */
+   void *free;
+};
+#endif
+
 static bool
 tu_device_get_build_id(blake3_hasher *ctx)
 {
@@ -166,6 +208,9 @@ static const struct vk_instance_extension_table tu_instance_extensions_supported
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    .KHR_wayland_surface                 = true,
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   .KHR_win32_surface                   = true,
+#endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
    .KHR_xcb_surface                     = true,
 #endif
@@ -246,11 +291,21 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_dynamic_rendering = true,
       .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = true,
+      /* Windows guest（vdrm_wddm）没有 POSIX fd：syncobj 是自足的
+       * tu_win_sync_type，BO 也导不出 dmabuf（bo_export_dmabuf 恒 -1）。
+       * 广告出去只会让 vk_semaphore.c:47 那类"按 import 钩子挑类型"的逻辑挑到
+       * 无法工作的路径。 */
+#ifndef _WIN32
       .KHR_external_fence_fd = true,
+#endif
       .KHR_external_memory = true,
+#ifndef _WIN32
       .KHR_external_memory_fd = true,
+#endif
       .KHR_external_semaphore = true,
+#ifndef _WIN32
       .KHR_external_semaphore_fd = true,
+#endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shading_rate = device->info->props.has_attachment_shading_rate,
       .KHR_get_memory_requirements2 = true,
@@ -362,6 +417,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
@@ -792,6 +848,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->image2DViewOf3D = true;
    features->sampler2DViewOf3D = true;
 
+   /* VK_EXT_image_sliced_view_of_3d */
+   features->imageSlicedViewOf3D = true;
+
    /* VK_EXT_image_view_min_lod */
    features->minLod = true;
 
@@ -952,9 +1011,18 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
 {
    memcpy(p->deviceUUID, pdevice->device_uuid, VK_UUID_SIZE);
    memcpy(p->driverUUID, pdevice->driver_uuid, VK_UUID_SIZE);
+#ifdef _WIN32
+   if (pdevice->instance->adapter_luid_valid) {
+      memcpy(p->deviceLUID, pdevice->instance->adapter_luid, VK_LUID_SIZE);
+      p->deviceNodeMask = 1;
+      p->deviceLUIDValid = true;
+   } else
+#endif
+   {
    memset(p->deviceLUID, 0, VK_LUID_SIZE);
    p->deviceNodeMask = 0;
    p->deviceLUIDValid = false;
+   }
 
    p->subgroupSize =
       pdevice->expose_double_threadsize ? pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
@@ -1910,7 +1978,8 @@ tu_physical_device_finish(struct tu_physical_device *device)
    tu_wsi_finish(device);
 #endif
 
-   close(device->local_fd);
+   if (device->local_fd != -1)
+      close(device->local_fd);
    if (device->master_fd != -1)
       close(device->master_fd);
 
@@ -1971,6 +2040,33 @@ tu_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    if (!instance)
       return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+#ifdef _WIN32
+   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      /* Do not break out early: the UMD may chain both private structs. */
+      if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_CALLBACKS_TU) {
+         const struct tu_d3dddi_callbacks_prefix *callbacks =
+            (const struct tu_d3dddi_callbacks_prefix *) ext;
+         memcpy(instance->adapter_luid, callbacks->adapter_luid,
+                VK_LUID_SIZE);
+         instance->adapter_luid_valid = true;
+      } else if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_RUNTIME_ALLOCATOR_TU) {
+         const struct tu_d3dddi_runtime_allocator *ra =
+            (const struct tu_d3dddi_runtime_allocator *) ext;
+         /* Both hooks or neither: a half-installed allocator would allocate
+          * through the runtime and then leak, because the matching free is what
+          * releases the runtime's resource association. */
+         if (ra->alloc && ra->free) {
+            instance->runtime_alloc_ctx = ra->ctx;
+            instance->runtime_alloc_fn = ra->alloc;
+            instance->runtime_free_fn = ra->free;
+         } else if (ra->alloc || ra->free) {
+            mesa_logw("tu_CreateInstance: runtime allocator has only one of "
+                      "alloc/free installed; ignoring it");
+         }
+      }
+   }
+#endif
 
    struct vk_instance_dispatch_table dispatch_table;
    vk_instance_dispatch_table_from_entrypoints(
@@ -3085,12 +3181,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    tu_bo_suballocator_init(&device->event_suballoc, device,
-      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+      os_page_size, TU_BO_ALLOC_INTERNAL_RESOURCE,
       "event_suballoc");
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
-      getpagesize(),
+      os_page_size,
       (enum tu_bo_alloc_flags)(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                TU_BO_ALLOC_ALLOW_DUMP),
       "vis_stream_suballoc");
@@ -3232,6 +3328,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                  "pthread condattr init");
       goto fail_timeline_cond;
    }
+   /* Only the native KGSL backend uses timed waits on timeline_cond.
+    * Windows builds use virtio and winpthreads does not support selecting
+    * CLOCK_MONOTONIC; its default condition variable suffices for broadcasts.
+    */
+#ifndef _WIN32
    if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
       pthread_condattr_destroy(&condattr);
       result = vk_startup_errorf(physical_device->instance,
@@ -3239,6 +3340,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                  "pthread condattr clock setup");
       goto fail_timeline_cond;
    }
+#endif
    if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
       pthread_condattr_destroy(&condattr);
       result = vk_startup_errorf(physical_device->instance,
@@ -3759,6 +3861,46 @@ tu_AllocateMemory(VkDevice _device,
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
 
+#ifdef _WIN32
+   /* Windows has no PRIME fd, so a shared allocation arrives as a D3DKMT
+    * allocation handle owned by the UMD (or opened from another process).  The
+    * common runtime records handleType in mem->vk but not the handle, so find
+    * the struct ourselves.
+    *
+    * Importing must not silently degrade: if we fall through to the plain
+    * allocation path, vkAllocateMemory succeeds with private memory and the two
+    * processes composite unrelated pixels instead of sharing them.  So report
+    * the failure rather than ignoring an unhandled pNext. */
+   const VkImportMemoryWin32HandleInfoKHR *w32_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
+
+   /* Private sType, so vk_find_struct_const cannot find it. */
+   const struct tu_d3dddi_create_resource *d3d_create = NULL;
+   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
+      if (ext->sType == VK_STRUCTURE_TYPE_D3DDDI_CREATE_RESOURCE_TU) {
+         d3d_create = (const struct tu_d3dddi_create_resource *) ext;
+         break;
+      }
+   }
+
+   if (w32_info && w32_info->handleType) {
+      if (w32_info->handleType !=
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT) {
+         mesa_loge("tu_AllocateMemory: unsupported Win32 import handleType 0x%x",
+                   w32_info->handleType);
+         result = vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      } else {
+         result = tu_bo_init_platform_alloc(
+            device, &mem->bo, pAllocateInfo->allocationSize, alloc_flags,
+            (uint32_t)(uintptr_t) w32_info->handle);
+         if (result != VK_SUCCESS) {
+            mesa_loge("tu_AllocateMemory: importing D3DKMT allocation 0x%x "
+                      "failed: %s", (uint32_t)(uintptr_t) w32_info->handle,
+                      vk_Result_to_str(result));
+         }
+      }
+   } else
+#endif
    if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
@@ -3823,6 +3965,25 @@ tu_AllocateMemory(VkDevice _device,
       VkMemoryPropertyFlags mem_property =
          device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
 
+#ifdef _WIN32
+      if (d3d_create && d3d_create->hRTResource) {
+         /* Backing for a D3D11 shared resource: must come from the runtime
+          * allocator.  Reporting failure is mandatory -- falling through to the
+          * ordinary path would return private memory from a call that succeeded,
+          * and the sharing processes would composite unrelated pixels. */
+         result = tu_bo_init_shared(device, &mem->vk.base, &mem->bo,
+                                    pAllocateInfo->allocationSize,
+                                    client_address, mem_property, alloc_flags,
+                                    name, d3d_create->hRTResource);
+         if (result != VK_SUCCESS) {
+            mesa_loge("tu_AllocateMemory: runtime-allocated shared BO for "
+                      "hRTResource=%p size=%" PRIu64 " failed: %s",
+                      d3d_create->hRTResource,
+                      (uint64_t) pAllocateInfo->allocationSize,
+                      vk_Result_to_str(result));
+         }
+      } else
+#endif
       result = _tu_init_memory(device, mem, mem_property, alloc_flags,
                                pAllocateInfo->allocationSize, client_address,
                                name);

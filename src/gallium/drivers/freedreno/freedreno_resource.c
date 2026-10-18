@@ -1062,8 +1062,10 @@ fd_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *prsc)
       fd_bo_del(rsc->bo);
    if (rsc->lrz)
       fd_bo_del(rsc->lrz);
+#ifndef _WIN32
    if (rsc->scanout)
       renderonly_scanout_destroy(rsc->scanout, fd_screen(pscreen)->ro);
+#endif
 
    if (prsc->target == PIPE_BUFFER)
       util_idalloc_mt_free(&screen->buffer_ids, rsc->b.buffer_id_unique);
@@ -1455,6 +1457,7 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
     * create_with_modifiers() doesn't give us usage flags, so we have to
     * assume that all calls with modifiers are scanout-possible
     */
+#ifndef _WIN32
    if (screen->ro &&
        ((tmpl->bind & PIPE_BIND_SCANOUT) ||
         has_explicit_modifier(modifiers, count))) {
@@ -1481,6 +1484,7 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
 
       return &rsc->b.b;
    }
+#endif
 
    prsc =
       fd_resource_allocate_and_resolve(pscreen, tmpl, modifiers, count, &size);
@@ -1557,11 +1561,13 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
       goto fail;
    }
 
+#ifndef _WIN32
    if (screen->ro) {
       rsc->scanout =
          renderonly_create_gpu_import_for_resource(prsc, screen->ro, NULL);
       /* failure is expected in some cases.. */
    }
+#endif
 
    rsc->valid = true;
 

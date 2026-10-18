@@ -68,6 +68,87 @@ enum wsi_win32_image_state {
    WSI_IMAGE_QUEUED,
 };
 
+/* Image-index handoff to the GDI present thread. wsi_common_queue.h does the
+ * same job but does not compile as C++, and the bound here is known exactly:
+ * an image cannot be presented again until the consumer has marked it idle,
+ * so at most one slot per swapchain image plus the shutdown token is ever in
+ * flight. The GDI path reports maxImageCount = 0 (no limit), so the ring is
+ * sized per swapchain rather than fixed. */
+struct wsi_win32_present_ring {
+   mtx_t mutex;
+   struct u_cnd_monotonic cond;
+   uint32_t *slots;
+   unsigned size;
+   unsigned head, count;
+   bool initialized;
+};
+
+static VkResult
+wsi_win32_present_ring_init(struct wsi_win32_present_ring *ring,
+                            unsigned size,
+                            const VkAllocationCallbacks *allocator)
+{
+   ring->slots = (uint32_t *)vk_alloc(allocator, size * sizeof(*ring->slots),
+                                      8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!ring->slots)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   if (mtx_init(&ring->mutex, mtx_plain) != thrd_success) {
+      vk_free(allocator, ring->slots);
+      ring->slots = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   if (u_cnd_monotonic_init(&ring->cond) != thrd_success) {
+      mtx_destroy(&ring->mutex);
+      vk_free(allocator, ring->slots);
+      ring->slots = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   ring->size = size;
+   ring->head = ring->count = 0;
+   ring->initialized = true;
+   return VK_SUCCESS;
+}
+
+static void
+wsi_win32_present_ring_finish(struct wsi_win32_present_ring *ring,
+                              const VkAllocationCallbacks *allocator)
+{
+   if (!ring->initialized)
+      return;
+   u_cnd_monotonic_destroy(&ring->cond);
+   mtx_destroy(&ring->mutex);
+   vk_free(allocator, ring->slots);
+   ring->slots = NULL;
+   ring->initialized = false;
+}
+
+static void
+wsi_win32_present_ring_push(struct wsi_win32_present_ring *ring, uint32_t index)
+{
+   mtx_lock(&ring->mutex);
+   /* The producer never outruns the ring: an image cannot be presented again
+    * until the consumer has marked it idle, and the ring has one slot per
+    * image plus one for the shutdown token. */
+   assert(ring->count < ring->size);
+   ring->slots[(ring->head + ring->count) % ring->size] = index;
+   ring->count++;
+   u_cnd_monotonic_signal(&ring->cond);
+   mtx_unlock(&ring->mutex);
+}
+
+static uint32_t
+wsi_win32_present_ring_pull(struct wsi_win32_present_ring *ring)
+{
+   mtx_lock(&ring->mutex);
+   while (ring->count == 0)
+      u_cnd_monotonic_wait(&ring->cond, &ring->mutex);
+   uint32_t index = ring->slots[ring->head];
+   ring->head = (ring->head + 1) % ring->size;
+   ring->count--;
+   mtx_unlock(&ring->mutex);
+   return index;
+}
+
 struct wsi_win32_image {
    struct wsi_image base;
    enum wsi_win32_image_state state;
@@ -110,6 +191,31 @@ struct wsi_win32_swapchain {
    VkExtent2D                 extent;
    HWND wnd;
    HDC chain_dc;
+
+   /* GDI present: memcpy the image into a per-image DIB section, then
+    * StretchBlt it to the window (gdi_dib, the default), or hand the image's
+    * CPU mapping straight to SetDIBitsToDevice (TU_WSI_GDI_DIRECT=1).
+    *
+    * The direct path saves the present thread 0.2-0.3 ms/frame at 720p-900p,
+    * but measured no faster end to end and 4-10% slower under light load
+    * (probe_wsi_fps, Adreno 830 guest, 2026-09-22): the source is a GPU
+    * allocation mapping rather than a DIB section, so win32k has to lock the
+    * pages and wrap them in a temporary surface, and the render thread's
+    * vkQueuePresentKHR p50 rose from 0.01 to 0.09 ms alongside it. Keep the
+    * DIB section path as default; the direct path stays for A/B and flips
+    * back to DIB for the rest of the swapchain's life if SetDIBitsToDevice
+    * ever fails. DIB sections are created lazily. */
+   bool                       gdi_dib;
+
+   /* GDI present thread. vkQueuePresentKHR only pushes an image index here and
+    * returns, so the app's render thread is free to record the next frame while
+    * this thread waits for the pre-present submit to land and then does the
+    * GDI copy. Only this thread touches chain_dc and the image DCs after
+    * creation. Unused on the DXGI path. */
+   bool                       present_thread_active;
+   thrd_t                     present_thread;
+   struct wsi_win32_present_ring present_ring;
+
    struct wsi_win32_image     images[0];
 };
 
@@ -541,6 +647,46 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
    return VK_SUCCESS;
 }
 
+/* Per-image DIB section plus memory DC, only needed by the StretchBlt
+ * fallback. Created lazily, possibly from the present thread. */
+static VkResult
+wsi_win32_image_init_dib(struct wsi_win32_swapchain *chain,
+                         struct wsi_win32_image *image)
+{
+   image->sw.dc = CreateCompatibleDC(chain->chain_dc);
+   if (!image->sw.dc)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   BITMAPINFO info = {};
+   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+   info.bmiHeader.biWidth = chain->extent.width;
+   info.bmiHeader.biHeight = -(LONG)chain->extent.height;
+   info.bmiHeader.biPlanes = 1;
+   info.bmiHeader.biBitCount = 32;
+   info.bmiHeader.biCompression = BI_RGB;
+
+   HBITMAP bmp = CreateDIBSection(image->sw.dc, &info, DIB_RGB_COLORS,
+                                  &image->sw.ppvBits, NULL, 0);
+   if (!bmp || !image->sw.ppvBits) {
+      if (bmp)
+         DeleteObject(bmp);
+      DeleteDC(image->sw.dc);
+      image->sw.dc = NULL;
+      image->sw.ppvBits = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   SelectObject(image->sw.dc, bmp);
+
+   BITMAP header;
+   int status = GetObject(bmp, sizeof(BITMAP), &header);
+   (void)status;
+   image->sw.bmp_row_pitch = header.bmWidthBytes;
+   image->sw.bmp = bmp;
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 wsi_win32_image_init(VkDevice device_h,
                      struct wsi_win32_swapchain *chain,
@@ -553,37 +699,12 @@ wsi_win32_image_init(VkDevice device_h,
    if (result != VK_SUCCESS)
       return result;
 
-   VkIcdSurfaceWin32 *win32_surface = (VkIcdSurfaceWin32 *)create_info->surface;
-   chain->wnd = win32_surface->hwnd;
    image->chain = chain;
 
-   if (chain->dxgi)
+   if (chain->dxgi || !chain->gdi_dib)
       return VK_SUCCESS;
 
-   chain->chain_dc = GetDC(chain->wnd);
-   image->sw.dc = CreateCompatibleDC(chain->chain_dc);
-   HBITMAP bmp = NULL;
-
-   BITMAPINFO info = { 0 };
-   info.bmiHeader.biSize = sizeof(BITMAPINFO);
-   info.bmiHeader.biWidth = create_info->imageExtent.width;
-   info.bmiHeader.biHeight = -create_info->imageExtent.height;
-   info.bmiHeader.biPlanes = 1;
-   info.bmiHeader.biBitCount = 32;
-   info.bmiHeader.biCompression = BI_RGB;
-
-   bmp = CreateDIBSection(image->sw.dc, &info, DIB_RGB_COLORS, &image->sw.ppvBits, NULL, 0);
-   assert(bmp && image->sw.ppvBits);
-
-   SelectObject(image->sw.dc, bmp);
-
-   BITMAP header;
-   int status = GetObject(bmp, sizeof(BITMAP), &header);
-   (void)status;
-   image->sw.bmp_row_pitch = header.bmWidthBytes;
-   image->sw.bmp = bmp;
-
-   return VK_SUCCESS;
+   return wsi_win32_image_init_dib(chain, image);
 }
 
 static void
@@ -608,10 +729,20 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *) drv_chain;
 
+   /* The present thread still touches chain_dc, the image DCs and the fences,
+    * so it has to be joined before any of them go away. */
+   if (chain->present_thread_active) {
+      wsi_win32_present_ring_push(&chain->present_ring, UINT32_MAX);
+      thrd_join(chain->present_thread, NULL);
+      wsi_win32_present_ring_finish(&chain->present_ring, allocator);
+      chain->present_thread_active = false;
+   }
+
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
 
-   DeleteDC(chain->chain_dc);
+   if (chain->chain_dc)
+      ReleaseDC(chain->wnd, chain->chain_dc);
 
    if (chain->surface->current_swapchain == chain)
       chain->surface->current_swapchain = NULL;
@@ -806,6 +937,189 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    return VK_SUCCESS;
 }
 
+/* TU_WSI_PRESENT_STATS=1 prints a per-second breakdown of the GDI present
+ * path. The copy and the blit are both on the caller's thread, so this is
+ * exactly what vkQueuePresentKHR charges the app's render thread. */
+static bool
+wsi_win32_present_stats_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *env = getenv("TU_WSI_PRESENT_STATS");
+      enabled = (env && *env && *env != '0') ? 1 : 0;
+   }
+   return enabled != 0;
+}
+
+static double
+wsi_win32_now_ms(void)
+{
+   LARGE_INTEGER c, f;
+   QueryPerformanceCounter(&c);
+   QueryPerformanceFrequency(&f);
+   return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+/* Default: memcpy into the image's DIB section, then StretchBlt it to the
+ * window. Two full-frame CPU passes, but the kernel side is a plain
+ * surface-to-surface blit. */
+static void
+wsi_win32_present_to_gdi_dib(struct wsi_win32_swapchain *chain,
+                             struct wsi_win32_image *image,
+                             double *t_copied, bool stats)
+{
+   if (!image->sw.bmp &&
+       wsi_win32_image_init_dib(chain, image) != VK_SUCCESS) {
+      chain->status = VK_ERROR_OUT_OF_HOST_MEMORY;
+      *t_copied = stats ? wsi_win32_now_ms() : 0;
+      return;
+   }
+
+   char *ptr = (char *)image->base.cpu_map;
+   char *dptr = (char *)image->sw.ppvBits;
+
+   for (unsigned h = 0; h < chain->extent.height; h++) {
+      memcpy(dptr, ptr, chain->extent.width * 4);
+      dptr += image->sw.bmp_row_pitch;
+      ptr += image->base.row_pitches[0];
+   }
+   *t_copied = stats ? wsi_win32_now_ms() : 0;
+
+   SetLastError(ERROR_SUCCESS);
+   if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY)) {
+      DWORD error = GetLastError();
+      DWORD session = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &session);
+      fprintf(stderr, "wsi-win32: StretchBlt failed: error=%lu session=%lu hwnd=%p dst_dc=%p src_dc=%p extent=%ux%u\n",
+              (unsigned long)error, (unsigned long)session,
+              (void *)chain->wnd, (void *)chain->chain_dc, (void *)image->sw.dc,
+              chain->extent.width, chain->extent.height);
+      chain->status = VK_ERROR_MEMORY_MAP_FAILED;
+   }
+}
+
+/* TU_WSI_GDI_DIRECT=1: hand the image's CPU mapping to GDI as a top-down
+ * 32bpp DIB and let it draw straight into the window, one user-mode pass over
+ * the pixels instead of two. The row pitch is folded into biWidth (the blit
+ * buffer pitch is a multiple of 128 bytes, a linear image's a multiple of 64)
+ * and the destination width clips the padding. Same pixel layout as the DIB
+ * section path, so the surface formats behave identically. Returns false to
+ * ask for the fallback. */
+static bool
+wsi_win32_present_to_gdi_direct(struct wsi_win32_swapchain *chain,
+                                struct wsi_win32_image *image)
+{
+   const uint32_t pitch = image->base.row_pitches[0];
+
+   if (pitch % 4 != 0)
+      return false;
+
+   BITMAPINFO info = {};
+   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+   info.bmiHeader.biWidth = pitch / 4;
+   info.bmiHeader.biHeight = -(LONG)chain->extent.height;
+   info.bmiHeader.biPlanes = 1;
+   info.bmiHeader.biBitCount = 32;
+   info.bmiHeader.biCompression = BI_RGB;
+
+   SetLastError(ERROR_SUCCESS);
+   int lines = SetDIBitsToDevice(chain->chain_dc, 0, 0,
+                                 chain->extent.width, chain->extent.height,
+                                 0, 0, 0, chain->extent.height,
+                                 image->base.cpu_map, &info, DIB_RGB_COLORS);
+   if (lines == (int)chain->extent.height)
+      return true;
+
+   fprintf(stderr, "wsi-win32: SetDIBitsToDevice drew %d of %u lines "
+           "(error=%lu pitch=%u extent=%ux%u), falling back to DIB section\n",
+           lines, chain->extent.height, (unsigned long)GetLastError(),
+           pitch, chain->extent.width, chain->extent.height);
+   return false;
+}
+
+/* The GDI half of a present: get the image's pixels onto the window. Runs on
+ * the present thread when there is one, otherwise inline on the caller. Sets
+ * chain->status on failure. */
+static void
+wsi_win32_present_to_gdi(struct wsi_win32_swapchain *chain,
+                         uint32_t image_index)
+{
+   struct wsi_win32_image *image = &chain->images[image_index];
+
+   const bool stats = wsi_win32_present_stats_enabled();
+   static double acc_copy, acc_blt, acc_flush, acc_next_log;
+   static unsigned acc_n;
+   double t0 = stats ? wsi_win32_now_ms() : 0;
+   double t1 = t0;
+
+   if (!chain->gdi_dib && !wsi_win32_present_to_gdi_direct(chain, image))
+      chain->gdi_dib = true;
+
+   if (chain->gdi_dib)
+      wsi_win32_present_to_gdi_dib(chain, image, &t1, stats);
+
+   double t2 = stats ? wsi_win32_now_ms() : 0;
+
+   /* GDI may batch the draw. Complete it before the source (the image's CPU
+    * mapping, or the DIB) is handed back to the next blit by marking the
+    * image idle, or the presenting thread goes idle waiting for the next
+    * Vulkan frame. */
+   if (!GdiFlush())
+      chain->status = VK_ERROR_MEMORY_MAP_FAILED;
+
+   if (stats) {
+      double t3 = wsi_win32_now_ms();
+      acc_copy += t1 - t0;
+      acc_blt += t2 - t1;
+      acc_flush += t3 - t2;
+      acc_n++;
+      if (t3 >= acc_next_log) {
+         if (acc_next_log != 0.0)
+            fprintf(stderr, "wsi-win32-present: %ux%u n=%u copy=%.3f blt=%.3f "
+                    "flush=%.3f total=%.3f ms/frame\n",
+                    chain->extent.width, chain->extent.height, acc_n,
+                    acc_copy / acc_n, acc_blt / acc_n, acc_flush / acc_n,
+                    (acc_copy + acc_blt + acc_flush) / acc_n);
+         acc_copy = acc_blt = acc_flush = 0;
+         acc_n = 0;
+         acc_next_log = t3 + 1000.0;
+      }
+   }
+
+   wsi_win32_set_image_idle(chain, image);
+}
+
+/* Drains the present queue. UINT32_MAX is the shutdown token. */
+static int
+wsi_win32_manage_present_queue(void *state)
+{
+   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)state;
+   const struct wsi_device *wsi = chain->base.wsi;
+
+   u_thread_setname("WSI GDI present");
+
+   for (;;) {
+      uint32_t image_index = wsi_win32_present_ring_pull(&chain->present_ring);
+      if (image_index == UINT32_MAX)
+         break;
+
+      /* wsi_common_queue_present() skipped this wait for us: the pre-present
+       * submit signals this fence, and only after that is cpu_map readable. */
+      VkResult result = wsi->WaitForFences(chain->base.device, 1,
+                                           &chain->base.fences[image_index],
+                                           true, ~0ull);
+      if (result != VK_SUCCESS) {
+         chain->status = VK_ERROR_OUT_OF_DATE_KHR;
+         wsi_win32_set_image_idle(chain, &chain->images[image_index]);
+         continue;
+      }
+
+      wsi_win32_present_to_gdi(chain, image_index);
+   }
+
+   return 0;
+}
+
 static VkResult
 wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
                         uint32_t image_index,
@@ -821,19 +1135,16 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
    if (chain->dxgi)
       return wsi_win32_queue_present_dxgi(chain, image, damage);
 
-   char *ptr = (char *)image->base.cpu_map;
-   char *dptr = (char *)image->sw.ppvBits;
-
-   for (unsigned h = 0; h < chain->extent.height; h++) {
-      memcpy(dptr, ptr, chain->extent.width * 4);
-      dptr += image->sw.bmp_row_pitch;
-      ptr += image->base.row_pitches[0];
+   if (chain->present_thread_active) {
+      /* Hand the frame off and return. The image stays non-idle until the
+       * present thread is done with it, so acquire_next_image() still blocks
+       * when every image is in flight. */
+      image->state = WSI_IMAGE_QUEUED;
+      wsi_win32_present_ring_push(&chain->present_ring, image_index);
+      return chain->status;
    }
-   if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY))
-      chain->status = VK_ERROR_MEMORY_MAP_FAILED;
 
-   wsi_win32_set_image_idle(chain, image);
-
+   wsi_win32_present_to_gdi(chain, image_index);
    return chain->status;
 }
 
@@ -988,11 +1299,21 @@ wsi_win32_surface_create_swapchain(
    chain->status = VK_SUCCESS;
 
    chain->surface = surface;
+   chain->wnd = surface->base.hwnd;
 
    if (image_params->image_type == WSI_IMAGE_TYPE_DXGI) {
       result = wsi_win32_surface_create_swapchain_dxgi(surface, device, wsi, create_info, chain);
       if (result != VK_SUCCESS)
          goto fail;
+   } else {
+      chain->chain_dc = GetDC(chain->wnd);
+      if (!chain->chain_dc) {
+         result = VK_ERROR_SURFACE_LOST_KHR;
+         goto fail;
+      }
+
+      const char *env = getenv("TU_WSI_GDI_DIRECT");
+      chain->gdi_dib = !(env && *env && *env != '0');
    }
 
    for (uint32_t image = 0; image < num_images; image++) {
@@ -1003,6 +1324,31 @@ wsi_win32_surface_create_swapchain(
          goto fail;
 
       chain->base.image_count++;
+   }
+
+   /* On the GDI path, present is a fence wait plus a full-frame CPU copy. Doing
+    * that inline charges it to the app's render thread and serialises it against
+    * the next frame's recording, which leaves the GPU idle. Move it to its own
+    * thread; wsi_common_queue_present() then skips its own fence wait. Opt out
+    * with TU_WSI_PRESENT_THREAD=0. */
+   if (!chain->dxgi) {
+      const char *env = getenv("TU_WSI_PRESENT_THREAD");
+      if (!(env && *env == '0')) {
+         /* One slot per image plus the shutdown token. */
+         result = wsi_win32_present_ring_init(&chain->present_ring,
+                                              chain->base.image_count + 1,
+                                              allocator);
+         if (result == VK_SUCCESS) {
+            if (thrd_create(&chain->present_thread,
+                            wsi_win32_manage_present_queue,
+                            chain) == thrd_success) {
+               chain->present_thread_active = true;
+               chain->base.defers_sw_present_wait = true;
+            } else {
+               wsi_win32_present_ring_finish(&chain->present_ring, allocator);
+            }
+         }
+      }
    }
 
    *swapchain_out = &chain->base;

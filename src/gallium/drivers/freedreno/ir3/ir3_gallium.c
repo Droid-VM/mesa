@@ -13,6 +13,7 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
+#include "util/u_cpu_detect.h"
 
 #include "nir/tgsi_to_nir.h"
 #include "freedreno_screen.h"
@@ -95,6 +96,10 @@ upload_shader_variant(struct ir3_shader_variant *v, void *arg)
    v->bo =
       fd_bo_new(compiler->dev, v->info.size, FD_BO_NOMAP,
                 "%s:%s", ir3_shader_stage(v), v->name);
+   if (unlikely(!v->bo)) {
+      mesa_loge("ir3: shader BO allocation failed: %s", v->name);
+      return;
+   }
 
    /* Always include shaders in kernel crash dumps. */
    fd_bo_mark_for_dump(v->bo);
@@ -539,7 +544,7 @@ ir3_screen_init(struct pipe_screen *pscreen)
     * big cores.  OTOH if they are sitting idle, maybe it is useful to
     * use them?
     */
-   unsigned num_threads = sysconf(_SC_NPROCESSORS_ONLN) / 2;
+   unsigned num_threads = util_get_cpu_caps()->nr_cpus / 2;
 
    /* Create at least one thread - even on single core CPU systems. */
    num_threads = MAX2(1, num_threads);

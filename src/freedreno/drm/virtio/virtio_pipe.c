@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/slab.h"
+#include "util/os_time.h"
 
 #include "freedreno_ringbuffer_sp.h"
 #include "virtio_priv.h"
@@ -115,7 +118,12 @@ virtio_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t ti
          .fence = fence->kfence,
    };
    struct msm_ccmd_submitqueue_query_rsp *rsp;
-   int64_t end_time = os_time_get_nano() + timeout;
+   /* DroidVM_F: callers may pass OS_TIMEOUT_INFINITE.  If the host keeps
+    * replying -ETIMEDOUT for a fence that never retires, the loop below
+    * never exits and the guest freezes.  Cap the wait so we can recover.
+    */
+   int64_t end_time = os_time_get_nano() +
+      (timeout == OS_TIMEOUT_INFINITE ? (int64_t)30 * 1000000000 : timeout);
    int ret;
 
    /* Do a non-blocking wait to trigger host-side wait-boost,
@@ -128,8 +136,12 @@ virtio_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t ti
 
    vdrm_flush(vdrm);
 
+#ifndef _WIN32
    if (fence->use_fence_fd)
       return sync_wait(fence->fence_fd, timeout / 1000000);
+#endif
+
+   uint64_t wait_us = 100;
 
    do {
       rsp = vdrm_alloc_rsp(vdrm, &req.hdr, sizeof(*rsp));
@@ -140,9 +152,14 @@ virtio_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t ti
 
       ret = rsp->ret;
 
-      if ((timeout != OS_TIMEOUT_INFINITE) &&
-          (os_time_get_nano() >= end_time))
+      if (os_time_get_nano() >= end_time)
          break;
+
+      if (ret == -ETIMEDOUT) {
+         /* DroidVM_E: never busy-spin on a fence that may never retire. */
+         os_time_sleep(wait_us);
+         wait_us = wait_us < 4000 ? wait_us * 4 : 16000; /* DroidVM: cap 16ms (~1 frame at 60fps) to spare the single-threaded host */
+      }
    } while (ret == -ETIMEDOUT);
 
 out:
@@ -263,6 +280,10 @@ virtio_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
    pipe->wait_spin_ns =
       (int64_t)debug_get_num_option("FD_POLL_SPIN_US", 1200) * 1000;
    pipe->control_needs_inval = vdrm->supports_guest_alloc;
+#ifdef _WIN32
+   /* WDDM maps MmCached pages imported by KGSL with IOCOHERENT. */
+   pipe->control_needs_inval = false;
+#endif
 
    virtio_pipe->gpu_id = vdrm->caps.u.msm.gpu_id;
    virtio_pipe->gmem = vdrm->caps.u.msm.gmem_size;

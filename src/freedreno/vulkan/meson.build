@@ -115,6 +115,10 @@ if with_platform_wayland
   tu_wsi = true
 endif
 
+if with_platform_windows
+  tu_wsi = true
+endif
+
 if system_has_kms_drm and not with_platform_android
   tu_wsi = true
 endif
@@ -202,6 +206,9 @@ endif
 libvulkan_freedreno = shared_library(
   'vulkan_freedreno',
   [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
+  # Windows：PUBLIC 宏为空、导出靠 .def —— vk_icdGetInstanceProcAddr 等三个
+  # loader 入口（src/vulkan/vulkan_api.def.in）。
+  vs_module_defs : vulkan_api_def,
   include_directories : libtu_includes,
   link_with : [
     libfreedreno_ir3,

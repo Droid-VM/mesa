@@ -36,7 +36,10 @@
 
 #define TU_MAX_QUEUE_FAMILIES 2
 
-#define TU_BORDER_COLOR_COUNT 4096
+/* Allow four full D3D12 sampler heaps to use distinct custom border colors.
+ * The sampler descriptor's BCOLOR index can address more than 4K entries.
+ */
+#define TU_BORDER_COLOR_COUNT 8192
 #define TU_BORDER_COLOR_BUILTIN 6
 
 #define TU_BLIT_SHADER_SIZE 4096
@@ -218,6 +221,23 @@ struct tu_instance
 
    uint32_t instance_idx;
    uint32_t api_version;
+
+#ifdef _WIN32
+   /* Supplied by the D3D UMD when Turnip is loaded through
+    * VK_LUNARG_direct_driver_loading.  Keep the raw bytes because Vulkan and
+    * DXGI both define the LUID as the same opaque eight-byte value. */
+   uint8_t adapter_luid[VK_LUID_SIZE];
+   bool adapter_luid_valid;
+
+   /* Also from the UMD: how to allocate a blob that has to become a D3D11
+    * shared resource.  Untyped here so tu_device.h stays free of the WDDM UMD
+    * headers; vdrm_wddm.c casts them back.  NULL when the ICD was loaded
+    * without a D3D UMD (standalone Vulkan), which simply means no shared
+    * resource support. */
+   void *runtime_alloc_ctx;
+   void *runtime_alloc_fn;
+   void *runtime_free_fn;
+#endif
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)

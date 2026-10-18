@@ -11,7 +11,9 @@
 #include <pthread.h>
 
 #include "util/hash_table.h"
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/os_file.h"
 #include "util/slab.h"
 
@@ -278,11 +280,15 @@ flush_deferred_submits(struct fd_device *dev)
          break;
 
       if (fd_deferred_submit->in_fence_fd != -1) {
+#ifndef _WIN32
          sync_accumulate("freedreno",
                          &fd_submit->in_fence_fd,
                          fd_deferred_submit->in_fence_fd);
          close(fd_deferred_submit->in_fence_fd);
          fd_deferred_submit->in_fence_fd = -1;
+#else
+         UNREACHABLE("sync-file fences are unavailable on Windows");
+#endif
       }
    }
 

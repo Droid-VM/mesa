@@ -22,7 +22,7 @@ subdir('ir2')
 subdir('ir3')
 subdir('fdl')
 
-if system_has_kms_drm
+if system_has_kms_drm or (with_platform_windows and with_gallium_freedreno)
   subdir('drm')
 endif
 

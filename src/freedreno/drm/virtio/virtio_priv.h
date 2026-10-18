@@ -6,9 +6,22 @@
 #ifndef VIRTIO_PRIV_H_
 #define VIRTIO_PRIV_H_
 
+#ifndef _WIN32
 #include <poll.h>
+#endif
 
 #include "freedreno_priv.h"
+
+#ifdef _WIN32
+/* IOCTL_SIMPLE carries Linux arm64 ioctl numbers to the host. */
+#define _IOC(dir, type, nr, size) (((dir) << 30) | ((size) << 16) | ((type) << 8) | (nr))
+#define _IO(type, nr) _IOC(0U, type, nr, 0)
+#define _IOR(type, nr, size) _IOC(2U, type, nr, sizeof(size))
+#define _IOW(type, nr, size) _IOC(1U, type, nr, sizeof(size))
+#define _IOWR(type, nr, size) _IOC(3U, type, nr, sizeof(size))
+#define _IOC_SIZE(cmd) (((cmd) >> 16) & 0x3fff)
+#define IOC_OUT (2U << 30)
+#endif
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_atomic.h"
@@ -54,7 +67,7 @@ struct virtio_device {
 };
 FD_DEFINE_CAST(fd_device, virtio_device);
 
-struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
+struct fd_device *virtio_device_new(int fd);
 
 static inline void
 virtio_dev_free_iova(struct fd_device *dev, uint64_t iova, uint32_t size)

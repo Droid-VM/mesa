@@ -298,9 +298,13 @@ void
 fd_context_switch_to(struct fd_context *ctx, struct fd_batch *batch)
 {
    if (ctx->in_fence_fd != -1) {
+#ifndef _WIN32
       sync_accumulate("freedreno", &batch->in_fence_fd, ctx->in_fence_fd);
       close(ctx->in_fence_fd);
       ctx->in_fence_fd = -1;
+#else
+      UNREACHABLE("sync-file fences are unavailable on Windows");
+#endif
    }
 }
 

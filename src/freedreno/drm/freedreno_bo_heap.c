@@ -221,6 +221,10 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
    }
 
    struct sa_bo *s = calloc(1, sizeof(*s));
+   if (unlikely(!s)) {
+      simple_mtx_unlock(&heap->lock);
+      return NULL;
+   }
 
    s->heap = heap;
    s->offset = offset;
@@ -233,6 +237,11 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
       heap->blocks[idx] = fd_bo_new(
             heap->dev, FD_BO_HEAP_BLOCK_SIZE, heap->flags | _FD_BO_HINT_HEAP,
             "heap-%x-block-%u", heap->flags, idx);
+      if (unlikely(!heap->blocks[idx])) {
+         free(s);
+         simple_mtx_unlock(&heap->lock);
+         return NULL;
+      }
       if (heap->flags == RING_FLAGS)
          fd_bo_mark_for_dump(heap->blocks[idx]);
    }

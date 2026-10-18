@@ -586,6 +586,19 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       alu->op != nir_op_sudot_4x8_iadd &&
       alu->op != nir_op_sudot_4x8_iadd_sat;
 
+   /* Keep values derived from a non-shared loop phi out of the scalar ALU,
+    * see emit_phi().
+    */
+   if (use_shared) {
+      for (int i = 0; i < info->num_inputs; i++) {
+         if (_mesa_set_search(ctx->noshared_defs, alu->src[i].src.ssa)) {
+            use_shared = false;
+            _mesa_set_add(ctx->noshared_defs, &alu->def);
+            break;
+         }
+      }
+   }
+
    struct ir3_instruction **def = ir3_get_def(ctx, &alu->def, dst_sz);
 
    /* Vectors are special in that they have non-scalarized writemasks,
@@ -1991,14 +2004,14 @@ emit_readonly_load_uav(struct ir3_context *ctx,
                        nir_src *index,
                        struct ir3_instruction *coords,
                        unsigned imm_offset,
-                       bool uav_load,
+                       bool use_isam_v,
                        struct ir3_instruction **dst)
 {
    struct ir3_builder *b = &ctx->build;
    struct tex_src_info info = get_image_ssbo_samp_tex_src(ctx, index, false);
 
    struct ir3_instruction *src1;
-   if (ctx->compiler->info->props.has_isam_v && !uav_load) {
+   if (use_isam_v) {
       src1 = create_immed(b, imm_offset);
    } else {
       assert(imm_offset == 0);
@@ -2007,7 +2020,7 @@ emit_readonly_load_uav(struct ir3_context *ctx,
 
    unsigned num_components = intr->def.num_components;
    struct ir3_instruction *sam =
-      emit_sam(ctx, OPC_ISAM, info, utype_for_size(intr->def.bit_size),
+      emit_sam(ctx, OPC_ISAM, info, utype_for_size(MAX2(intr->def.bit_size, 16)),
                MASK(num_components), coords, src1);
 
    ir3_handle_nonuniform(sam, intr);
@@ -2017,13 +2030,39 @@ emit_readonly_load_uav(struct ir3_context *ctx,
 
    ir3_split_dest(b, dst, sam, 0, num_components);
 
-   if (ctx->compiler->info->props.has_isam_v && !uav_load) {
+   if (use_isam_v) {
       sam->flags |= (IR3_INSTR_V | IR3_INSTR_INV_1D);
 
       if (imm_offset) {
          sam->flags |= IR3_INSTR_IMM_OFFSET;
       }
    }
+}
+
+static bool
+prefer_ldib_for_ssbo(struct ir3_context *ctx, nir_intrinsic_instr *intr)
+{
+   /* A8xx compute loops can spend substantially longer waiting on repeated
+    * vector ISAM loads than on LDIB, even with identical register allocation
+    * and scheduling. Keep the preference local to 32-bit vector loop loads.
+    */
+   if (ctx->compiler->gen != 8 || ctx->s->info.stage != MESA_SHADER_COMPUTE ||
+       intr->def.bit_size != 32 || intr->def.num_components < 2)
+      return false;
+
+   /* opt_offsets may already have folded an 8-bit ISAM immediate. LDIB only
+    * has 7 bits; retain ISAM when its folded base does not fit LDIB.
+    */
+   if (nir_intrinsic_base(intr) >= 128)
+      return false;
+
+   for (nir_cf_node *node = intr->instr.block->cf_node.parent; node;
+        node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         return true;
+   }
+
+   return false;
 }
 
 /* src[] = { buffer_index, offset }. No const_index */
@@ -2035,14 +2074,23 @@ emit_intrinsic_load_ssbo(struct ir3_context *ctx,
    assert(nir_intrinsic_offset_shift(intr) ==
           util_logbase2(intr->def.bit_size / 8));
 
-   /* Note: we can only use isam for vectorized loads/stores if isam.v is
-    * available.
-    * Note: isam also can't handle 8-bit loads.
+   /* Ordinary ISAM can read a scalar byte through the dedicated R8_UINT
+    * descriptor, returning the value in a half register. ISAM.V cannot.
+    * Prefer it for repeated loads in A8xx compute loops. Keep folded offsets
+    * and non-uniform descriptors on the LDIB path.
     */
+   bool use_r8_isam = ctx->compiler->gen == 8 &&
+      ctx->s->info.stage == MESA_SHADER_COMPUTE &&
+      ctx->loop_depth > 0 &&
+      ctx->compiler->options.storage_8bit && intr->def.bit_size == 8 &&
+      intr->def.num_components == 1 && nir_intrinsic_base(intr) == 0 &&
+      !(nir_intrinsic_access(intr) & ACCESS_NON_UNIFORM);
+
+   /* Vectorized loads require ISAM.V. */
    if (!(nir_intrinsic_access(intr) & ACCESS_CAN_REORDER) ||
        (intr->def.num_components > 1 && !ctx->compiler->info->props.has_isam_v) ||
-       (ctx->compiler->options.storage_8bit && intr->def.bit_size == 8) ||
-       !ctx->compiler->has_isam_ssbo) {
+       (intr->def.bit_size == 8 && !use_r8_isam) ||
+       !ctx->compiler->has_isam_ssbo || prefer_ldib_for_ssbo(ctx, intr)) {
       ctx->funcs->emit_intrinsic_load_ssbo(ctx, intr, dst);
       return;
    }
@@ -2051,15 +2099,16 @@ emit_intrinsic_load_ssbo(struct ir3_context *ctx,
    nir_src *offset_src = &intr->src[2];
    struct ir3_instruction *coords = NULL;
    unsigned imm_offset = 0;
+   bool use_isam_v = ctx->compiler->info->props.has_isam_v && !use_r8_isam;
 
-   if (ctx->compiler->info->props.has_isam_v) {
+   if (use_isam_v) {
       ir3_lower_imm_offset(ctx, intr, offset_src, 8, &coords, &imm_offset);
    } else {
       coords =
          ir3_collect(b, ir3_get_src(ctx, offset_src)[0], create_immed(b, 0));
    }
 
-   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, imm_offset, false, dst);
+   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, imm_offset, use_isam_v, dst);
 }
 
 static void
@@ -2078,7 +2127,7 @@ emit_intrinsic_load_uav(struct ir3_context *ctx,
    struct ir3_builder *b = &ctx->build;
    struct ir3_instruction *coords =
       ir3_create_collect(b, ir3_get_src(ctx, &intr->src[1]), 2);
-   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, 0, true, dst);
+   emit_readonly_load_uav(ctx, intr, &intr->src[0], coords, 0, false, dst);
 }
 
 static void
@@ -4262,6 +4311,23 @@ emit_tex_txs(struct ir3_context *ctx, nir_tex_instr *tex)
    ir3_put_def(ctx, &tex->def);
 }
 
+/* Whether uniform header phis of this loop should stay out of shared
+ * registers: loops without barriers, where the per-iteration (ss) wait for
+ * the scalar ALU is not hidden by other synchronization.
+ */
+static bool
+loop_avoids_shared_phis(nir_loop *loop)
+{
+   nir_foreach_block_in_cf_node (block, &loop->cf_node) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_barrier)
+            return false;
+      }
+   }
+   return true;
+}
+
 /* phi instructions are left partially constructed.  We don't resolve
  * their srcs until the end of the shader, since (eg. loops) one of
  * the phi's srcs might be defined after the phi due to back edges in
@@ -4287,6 +4353,25 @@ emit_phi(struct ir3_context *ctx, nir_phi_instr *nphi)
       }
    }
 
+   /* A uniform loop counter in a shared register is updated and compared by
+    * the scalar ALU, and the loop branch must then wait with (ss) for the
+    * scalar ALU every iteration. In a short A8xx compute loop this wait costs
+    * far more than the per-fiber ALU work. Keep uniform loop-header phis of
+    * such loops, and the uniform ALU results computed from them, in normal
+    * registers.
+    */
+   bool shared = ctx->compiler->info->props.has_scalar_alu &&
+                 !nphi->def.divergent;
+   nir_cf_node *parent = nphi->instr.block->cf_node.parent;
+   if (shared && ctx->compiler->gen == 8 &&
+       ctx->so->type == MESA_SHADER_COMPUTE &&
+       parent->type == nir_cf_node_loop &&
+       nir_loop_first_block(nir_cf_node_as_loop(parent)) == nphi->instr.block &&
+       loop_avoids_shared_phis(nir_cf_node_as_loop(parent))) {
+      shared = false;
+      _mesa_set_add(ctx->noshared_defs, &nphi->def);
+   }
+
    for (unsigned i = 0; i < num_components; i++) {
       phi = ir3_build_instr(&ctx->build, OPC_META_PHI, 1,
                             exec_list_length(&nphi->srcs));
@@ -4294,7 +4379,7 @@ emit_phi(struct ir3_context *ctx, nir_phi_instr *nphi)
       phi->phi.nphi = nphi;
       phi->phi.comp = i;
 
-      if (ctx->compiler->info->props.has_scalar_alu && !nphi->def.divergent)
+      if (shared)
          phi->dsts[0]->flags |= IR3_REG_SHARED;
 
       dst[i] = phi;
@@ -4725,6 +4810,14 @@ emit_predicated_branch(struct ir3_context *ctx, nir_if *nif)
    if (!ctx->compiler->has_predication)
       return NULL;
    if (!nif_can_be_predicated(nif))
+      return NULL;
+
+   /* Every predicated block pays the prede quirk's nops. Inside an A8xx
+    * compute loop that is paid per iteration, where a branch is cheaper; the
+    * blob only predicates outside loops.
+    */
+   if (ctx->compiler->gen == 8 && ctx->so->type == MESA_SHADER_COMPUTE &&
+       ctx->loop_depth > 0)
       return NULL;
 
    struct ir3_block *then_block = get_block(ctx, nir_if_first_then_block(nif));

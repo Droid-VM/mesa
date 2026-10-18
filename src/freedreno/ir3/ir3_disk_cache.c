@@ -7,6 +7,7 @@
 
 #include "ir3_compiler.h"
 #include "ir3_nir.h"
+#include "util/build_id.h"
 
 #define debug 0
 
@@ -33,6 +34,7 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
    if (ir3_shader_debug & IR3_DBG_NOCACHE)
       return;
 
+#if HAVE_BUILD_ID
    const char *renderer = fd_dev_name(compiler->dev_id);
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(ir3_disk_cache_init);
@@ -55,6 +57,9 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
 
    uint64_t driver_flags = ir3_shader_debug_hash_key();
    compiler->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+#else
+   return;
+#endif
 }
 
 void

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "util/half_float.h"
+#include "util/simple_mtx.h"
 #include "util/u_math.h"
 
 #include "ir3/instr-a3xx.h"
@@ -29,7 +30,7 @@
 #define IR3_REG_ABS    IR3_REG_FABS
 #define IR3_REG_NEGATE IR3_REG_FNEG
 
-static pthread_mutex_t ir3_parse_mtx = PTHREAD_MUTEX_INITIALIZER;
+static simple_mtx_t ir3_parse_mtx = SIMPLE_MTX_INITIALIZER;
 
 static struct ir3_kernel_info *info;
 static struct ir3_shader_variant *variant;
@@ -342,7 +343,7 @@ yyerror(const char *error)
 struct ir3 *
 ir3_parse(struct ir3_shader_variant *v, struct ir3_kernel_info *k, FILE *f)
 {
-   pthread_mutex_lock(&ir3_parse_mtx);
+   simple_mtx_lock(&ir3_parse_mtx);
 
    ir3_yyset_lineno(1);
    ir3_yyset_input(f);
@@ -363,6 +364,6 @@ ir3_parse(struct ir3_shader_variant *v, struct ir3_kernel_info *k, FILE *f)
    ralloc_free(ir3_parser_dead_ctx);
 
    struct ir3 *ir = variant->ir;
-   pthread_mutex_unlock(&ir3_parse_mtx);
+   simple_mtx_unlock(&ir3_parse_mtx);
    return ir;
 }

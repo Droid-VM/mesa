@@ -95,12 +95,18 @@ extern bool fd_binning_enabled;
 
 #include <unistd.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <windows.h>
+#define FD_THREAD_ID ((int)GetCurrentThreadId())
+#else
 #include <sys/syscall.h>
+#define FD_THREAD_ID ((pid_t)syscall(SYS_gettid))
+#endif
 
 #define DBG(fmt, ...)                                                          \
    do {                                                                        \
       if (FD_DBG(MSGS))                                                        \
-         mesa_logd("%5d: %s:%d: " fmt, ((pid_t)syscall(SYS_gettid)),           \
+         mesa_logd("%5d: %s:%d: " fmt, FD_THREAD_ID,                          \
                                         __func__, __LINE__,                    \
                                         ##__VA_ARGS__);                        \
    } while (0)

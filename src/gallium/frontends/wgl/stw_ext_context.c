@@ -37,6 +37,7 @@
 #include "stw_ext_context.h"
 
 #include "util/u_debug.h"
+#include "frontend/api.h"
 
 
 static wglCreateContext_t g_pfnwglCreateContext = NULL;
@@ -84,8 +85,9 @@ wglCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int *attribList)
                                 WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB |
                                 WGL_CONTEXT_ROBUST_ACCESS_BIT_ARB);
 
-   if (!stw_dev)
+   if (!stw_dev) {
       return NULL;
+   }
 
    /* parse attrib_list */
    if (attribList) {
@@ -224,14 +226,72 @@ wglCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int *attribList)
       struct stw_context *share_stw = stw_lookup_context(share_dhglrc);
 
       const struct stw_pixelformat_info *pfi = stw_pixelformat_get_info_from_hdc(hDC);
-      if (!pfi)
+      if (!pfi) {
          return 0;
+      }
 
-      struct stw_context *stw_ctx = stw_create_context_attribs(hDC, layerPlane, share_stw,
-                                                               stw_dev->fscreen,
-                                                               majorVersion, minorVersion,
-                                                               contextFlags, profileMask, pfi,
-                                                               resetStrategy);
+      /* ---- DROIDVM: GL version fallback (2026-10-18) --------------------
+       * The virtio/freedreno stack behind this ICD advertises GL 3.2 core as
+       * its maximum.  Apps like Minecraft (Fabulously Optimized) ask for 3.3
+       * core forward-compatible; st_api_create_context() then rejects it with
+       * ST_CONTEXT_ERROR_BAD_VERSION and the old code returned NULL, so the
+       * game never got a context.
+       *
+       * The requested version is always tried first and is left untouched.
+       * Only when that fails *because of the version* do we retry a
+       * descending list: 3.2 core -> 3.1 core -> 3.0 core -> requested
+       * version with a compatibility profile.  The first success wins; any
+       * other failure reason never retries.
+       */
+      struct stw_context *stw_ctx;
+      int ctx_err = -1;
+
+      stw_ctx = stw_create_context_attribs_err(hDC, layerPlane, share_stw,
+                                               stw_dev->fscreen,
+                                               majorVersion, minorVersion,
+                                               contextFlags, profileMask, pfi,
+                                               resetStrategy, &ctx_err);
+
+      if (!stw_ctx && ctx_err == ST_CONTEXT_ERROR_BAD_VERSION &&
+          majorVersion >= 3 &&
+          (profileMask == WGL_CONTEXT_CORE_PROFILE_BIT_ARB ||
+           profileMask == WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB)) {
+         struct {
+            int major, minor, profile;
+         } tries[4];
+         int ntries = 0;
+         const int req = majorVersion * 10 + minorVersion;
+
+         if (req > 32) {
+            tries[ntries].major = 3;
+            tries[ntries].minor = 2;
+            tries[ntries++].profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+         }
+         if (req > 31) {
+            tries[ntries].major = 3;
+            tries[ntries].minor = 1;
+            tries[ntries++].profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+         }
+         if (req > 30) {
+            tries[ntries].major = 3;
+            tries[ntries].minor = 0;
+            tries[ntries++].profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+         }
+         if (profileMask != WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB) {
+            tries[ntries].major = majorVersion;
+            tries[ntries].minor = minorVersion;
+            tries[ntries++].profile = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+         }
+
+         for (i = 0; i < ntries && !stw_ctx &&
+                     ctx_err == ST_CONTEXT_ERROR_BAD_VERSION; i++) {
+            stw_ctx = stw_create_context_attribs_err(hDC, layerPlane, share_stw,
+                                                     stw_dev->fscreen,
+                                                     tries[i].major, tries[i].minor,
+                                                     contextFlags, tries[i].profile,
+                                                     pfi, resetStrategy, &ctx_err);
+         }
+      }
 
       if (!stw_ctx) {
          pfnwglDeleteContext(context);

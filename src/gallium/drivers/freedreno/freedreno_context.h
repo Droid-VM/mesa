@@ -10,7 +10,9 @@
 #define FREEDRENO_CONTEXT_H_
 
 #include "pipe/p_context.h"
+#ifndef _WIN32
 #include "util/libsync.h"
+#endif
 #include "util/list.h"
 #include "util/slab.h"
 #include "util/u_blitter.h"

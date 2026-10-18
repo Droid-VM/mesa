@@ -14,7 +14,9 @@
 #include "freedreno_fence.h"
 #include "freedreno_util.h"
 /* TODO: Use the interface drm/freedreno_drmif.h instead of calling directly */
+#ifndef _WIN32
 #include <xf86drm.h>
+#endif
 
 static void
 fence_set_fd(struct pipe_fence_handle *fence, int fence_fd)
@@ -104,8 +106,10 @@ fd_fence_destroy(struct pipe_fence_handle *fence)
 
    tc_unflushed_batch_token_reference(&fence->tc_token, NULL);
 
+#ifndef _WIN32
    if (fence->syncobj)
       drmSyncobjDestroy(fd_device_fd(fence->screen->dev), fence->syncobj);
+#endif
    fd_pipe_del(fence->pipe);
    if (fence->fence)
       fd_fence_del(fence->fence);
@@ -143,9 +147,13 @@ fd_pipe_fence_finish(struct pipe_screen *pscreen, struct pipe_context *pctx,
       fence = fence->last_fence;
 
    if (fence->use_fence_fd) {
+#ifndef _WIN32
       assert(fence->fence);
       int ret = sync_wait(fence->fence->fence_fd, timeout / 1000000);
       return ret == 0;
+#else
+      return false;
+#endif
    }
 
    if (fd_pipe_wait_timeout(fence->pipe, fence->fence, timeout))
@@ -184,6 +192,9 @@ void
 fd_create_pipe_fence_fd(struct pipe_context *pctx, struct pipe_fence_handle **pfence,
                         int fd, enum pipe_fd_type type)
 {
+#ifdef _WIN32
+   *pfence = NULL;
+#else
    struct fd_context *ctx = fd_context(pctx);
 
    switch (type) {
@@ -206,6 +217,7 @@ fd_create_pipe_fence_fd(struct pipe_context *pctx, struct pipe_fence_handle **pf
    default:
       UNREACHABLE("Unhandled fence type");
    }
+#endif
 }
 
 void
@@ -230,6 +242,7 @@ fd_pipe_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f
     * for the fence to become available to ensure that we can safely
     * submit a batch with it as an in_fence_fd:
     */
+#ifndef _WIN32
     if (fence->syncobj) {
       int ret, fence_fd, drm_fd = fd_device_fd(fence->screen->dev);
       struct drm_syncobj_timeline_wait wait_args = {
@@ -256,6 +269,7 @@ fd_pipe_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f
        */
       drmSyncobjReset(drm_fd, &fence->syncobj, 1);
    }
+#endif
 
    /* if not an external fence, then nothing more to do without preemption: */
    if (!fence->use_fence_fd)
@@ -264,9 +278,13 @@ fd_pipe_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f
    ctx->no_implicit_sync = true;
 
    assert(fence->fence);
+#ifndef _WIN32
    if (sync_accumulate("freedreno", &ctx->in_fence_fd, fence->fence->fence_fd)) {
       /* error */
    }
+#else
+   UNREACHABLE("sync-file fences are unavailable on Windows");
+#endif
 
    /* Reset the fence: */
    fence->flushed = false;
@@ -369,11 +387,13 @@ DBG("fence=%p, fence->fence=%p", fence, fence->fence);
    fence->fence = submit_fence;
    fd_pipe_fence_set_batch(fence, NULL);
 
+#ifndef _WIN32
    if (fence->syncobj) {
       int drm_fd = fd_device_fd(fence->screen->dev);
       assert(fence->use_fence_fd);
       drmSyncobjImportSyncFile(drm_fd, fence->syncobj, submit_fence->fence_fd);
    }
+#endif
 }
 
 struct pipe_fence_handle *

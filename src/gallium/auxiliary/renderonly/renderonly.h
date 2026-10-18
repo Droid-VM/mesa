@@ -101,6 +101,9 @@ static inline bool
 renderonly_get_handle(struct renderonly_scanout *scanout,
       struct winsys_handle *handle)
 {
+#ifdef _WIN32
+   return false;
+#else
    if (!scanout)
       return false;
 
@@ -109,6 +112,7 @@ renderonly_get_handle(struct renderonly_scanout *scanout,
    handle->stride = scanout->stride;
 
    return true;
+#endif
 }
 
 /**
