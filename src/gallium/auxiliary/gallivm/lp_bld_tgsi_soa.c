@@ -3371,18 +3371,6 @@ sviewinfo_emit(
 }
 
 static void
-lod_emit(
-   const struct lp_build_tgsi_action * action,
-   struct lp_build_tgsi_context * bld_base,
-   struct lp_build_emit_data * emit_data)
-{
-   struct lp_build_tgsi_soa_context * bld = lp_soa_context(bld_base);
-
-   emit_sample(bld, emit_data->inst, LP_BLD_TEX_MODIFIER_NONE,
-               false, LP_SAMPLER_OP_LODQ, emit_data->output);
-}
-
-static void
 target_to_dims_layer(enum tgsi_texture_type target,
                      unsigned *dims,
                      unsigned *layer_coord)
@@ -4573,7 +4561,6 @@ lp_build_tgsi_soa(struct gallivm_state *gallivm,
    bld.bld_base.op_actions[TGSI_OPCODE_SAMPLE_L].emit = sample_l_emit;
    bld.bld_base.op_actions[TGSI_OPCODE_GATHER4].emit = gather4_emit;
    bld.bld_base.op_actions[TGSI_OPCODE_SVIEWINFO].emit = sviewinfo_emit;
-   bld.bld_base.op_actions[TGSI_OPCODE_LOD].emit = lod_emit;
 
    bld.bld_base.op_actions[TGSI_OPCODE_LOAD].emit = load_emit;
    bld.bld_base.op_actions[TGSI_OPCODE_STORE].emit = store_emit;

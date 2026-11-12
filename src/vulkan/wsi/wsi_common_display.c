@@ -296,15 +296,10 @@ wsi_display_parse_edid(struct wsi_display_connector *connector, drmModePropertyB
 
    char *make = di_info_get_make(info);
    char *model = di_info_get_model(info);
-   if (make && model) {
-      /* Free the previous display name in case the EDID is parsed more than
-       * once.
-       */
-      vk_free(connector->wsi->alloc, metadata->display_name);
-
+   /* Per the spec, the name lives as long as the display, so allocate once. */
+   if (make && model && !metadata->display_name) {
       /* make + space + model + null terminator */
       int display_name_size = strlen(make) + strlen(model) + 2;
-      /* Per the spec, this string remains valid for the lifetime of the VkDisplayKHR. */
       metadata->display_name = vk_zalloc(connector->wsi->alloc,
             display_name_size, 8,
             VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -1235,10 +1230,10 @@ wsi_GetDisplayPlaneCapabilities2KHR(VkPhysicalDevice physicalDevice,
                                          pDisplayPlaneInfo->planeIndex,
                                          &pCapabilities->capabilities);
 
-   vk_foreach_struct(ext, pCapabilities->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pCapabilities->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
-         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
+         VkSurfaceProtectedCapabilitiesKHR *protected = ext;
          protected->supportsProtected =
             wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_DISPLAY];
          break;
@@ -1328,10 +1323,6 @@ wsi_display_surface_get_capabilities(VkIcdSurfaceBase *surface_base,
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
       image_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = vk_find_struct(caps, SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT);
-   if (surface_caps && pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
-      surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
-
    VkImageUsageFlags2CreateInfoKHR *usage2 =
       vk_find_struct(caps->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
    if (usage2) {
@@ -1373,17 +1364,17 @@ wsi_display_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
       result = wsi_display_surface_get_surface_counters(&counters->supported_surface_counters);
    }
 
-   vk_foreach_struct(ext, caps->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, caps->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
-         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
+         VkSurfaceProtectedCapabilitiesKHR *protected = ext;
          protected->supportsProtected = VK_FALSE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
          /* Unsupported. */
-         VkSurfacePresentScalingCapabilitiesKHR *scaling = (void *)ext;
+         VkSurfacePresentScalingCapabilitiesKHR *scaling = ext;
          scaling->supportedPresentScaling = 0;
          scaling->supportedPresentGravityX = 0;
          scaling->supportedPresentGravityY = 0;
@@ -1394,7 +1385,7 @@ wsi_display_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
          /* We only support FIFO. */
-         VkSurfacePresentModeCompatibilityKHR *compat = (void *)ext;
+         VkSurfacePresentModeCompatibilityKHR *compat = ext;
          if (compat->pPresentModes) {
             if (compat->presentModeCount) {
                assert(present_mode);
@@ -1408,21 +1399,21 @@ wsi_display_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR: {
-         VkSurfaceCapabilitiesPresentId2KHR *pid2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentId2KHR *pid2 = ext;
 
          pid2->presentId2Supported = VK_TRUE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR: {
-         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = ext;
 
          pwait2->presentWait2Supported = VK_TRUE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT: {
-         VkPresentTimingSurfaceCapabilitiesEXT *wait = (void *)ext;
+         VkPresentTimingSurfaceCapabilitiesEXT *wait = ext;
 
          wait->presentStageQueries = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT;
          wait->presentTimingSupported = VK_TRUE;
@@ -1430,6 +1421,28 @@ wsi_display_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
          wait->presentAtRelativeTimeSupported = VK_TRUE;
          break;
       }
+
+      case VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT: {
+         VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = ext;
+         VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+
+         if (pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_bind_memory2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_id2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_wait2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_swapchain_mutable_format)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+         if (pdevice->supported_extensions.EXT_present_timing)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_swapchain_maintenance1 ||
+             pdevice->supported_extensions.EXT_swapchain_maintenance1)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT;
+      }
+      break;
 
       default:
          /* Ignored */
@@ -2242,14 +2255,14 @@ wsi_display_acquire_next_image(struct wsi_swapchain *drv_chain,
          wsi_display_debug("image %d state %d\n", i, chain->images[i].state);
       }
 
-      if (ret == ETIMEDOUT) {
+      if (ret == thrd_timedout) {
          result = VK_TIMEOUT;
          goto done;
       }
 
       ret = wsi_display_wait_for_event(wsi, timeout);
 
-      if (ret && ret != ETIMEDOUT) {
+      if (ret && ret != thrd_timedout) {
          result = VK_ERROR_SURFACE_LOST_KHR;
          wsi_display_surface_error(chain, result);
          goto done;
@@ -2574,7 +2587,7 @@ wsi_display_fence_wait(struct wsi_display_fence *fence, uint64_t timeout)
          break;
       }
 
-      if (ret == ETIMEDOUT) {
+      if (ret == thrd_timedout) {
          wsi_display_debug("%9lu fence %lu timeout\n",
                            pthread_self(), fence->sequence);
          result = VK_TIMEOUT;
@@ -2586,7 +2599,7 @@ wsi_display_fence_wait(struct wsi_display_fence *fence, uint64_t timeout)
       else
          ret = wsi_display_wait_for_event(fence->wsi, timeout);
 
-      if (ret && ret != ETIMEDOUT) {
+      if (ret && ret != thrd_timedout) {
          wsi_display_debug("%9lu fence %lu error\n",
                            pthread_self(), fence->sequence);
          result = VK_ERROR_DEVICE_LOST;

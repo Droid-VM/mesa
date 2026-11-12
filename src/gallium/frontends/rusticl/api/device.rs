@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::api::icd::*;
+use crate::api::memory::*;
 use crate::api::types::IdpAccelProps;
 use crate::api::util::*;
 use crate::core::device::*;
@@ -92,6 +93,14 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
             }
             CL_DEVICE_EXTENSIONS => v.write::<&str>(&dev.extension_string),
             CL_DEVICE_EXTENSIONS_WITH_VERSION => v.write::<&[cl_name_version]>(&dev.extensions),
+            CL_DEVICE_EXTERNAL_MEMORY_IMPORT_ASSUME_LINEAR_IMAGES_HANDLE_TYPES_KHR
+                if dev.memory_sharing_supported() =>
+            {
+                v.write::<&[cl_external_memory_handle_type_khr]>(SUPPORTED_EXTERNAL_MEMORY_TYPES)
+            }
+            CL_DEVICE_EXTERNAL_MEMORY_IMPORT_HANDLE_TYPES_KHR if dev.memory_sharing_supported() => {
+                v.write::<&[cl_external_memory_handle_type_khr]>(SUPPORTED_EXTERNAL_MEMORY_TYPES)
+            }
             CL_DEVICE_GENERIC_ADDRESS_SPACE_SUPPORT => v.write::<bool>(false),
             CL_DEVICE_GLOBAL_MEM_CACHE_TYPE => v.write::<cl_device_mem_cache_type>(CL_NONE),
             CL_DEVICE_GLOBAL_MEM_CACHE_SIZE => v.write::<cl_ulong>(0),
@@ -104,7 +113,17 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
             }
             // Provided by the cl_khr_fp16 extension.
             CL_DEVICE_HALF_FP_CONFIG if dev.fp16_supported() => {
-                v.write::<cl_device_fp_config>((CL_FP_ROUND_TO_NEAREST | CL_FP_INF_NAN).into())
+                let mut flags = CL_FP_ROUND_TO_NEAREST | CL_FP_INF_NAN;
+
+                if dev
+                    .get_nir_options()
+                    .float_mul_add16
+                    .are_all_bits_set(nir_float_muladd_support::nir_float_muladd_support_has_ffma)
+                {
+                    flags |= CL_FP_FMA;
+                }
+
+                v.write::<cl_device_fp_config>(flags.into())
             }
             CL_DEVICE_HOST_MEM_CAPABILITIES_INTEL => {
                 v.write::<cl_device_unified_shared_memory_capabilities_intel>(0)
@@ -322,9 +341,19 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
 
                 v.write::<cl_device_fp_atomic_capabilities_ext>(flags.into())
             }
-            CL_DEVICE_SINGLE_FP_CONFIG => v.write::<cl_device_fp_config>(
-                (CL_FP_ROUND_TO_NEAREST | CL_FP_INF_NAN) as cl_device_fp_config,
-            ),
+            CL_DEVICE_SINGLE_FP_CONFIG => {
+                let mut flags = CL_FP_ROUND_TO_NEAREST | CL_FP_INF_NAN;
+
+                if dev
+                    .get_nir_options()
+                    .float_mul_add32
+                    .are_all_bits_set(nir_float_muladd_support::nir_float_muladd_support_has_ffma)
+                {
+                    flags |= CL_FP_FMA;
+                }
+
+                v.write::<cl_device_fp_config>(flags.into())
+            }
             CL_DEVICE_SPIRV_CAPABILITIES => {
                 v.write_iter::<cl_uint>(dev.spirv_caps_vec.iter().map(|&cap| cap as _))
             }

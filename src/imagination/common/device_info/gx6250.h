@@ -41,7 +41,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_51 = {
    .has_compute_overlap = true,
    .has_eight_output_registers = true,
    .has_fbcdc_algorithm = true,
-   /* .has_gs_rta_support = true, */
+   .has_gs_rta_support = true,
    .has_isp_max_tiles_in_flight = true,
    .has_isp_samples_per_pixel = true,
    .has_max_instances_per_pds_task = true,
@@ -61,6 +61,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_51 = {
    .has_tpu_extended_integer_lookup = true,
    .has_tpu_image_state_v2 = true,
    .has_tpu_parallel_instances = true,
+   .has_transform_feedback_query_bits = true,
    .has_unified_store_depth = true,
    .has_usc_f16sop_u8 = true,
    .has_usc_itrsmp = true,
@@ -88,6 +89,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_51 = {
    .tile_size_x = 32U,
    .tile_size_y = 32U,
    .tpu_parallel_instances = 4U,
+   .transform_feedback_query_bits = 32U,
    .unified_store_depth = 256U,
    .usc_itr_parallel_instances = 8U,
    .usc_min_output_registers_per_pix = 2U,
@@ -141,7 +143,8 @@ static const struct pvr_device_info pvr_device_info_4_40_2_51 = {
 };
 
 #define PVR_DEVICE_IDENT_4_V_2_58 \
-   .device_id = 0x6250, .series_name = "Rogue", .public_name = "GX6250"
+   .device_id = 0x6250, .series_name = "Rogue", \
+   .public_name = "GX6250", .arch = PVR_DEVICE_ARCH_ROGUE
 
 static const struct pvr_device_features pvr_device_features_4_V_2_58 = {
    .has_astc = true,
@@ -152,7 +155,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_58 = {
    .has_compute_overlap = true,
    .has_eight_output_registers = true,
    .has_fbcdc_algorithm = true,
-   /* .has_gs_rta_support = true, */
+   .has_gs_rta_support = true,
    .has_isp_max_tiles_in_flight = true,
    .has_isp_samples_per_pixel = true,
    .has_max_instances_per_pds_task = true,
@@ -172,6 +175,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_58 = {
    .has_tpu_extended_integer_lookup = true,
    .has_tpu_image_state_v2 = true,
    .has_tpu_parallel_instances = true,
+   .has_transform_feedback_query_bits = true,
    .has_unified_store_depth = true,
    .has_usc_f16sop_u8 = true,
    .has_usc_itrsmp = true,
@@ -199,6 +203,7 @@ static const struct pvr_device_features pvr_device_features_4_V_2_58 = {
    .tile_size_x = 32U,
    .tile_size_y = 32U,
    .tpu_parallel_instances = 4U,
+   .transform_feedback_query_bits = 32U,
    .unified_store_depth = 256U,
    .usc_itr_parallel_instances = 8U,
    .usc_min_output_registers_per_pix = 2U,

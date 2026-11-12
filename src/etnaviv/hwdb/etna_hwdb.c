@@ -40,6 +40,7 @@ etna_query_feature_db(struct etna_core_info *info)
       etna_core_enable_feature(info, ETNA_FEATURE_CORE_NPU);
 
    /* Features: */
+   ETNA_FEATURE(REG_TessellationShaders, TESSELLATION_SHADERS);
    ETNA_FEATURE(REG_FastClear, FAST_CLEAR);
    ETNA_FEATURE(REG_Pipe3D, PIPE_3D);
    ETNA_FEATURE(REG_FE20BitIndex, 32_BIT_INDICES);
@@ -75,6 +76,8 @@ etna_query_feature_db(struct etna_core_info *info)
    ETNA_FEATURE(REG_BugFixes8, BUG_FIXES8);
 
    ETNA_FEATURE(REG_BugFixes15, PE_DITHER_FIX);
+   ETNA_FEATURE(PE_32BPC_COLORMASK_FIX, PE_32BPC_COLORMASK_FIX);
+   ETNA_FEATURE(PE_RGBA16I_FIX, PE_RGBA16I_FIX);
    ETNA_FEATURE(REG_InstructionCache, INSTRUCTION_CACHE);
    ETNA_FEATURE(REG_ExtraShaderInstructions2, HAS_FAST_TRANSCENDENTALS);
 
@@ -113,8 +116,13 @@ etna_query_feature_db(struct etna_core_info *info)
    ETNA_FEATURE(REG_RSS8, S8);
    ETNA_FEATURE(HWTFB, HWTFB);
    ETNA_FEATURE(BLT_64bpp_MASKED_CLEAR_FIX, BLT_64BPP_MASKED_CLEAR_FIX);
+   ETNA_FEATURE(BLT_8bpp_256TILE_FC_FIX, BLT_8BPP_256TILE_FC_FIX);
    ETNA_FEATURE(WIDELINE_TRIANGLE_EMU, WIDELINE_TRIANGLE_EMU);
    ETNA_FEATURE(REG_UnifiedSamplers, UNIFIED_SAMPLERS);
+   ETNA_FEATURE(PE_A8B8G8R8, PE_A8B8G8R8);
+   ETNA_FEATURE(TX_INTEGER_COORDINATE_V2, TX_INTEGER_COORDINATE_V2);
+   ETNA_FEATURE(TX_BORDER_CLAMP_FIX, TX_BORDER_CLAMP_FIX);
+   ETNA_FEATURE(PE_ADVANCE_BLEND_PART0, PE_ADVANCE_BLEND_PART0);
 
    /* Limits: */
    if (etna_core_has_feature(info, ETNA_FEATURE_CORE_GPU)) {
@@ -127,6 +135,9 @@ etna_query_feature_db(struct etna_core_info *info)
       info->gpu.pixel_pipes = db->NumPixelPipes;
       info->gpu.max_varyings = db->VaryingCount;
       info->gpu.num_constants = db->NumberOfConstants;
+      info->gpu.result_window_max_size = db->RESULT_WINDOW_MAX_SIZE;
+      info->gpu.usc_size = db->USC_MAX_PAGES;
+      info->gpu.l1_cache_size = db->L1CacheSize;
    }
 
    if (etna_core_has_feature(info, ETNA_FEATURE_CORE_NPU)) {

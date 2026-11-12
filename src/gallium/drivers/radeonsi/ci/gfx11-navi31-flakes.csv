@@ -9,9 +9,6 @@ glx@glx_arb_sync_control@waitformsc
 # These either consistently pass or consistently fail depending on the X server version, DDX, etc.
 glx@glx_ext_import_context@*
 
-# Random: ../src/util/hash_table.c:311: hash_table_search: Assertion `!key_pointer_is_reserved(ht, key)' failed.
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread
-
 spec@arb_bindless_texture@compiler@images@arith-bound-image.frag
 spec@ext_external_objects@vk-ping-pong-single-sem
 

@@ -99,6 +99,10 @@ qir_opt_peephole_sf_block(struct vc4_compile *c, struct qblock *block)
          * removing unused or repeated ones.
          */
         qir_for_each_inst_rev(inst, block) {
+                /* Flags aren't preserved across a thrsw. */
+                if (inst->op == QOP_THRSW)
+                        last_sf = NULL;
+
                 if (inst->sf) {
                         if (!sf_live) {
                                 /* Our instruction's SF isn't read, so drop it.

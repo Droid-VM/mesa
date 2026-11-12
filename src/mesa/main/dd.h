@@ -81,13 +81,13 @@ struct pipe_vertex_element;
  * want to provoke the driver to throw away the old storage, we will
  * respect the contents of already referenced data.
  */
-#define MESA_MAP_NOWAIT_BIT       0x4000
+#define MESA_MAP_NOWAIT_BIT       0x8000
 
 /* Mapping a buffer is allowed from any thread. */
-#define MESA_MAP_THREAD_SAFE_BIT  0x8000
+#define MESA_MAP_THREAD_SAFE_BIT  0x10000
 
 /* This buffer will only be mapped/unmapped once */
-#define MESA_MAP_ONCE            0x10000
+#define MESA_MAP_ONCE            0x20000
 
 /* This BufferStorage flag indicates that the buffer will be used
  * by pipe_vertex_state, which doesn't track buffer busyness and doesn't
@@ -149,7 +149,7 @@ struct dd_function_table {
     * The interface is identical to pipe_context::draw_vbo.
     */
    void (*DrawGallium)(struct gl_context *ctx,
-                       const struct pipe_draw_info *info,
+                       struct pipe_draw_info *info,
                        unsigned drawid_offset,
                        const struct pipe_draw_indirect_info *indirect,
                        const struct pipe_draw_start_count_bias *draws,
@@ -207,31 +207,6 @@ struct dd_function_table {
    GLboolean SaveNeedFlush;
 
    /**@}*/
-
-   /**
-    * Query reset status for GL_ARB_robustness
-    *
-    * Per \c glGetGraphicsResetStatusARB, this function should return a
-    * non-zero value once after a reset.  If a reset is non-atomic, the
-    * non-zero status should be returned for the duration of the reset.
-    */
-   GLenum (*GetGraphicsResetStatus)(struct gl_context *ctx);
-
-   /**
-    * \name GL_ARB_get_program_binary
-    */
-   /*@{*/
-   /**
-    * Calls to retrieve/store a binary serialized copy of the current program.
-    */
-   void (*ProgramBinarySerializeDriverBlob)(struct gl_context *ctx,
-                                            struct gl_shader_program *shProg,
-                                            struct gl_program *prog);
-
-   void (*ProgramBinaryDeserializeDriverBlob)(struct gl_context *ctx,
-                                              struct gl_shader_program *shProg,
-                                              struct gl_program *prog);
-   /*@}*/
 
    /**
     * \name Disk shader cache functions

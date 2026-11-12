@@ -35,6 +35,7 @@
 #include "vk_pipeline.h"
 
 #include "util/format/u_format.h"
+#include "vulkan/vulkan_core.h"
 
 struct vk_meta_fill_buffer_key {
    enum vk_meta_object_key_type key_type;
@@ -299,6 +300,40 @@ copy_img_view_format_for_aspect(const struct vk_meta_copy_image_view *info,
 }
 
 static bool
+copying_ds_with_color(const struct vk_meta_copy_image_view *view_info,
+                      VkImageAspectFlags aspects)
+{
+   if (!(aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)))
+      return false;
+
+   VkImageAspectFlags format_aspects = 0;
+   if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
+      format_aspects |= vk_format_aspects(view_info->depth.format);
+   if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
+      format_aspects |= vk_format_aspects(view_info->stencil.format);
+
+   switch (format_aspects) {
+   case VK_IMAGE_ASPECT_COLOR_BIT:
+      return true;
+   case VK_IMAGE_ASPECT_DEPTH_BIT:
+      return false;
+   case VK_IMAGE_ASPECT_STENCIL_BIT:
+   case VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT:
+      UNREACHABLE("Copy of stencil component with stencil view not yet supported");
+   default:
+      UNREACHABLE("Invalid formats for ds copy");
+   }
+}
+
+static bool
+copying_ds_with_ds(const struct vk_meta_copy_image_view *view_info,
+                   VkImageAspectFlags aspects)
+{
+   return (aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+          !copying_ds_with_color(view_info, aspects);
+}
+
+static bool
 depth_stencil_interleaved(const struct vk_meta_copy_image_view *view)
 {
    return view->stencil.format != VK_FORMAT_UNDEFINED &&
@@ -374,10 +409,17 @@ get_gfx_copy_pipeline(
       VkFormat fmt =
          copy_img_view_format_for_aspect(view, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-      render.color_attachment_formats[render.color_attachment_count] = fmt;
-      render.color_attachment_write_masks[render.color_attachment_count] =
-         (VkColorComponentFlags)view->depth.component_mask;
-      render.color_attachment_count++;
+      if (copying_ds_with_color(view, aspects)) {
+         render.color_attachment_formats[render.color_attachment_count] = fmt;
+         render.color_attachment_write_masks[render.color_attachment_count] =
+            (VkColorComponentFlags)view->depth.component_mask;
+         render.color_attachment_count++;
+      } else {
+         ds_info.depthTestEnable = VK_TRUE;
+         ds_info.depthWriteEnable = VK_TRUE;
+         ds_info.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+         render.depth_attachment_format = fmt;
+      }
    }
 
    if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -388,6 +430,7 @@ get_gfx_copy_pipeline(
           depth_stencil_interleaved(view)) {
          render.color_attachment_write_masks[0] |= view->stencil.component_mask;
       } else {
+         assert(copying_ds_with_color(view, aspects));
          render.color_attachment_formats[render.color_attachment_count] = fmt;
          render.color_attachment_write_masks[render.color_attachment_count] =
             (VkColorComponentFlags)view->stencil.component_mask;
@@ -478,7 +521,7 @@ copy_create_src_image_view(struct vk_command_buffer *cmd,
       },
    };
 
-   if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+   if (copying_ds_with_color(view_info, aspect)) {
       nir_component_mask_t comp_mask = aspect == VK_IMAGE_ASPECT_STENCIL_BIT
                                           ? view_info->stencil.component_mask
                                           : view_info->depth.component_mask;
@@ -595,7 +638,8 @@ static VkFormat
 copy_img_buf_format_for_aspect(const struct vk_meta_copy_image_view *info,
                                VkImageAspectFlagBits aspect)
 {
-   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+   if (copying_ds_with_color(info, aspect) &&
+       aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
       enum pipe_format pfmt = vk_format_to_pipe_format(info->depth.format);
       unsigned num_comps = util_format_get_nr_components(pfmt);
       unsigned depth_comp_bits = 0;
@@ -654,6 +698,32 @@ convert_texel(nir_builder *b, VkFormat src_fmt, VkFormat dst_fmt,
 
    if (src_pfmt == dst_pfmt)
       return texel;
+
+   if ((src_pfmt == PIPE_FORMAT_R32_FLOAT &&
+        dst_pfmt == PIPE_FORMAT_Z32_FLOAT) ||
+       (src_pfmt == PIPE_FORMAT_R16_UNORM &&
+        dst_pfmt == PIPE_FORMAT_Z16_UNORM))
+      return texel;
+
+   /*
+    * For depth, the hardware is about to convert from float to the output
+    * format, so to compensate for that we need to do the inverse conversion
+    * (output format to float)
+    */
+   if (vk_format_is_int(src_fmt)) {
+      if (dst_fmt == VK_FORMAT_X8_D24_UNORM_PACK32) {
+         texel = nir_iand_imm(b, texel, (1 << 24) - 1);
+         return nir_format_unorm24_to_float(b, texel);
+      } else if (dst_fmt == VK_FORMAT_D32_SFLOAT) {
+         return texel;
+      } else if (vk_format_is_depth_or_stencil(dst_fmt)) {
+         assert(!vk_format_has_stencil(dst_fmt));
+         assert(vk_format_is_unorm(dst_fmt));
+         assert(texel->num_components == 1);
+         const unsigned bit_size = texel->bit_size;
+         return nir_format_unorm_to_float(b, texel, &bit_size);
+      }
+   }
 
    unsigned src_blksz = util_format_get_blocksize(src_pfmt);
    unsigned dst_blksz = util_format_get_blocksize(dst_pfmt);
@@ -790,23 +860,35 @@ static nir_variable *
 frag_var(nir_builder *b, const struct vk_meta_copy_image_view *view,
          VkImageAspectFlags aspect, uint32_t rt)
 {
-   VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
-   enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
-   enum glsl_base_type base_type =
-      util_format_is_pure_sint(pfmt)   ? GLSL_TYPE_INT
-      : util_format_is_pure_uint(pfmt) ? GLSL_TYPE_UINT
-                                       : GLSL_TYPE_FLOAT;
-   const struct glsl_type *var_type = glsl_vector_type(base_type, 4);
-   static const char *var_names[] = {
-      "gl_FragData[0]",
-      "gl_FragData[1]",
-   };
+   const struct glsl_type *var_type;
+   const char *var_name;
+   int location;
 
-   assert(rt < ARRAY_SIZE(var_names));
+   if (copying_ds_with_ds(view, aspect)) {
+      assert(aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+      var_name = "gl_FragDepth";
+      var_type = glsl_vector_type(GLSL_TYPE_FLOAT, 1);
+      location = FRAG_RESULT_DEPTH;
+   } else {
+      VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      enum glsl_base_type base_type =
+         util_format_is_pure_sint(pfmt)   ? GLSL_TYPE_INT
+         : util_format_is_pure_uint(pfmt) ? GLSL_TYPE_UINT
+                                          : GLSL_TYPE_FLOAT;
+      var_type = glsl_vector_type(base_type, 4);
+      static const char *var_names[] = {
+         "gl_FragData[0]",
+         "gl_FragData[1]",
+      };
+      assert(rt < ARRAY_SIZE(var_names));
+      var_name = var_names[rt];
+      location = FRAG_RESULT_DATA0 + rt;
+   }
 
    nir_variable *var = nir_variable_create(b->shader, nir_var_shader_out,
-                                           var_type, var_names[rt]);
-   var->data.location = FRAG_RESULT_DATA0 + rt;
+                                           var_type, var_name);
+   var->data.location = location;
 
    return var;
 }
@@ -816,14 +898,16 @@ write_frag(nir_builder *b, const struct vk_meta_copy_image_view *view,
            VkImageAspectFlags aspect, nir_variable *frag_var, nir_def *frag_val)
 {
    nir_component_mask_t comp_mask;
-
-   if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+   if (copying_ds_with_color(view, aspect)) {
       VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
 
       comp_mask = aspect == VK_IMAGE_ASPECT_DEPTH_BIT
                      ? view->depth.component_mask
                      : view->stencil.component_mask;
       frag_val = place_ds_texel(b, fmt, comp_mask, frag_val);
+   } else if (copying_ds_with_ds(view, aspect)) {
+      frag_val = nir_trim_vector(b, frag_val, 1);
+      comp_mask = nir_component_mask(1);
    } else {
       comp_mask = nir_component_mask(4);
    }
@@ -846,7 +930,8 @@ write_frag(nir_builder *b, const struct vk_meta_copy_image_view *view,
       }
    }
 
-   frag_val = nir_pad_vector_imm_int(b, frag_val, 0, 4);
+   frag_val = nir_pad_vector_imm_int(b, frag_val, 0,
+                                     glsl_get_components(frag_var->type));
 
    nir_store_var(b, frag_var, frag_val, comp_mask);
 }
@@ -878,6 +963,7 @@ write_img(nir_builder *b, const struct vk_meta_copy_image_view *view,
    nir_def *zero_lod = nir_imm_int(b, 0);
 
    if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+      assert(copying_ds_with_color(view, aspect));
       nir_component_mask_t comp_mask = aspect == VK_IMAGE_ASPECT_DEPTH_BIT
                                           ? view->depth.component_mask
                                           : view->stencil.component_mask;
@@ -1028,6 +1114,9 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
       MESA_SHADER_FRAGMENT, NULL, "vk-meta-copy-buffer-to-image-frag");
    nir_builder *b = &builder;
 
+   /* Don't read out of bounds for helpers */
+   nir_terminate_if(b, nir_is_helper_invocation(b, 1));
+
    VkFormat buf_fmt =
       copy_img_buf_format_for_aspect(&key->img.view, key->img.aspect);
 
@@ -1038,7 +1127,8 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
    nir_def *img_offs = nir_vec3(b,
       load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.x),
       load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.y),
-      load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.z));
+      /* Always zero. See copy_buffer_image_prepare_gfx_push_const */
+      nir_imm_zero(b, 1, 32));
 
    /* Move the layer ID to the second coordinate if we're dealing with a 1D
     * array, as this is where the texture instruction expects it. */
@@ -1053,7 +1143,7 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
    assert(blk_sz % comp_count == 0);
    unsigned comp_sz = (blk_sz / comp_count) * 8;
 
-   coords = nir_isub(b, coords, img_offs);
+   coords = nir_iadd(b, coords, img_offs);
 
    nir_def *texel = nir_load_global(b,
       comp_count, comp_sz, copy_img_buf_addr(b, buf_pfmt, coords),
@@ -1202,9 +1292,9 @@ static VkResult
 copy_buffer_image_prepare_gfx_push_const(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    const struct vk_meta_copy_buffer_image_key *key,
-   VkPipelineLayout pipeline_layout, VkBuffer buffer,
+   VkPipelineLayout pipeline_layout,
    const struct vk_image_buffer_layout *buf_layout, struct vk_image *img,
-   const VkBufferImageCopy2 *region)
+   const VkDeviceMemoryImageCopyKHR *region)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -1219,13 +1309,15 @@ copy_buffer_image_prepare_gfx_push_const(
       .buf = {
          .row_stride = buf_layout->row_stride_B,
          .image_stride = buf_layout->image_stride_B,
-         .addr = vk_meta_buffer_address(dev, buffer, region->bufferOffset,
-                                        VK_WHOLE_SIZE),
+         .addr = region->addressRange.address,
       },
+      /* Equivalent to copy_image_prepare_gfx_push_const, but with a
+       * zero src offset
+       */
       .img.offset = {
-         .x = region->imageOffset.x,
-         .y = region->imageOffset.y,
-         .z = region->imageOffset.z,
+         .x = -region->imageOffset.x,
+         .y = -region->imageOffset.y,
+         .z = 0,
       },
    };
 
@@ -1238,9 +1330,9 @@ static VkResult
 copy_buffer_image_prepare_compute_push_const(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    const struct vk_meta_copy_buffer_image_key *key,
-   VkPipelineLayout pipeline_layout, VkBuffer buffer,
+   VkPipelineLayout pipeline_layout,
    const struct vk_image_buffer_layout *buf_layout, struct vk_image *img,
-   const VkBufferImageCopy2 *region, uint32_t *wg_count)
+   const VkDeviceMemoryImageCopyKHR *region, uint32_t *wg_count)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -1257,8 +1349,7 @@ copy_buffer_image_prepare_compute_push_const(
       .buf = {
          .row_stride = buf_layout->row_stride_B,
          .image_stride = buf_layout->image_stride_B,
-         .addr = vk_meta_buffer_address(dev, buffer, region->bufferOffset,
-                                        VK_WHOLE_SIZE),
+         .addr = region->addressRange.address,
       },
       .img.offset = {
          .x = img_offs.x,
@@ -1288,9 +1379,10 @@ format_is_supported(VkFormat fmt)
    enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
    const struct util_format_description *fdesc = util_format_description(pfmt);
 
-   /* We only support RGB formats in the copy path to keep things simple. */
+   /* We only support RGB or depth formats in the copy path. */
    return fdesc->colorspace == UTIL_FORMAT_COLORSPACE_RGB ||
-          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB;
+          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB ||
+          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_ZS;
 }
 
 static struct vk_meta_copy_image_view
@@ -1352,9 +1444,9 @@ static void
 copy_image_to_buffer_region(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    struct vk_image *img, VkImageLayout img_layout,
-   const struct vk_meta_copy_image_properties *img_props, VkBuffer buffer,
+   const struct vk_meta_copy_image_properties *img_props,
    const struct vk_image_buffer_layout *buf_layout,
-   const VkBufferImageCopy2 *region)
+   const VkDeviceMemoryImageCopyKHR *region)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -1406,7 +1498,7 @@ copy_image_to_buffer_region(
    uint32_t wg_count[3] = {0};
 
    result = copy_buffer_image_prepare_compute_push_const(
-      cmd, meta, &key, pipeline_layout, buffer, buf_layout, img, region,
+      cmd, meta, &key, pipeline_layout, buf_layout, img, region,
       wg_count);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(cmd, result);
@@ -1418,25 +1510,42 @@ copy_image_to_buffer_region(
 }
 
 void
-vk_meta_copy_image_to_buffer(
+vk_meta_copy_image_to_memory(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-   const VkCopyImageToBufferInfo2 *info,
+   const VkCopyDeviceMemoryImageInfoKHR *info,
    const struct vk_meta_copy_image_properties *img_props)
 {
-   VK_FROM_HANDLE(vk_image, img, info->srcImage);
+   VK_FROM_HANDLE(vk_image, img, info->image);
 
    for (uint32_t i = 0; i < info->regionCount; i++) {
-      VkBufferImageCopy2 region = info->pRegions[i];
+      VkDeviceMemoryImageCopyKHR region = info->pRegions[i];
       struct vk_image_buffer_layout buf_layout =
-         vk_image_buffer_copy_layout(img, &region);
+         vk_image_memory_copy_layout(img, &region);
 
       region.imageExtent = vk_image_extent_to_elements(img, region.imageExtent);
       region.imageOffset = vk_image_offset_to_elements(img, region.imageOffset);
 
-      copy_image_to_buffer_region(cmd, meta, img, info->srcImageLayout,
-                                  img_props, info->dstBuffer, &buf_layout,
+      copy_image_to_buffer_region(cmd, meta, img, region.imageLayout,
+                                  img_props, &buf_layout,
                                   &region);
    }
+}
+
+void
+vk_meta_copy_image_to_buffer(
+   struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+   const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo,
+   const struct vk_meta_copy_image_properties *img_props)
+{
+   STACK_ARRAY(VkDeviceMemoryImageCopyKHR, regions,
+               pCopyImageToBufferInfo->regionCount);
+
+   VkCopyDeviceMemoryImageInfoKHR info =
+      vk_upgrade_copy_image_to_buffer2(pCopyImageToBufferInfo, regions);
+
+   vk_meta_copy_image_to_memory(cmd, meta, &info, img_props);
+
+   STACK_ARRAY_FINISH(regions);
 }
 
 static void
@@ -1458,6 +1567,7 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       .y1 = dst_img_offset->y + copy_extent->height,
    };
    VkRenderingAttachmentInfo vk_atts[2];
+   uint8_t vk_att_idx = 0;
    VkRenderingInfo vk_render = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = {
@@ -1471,7 +1581,6 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
          },
       },
       .layerCount = depth_or_layer_count,
-      .pColorAttachments = vk_atts,
    };
    VkImageView iview = VK_NULL_HANDLE;
 
@@ -1490,7 +1599,7 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
          return;
       }
 
-      vk_atts[vk_render.colorAttachmentCount] = (VkRenderingAttachmentInfo){
+      vk_atts[vk_att_idx] = (VkRenderingAttachmentInfo){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          .imageView = iview,
          .imageLayout = dst_img_layout,
@@ -1505,11 +1614,18 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
           depth_stencil_interleaved(view_info) &&
           (dst_img_subres->aspectMask !=
            (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
-         vk_atts[vk_render.colorAttachmentCount].loadOp =
+         vk_atts[vk_att_idx].loadOp =
             VK_ATTACHMENT_LOAD_OP_LOAD;
       }
 
-      vk_render.colorAttachmentCount++;
+      if (copying_ds_with_ds(view_info, dst_img_subres->aspectMask)) {
+         assert(aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+         vk_render.pDepthAttachment = &vk_atts[vk_att_idx];
+      } else {
+         vk_render.pColorAttachments = vk_atts;
+         vk_render.colorAttachmentCount++;
+      }
+      vk_att_idx++;
    }
 
    disp->CmdBeginRendering(vk_command_buffer_to_handle(cmd), &vk_render);
@@ -1521,9 +1637,9 @@ static void
 copy_buffer_to_image_region_gfx(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    struct vk_image *img, VkImageLayout img_layout,
-   const struct vk_meta_copy_image_properties *img_props, VkBuffer buffer,
+   const struct vk_meta_copy_image_properties *img_props,
    const struct vk_image_buffer_layout *buf_layout,
-   const VkBufferImageCopy2 *region)
+   const VkDeviceMemoryImageCopyKHR *region)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -1560,7 +1676,7 @@ copy_buffer_to_image_region_gfx(
                          VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
    result = copy_buffer_image_prepare_gfx_push_const(
-      cmd, meta, &key, pipeline_layout, buffer, buf_layout, img, region);
+      cmd, meta, &key, pipeline_layout, buf_layout, img, region);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(cmd, result);
       return;
@@ -1574,9 +1690,9 @@ static void
 copy_buffer_to_image_region_compute(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    struct vk_image *img, VkImageLayout img_layout,
-   const struct vk_meta_copy_image_properties *img_props, VkBuffer buffer,
+   const struct vk_meta_copy_image_properties *img_props,
    const struct vk_image_buffer_layout *buf_layout,
-   const VkBufferImageCopy2 *region)
+   const VkDeviceMemoryImageCopyKHR *region)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -1630,7 +1746,7 @@ copy_buffer_to_image_region_compute(
    uint32_t wg_count[3] = {0};
 
    result = copy_buffer_image_prepare_compute_push_const(
-      cmd, meta, &key, pipeline_layout, buffer, buf_layout, img, region,
+      cmd, meta, &key, pipeline_layout, buf_layout, img, region,
       wg_count);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(cmd, result);
@@ -1642,33 +1758,50 @@ copy_buffer_to_image_region_compute(
 }
 
 void
-vk_meta_copy_buffer_to_image(
+vk_meta_copy_memory_to_image(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-   const VkCopyBufferToImageInfo2 *info,
+   const VkCopyDeviceMemoryImageInfoKHR *info,
    const struct vk_meta_copy_image_properties *img_props,
    VkPipelineBindPoint bind_point)
 {
-   VK_FROM_HANDLE(vk_image, img, info->dstImage);
+   VK_FROM_HANDLE(vk_image, img, info->image);
 
    for (uint32_t i = 0; i < info->regionCount; i++) {
-      VkBufferImageCopy2 region = info->pRegions[i];
+      VkDeviceMemoryImageCopyKHR region = info->pRegions[i];
       struct vk_image_buffer_layout buf_layout =
-         vk_image_buffer_copy_layout(img, &region);
+         vk_image_memory_copy_layout(img, &region);
 
       region.imageExtent = vk_image_extent_to_elements(img, region.imageExtent);
       region.imageOffset = vk_image_offset_to_elements(img, region.imageOffset);
 
       if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
-         copy_buffer_to_image_region_gfx(cmd, meta, img, info->dstImageLayout,
-                                         img_props, info->srcBuffer,
-                                         &buf_layout, &region);
+         copy_buffer_to_image_region_gfx(cmd, meta, img, region.imageLayout,
+                                         img_props, &buf_layout, &region);
       } else {
          copy_buffer_to_image_region_compute(cmd, meta, img,
-                                             info->dstImageLayout, img_props,
-                                             info->srcBuffer, &buf_layout,
+                                             region.imageLayout, img_props,
+                                             &buf_layout,
                                              &region);
       }
    }
+}
+
+void
+vk_meta_copy_buffer_to_image(
+   struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+   const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo,
+   const struct vk_meta_copy_image_properties *img_props,
+   VkPipelineBindPoint bind_point)
+{
+   STACK_ARRAY(VkDeviceMemoryImageCopyKHR, regions,
+               pCopyBufferToImageInfo->regionCount);
+
+   VkCopyDeviceMemoryImageInfoKHR info =
+      vk_upgrade_copy_buffer_to_image2(pCopyBufferToImageInfo, regions);
+
+   vk_meta_copy_memory_to_image(cmd, meta, &info, img_props, bind_point);
+
+   STACK_ARRAY_FINISH(regions);
 }
 
 static nir_shader *
@@ -2036,8 +2169,13 @@ copy_image_prepare_gfx_push_const(struct vk_command_buffer *cmd,
          .x = src_img_offs.x - region->dstOffset.x,
          .y = src_img_offs.y - region->dstOffset.y,
          /* Render image view only contains the layers needed for rendering,
-          * so we consider the coordinate containing the layer to always be
-          * zero.
+          * (that is, the z dst offset is applied with
+          * subresourceRange.baseArrayLayer rather than increasing the layer
+          * id), so we consider the coordinate containing the layer to always
+          * be zero. Note that this is specifically for the 3D copy case, since
+          * we turn 3D copies into 2D array copies. The 1D array and 2D array
+          * cases will have the array offsets in dstSubresource already so
+          * there's no special handling required here.
           */
          .z = src_img_offs.z,
       },
@@ -2066,12 +2204,10 @@ static bool
 aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
                    const VkImageCopy2 *region)
 {
-   const struct vk_format_ycbcr_info *src_ycbcr_info =
-      vk_format_get_ycbcr_info(src_img->format);
-   const struct vk_format_ycbcr_info *dst_ycbcr_info =
-      vk_format_get_ycbcr_info(dst_img->format);
+   const bool src_multiplanar = vk_format_get_plane_count(src_img->format) > 1;
+   const bool dst_multiplanar = vk_format_get_plane_count(dst_img->format) > 1;
 
-   if (!src_ycbcr_info && !dst_ycbcr_info) {
+   if (!src_multiplanar && !dst_multiplanar) {
       ASSERTED const VkImageAspectFlags valid_aspects =
          VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT |
          VK_IMAGE_ASPECT_STENCIL_BIT;
@@ -2108,7 +2244,7 @@ aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
     *    of pRegions, srcSubresource.aspectMask must be a single valid
     *    multi-planar aspect mask bit"
     */
-   if (src_ycbcr_info &&
+   if (src_multiplanar &&
        !valid_multiplane_aspect_mask(region->srcSubresource.aspectMask))
       return false;
 
@@ -2118,7 +2254,7 @@ aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
     *    of pRegions, dstSubresource.aspectMask must be a single valid
     *    multi-planar aspect mask bit"
     */
-   if (dst_ycbcr_info &&
+   if (dst_multiplanar &&
        !valid_multiplane_aspect_mask(region->dstSubresource.aspectMask))
       return false;
 
@@ -2128,7 +2264,7 @@ aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
     *    not have a multi-planar image format, then for each element of
     *    pRegions, dstSubresource.aspectMask must be VK_IMAGE_ASPECT_COLOR_BIT"
     */
-   if (src_ycbcr_info && !dst_ycbcr_info &&
+   if (src_multiplanar && !dst_multiplanar &&
        region->dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
       return false;
 
@@ -2138,7 +2274,7 @@ aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
     *    not have a multi-planar image format, then for each element of
     *    pRegions, srcSubresource.aspectMask must be VK_IMAGE_ASPECT_COLOR_BIT"
     */
-   if (!src_ycbcr_info && dst_ycbcr_info &&
+   if (!src_multiplanar && dst_multiplanar &&
        region->srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
       return false;
 
@@ -2394,8 +2530,8 @@ get_copy_buffer_pipeline(struct vk_device *device, struct vk_meta_device *meta,
 }
 
 static void
-copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-                   VkBuffer src, VkBuffer dst, const VkBufferCopy2 *region)
+copy_memory_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+                   const VkDeviceMemoryCopyKHR *region)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_physical_device *pdev = dev->physical;
@@ -2406,11 +2542,15 @@ copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       .key_type = VK_META_OBJECT_KEY_COPY_BUFFER,
    };
 
-   VkDeviceSize size = region->size;
-   VkDeviceAddress src_addr =
-      vk_meta_buffer_address(dev, src, region->srcOffset, size);
-   VkDeviceAddress dst_addr =
-      vk_meta_buffer_address(dev, dst, region->dstOffset, size);
+   /*
+    * srcRange is the right size to use here due to
+    * VUID-VkDeviceMemoryCopyKHR-size-13016
+    * The size member of dstRange must be greater than or equal to the
+    * size member of srcRange
+    */
+   VkDeviceSize size = region->srcRange.size;
+   VkDeviceAddress src_addr = region->srcRange.address;
+   VkDeviceAddress dst_addr = region->dstRange.address;
 
    /* Combine the size and src/dst address to extract the alignment. */
    uint64_t align = src_addr | dst_addr | size;
@@ -2463,14 +2603,28 @@ copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
 }
 
 void
-vk_meta_copy_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-                    const VkCopyBufferInfo2 *info)
+vk_meta_copy_memory(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+                    const VkCopyDeviceMemoryInfoKHR *info)
 {
    for (unsigned i = 0; i < info->regionCount; i++) {
-      const VkBufferCopy2 *region = &info->pRegions[i];
+      const VkDeviceMemoryCopyKHR *region = &info->pRegions[i];
 
-      copy_buffer_region(cmd, meta, info->srcBuffer, info->dstBuffer, region);
+      copy_memory_region(cmd, meta, region);
    }
+}
+
+void
+vk_meta_copy_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+                    const VkCopyBufferInfo2 *pCopyBufferInfo)
+{
+   STACK_ARRAY(VkDeviceMemoryCopyKHR, regions, pCopyBufferInfo->regionCount);
+
+   VkCopyDeviceMemoryInfoKHR info =
+      vk_upgrade_copy_buffer2(pCopyBufferInfo, regions);
+
+   vk_meta_copy_memory(cmd, meta, &info);
+
+   STACK_ARRAY_FINISH(regions);
 }
 
 void
@@ -2478,11 +2632,26 @@ vk_meta_update_buffer(struct vk_command_buffer *cmd,
                       struct vk_meta_device *meta, VkBuffer buffer,
                       VkDeviceSize offset, VkDeviceSize size, const void *data)
 {
+   VK_FROM_HANDLE(vk_buffer, buf, buffer);
+
+   VkDeviceAddressRangeKHR addr_range =
+      vk_device_address_range(buf, offset, size);
+
+   vk_meta_update_memory(cmd, meta, &addr_range, buf->address_flags, size, data);
+}
+
+void
+vk_meta_update_memory(struct vk_command_buffer *cmd,
+                      struct vk_meta_device *meta,
+                      const VkDeviceAddressRangeKHR* dst_range,
+                      const VkAddressCommandFlagsKHR dstFlags,
+                      VkDeviceSize dataSize, const void *data)
+{
    VkResult result;
 
    const VkBufferCreateInfo tmp_buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = size,
+      .size = dataSize,
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
       .queueFamilyIndexCount = 1,
       .pQueueFamilyIndices = &cmd->pool->queue_family_index,
@@ -2494,6 +2663,7 @@ vk_meta_update_buffer(struct vk_command_buffer *cmd,
       vk_command_buffer_set_error(cmd, result);
       return;
    }
+   VK_FROM_HANDLE(vk_buffer, tmp_buf, tmp_buffer);
 
    void *tmp_buffer_map;
    result = meta->cmd_bind_map_buffer(cmd, meta, tmp_buffer, &tmp_buffer_map);
@@ -2502,23 +2672,22 @@ vk_meta_update_buffer(struct vk_command_buffer *cmd,
       return;
    }
 
-   memcpy(tmp_buffer_map, data, size);
+   memcpy(tmp_buffer_map, data, dataSize);
 
-   const VkBufferCopy2 copy_region = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-      .srcOffset = 0,
-      .dstOffset = offset,
-      .size = size,
+   const VkDeviceMemoryCopyKHR copy_region = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_COPY_KHR,
+      .srcRange = vk_device_address_range(tmp_buf, 0, dataSize),
+      .srcFlags = tmp_buf->address_flags,
+      .dstRange = *dst_range,
+      .dstFlags = dstFlags,
    };
-   const VkCopyBufferInfo2 copy_info = {
-      .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer = tmp_buffer,
-      .dstBuffer = buffer,
+   const VkCopyDeviceMemoryInfoKHR copy_info = {
+      .sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_INFO_KHR,
       .regionCount = 1,
       .pRegions = &copy_region,
    };
 
-   vk_meta_copy_buffer(cmd, meta, &copy_info);
+   vk_meta_copy_memory(cmd, meta, &copy_info);
 }
 
 static nir_shader *
@@ -2572,11 +2741,11 @@ get_fill_buffer_pipeline(struct vk_device *device, struct vk_meta_device *meta,
 }
 
 void
-vk_meta_fill_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-                    VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
-                    uint32_t data)
+vk_meta_fill_memory(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+                    const VkDeviceAddressRangeKHR* dst_range,
+                    const VkAddressCommandFlagsKHR dstFlags,
+                    const uint32_t data)
 {
-   VK_FROM_HANDLE(vk_buffer, buf, buffer);
    struct vk_device *dev = cmd->base.device;
    const struct vk_physical_device *pdev = dev->physical;
    const struct vk_device_dispatch_table *disp = &dev->dispatch_table;
@@ -2598,14 +2767,8 @@ vk_meta_fill_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    disp->CmdBindPipeline(vk_command_buffer_to_handle(cmd),
                          VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-   /* From the Vulkan 1.3.290 spec:
-    *
-    *   "If VK_WHOLE_SIZE is used and the remaining size of the buffer is not a
-    *    multiple of 4, then the nearest smaller multiple is used."
-    *
-    * hence the mask to align the size on 4 bytes here.
-    */
-   size = vk_buffer_range(buf, offset, size) & ~3u;
+   VkDeviceAddress addr = dst_range->address;
+   VkDeviceSize size = dst_range->size;
 
    const uint32_t optimal_wg_size = vk_meta_buffer_access_wg_size(meta, 4);
    const uint32_t per_wg_copy_size = optimal_wg_size * 4;
@@ -2615,7 +2778,7 @@ vk_meta_fill_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    while (size > 0) {
       struct vk_meta_fill_buffer_info args = {
          .size = MIN2(size, max_per_dispatch_size),
-         .buf_addr = vk_meta_buffer_address(dev, buffer, offset, size),
+         .buf_addr = addr,
          .data = data,
       };
       uint32_t wg_count = DIV_ROUND_UP(args.size, per_wg_copy_size);
@@ -2626,7 +2789,7 @@ vk_meta_fill_buffer(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
 
       disp->CmdDispatch(vk_command_buffer_to_handle(cmd), wg_count, 1, 1);
 
-      offset += args.size;
+      addr += args.size;
       size -= args.size;
    }
 }

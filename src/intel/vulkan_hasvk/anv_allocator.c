@@ -1955,24 +1955,6 @@ anv_device_set_bo_tiling(struct anv_device *device,
    return VK_SUCCESS;
 }
 
-static bool
-atomic_dec_not_one(uint32_t *counter)
-{
-   uint32_t old, val;
-
-   val = *counter;
-   while (1) {
-      if (val == 1)
-         return false;
-
-      old = __sync_val_compare_and_swap(counter, val, val - 1);
-      if (old == val)
-         return true;
-
-      val = old;
-   }
-}
-
 void
 anv_device_release_bo(struct anv_device *device,
                       struct anv_bo *bo)
@@ -1984,7 +1966,7 @@ anv_device_release_bo(struct anv_device *device,
     * then the refcount has been decremented and we are not the last
     * reference.
     */
-   if (atomic_dec_not_one(&bo->refcount))
+   if (p_atomic_dec_not_one(&bo->refcount))
       return;
 
    pthread_mutex_lock(&cache->mutex);

@@ -99,6 +99,13 @@ Define("INTEL_DEVICE_MAX_SLICES", 8)
 Define("INTEL_DEVICE_MAX_SUBSLICES", 8, "Maximum on gfx11")
 Define("INTEL_DEVICE_MAX_EUS_PER_SUBSLICE", 16, "Maximum on gfx11")
 Define("INTEL_DEVICE_MAX_PIXEL_PIPES", 16, "Maximum on DG2")
+Define("INTEL_DEVICE_MAX_SUBSLICE_MASKS",
+       "INTEL_DEVICE_MAX_SLICES * DIV_ROUND_UP(INTEL_DEVICE_MAX_SUBSLICES, 8)",
+       "Maximum number of sublice masks")
+Define("INTEL_DEVICE_MAX_EU_MASKS",
+       "INTEL_DEVICE_MAX_SLICES * INTEL_DEVICE_MAX_SUBSLICES * "
+       "DIV_ROUND_UP(INTEL_DEVICE_MAX_EUS_PER_SUBSLICE, 8)",
+       "Maximum number of eu masks")
 
 Enum("intel_platform",
      [EnumValue("INTEL_PLATFORM_GFX3", value=1),
@@ -353,7 +360,7 @@ Struct("intel_device_info",
                comment="A bit mask of the slices available."),
 
         Member("uint8_t", "subslice_masks",
-               array="INTEL_DEVICE_MAX_SLICES * DIV_ROUND_UP(INTEL_DEVICE_MAX_SUBSLICES, 8)",
+               array="INTEL_DEVICE_MAX_SUBSLICE_MASKS",
                compiler_field=True,
                ray_tracing_field=True,
                comment=dedent("""\
@@ -366,8 +373,7 @@ Struct("intel_device_info",
                subslices are enabled, see subslice_masks[].""")),
 
         Member("uint8_t", "eu_masks",
-               array=("INTEL_DEVICE_MAX_SLICES * INTEL_DEVICE_MAX_SUBSLICES * "
-                      "DIV_ROUND_UP(INTEL_DEVICE_MAX_EUS_PER_SUBSLICE, 8)"),
+               array=("INTEL_DEVICE_MAX_EU_MASKS"),
                comment=dedent("""\
                An array of bit mask of EUs available, use eu_slice_stride &
                eu_subslice_stride to access this array.""")),
@@ -454,6 +460,7 @@ Struct("intel_device_info",
         Member("char", "name", array="INTEL_DEVICE_MAX_NAME_SIZE"),
         Member("bool", "no_hw"),
         Member("bool", "probe_forced", comment="Device needed INTEL_FORCE_PROBE"),
+        Member("bool", "no_jay", comment="Driver requested brw over Jay (e.g. per-app driconf)"),
         Member("intel_device_info_mem_desc", "mem"),
         Member("intel_device_info_pat_desc", "pat"),
 

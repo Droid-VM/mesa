@@ -818,7 +818,7 @@ static bool r600_fence_finish(struct pipe_screen *screen,
 	struct r600_common_context *rctx;
 	int64_t abs_timeout = os_time_get_absolute_timeout(timeout);
 
-	ctx = threaded_context_unwrap_sync(ctx);
+	ctx = pipe_get_driver_context(threaded_context_unwrap_sync(ctx));
 	rctx = ctx ? (struct r600_common_context*)ctx : NULL;
 
 	if (rfence->sdma) {
@@ -1096,8 +1096,6 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_ineg = true,
 		.lower_fsign = true,
 		.lower_fmod = true,
-		.lower_uadd_carry = true,
-		.lower_usub_borrow = true,
 		.lower_bitfield_extract = true,
 		.lower_bitfield_extract16 = true,
 		.lower_bitfield_extract8 = true,

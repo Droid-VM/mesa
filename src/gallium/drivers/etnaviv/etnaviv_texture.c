@@ -34,6 +34,7 @@
 #include "etnaviv_texture_state.h"
 #include "etnaviv_translate.h"
 #include "etnaviv_yuv.h"
+#include "layout/eil_format.h"
 #include "util/bitscan.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -65,6 +66,9 @@ etna_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
 
    uint32_t mask = 1 << offset;
    for (int idx = 0; idx < num_samplers; ++idx, mask <<= 1) {
+      if (ctx->sampler[offset + idx] != samplers[idx])
+         ctx->dirty_samplers |= mask;
+
       ctx->sampler[offset + idx] = samplers[idx];
       if (samplers[idx])
          ctx->active_samplers |= mask;
@@ -92,8 +96,10 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
    struct etna_resource *rsc = etna_resource(pview->texture);
    struct etna_resource_level *lev = &rsc->levels[0];
 
-   if ((lev->clear_value & 0xffffffff) != sts->TS_SAMPLER_CLEAR_VALUE ||
-       (lev->clear_value >> 32) != sts->TS_SAMPLER_CLEAR_VALUE2)
+   const uint64_t clear_value = etna_resource_level_clear_value(lev);
+
+   if ((clear_value & 0xffffffff) != sts->TS_SAMPLER_CLEAR_VALUE ||
+       (clear_value >> 32) != sts->TS_SAMPLER_CLEAR_VALUE2)
       dirty = true;
 
    assert(rsc->ts_bo && etna_resource_level_ts_valid(lev));
@@ -105,8 +111,8 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
       COND(lev->ts_compress_fmt >= 0, VIVS_TS_SAMPLER_CONFIG_COMPRESSION) |
       VIVS_TS_SAMPLER_CONFIG_COMPRESSION_FORMAT(lev->ts_compress_fmt) |
       COND(util_format_get_blocksizebits(pview->format) == 64, VIVS_TS_SAMPLER_CONFIG_64BPP_FORMAT);
-   sts->TS_SAMPLER_CLEAR_VALUE = lev->clear_value;
-   sts->TS_SAMPLER_CLEAR_VALUE2 = lev->clear_value >> 32;
+   sts->TS_SAMPLER_CLEAR_VALUE = clear_value;
+   sts->TS_SAMPLER_CLEAR_VALUE2 = clear_value >> 32;
    sts->TS_SAMPLER_STATUS_BASE.bo = rsc->ts_bo;
    sts->TS_SAMPLER_STATUS_BASE.offset = lev->ts_offset;
    sts->TS_SAMPLER_STATUS_BASE.flags = ETNA_RELOC_READ;
@@ -145,7 +151,8 @@ etna_can_use_sampler_ts(struct pipe_sampler_view *view, int num)
       return false;
 
    /* Does not use compression or the hardware supports V4 compression. */
-   if (rsc->levels[0].ts_compress_fmt >= 0 && !screen->specs.v4_compression)
+   if (rsc->levels[0].ts_compress_fmt >= 0 &&
+       !VIV_FEATURE(screen, ETNA_FEATURE_V4_COMPRESSION))
       return false;
 
    /* The sampler will have one LOD, and it happens to be level 0.
@@ -156,6 +163,43 @@ etna_can_use_sampler_ts(struct pipe_sampler_view *view, int num)
       return false;
 
    return true;
+}
+
+static struct etna_resource *
+etna_border_shadow(struct etna_context *ctx, struct etna_resource *rsc,
+                   unsigned num)
+{
+   const struct pipe_sampler_state *ss = ctx->sampler[num];
+
+   if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_TX_BORDER_CLAMP_FIX) ||
+       !rsc->border_tail || !ss || !etna_sampler_uses_border(ss))
+      return NULL;
+
+   if (rsc->border)
+      return etna_resource(rsc->border);
+
+   struct etna_resource *shadow =
+      etna_resource_alloc_border_shadow(&ctx->base, &rsc->base);
+
+   if (shadow)
+      perf_debug_ctx(ctx, "Sampling %p through a border clamp shadow", rsc);
+
+   return shadow;
+}
+
+struct etna_resource *
+etna_sampler_view_resource(struct etna_context *ctx,
+                           struct pipe_sampler_view *view, unsigned num)
+{
+   struct etna_resource *rsc = etna_resource(view->texture);
+
+   if (rsc->texture)
+      rsc = etna_resource(rsc->texture);
+
+   if (etna_sampler_view_uses_border_shadow(ctx, num))
+      rsc = etna_resource(rsc->border);
+
+   return rsc;
 }
 
 void
@@ -180,6 +224,10 @@ etna_update_sampler_source(struct pipe_sampler_view *view, int num)
    if (base->texture)
       to = etna_resource(base->texture);
 
+   struct etna_resource *shadow = etna_border_shadow(ctx, to, num);
+   if (shadow)
+      to = shadow;
+
    if ((to != from) && etna_resource_older(to, from)) {
       etna_copy_resource(view->context, &to->base, &from->base,
                          view->u.tex.first_level,
@@ -199,9 +247,23 @@ etna_update_sampler_source(struct pipe_sampler_view *view, int num)
       }
    }
 
+   const uint32_t bit = 1u << num;
+   const bool use_shadow = shadow != NULL;
+   const bool used_shadow = etna_sampler_view_uses_border_shadow(ctx, num);
+
+   if (use_shadow != used_shadow) {
+      if (use_shadow)
+         ctx->border_shadow_views |= bit;
+      else
+         ctx->border_shadow_views &= ~bit;
+
+      ctx->dirty |= ETNA_DIRTY_SAMPLER_VIEWS;
+      ctx->dirty_sampler_views |= bit;
+   }
+
    if (etna_configure_sampler_ts(ctx->ts_for_sampler_view(view), view, enable_sampler_ts)) {
       ctx->dirty |= ETNA_DIRTY_SAMPLER_VIEWS | ETNA_DIRTY_TEXTURE_CACHES;
-      ctx->dirty_sampler_views |= (1 << num);
+      ctx->dirty_sampler_views |= bit;
    }
 }
 
@@ -310,7 +372,7 @@ etna_pack_unified_companions(struct etna_context *ctx, mesa_shader_stage stage,
    unsigned comp = nr;
 
    for (unsigned i = 0; i < PIPE_MAX_SAMPLERS / 2; i++) {
-      if (i < nr && views[i] && format_is_128bit(views[i]->format)) {
+      if (i < nr && views[i] && eil_format_is_emulated_128bit(views[i]->format)) {
          mask |= 1u << i;
          ctx->sampler_companion[stage][i] = comp++;
       } else {
@@ -339,7 +401,7 @@ etna_fragtex_set_sampler_views(struct etna_context *ctx, unsigned nr,
 
    uint16_t mask = 0;
    for (unsigned i = 0; i < nr; i++) {
-      if (views[i] && format_is_128bit(views[i]->format)) {
+      if (views[i] && eil_format_is_emulated_128bit(views[i]->format)) {
          assert(nr + i < screen->specs.fragment_sampler_count);
          mask |= 1u << i;
       }
@@ -372,7 +434,7 @@ etna_vertex_set_sampler_views(struct etna_context *ctx, unsigned nr,
 
    uint16_t mask = 0;
    for (unsigned k = 0; k < nr; k++)
-      if (views[k] && format_is_128bit(views[k]->format))
+      if (views[k] && eil_format_is_emulated_128bit(views[k]->format))
          mask |= 1u << k;
 
    ctx->tex_is_128bit[MESA_SHADER_VERTEX] = mask;

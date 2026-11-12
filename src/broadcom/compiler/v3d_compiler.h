@@ -205,57 +205,6 @@ enum quniform_contents {
         QUNIFORM_VIEWPORT_Z_OFFSET,
         QUNIFORM_VIEWPORT_Z_SCALE,
 
-        /**
-         * A reference to a V3D 3.x texture config parameter 0 uniform.
-         *
-         * This is a uniform implicitly loaded with a QPU_W_TMU* write, which
-         * defines texture type, miplevels, and such.  It will be found as a
-         * parameter to the first QOP_TEX_[STRB] instruction in a sequence.
-         */
-        QUNIFORM_TEXTURE_CONFIG_P0_0,
-        QUNIFORM_TEXTURE_CONFIG_P0_1,
-        QUNIFORM_TEXTURE_CONFIG_P0_2,
-        QUNIFORM_TEXTURE_CONFIG_P0_3,
-        QUNIFORM_TEXTURE_CONFIG_P0_4,
-        QUNIFORM_TEXTURE_CONFIG_P0_5,
-        QUNIFORM_TEXTURE_CONFIG_P0_6,
-        QUNIFORM_TEXTURE_CONFIG_P0_7,
-        QUNIFORM_TEXTURE_CONFIG_P0_8,
-        QUNIFORM_TEXTURE_CONFIG_P0_9,
-        QUNIFORM_TEXTURE_CONFIG_P0_10,
-        QUNIFORM_TEXTURE_CONFIG_P0_11,
-        QUNIFORM_TEXTURE_CONFIG_P0_12,
-        QUNIFORM_TEXTURE_CONFIG_P0_13,
-        QUNIFORM_TEXTURE_CONFIG_P0_14,
-        QUNIFORM_TEXTURE_CONFIG_P0_15,
-        QUNIFORM_TEXTURE_CONFIG_P0_16,
-        QUNIFORM_TEXTURE_CONFIG_P0_17,
-        QUNIFORM_TEXTURE_CONFIG_P0_18,
-        QUNIFORM_TEXTURE_CONFIG_P0_19,
-        QUNIFORM_TEXTURE_CONFIG_P0_20,
-        QUNIFORM_TEXTURE_CONFIG_P0_21,
-        QUNIFORM_TEXTURE_CONFIG_P0_22,
-        QUNIFORM_TEXTURE_CONFIG_P0_23,
-        QUNIFORM_TEXTURE_CONFIG_P0_24,
-        QUNIFORM_TEXTURE_CONFIG_P0_25,
-        QUNIFORM_TEXTURE_CONFIG_P0_26,
-        QUNIFORM_TEXTURE_CONFIG_P0_27,
-        QUNIFORM_TEXTURE_CONFIG_P0_28,
-        QUNIFORM_TEXTURE_CONFIG_P0_29,
-        QUNIFORM_TEXTURE_CONFIG_P0_30,
-        QUNIFORM_TEXTURE_CONFIG_P0_31,
-        QUNIFORM_TEXTURE_CONFIG_P0_32,
-
-        /**
-         * A reference to a V3D 3.x texture config parameter 1 uniform.
-         *
-         * This is a uniform implicitly loaded with a QPU_W_TMU* write, which
-         * has the pointer to the indirect texture state.  Our data[] field
-         * will have a packed p1 value, but the address field will be just
-         * which texture unit's texture should be referenced.
-         */
-        QUNIFORM_TEXTURE_CONFIG_P1,
-
         /* A V3D 4.x texture config parameter.  The high 8 bits will be
          * which texture or sampler is being sampled, and the driver must
          * replace the address field with the appropriate address.
@@ -412,6 +361,12 @@ struct v3d_key {
          */
         uint32_t sampler_is_32b;
 
+        /* Mask of RGB32 buffer texture samplers.  They are bound as R32 views
+         * with three times the texels; v3d_nir_lower_txf_buffer_rgb32 rewrites
+         * their fetches.
+         */
+        uint32_t sampler_buffer_rgb32;
+
         bool is_last_geometry_stage;
         bool robust_uniform_access;
         bool robust_storage_access;
@@ -431,6 +386,7 @@ struct v3d_fs_key {
         bool sample_alpha_to_one;
         bool can_earlyz_with_discard;
         bool software_blend;
+        bool force_dual_color_blend;
         bool ignore_sample_mask;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
@@ -624,6 +580,7 @@ struct v3d_interp_input {
    struct qreg vp;
    struct qreg C;
    unsigned mode; /* interpolation mode */
+   bool centroid;
 };
 
 struct v3d_ra_node_info {
@@ -695,7 +652,13 @@ struct v3d_compile {
         struct v3d_interp_input *interp;
         struct qreg *outputs;
         bool msaa_per_sample_output;
+
+        /* Cache of TLB color and Depth/Stencil reads, should the shader have any.
+         * For Color, we have a vec4 per sample for each possible RT.
+         * For Depth/Stencil, we have a depth and stencil scalar per sample.
+         */
         struct qreg color_reads[V3D_MAX_DRAW_BUFFERS * V3D_MAX_SAMPLES * 4];
+        struct qreg ds_reads[2 * V3D_MAX_SAMPLES];
         struct qreg sample_colors[V3D_MAX_DRAW_BUFFERS * V3D_MAX_SAMPLES * 4];
         uint32_t inputs_array_size;
         uint32_t outputs_array_size;
@@ -767,6 +730,8 @@ struct v3d_compile {
          */
         bool disable_general_tmu_sched;
         bool has_general_tmu_load;
+
+        bool robust_access_lowered;
 
         /* Minimum number of threads we are willing to use to register allocate
          * a shader with the current compilation strategy. This only prevents
@@ -1151,6 +1116,12 @@ const struct v3d_compiler *v3d_compiler_init(const struct v3d_device_info *devin
 void v3d_compiler_free(const struct v3d_compiler *compiler);
 void v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s);
 
+/* The QPU prefetches the instruction after the one it executes, so the
+ * buffer holding the shader code needs this much space after the last
+ * instruction, or the prefetch can fall on an unmapped page.
+ */
+#define V3D_QPU_PREFETCH_PAD sizeof(uint64_t)
+
 uint64_t *v3d_compile(const struct v3d_compiler *compiler,
                       struct v3d_key *key,
                       struct v3d_prog_data **prog_data,
@@ -1202,6 +1173,8 @@ enum v3d_qpu_output_pack vir_get_pack(struct qinst *inst);
 
 struct qreg vir_get_temp(struct v3d_compile *c);
 void vir_calculate_live_intervals(struct v3d_compile *c);
+void vir_update_live_intervals_after_spill(struct v3d_compile *c,
+                                           uint32_t num_temps_before_spills);
 int vir_get_nsrc(struct qinst *inst);
 bool vir_has_side_effects(struct v3d_compile *c, struct qinst *inst);
 bool vir_get_add_op(struct qinst *inst, enum v3d_qpu_add_op *op);
@@ -1246,16 +1219,20 @@ bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_scratch(nir_shader *s);
 bool v3d_nir_lower_txf_ms(nir_shader *s);
+bool v3d_nir_lower_txf_buffer_rgb32(nir_shader *s, uint32_t sampler_mask);
 bool v3d_nir_lower_image_load_store(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_null_descriptors(nir_shader *s);
 bool v3d_nir_lower_global_2x32(nir_shader *s);
 bool v3d_nir_lower_load_store_bitsize(nir_shader *s);
 bool v3d_nir_lower_algebraic(struct nir_shader *shader, const struct v3d_compile *c);
-bool v3d_nir_lower_load_output(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_tlb_loads(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
 
-nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt, int sample);
-
+nir_def *v3d_nir_get_tlb_color(nir_builder *b, int rt,
+                               int sample, unsigned component,
+                               unsigned num_components);
+nir_def *v3d_nir_get_tlb_depth_stencil(nir_builder *b, nir_io_semantics sem,
+                                       unsigned sample);
 void v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr);
 void v3d_vir_emit_image_load_store(struct v3d_compile *c,
                                    nir_intrinsic_instr *instr);
@@ -1274,14 +1251,6 @@ bool v3d_gl_format_is_return_32(enum pipe_format format);
 
 uint32_t
 v3d_get_op_for_atomic_add(nir_intrinsic_instr *instr, unsigned src);
-
-static inline bool
-quniform_contents_is_texture_p0(enum quniform_contents contents)
-{
-        return (contents >= QUNIFORM_TEXTURE_CONFIG_P0_0 &&
-                contents < (QUNIFORM_TEXTURE_CONFIG_P0_0 +
-                            V3D_MAX_TEXTURE_SAMPLERS));
-}
 
 static inline bool
 vir_in_nonuniform_control_flow(struct v3d_compile *c)
@@ -1588,7 +1557,7 @@ vir_UMUL(struct v3d_compile *c, struct qreg src0, struct qreg src1)
 }
 
 static inline struct qreg
-vir_TLBU_COLOR_READ(struct v3d_compile *c, uint32_t config)
+vir_TLBU_READ(struct v3d_compile *c, uint32_t config)
 {
         assert((config & 0xffffff00) == 0xffffff00);
 
@@ -1600,7 +1569,7 @@ vir_TLBU_COLOR_READ(struct v3d_compile *c, uint32_t config)
 }
 
 static inline struct qreg
-vir_TLB_COLOR_READ(struct v3d_compile *c)
+vir_TLB_READ(struct v3d_compile *c)
 {
         struct qinst *ldtlb = vir_add_inst(V3D_QPU_A_NOP, c->undef,
                                            c->undef, c->undef);

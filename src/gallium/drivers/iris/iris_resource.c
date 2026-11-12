@@ -15,7 +15,6 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
-#include "util/detect_os.h"
 #include "util/os_memory.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_inlines.h"
@@ -915,8 +914,10 @@ iris_resource_configure_main(const struct iris_screen *screen,
             (templ->bind & PIPE_BIND_SHARED))
       usage |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
 
-   else if (!res->mod_info && res->external_format != PIPE_FORMAT_NONE)
+   else if (!res->mod_info && res->external_format != PIPE_FORMAT_NONE) {
       usage |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
+      usage |= ISL_SURF_USAGE_PREFER_4K_ALIGNMENT;
+   }
 
    else if (templ->bind & PIPE_BIND_CONST_BW)
       usage |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
@@ -1281,12 +1282,8 @@ iris_resource_create_for_image(struct pipe_screen *pscreen,
                 iris_get_aux_clear_color_state_size(screen, res);
    }
 
-   /* The ISL alignment already includes AUX-TT requirements, so no additional
-    * attention required here :)
-    */
-   uint32_t alignment = MAX2(4096, res->surf.alignment_B);
-   res->bo =
-      iris_bo_alloc(screen->bufmgr, name, bo_size, alignment, memzone, flags);
+   res->bo = iris_bo_alloc(screen->bufmgr, name, bo_size,
+                           res->surf.alignment_B, memzone, flags);
 
    if (!res->bo)
       goto fail;
@@ -2050,7 +2047,7 @@ iris_replace_buffer_storage(struct pipe_context *ctx,
                             struct pipe_resource *p_dst,
                             struct pipe_resource *p_src,
                             unsigned num_rebinds,
-                            uint32_t rebind_mask,
+                            uint64_t rebind_mask,
                             uint32_t delete_buffer_id)
 {
    struct iris_screen *screen = (void *) ctx->screen;
@@ -2220,7 +2217,7 @@ iris_map_copy_region(struct iris_transfer *map)
 
       unsigned row_pitch_B = 0;
 
-#if DETECT_OS_ANDROID
+#ifdef HAVE_ANDROID_PLATFORM
       /* Staging buffers for stall-avoidance blits don't always have the
        * same restrictions on stride as the original buffer.  For example,
        * the original buffer may be used for scanout, while the staging
@@ -2613,8 +2610,7 @@ iris_transfer_map(struct pipe_context *ctx,
    /* Disable support for tilings that are not supported by ISL's tiled-memcpy
     * functions.
     */
-   if (isl_tiling_is_64(res->surf.tiling) ||
-       isl_tiling_is_std_y(res->surf.tiling))
+   if (isl_tiling_is_standard(res->surf.tiling))
       usage &= ~PIPE_MAP_DIRECTLY;
 
    if (!(usage & PIPE_MAP_DIRECTLY)) {
@@ -2739,8 +2735,7 @@ iris_texture_subdata(struct pipe_context *ctx,
     * TODO: Teach isl_memcpy_linear_to_tiled about Tile64...
     */
    if (surf->tiling == ISL_TILING_LINEAR ||
-       isl_tiling_is_64(res->surf.tiling) ||
-       isl_tiling_is_std_y(res->surf.tiling) ||
+       isl_tiling_is_standard(res->surf.tiling) ||
        isl_aux_usage_has_compression(res->aux.usage) ||
        resource_is_busy(ice, res) ||
        iris_bo_mmap_mode(res->bo) == IRIS_MMAP_NONE) {

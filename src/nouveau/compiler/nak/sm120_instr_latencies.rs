@@ -5,6 +5,7 @@
 use crate::ir::*;
 
 use nak_latencies::sm100::*;
+use std::cmp::max;
 
 // This contains the register scheduling information provided by NVIDIA.  This
 // file is for Blackwell only.
@@ -254,11 +255,11 @@ fn op_ureg_latency(
         Op::ALd(_)
         | Op::ASt(_)
         | Op::Ld(_)
-        | Op::Ldcg(_)
         | Op::Ldsm(_)
         | Op::St(_)
         | Op::Atom(_) => decoupled,
         Op::SuLd(_) | Op::SuSt(_) | Op::SuAtom(_) => decoupled,
+        Op::Ldcg(_) => ToUr,
         Op::Ldc(_) => {
             if uniform_op {
                 ToUr
@@ -421,6 +422,20 @@ impl SM120Latency {
         }
     }
 
+    // The latency table is for sm100, but sm120 has larger latencies. The
+    // hmma/imma values are reverse engineered from disassembling cuda
+    // programs and looking at RaW latencies. Hopefully adding the same amount
+    // to WaW/WaR latencies will be fine
+    // RE code:
+    // https://gitlab.freedesktop.org/mhenning/re/-/tree/main/latency_cuda
+    fn latency_adjust(first_latency: RegLatencySM100) -> u32 {
+        match first_latency {
+            RegLatencySM100::Hmma => 9,
+            RegLatencySM100::Imma => 7,
+            _ => 0,
+        }
+    }
+
     pub fn raw(
         write: &Op,
         dst_idx: usize,
@@ -438,19 +453,15 @@ impl SM120Latency {
                     Some(op) => op_reg_latency(op, true, src_idx),
                     None => RegLatencySM100::RedirectedFp64,
                 };
-                // The latencies are for SM100 docs, but some chips need large
-                // one just override here.
-                if write_latency == RegLatencySM100::Hmma
-                    || read_latency == RegLatencySM100::Hmma
-                {
-                    RegLatencySM100::raw(write_latency, read_latency, false) + 9
-                } else if write_latency == RegLatencySM100::Imma
-                    || read_latency == RegLatencySM100::Imma
-                {
-                    RegLatencySM100::raw(write_latency, read_latency, false) + 5
-                } else {
-                    RegLatencySM100::raw(write_latency, read_latency, false) + 1
-                }
+
+                RegLatencySM100::raw(write_latency, read_latency, false)
+                    + max(
+                        max(
+                            Self::latency_adjust(write_latency),
+                            Self::latency_adjust(read_latency),
+                        ),
+                        1,
+                    )
             }
             RegFile::UGPR => {
                 let write_latency = op_ureg_latency(write, false, dst_idx);
@@ -491,13 +502,11 @@ impl SM120Latency {
                 let write_latency = op_reg_latency(write, false, dst_idx);
                 let read_latency = op_reg_latency(read, true, src_idx);
 
-                if write_latency == RegLatencySM100::Hmma
-                    || read_latency == RegLatencySM100::Hmma
-                {
-                    RegLatencySM100::war(read_latency, write_latency, false) + 7
-                } else {
-                    RegLatencySM100::war(read_latency, write_latency, false)
-                }
+                RegLatencySM100::war(read_latency, write_latency, false)
+                    + max(
+                        Self::latency_adjust(read_latency),
+                        Self::latency_adjust(write_latency),
+                    )
             }
             RegFile::UGPR => {
                 let write_latency = op_ureg_latency(write, false, dst_idx);
@@ -533,21 +542,12 @@ impl SM120Latency {
             RegFile::GPR => {
                 let write1_latency = op_reg_latency(a, false, a_dst_idx);
                 let write2_latency = op_reg_latency(b, false, b_dst_idx);
-                if write1_latency == RegLatencySM100::Hmma
-                    || write2_latency == RegLatencySM100::Hmma
-                {
-                    RegLatencySM100::waw(
-                        write1_latency,
-                        write2_latency,
-                        a_op_pred,
-                    ) + 7
-                } else {
-                    RegLatencySM100::waw(
-                        write1_latency,
-                        write2_latency,
-                        a_op_pred,
+
+                RegLatencySM100::waw(write1_latency, write2_latency, a_op_pred)
+                    + max(
+                        Self::latency_adjust(write1_latency),
+                        Self::latency_adjust(write2_latency),
                     )
-                }
             }
             RegFile::UGPR => {
                 let write1_latency = op_ureg_latency(a, false, a_dst_idx);

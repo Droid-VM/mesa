@@ -368,4 +368,5 @@ void
 svga_init_draw_functions(struct svga_context *svga)
 {
    svga->pipe.draw_vbo = svga_draw_vbo;
+   svga->pipe.draw_vbo_buffers = util_draw_vbo_buffers;
 }

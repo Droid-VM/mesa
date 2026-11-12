@@ -41,7 +41,7 @@ configure_file(
   input : 'VkLayer_MESA_vram_report_limit.json.in',
   output : '@BASENAME@',
   install : true,
-  install_dir : join_paths(get_option('datadir'), 'vulkan', 'explicit_layer.d'),
+  install_dir : join_paths(get_option('datadir'), 'vulkan', 'implicit_layer.d'),
   install_tag : 'runtime',
 )
 
@@ -50,4 +50,4 @@ configure_file(
   input : 'VkLayer_MESA_vram_report_limit.json.in',
   output : '@PLAINNAME@_dev.json',
 )
-devenv.append('VK_ADD_LAYER_PATH', meson.current_build_dir())
+devenv.append('VK_ADD_IMPLICIT_LAYER_PATH', meson.current_build_dir())

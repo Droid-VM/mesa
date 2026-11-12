@@ -170,8 +170,12 @@ enum ac_tracked_reg
    AC_TRACKED_VGT_GS_VERT_ITEMSIZE_3,        /* GFX6-10 (GFX11+ can reuse this slot) */
 
    AC_TRACKED_SPI_VS_OUT_CONFIG,             /* GFX6-11 */
-   AC_TRACKED_DB_RENDER_OVERRIDE = AC_TRACKED_SPI_VS_OUT_CONFIG, /* GFX12+ (slot reused) */
+   AC_TRACKED_PA_SC_VRS_INFO = AC_TRACKED_SPI_VS_OUT_CONFIG, /* GFX12+ (slot reused) */
+
+   AC_TRACKED_DB_RENDER_OVERRIDE,
    AC_TRACKED_VGT_PRIMITIVEID_EN,            /* GFX6-11 */
+   AC_TRACKED_DB_VIEWPORT_CONTROL = AC_TRACKED_VGT_PRIMITIVEID_EN, /* GFX12+ (slot reused) */
+
    AC_TRACKED_CB_DCC_CONTROL,                /* GFX8-11 */
    AC_TRACKED_DB_STENCIL_READ_MASK,          /* GFX12+ */
    AC_TRACKED_DB_STENCIL_WRITE_MASK,         /* GFX12+ */
@@ -189,6 +193,22 @@ enum ac_tracked_reg
 
    AC_TRACKED_DB_Z_INFO,            /* only GFX11.x for RADV */
 
+   AC_TRACKED_VGT_STRMOUT_DRAW_OPAQUE_OFFSET,
+   AC_TRACKED_VGT_STRMOUT_DRAW_OPAQUE_VERTEX_STRIDE,
+
+   /* 2 consecutive registers */
+   AC_TRACKED_VGT_STRMOUT_CONFIG,
+   AC_TRACKED_VGT_STRMOUT_BUFFER_CONFIG,
+
+   AC_TRACKED_PA_SU_PRIM_FILTER_CNTL,
+   AC_TRACKED_VGT_MULTI_PRIM_IB_RESET_EN,
+   AC_TRACKED_SPI_BARYC_CNTL,
+
+   /* 3 consecutive registers */
+   AC_TRACKED_PA_SC_VRS_RATE_BASE,
+   AC_TRACKED_PA_SC_VRS_RATE_BASE_EXT,
+   AC_TRACKED_PA_SC_VRS_RATE_SIZE_XY,
+
    AC_NUM_TRACKED_CONTEXT_REGS,
    AC_FIRST_TRACKED_OTHER_REG = AC_NUM_TRACKED_CONTEXT_REGS,
 
@@ -198,7 +218,6 @@ enum ac_tracked_reg
    AC_TRACKED_SPI_SHADER_PGM_RSRC4_GS,       /* GFX10+ */
    AC_TRACKED_VGT_GS_OUT_PRIM_TYPE_UCONFIG,  /* GFX11+ */
    AC_TRACKED_SPI_SHADER_GS_OUT_CONFIG_PS,   /* GFX12+ */
-   AC_TRACKED_VGT_PRIMITIVEID_EN_UCONFIG,    /* GFX12+ */
 
    AC_TRACKED_IA_MULTI_VGT_PARAM_UCONFIG,    /* GFX9 only */
    AC_TRACKED_GE_CNTL = AC_TRACKED_IA_MULTI_VGT_PARAM_UCONFIG, /* GFX10+ */
@@ -243,6 +262,11 @@ enum ac_tracked_reg
    /* 2 consecutive registers. */
    AC_TRACKED_COMPUTE_DISPATCH_SCRATCH_BASE_LO, /* GFX11+ */
    AC_TRACKED_COMPUTE_DISPATCH_SCRATCH_BASE_HI, /* GFX11+ */
+
+   AC_TRACKED_VGT_PRIMITIVEID_EN_UCONFIG,    /* GFX12+ */
+   AC_TRACKED_GE_VRS_RATE,
+   AC_TRACKED_GE_MULTI_PRIM_IB_RESET_EN_UCONFIG,
+   AC_TRACKED_VGT_PRIMITIVE_TYPE, /* CONFIG on GFX6, UCONFIG on GFX7+ */
 
    /* This spot is only for new SH and UCONFIG register enums.
     * Context register enums should be before AC_NUM_TRACKED_CONTEXT_REGS.
@@ -500,6 +524,51 @@ struct ac_tracked_regs {
       }                                                                    \
    } while (0)
 
+#define ac_cmdbuf_opt_set_ctx_reg_idx(tracked_regs, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ctx_reg_idx(reg, idx, __value);                           \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+         __cs->context_roll = true;                                              \
+      }                                                                          \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_cfg_reg(tracked_regs, reg, reg_enum, value)      \
+   do {                                                                    \
+      const uint32_t __value = (value);                                    \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||        \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                \
+         ac_cmdbuf_set_cfg_reg(reg, __value);                              \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));             \
+         tracked_regs->reg_value[(reg_enum)] = __value;                    \
+      }                                                                    \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ucfg_reg(tracked_regs, reg, reg_enum, value)     \
+   do {                                                                    \
+      const uint32_t __value = (value);                                    \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||        \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                \
+         ac_cmdbuf_set_ucfg_reg(reg, __value);                             \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));             \
+         tracked_regs->reg_value[(reg_enum)] = __value;                    \
+      }                                                                    \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ucfg_reg_idx(tracked_regs, info, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ucfg_reg_idx(info, reg, idx, __value);                    \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+      }                                                                          \
+   } while (0)
+
 #define ac_cmdbuf_opt_set_ctx_reg2(tracked_regs, reg, reg_enum, v1, v2)                                     \
    do {                                                                                                     \
       static_assert(BITSET_BITWORD(reg_enum) == BITSET_BITWORD(reg_enum + 1),                               \
@@ -561,6 +630,38 @@ struct ac_tracked_regs {
          tracked_regs->reg_value[(reg_enum) + 1] = __v2;                                                          \
          tracked_regs->reg_value[(reg_enum) + 2] = __v3;                                                          \
          tracked_regs->reg_value[(reg_enum) + 3] = __v4;                                                          \
+         __cs->context_roll = true;                                                                               \
+      }                                                                                                           \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ctx_reg6(tracked_regs, reg, reg_enum, v1, v2, v3, v4, v5, v6)                           \
+   do {                                                                                                           \
+      static_assert(BITSET_BITWORD((reg_enum)) == BITSET_BITWORD((reg_enum) + 5),                                 \
+                    "bit range crosses dword boundary");                                                          \
+      const uint32_t __v1 = (v1);                                                                                 \
+      const uint32_t __v2 = (v2);                                                                                 \
+      const uint32_t __v3 = (v3);                                                                                 \
+      const uint32_t __v4 = (v4);                                                                                 \
+      const uint32_t __v5 = (v5);                                                                                 \
+      const uint32_t __v6 = (v6);                                                                                 \
+      if (!BITSET_TEST_RANGE_INSIDE_WORD(tracked_regs->reg_saved_mask, (reg_enum), (reg_enum) + 5, 0x3f) ||       \
+          tracked_regs->reg_value[(reg_enum)] != __v1 || tracked_regs->reg_value[(reg_enum) + 1] != __v2 ||       \
+          tracked_regs->reg_value[(reg_enum) + 2] != __v3 || tracked_regs->reg_value[(reg_enum) + 3] != __v4 ||   \
+          tracked_regs->reg_value[(reg_enum) + 4] != __v5 || tracked_regs->reg_value[(reg_enum) + 5] != __v6) {   \
+         ac_cmdbuf_set_ctx_reg_seq(reg, 6);                                                                       \
+         ac_cmdbuf_emit(__v1);                                                                                    \
+         ac_cmdbuf_emit(__v2);                                                                                    \
+         ac_cmdbuf_emit(__v3);                                                                                    \
+         ac_cmdbuf_emit(__v4);                                                                                    \
+         ac_cmdbuf_emit(__v5);                                                                                    \
+         ac_cmdbuf_emit(__v6);                                                                                    \
+         BITSET_SET_RANGE_INSIDE_WORD(tracked_regs->reg_saved_mask, (reg_enum), (reg_enum) + 5);                  \
+         tracked_regs->reg_value[(reg_enum)] = __v1;                                                              \
+         tracked_regs->reg_value[(reg_enum) + 1] = __v2;                                                          \
+         tracked_regs->reg_value[(reg_enum) + 2] = __v3;                                                          \
+         tracked_regs->reg_value[(reg_enum) + 3] = __v4;                                                          \
+         tracked_regs->reg_value[(reg_enum) + 4] = __v5;                                                          \
+         tracked_regs->reg_value[(reg_enum) + 5] = __v6;                                                          \
          __cs->context_roll = true;                                                                               \
       }                                                                                                           \
    } while (0)

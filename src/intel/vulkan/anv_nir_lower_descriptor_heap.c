@@ -8,6 +8,11 @@
 
 #include "genxml/genX_bits.h"
 
+struct lower_state {
+   const struct anv_physical_device *pdevice;
+   struct anv_pipeline_bind_map *map;
+};
+
 static nir_def *
 build_surface_handle(nir_builder *b, nir_def *heap_offset,
                      uint32_t plane, bool non_uniform,
@@ -15,6 +20,26 @@ build_surface_handle(nir_builder *b, nir_def *heap_offset,
 {
    if (plane != 0)
       heap_offset = nir_iadd_imm(b, heap_offset, plane * ANV_SURFACE_STATE_SIZE);
+
+   if (pdevice->uses_efficient_64bit) {
+      return nir_resource_intel(
+         b, 2, 32,
+         nir_imm_int(b, 0xdeaddead),
+         nir_vec2(b,
+                  nir_iadd(b,
+                           anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+                           heap_offset),
+                  nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH)),
+         nir_imm_int(b, 0xdeaddead),
+         nir_imm_int(b, 0) /* bindless_base_offset */,
+         .desc_set = -1,
+         .binding = -1,
+         .resource_block_intel = UINT32_MAX,
+         .resource_access_intel = (
+            nir_resource_intel_bindless |
+            (non_uniform ? nir_resource_intel_non_uniform : 0)));
+   }
+
    nir_def *surface_handle = nir_iadd(
       b, anv_load_driver_uniform(b, 1, heap.surfaces_offset),
       heap_offset);
@@ -22,7 +47,7 @@ build_surface_handle(nir_builder *b, nir_def *heap_offset,
       surface_handle = nir_ishl_imm(b, surface_handle, 6);
 
    return nir_resource_intel(
-      b,
+      b, 1, 32,
       nir_imm_int(b, 0xdeaddead),
       surface_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -39,15 +64,28 @@ static nir_def *
 build_deref_surface_handle(nir_builder *b, nir_deref_instr *deref,
                            const struct anv_physical_device *pdevice)
 {
+   nir_def *base_address;
+   if (pdevice->uses_efficient_64bit) {
+      base_address = nir_vec2(b,
+                              anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+                              nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH));
+   } else if (intel_has_extended_bindless(&pdevice->info)) {
+      base_address = anv_load_driver_uniform(b, 1, heap.surfaces_offset);
+   } else {
+      base_address = nir_imm_int(b, 0);
+   }
+
    nir_def *surface_handle = nir_explicit_io_address_from_deref(
-      b, deref,
-      anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+      b, deref, base_address,
+      pdevice->uses_efficient_64bit ?
+      nir_address_format_vec2_index_32bit_offset :
       nir_address_format_32bit_offset);
+
    if (!intel_has_extended_bindless(&pdevice->info))
       surface_handle = nir_ishl_imm(b, surface_handle, 6);
 
    return nir_resource_intel(
-      b,
+      b, pdevice->uses_efficient_64bit ? 2 : 1, 32,
       nir_imm_int(b, 0xdeaddead),
       surface_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -68,17 +106,27 @@ build_sampler_handle(nir_builder *b, nir_def *heap_offset,
     * config and so the same relocated offset.
     */
    nir_def *sampler_handle;
-   if (embedded) {
-      sampler_handle = heap_offset;
-   } else {
-      sampler_handle = nir_iadd(
+   if (pdevice->uses_efficient_64bit) {
+      sampler_handle = nir_vec2(
          b,
-         anv_load_driver_uniform(b, 1, heap.samplers_offset),
-         plane == 0 ? heap_offset :
-         nir_iadd_imm(b, heap_offset, plane * ANV_SAMPLER_STATE_SIZE));
+         embedded ? heap_offset :
+         nir_iadd(b, anv_load_driver_uniform(b, 1, heap.samplers_offset), heap_offset),
+         embedded ?
+         nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH) :
+         nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH));
+   } else {
+      if (embedded) {
+         sampler_handle = heap_offset;
+      } else {
+         sampler_handle = nir_iadd(
+            b,
+            anv_load_driver_uniform(b, 1, heap.samplers_offset),
+            plane == 0 ? heap_offset :
+            nir_iadd_imm(b, heap_offset, plane * ANV_SAMPLER_STATE_SIZE));
+      }
    }
    return nir_resource_intel(
-      b,
+      b, pdevice->uses_efficient_64bit ? 2 : 1, 32,
       nir_imm_int(b, 0xdeaddead),
       sampler_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -106,7 +154,10 @@ build_descriptor_addr(nir_builder *b, nir_def *heap_offset,
    return nir_pack_64_2x32_split(
       b, offset,
       nir_load_reloc_const_intel(
-         b, BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH));
+         b,
+         pdevice->uses_efficient_64bit ?
+         BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH :
+         BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH));
 }
 
 static nir_def *
@@ -186,7 +237,10 @@ lower_accel_struct_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    b->cursor = nir_after_instr(&intrin->instr);
 
    nir_def *accel_addr = build_load_descriptor_mem(
-      b, 1, 64, intrin->src[0].ssa, 0, pdevice);
+      b,
+      intrin->def.num_components,
+      intrin->def.bit_size,
+      intrin->src[0].ssa, 0, pdevice);
    nir_def_replace(&intrin->def, accel_addr);
 
    return true;
@@ -453,9 +507,28 @@ tex_instr_get_and_remove_plane_src(nir_tex_instr *tex)
    return plane;
 }
 
+static nir_def *
+build_image_resinfo(nir_builder *b,
+                    nir_def *heap_offset,
+                    nir_def *lod,
+                    unsigned num_components,
+                    enum glsl_sampler_dim dim,
+                    bool is_array, bool is_storage,
+                    const struct anv_physical_device *pdevice)
+{
+   nir_def *desc_addr = build_descriptor_addr(b, heap_offset, pdevice);
+   return anv_resinfo(b, &pdevice->info, desc_addr,
+                      lod == NULL ? nir_imm_int(b, 0) : lod,
+                      nir_imm_int(b, num_components),
+                      nir_imm_int(b, dim), nir_imm_bool(b, is_array),
+                      false);
+}
+
 static bool
 lower_tex(nir_builder *b, nir_tex_instr *tex, void *data)
 {
+   struct lower_state *state = data;
+
    bool progress = false;
 
    b->cursor = nir_before_instr(&tex->instr);
@@ -463,19 +536,49 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, void *data)
    uint32_t plane = tex_instr_get_and_remove_plane_src(tex);
 
    int surf_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_heap_offset);
+
+   if (tex->op == nir_texop_txs_lod0_intel) {
+      assert(surf_src_idx >= 0);
+
+      nir_def *lod = nir_get_tex_src(tex, nir_tex_src_lod);
+
+      nir_def_replace(&tex->def,
+                      nir_trim_vector(
+                         b,
+                         build_image_resinfo(b, tex->src[surf_src_idx].src.ssa,
+                                             lod, tex->def.num_components,
+                                             tex->sampler_dim, tex->is_array,
+                                             false, state->pdevice),
+                         tex->def.num_components));
+      return true;
+   }
+
+   /* Track input attachments use */
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS_MS) {
+      BITSET_SET_COUNT(state->map->input_attachments,
+                       (tex->input_attachment_depth ||
+                        tex->input_attachment_stencil) ?
+                       MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS :
+                       tex->texture_index,
+                       MAX2(1, tex->texture_array_size));
+      tex->texture_index = 0;
+   }
+
    if (surf_src_idx >= 0) {
       nir_src_rewrite(
          &tex->src[surf_src_idx].src,
          build_surface_handle(b, tex->src[surf_src_idx].src.ssa,
-                              plane, tex->texture_non_uniform, data));
+                              plane, tex->texture_non_uniform, state->pdevice));
       tex->src[surf_src_idx].src_type = nir_tex_src_texture_handle;
+      tex->texture_index = 0;
       progress = true;
    }
    int smpl_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_heap_offset);
    if (smpl_src_idx >= 0) {
       nir_def *sampler_index =
          build_sampler_handle(b, tex->src[smpl_src_idx].src.ssa, plane,
-                              tex->sampler_non_uniform, false, data);
+                              tex->sampler_non_uniform, false, state->pdevice);
       nir_src_rewrite(&tex->src[smpl_src_idx].src, sampler_index);
       tex->src[smpl_src_idx].src_type = nir_tex_src_sampler_handle;
       progress = true;
@@ -484,7 +587,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, void *data)
          b,
          nir_load_reloc_const_intel(
             b, BRW_SHADER_RELOC_EMBEDDED_SAMPLER_HANDLE + tex->sampler_index),
-         plane, tex->sampler_non_uniform, true, data);
+         plane, tex->sampler_non_uniform, true, state->pdevice);
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);
       tex->sampler_index = 0;
       progress = true;
@@ -494,26 +597,36 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, void *data)
 }
 
 static nir_def *
-build_buffer_addr_for_deref(nir_builder *b, nir_deref_instr *deref,
-                            const struct anv_physical_device *pdevice)
+build_direct_buffer_addr_for_deref(nir_builder *b, nir_deref_instr *deref,
+                                   const struct anv_physical_device *pdevice)
 {
    if (deref->deref_type != nir_deref_type_cast) {
       nir_deref_instr *parent = nir_deref_instr_parent(deref);
       nir_def *addr =
-         build_buffer_addr_for_deref(b, parent, pdevice);
+         build_direct_buffer_addr_for_deref(b, parent, pdevice);
 
       b->cursor = nir_before_instr(&deref->instr);
       return nir_explicit_io_address_from_deref(
-         b, deref, addr, nir_address_format_32bit_index_offset);
+         b, deref, addr,
+         pdevice->uses_efficient_64bit ?
+         nir_address_format_vec2_index_32bit_offset :
+         nir_address_format_32bit_index_offset);
    }
 
    nir_intrinsic_instr *intrin = nir_src_as_intrinsic(deref->parent);
    assert(intrin->intrinsic == nir_intrinsic_load_heap_descriptor);
 
    b->cursor = nir_before_instr(&intrin->instr);
-   return nir_vec2(b,
-                   build_surface_handle(b, intrin->src[0].ssa, 0, 0, pdevice),
-                   nir_imm_int(b, 0));
+
+   nir_def *handle = build_surface_handle(b, intrin->src[0].ssa, 0, 0, pdevice);
+   if (pdevice->uses_efficient_64bit) {
+      return nir_vec3(b,
+                      nir_channel(b, handle, 0),
+                      nir_channel(b, handle, 1),
+                      nir_imm_int(b, 0));
+   } else {
+      return nir_vec2(b, handle, nir_imm_int(b, 0));
+   }
 }
 
 static bool
@@ -556,8 +669,10 @@ try_lower_direct_buffer_intrinsic(nir_builder *b,
 
    b->cursor = nir_before_instr(&intrin->instr);
 
-   nir_def *addr = build_buffer_addr_for_deref(b, deref, pdevice);
+   nir_def *addr = build_direct_buffer_addr_for_deref(b, deref, pdevice);
    nir_lower_explicit_io_instr(b, intrin, addr,
+                               pdevice->uses_efficient_64bit ?
+                               nir_address_format_vec2_index_32bit_offset :
                                nir_address_format_32bit_index_offset);
 
    return true;
@@ -653,6 +768,11 @@ anv_nir_lower_descriptor_heap(nir_shader *shader,
       };
    }
 
+   struct lower_state state = {
+      .pdevice = device->physical,
+      .map = map,
+   };
+
    /* Required to lower buffers efficiently */
    nir_divergence_analysis(shader);
 
@@ -666,9 +786,7 @@ anv_nir_lower_descriptor_heap(nir_shader *shader,
                                  nir_metadata_control_flow,
                                  (void *)device->physical);
    progress |=
-      nir_shader_tex_pass(shader, lower_tex,
-                          nir_metadata_control_flow,
-                          (void *)device->physical);
+      nir_shader_tex_pass(shader, lower_tex, nir_metadata_control_flow, &state);
 
    return progress;
 }

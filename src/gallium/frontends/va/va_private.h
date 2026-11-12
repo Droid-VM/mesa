@@ -57,7 +57,7 @@
 #define VL_VA_DRIVER(ctx) ((vlVaDriver *)ctx->pDriverData)
 #define VL_VA_PSCREEN(ctx) (VL_VA_DRIVER(ctx)->vscreen->pscreen)
 
-#define VL_VA_MAX_IMAGE_FORMATS 23
+#define VL_VA_MAX_IMAGE_FORMATS 25
 #define VL_VA_ENC_GOP_COEFF 16
 
 #define UINT_TO_PTR(x) ((void*)(uintptr_t)(x))
@@ -100,24 +100,6 @@
 /* vaCreateContext flags */
 #define VL_VA_CREATE_CONTEXT_PROTECTED (1 << 16)
 
-static inline enum pipe_video_chroma_format
-ChromaToPipe(int format)
-{
-   switch (format) {
-   case VA_RT_FORMAT_YUV420:
-   case VA_RT_FORMAT_YUV420_10BPP:
-      return PIPE_VIDEO_CHROMA_FORMAT_420;
-   case VA_RT_FORMAT_YUV422:
-      return PIPE_VIDEO_CHROMA_FORMAT_422;
-   case VA_RT_FORMAT_YUV444:
-      return PIPE_VIDEO_CHROMA_FORMAT_444;
-   case VA_RT_FORMAT_YUV400:
-      return PIPE_VIDEO_CHROMA_FORMAT_400;
-   default:
-      return PIPE_VIDEO_CHROMA_FORMAT_NONE;
-   }
-}
-
 static inline enum pipe_format
 VaFourccToPipeFormat(unsigned format)
 {
@@ -130,6 +112,10 @@ VaFourccToPipeFormat(unsigned format)
       return PIPE_FORMAT_P012;
    case VA_FOURCC('P','0','1','6'):
       return PIPE_FORMAT_P016;
+   case VA_FOURCC('P','2','0','8'):
+      return PIPE_FORMAT_NV16;
+   case VA_FOURCC('P','2','1','0'):
+      return PIPE_FORMAT_P210;
    case VA_FOURCC('I','4','2','0'):
       return PIPE_FORMAT_IYUV;
    case VA_FOURCC('Y','V','1','2'):
@@ -179,12 +165,16 @@ PipeFormatToVaFourcc(enum pipe_format p_format)
    switch (p_format) {
    case PIPE_FORMAT_NV12:
       return VA_FOURCC('N','V','1','2');
+   case PIPE_FORMAT_NV16:
+      return VA_FOURCC('P','2','0','8');
    case PIPE_FORMAT_P010:
       return VA_FOURCC('P','0','1','0');
    case PIPE_FORMAT_P012:
       return VA_FOURCC('P','0','1','2');
    case PIPE_FORMAT_P016:
       return VA_FOURCC('P','0','1','6');
+   case PIPE_FORMAT_P210:
+      return VA_FOURCC('P','2','1','0');
    case PIPE_FORMAT_IYUV:
       return VA_FOURCC('I','4','2','0');
    case PIPE_FORMAT_YV12:
@@ -271,16 +261,19 @@ PipeToProfile(enum pipe_video_profile profile)
 #else
       return VAProfileNone;
 #endif
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
+      return VAProfileHEVCMain422_10;
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
+      return VAProfileHEVCMain444;
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
+      return VAProfileHEVCMain444_10;
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED:
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH422:
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444:
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_12:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_STILL:
-   case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
-   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
-   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
    case PIPE_VIDEO_PROFILE_UNKNOWN:
       return VAProfileNone;
    default:
@@ -329,6 +322,12 @@ ProfileToPipe(VAProfile profile)
    case VAProfileAV1Profile2:
       return PIPE_VIDEO_PROFILE_AV1_PROFILE2;
 #endif
+   case VAProfileHEVCMain422_10:
+      return PIPE_VIDEO_PROFILE_HEVC_MAIN10_422;
+   case VAProfileHEVCMain444:
+      return PIPE_VIDEO_PROFILE_HEVC_MAIN_444;
+   case VAProfileHEVCMain444_10:
+      return PIPE_VIDEO_PROFILE_HEVC_MAIN10_444;
    case VAProfileNone:
        return PIPE_VIDEO_PROFILE_UNKNOWN;
    default:
@@ -339,7 +338,6 @@ ProfileToPipe(VAProfile profile)
 typedef struct {
    struct vl_screen *vscreen;
    struct pipe_context *pipe;
-   struct pipe_context *pipe2;
    struct handle_table *htab;
    struct pipe_video_codec *proc;
    mtx_t mutex;
@@ -372,8 +370,8 @@ typedef struct {
    unsigned int coded_size;
    struct pipe_enc_feedback_metadata extended_metadata;
    void *feedback;
-   struct vlVaContext *ctx;
    struct vlVaSurface *coded_surf;
+   struct pipe_video_codec *codec;
    struct pipe_fence_handle *fence;
 } vlVaBuffer;
 
@@ -411,11 +409,8 @@ typedef struct vlVaContext {
    bool needs_begin_frame;
    int packed_header_type;
    bool packed_header_emulation_bytes;
-   struct set *surfaces;
-   struct set *buffers;
    unsigned slice_data_offset;
    bool have_slice_params;
-   mtx_t mutex;
 
    struct {
       struct util_dynarray buffers;
@@ -432,14 +427,17 @@ typedef struct {
 typedef struct vlVaSurface {
    struct pipe_video_buffer templat, *buffer;
    struct util_dynarray subpics; /* vlVaSubpicture */
-   vlVaContext *ctx;
    vlVaBuffer *coded_buf;
+   struct pipe_video_codec *codec;
    struct pipe_fence_handle *fence; /* pipe_video_codec fence */
    struct pipe_fence_handle *pipe_fence; /* pipe_context fence */
-   bool is_dpb;
+   uint32_t *dpb_id;
+   struct pipe_video_buffer **dpb_buffer;
    unsigned int strides[3];
    unsigned int offsets[3];
    unsigned int data_size;
+   enum pipe_video_entrypoint entrypoint;
+   bool field_pic; /* the last H.264 decode to this surface was a field picture */
 } vlVaSurface;
 
 typedef struct {
@@ -565,7 +563,6 @@ void vlVaSurfaceFlush(vlVaDriver *drv, vlVaSurface *surf);
 void vlVaAddRawHeader(struct util_dynarray *headers, uint8_t type, uint32_t size, uint8_t *buf,
                       bool is_slice, uint32_t emulation_bytes_start);
 void vlVaGetBufferFeedback(vlVaBuffer *buf);
-void vlVaSetSurfaceContext(vlVaDriver *drv, vlVaSurface *surf, vlVaContext *context);
 MESAPROC VAStatus vlVaPostProc(vlVaDriver *drv, vlVaContext *context, struct pipe_video_buffer *src, struct pipe_video_buffer *dst,
                                struct pipe_vpp_desc *param) TAIL;
 void vlVaGetReferenceFrame(vlVaDriver *drv, VASurfaceID surface_id, struct pipe_video_buffer **ref_frame);

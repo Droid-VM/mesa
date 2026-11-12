@@ -595,6 +595,7 @@ GENX(pandecode_shader)(struct pandecode_context *ctx, uint64_t addr,
    pan_unpack(cl, SHADER_PROGRAM, desc);
 
    assert(desc.type == 8);
+   assert(!(addr & 0x1f));
 
    DUMP_UNPACKED(ctx, SHADER_PROGRAM, desc, "%s Shader @%" PRIx64 ":\n", label,
                  addr);

@@ -73,6 +73,7 @@ radv_utrace_write_timestamp(struct u_trace *ut, void *cs, void *timestamps, uint
       return false;
 
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_utrace_timestamps_bo *bo = timestamps;
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, bo->bo);
@@ -81,7 +82,7 @@ radv_utrace_write_timestamp(struct u_trace *ut, void *cs, void *timestamps, uint
 
    if (cmd_buffer->qf == RADV_QUEUE_TRANSFER) {
       radeon_check_space(device->ws, cmd_buffer->cs->b, 3);
-      ac_emit_sdma_write_timestamp(cmd_buffer->cs->b, va);
+      ac_emit_sdma_write_timestamp(cmd_buffer->cs->b, pdev->info.sdma_ip_version, va);
 
       cmd_buffer->utrace.last_cdw = cmd_buffer->cs->b->cdw;
 
@@ -92,9 +93,9 @@ radv_utrace_write_timestamp(struct u_trace *ut, void *cs, void *timestamps, uint
    if (suspend_cond_render)
       radv_suspend_conditional_rendering(cmd_buffer);
 
-   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_PS_PARTIAL_FLUSH | RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS;
 
-   radv_emit_cache_flush(cmd_buffer);
+   radv_emit_cache_flush(cmd_buffer, false);
 
    ASSERTED unsigned cdw_max = radeon_check_space(device->ws, cmd_buffer->cs->b, 28);
    /* TODO: Figure out why ace timestamps don't always complete. */

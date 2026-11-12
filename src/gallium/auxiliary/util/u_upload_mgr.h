@@ -37,6 +37,8 @@
 
 struct pipe_context;
 struct pipe_resource;
+struct pipe_transfer;
+struct pipe_clientptr_heap;
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +70,11 @@ u_upload_create_default(struct pipe_context *pipe);
  */
 struct u_upload_mgr *
 u_upload_clone(struct pipe_context *pipe, struct u_upload_mgr *upload);
+
+/** Same as u_upload_clone, with the new uploader supporing u_upload_alloc_clientptr */
+struct u_upload_mgr *
+u_upload_clone_clientptr(struct pipe_context *pipe, struct u_upload_mgr *upload,
+                              struct pipe_clientptr_heap *clientptr_heap);
 
 /** Whether to avoid persistent mappings where available */
 void
@@ -145,6 +152,29 @@ void u_upload_data_ref(struct u_upload_mgr *upload,
                      const void *data,
                      unsigned *out_offset,
                      struct pipe_resource **outbuf);
+
+/** Same as u_upload_alloc, returning a transfer object for use with map_clientptr_range instead of a pointer
+ *
+ *  \param upload must be created with u_upload_clone_clientptr
+ *  \param transfer_clientptr valid until following upload
+ */
+void
+u_upload_alloc_clientptr(struct u_upload_mgr *upload,
+                  unsigned size,
+                  unsigned alignment,
+                  unsigned *out_offset,
+                  struct pipe_resource **outbuf,
+                  struct pipe_resource **releasebuf,
+                  struct pipe_transfer **transfer_clientptr);
+
+/* same as above, but outbuf gains a ref */
+void
+u_upload_alloc_clientptr_ref(struct u_upload_mgr *upload,
+                  unsigned size,
+                  unsigned alignment,
+                  unsigned *out_offset,
+                  struct pipe_resource **outbuf,
+                  struct pipe_transfer **transfer_clientptr);
 
 #ifdef __cplusplus
 } // extern "C" {

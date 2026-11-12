@@ -1,5 +1,7 @@
 /*
+ * Copyright © 2026 NXP
  * Copyright © 2022 Intel Corporation
+ * Copyright © 2026 Google LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -145,16 +147,22 @@ vk_gralloc_to_drm_explicit_layout(
    struct u_gralloc *u_gralloc = vk_android_get_ugralloc();
    assert(u_gralloc);
 
-   if (u_gralloc_get_buffer_basic_info(u_gralloc, in_hnd, &info) != 0)
+   if (u_gralloc_get_buffer_basic_info(u_gralloc, in_hnd, &info) != 0) {
+      mesa_loge("u_gralloc_get_buffer_basic_info failed");
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
-   if (info.num_planes > max_planes)
+   if (info.num_planes > max_planes) {
+      mesa_loge("info.num_planes(%u) > max_planes(%u) unsupported",
+                info.num_planes, max_planes);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
    bool is_disjoint = false;
    for (size_t i = 1; i < info.num_planes; i++) {
       if (info.offsets[i] == 0) {
          is_disjoint = true;
+         mesa_loge("disjoint planes (info.offsets[%zu] == 0) unsupported", i);
          break;
       }
    }
@@ -176,6 +184,17 @@ vk_gralloc_to_drm_explicit_layout(
    for (size_t i = 0; i < info.num_planes; i++) {
       out_layouts[i].offset = info.offsets[i];
       out_layouts[i].rowPitch = info.strides[i];
+   }
+
+   /* Compute arrayPitch for multi-layer buffers. The gralloc HAL does not
+    * expose a per-layer stride directly, but we can derive it from the
+    * total allocation size and layer count. Disjoint multi-plane buffers
+    * are rejected above, so alloc_size / layer_count is valid here.
+    */
+   if (info.layer_count > 1 && info.alloc_size > 0) {
+      uint64_t array_pitch = info.alloc_size / info.layer_count;
+      for (size_t i = 0; i < info.num_planes; i++)
+         out_layouts[i].arrayPitch = array_pitch;
    }
 
    if (info.drm_fourcc == DRM_FORMAT_YVU420) {
@@ -210,15 +229,21 @@ vk_android_import_anb_memory(struct vk_device *device,
    VkResult result = device->dispatch_table.GetMemoryFdPropertiesKHR(
       (VkDevice)device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
       dma_buf_fd, &fd_props);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      mesa_loge("GetMemoryFdPropertiesKHR failed");
       return result;
+   }
 
    uint32_t compatible_types = mem_reqs.memoryTypeBits & fd_props.memoryTypeBits;
-   if (!compatible_types)
+   if (!compatible_types) {
+      mesa_loge("No compatible AHB mem types (img_reqs=%#x,fd_reqs=%#x)",
+                 mem_reqs.memoryTypeBits, fd_props.memoryTypeBits);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
    int dup_fd = os_dupfd_cloexec(dma_buf_fd);
    if (dup_fd < 0) {
+      mesa_loge("os_dupfd_cloexec(%d) failed: %s", dma_buf_fd, strerror(errno));
       return (errno == EMFILE) ? VK_ERROR_TOO_MANY_OBJECTS
                                : VK_ERROR_OUT_OF_HOST_MEMORY;
    }
@@ -305,6 +330,7 @@ vk_android_init_deferred_image(struct vk_device *device,
    /* collect all dynamic array infos */
    uint32_t queue_family_count = 0;
    uint32_t view_format_count = 0;
+   uint32_t fixed_rate_count = 0;
 
    if (pCreateInfo->sharingMode == VK_SHARING_MODE_CONCURRENT)
       queue_family_count = pCreateInfo->queueFamilyIndexCount;
@@ -314,15 +340,24 @@ vk_android_init_deferred_image(struct vk_device *device,
    if (raw_list)
       view_format_count = raw_list->viewFormatCount;
 
+   const VkImageCompressionControlEXT *raw_compress =
+      vk_find_struct_const(pCreateInfo->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
+   if (raw_compress &&
+       (raw_compress->flags & VK_IMAGE_COMPRESSION_FIXED_RATE_EXPLICIT_EXT))
+      fixed_rate_count = raw_compress->compressionControlPlaneCount;
+
    /* Extend below when drivers support more extensions that interact with ANB
-    * or AHB. e.g. VK_EXT_image_compression_control
+    * or AHB.
     */
    VK_MULTIALLOC(ma);
    VK_MULTIALLOC_DECL(&ma, VkImageCreateInfo, create_info, 1);
    VK_MULTIALLOC_DECL(&ma, VkImageFormatListCreateInfo, list_info, 1);
    VK_MULTIALLOC_DECL(&ma, VkImageStencilUsageCreateInfo, stencil_info, 1);
+   VK_MULTIALLOC_DECL(&ma, VkImageCompressionControlEXT, compress_info, 1);
    VK_MULTIALLOC_DECL(&ma, uint32_t, queue_families, queue_family_count);
    VK_MULTIALLOC_DECL(&ma, VkFormat, view_formats, view_format_count);
+   VK_MULTIALLOC_DECL(&ma, VkImageCompressionFixedRateFlagsEXT, fixed_rates,
+                      fixed_rate_count);
 
    if (!vk_multialloc_zalloc2(&ma, &device->alloc, pAllocator,
                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT))
@@ -374,6 +409,21 @@ vk_android_init_deferred_image(struct vk_device *device,
          .stencilUsage = image->stencil_usage,
       };
       __vk_append_struct(create_info, stencil_info);
+   }
+
+   /* VK_EXT_image_compression_control */
+   if (raw_compress) {
+      if (fixed_rate_count) {
+         typed_memcpy(fixed_rates, raw_compress->pFixedRateFlags,
+                      fixed_rate_count);
+      }
+      *compress_info = (VkImageCompressionControlEXT){
+         .sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT,
+         .flags = raw_compress->flags,
+         .compressionControlPlaneCount = fixed_rate_count,
+         .pFixedRateFlags = fixed_rate_count ? fixed_rates : NULL,
+      };
+      __vk_append_struct(create_info, compress_info);
    }
 
    image->android_deferred_create_info = create_info;
@@ -694,6 +744,12 @@ vk_ahb_format_to_image_format(uint32_t ahb_format)
 #endif
    case AHARDWAREBUFFER_FORMAT_Y8:
       return VK_FORMAT_R8_UNORM;
+#if ANDROID_API_LEVEL >= 34
+   case AHARDWAREBUFFER_FORMAT_R16_UINT:
+      return VK_FORMAT_R16_UINT;
+   case AHARDWAREBUFFER_FORMAT_R16G16_UINT:
+      return VK_FORMAT_R16G16_UINT;
+#endif
    case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
       return VK_FORMAT_B8G8R8A8_UNORM;
    default:
@@ -737,11 +793,38 @@ vk_image_format_to_ahb_format(VkFormat vk_format)
    case VK_FORMAT_R8_UNORM:
       return AHARDWAREBUFFER_FORMAT_R8_UNORM;
 #endif
+#if ANDROID_API_LEVEL >= 34
+   case VK_FORMAT_R16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16_UINT;
+   case VK_FORMAT_R16G16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16G16_UINT;
+#endif
    case VK_FORMAT_B8G8R8A8_UNORM:
       return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
    default:
       return 0;
    }
+}
+
+VkFormat
+vk_external_format_to_efr_format(VkFormat external_format)
+{
+   /* passthrough for RGB formats */
+   if (!vk_format_get_ycbcr_info(external_format))
+      return external_format;
+
+   switch (external_format) {
+   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
+      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+   default:
+      break;
+   }
+
+   /* no support beyond the potentially required YUV formats */
+   return VK_FORMAT_UNDEFINED;
 }
 
 /* Construct ahw usage mask from image usage bits, see
@@ -769,14 +852,6 @@ vk_image_usage_to_ahb_usage(const VkImageCreateFlags2KHR vk_create,
    if (vk_create & VK_IMAGE_CREATE_PROTECTED_BIT)
       ahb_usage |= AHARDWAREBUFFER_USAGE_PROTECTED_CONTENT;
 
-   /* XXX We need a better gralloc private query to forward the mutable bit
-    * along with the format list for a private vendor usage bit, and leave the
-    * decision to gralloc. For now, resolve mutable bit to CPU_WRITE_RARELY to
-    * implicitly force LINEAR.
-    */
-   if (vk_create & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
-      ahb_usage |= AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
-
    /* No usage bits set - set at least one GPU usage. */
    if (ahb_usage == 0)
       ahb_usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
@@ -784,21 +859,91 @@ vk_image_usage_to_ahb_usage(const VkImageCreateFlags2KHR vk_create,
    return ahb_usage;
 }
 
-static bool
-vk_ahb_probe_format(VkFormat vk_format,
-                    VkImageCreateFlags vk_create,
-                    VkImageUsageFlags vk_usage)
+static uint64_t
+vk_image_info_to_ahb_usage(VkFormat vk_format,
+                           VkImageCreateFlags2KHR vk_create,
+                           VkImageUsageFlags2KHR vk_usage,
+                           const void *image_info_pnext)
 {
-   const uint32_t ahb_format = vk_image_format_to_ahb_format(vk_format);
-   if (!ahb_format)
-      return false;
+   uint64_t ahb_usage = vk_image_usage_to_ahb_usage(vk_create, vk_usage);
+   bool force_linear = false;
 
+   /* Optimal tiling can be assumed for mutability only between unorm and srgb
+    * variants. For anything beyond that, force AHB alloc with linear tiling.
+    * This should cover most practical usages without perf impact. Ideally, a
+    * new gralloc query is needed to precisely instruct the allocation, but the
+    * shape could vary a lot across different vendors.
+    *
+    * To be noted: Android 16 and 17 have missed to forward the app provided
+    * image format list to AHB usage query for VK_KHR_swapchain_mutable_format
+    * support in the platform loader. The lucky part is the exact list does get
+    * forwarded to the actual ANB image creation. So we additionally workaround
+    * to assume optimal tiling when there's no format list provided.
+    */
+   if (vk_create & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
+      const VkImageFormatListCreateInfo *format_list =
+         vk_find_struct_const(image_info_pnext, IMAGE_FORMAT_LIST_CREATE_INFO);
+      if (format_list && format_list->viewFormatCount > 1) {
+         /* vk_format_srgb_to_linear returns the original format if not srgb */
+         const VkFormat src_fmt =
+            vk_format_srgb_to_linear(format_list->pViewFormats[0]);
+
+         for (uint32_t i = 1; i < format_list->viewFormatCount; i++) {
+            const VkFormat dst_fmt =
+               vk_format_srgb_to_linear(format_list->pViewFormats[i]);
+            if (src_fmt != dst_fmt) {
+               force_linear = true;
+               break;
+            }
+         }
+      }
+   }
+
+   /* VK_IMAGE_COMPRESSION_DISABLED_EXT means the app doesn't want an
+    * implicit compressed/tiled layout for this image. Use
+    * CPU_WRITE_RARELY to implicitly force LINEAR, preventing gralloc from
+    * allocating a compressed buffer and silently violating
+    * VK_IMAGE_COMPRESSION_DISABLED_EXT.
+    */
+   const VkImageCompressionControlEXT *compression_control =
+      vk_find_struct_const(image_info_pnext, IMAGE_COMPRESSION_CONTROL_EXT);
+   if (compression_control &&
+       (compression_control->flags & VK_IMAGE_COMPRESSION_DISABLED_EXT) &&
+       !vk_format_is_depth_or_stencil(vk_format))
+      force_linear = true;
+
+   if (force_linear)
+      ahb_usage |= AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
+
+   return ahb_usage;
+}
+
+static inline uint64_t
+vk_image_format_info_to_ahb_usage(const VkPhysicalDeviceImageFormatInfo2 *info)
+{
+
+   const VkImageCreateFlags2KHR flags = vk_image_format_info_2_flags(info);
+   const VkImageUsageFlags2KHR usage = vk_image_format_info_2_usage(info);
+   return vk_image_info_to_ahb_usage(info->format, flags, usage, info->pNext);
+}
+
+static inline uint64_t
+vk_image_create_info_to_ahb_usage(const VkImageCreateInfo *info)
+{
+   const VkImageCreateFlags2KHR flags = vk_image_create_flags(info);
+   const VkImageUsageFlags2KHR usage = vk_image_usage_flags(info);
+   return vk_image_info_to_ahb_usage(info->format, flags, usage, info->pNext);
+}
+
+static bool
+vk_ahb_probe_format(uint32_t ahb_format, uint64_t ahb_usage)
+{
    AHardwareBuffer_Desc desc = {
       .width = 16,
       .height = 16,
       .layers = 1,
       .format = ahb_format,
-      .usage = vk_image_usage_to_ahb_usage(vk_create, vk_usage),
+      .usage = ahb_usage,
    };
 #if ANDROID_API_LEVEL >= 29
    return AHardwareBuffer_isSupported(&desc);
@@ -833,15 +978,29 @@ vk_alloc_ahardware_buffer(const VkMemoryAllocateInfo *pAllocateInfo)
    if (dedicated_info && dedicated_info->image) {
       VK_FROM_HANDLE(vk_image, image, dedicated_info->image);
 
-      if (!image->ahb_format)
+      if (!image->ahb_format) {
+         mesa_loge("image->ahb_format must not be UNDEFINED");
          return NULL;
+      }
 
       w = image->extent.width;
       h = image->extent.height;
       layers = image->array_layers;
       format = image->ahb_format;
-      usage = vk_image_usage_to_ahb_usage(image->create_flags,
-                                          image->usage);
+
+      /* Populate more accurate AHB usage via vk_image_create_info_to_ahb_usage
+       * if vk_android_init_deferred_image has been adopted. Otherwise, fallback
+       * to vk_image_usage_to_ahb_usage.
+       */
+      if (image->android_deferred_create_info) {
+         usage = vk_image_create_info_to_ahb_usage(
+            image->android_deferred_create_info);
+      } else {
+         usage = vk_image_usage_to_ahb_usage(image->create_flags, image->usage);
+         if ((image->compr_flags & VK_IMAGE_COMPRESSION_DISABLED_EXT) &&
+             !vk_format_is_depth_or_stencil(image->format))
+            usage |= AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
+      }
    } else {
       /* AHB export allocation for VkBuffer requires a valid allocationSize */
       assert(pAllocateInfo->allocationSize);
@@ -861,8 +1020,11 @@ vk_alloc_ahardware_buffer(const VkMemoryAllocateInfo *pAllocateInfo)
     };
 
    struct AHardwareBuffer *ahb;
-   if (AHardwareBuffer_allocate(&desc, &ahb) != 0)
+   if (AHardwareBuffer_allocate(&desc, &ahb) != 0) {
+      mesa_loge("Failed to allocate AHB (w=%u,h=%u,l=%u,f=%u,u=0x%" PRIx64 ")",
+                w, h, layers, format, usage);
       return NULL;
+   }
 
    return ahb;
 }
@@ -884,15 +1046,20 @@ get_ahb_buffer_format_properties2(
    /* "Buffer must be a valid Android hardware buffer object with at least
     * one of the AHARDWAREBUFFER_USAGE_GPU_* usage flags."
     */
-   if (!gpu_usage)
+   if (!gpu_usage) {
+      mesa_loge("AHB (format=%u,usage=0x%" PRIx64 ") has no GPU usage",
+                desc.format, desc.usage);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
    /* No known gralloc implementations currently allocate with a
     * layers > 1. So return an error if we happen to get one since
     * the rest of mesa won't handle it properly.
     */
-   if (desc.layers > 1)
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR;
+   if (desc.layers > 1) {
+      mesa_loge("Unsupported AHB desc.layers(%u) > 1", desc.layers);
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
    /* Fill properties fields based on description. */
    VkAndroidHardwareBufferFormatProperties2ANDROID *p = pProperties;
@@ -952,6 +1119,15 @@ get_ahb_buffer_format_properties2(
       break;
    case DRM_FORMAT_P010:
       external_format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+      break;
+   case DRM_FORMAT_P210:
+      external_format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16;
+      break;
+   case DRM_FORMAT_YUYV:
+      external_format = VK_FORMAT_G8B8G8R8_422_UNORM;
+      break;
+   case DRM_FORMAT_UYVY:
+      external_format = VK_FORMAT_B8G8R8G8_422_UNORM;
       break;
    case DRM_FORMAT_XBGR8888:
       /* This can be resolved from IMPLEMENTATION_DEFINED AHB format */
@@ -1026,16 +1202,16 @@ vk_common_GetAndroidHardwareBufferPropertiesANDROID(
    VkAndroidHardwareBufferFormatProperties2ANDROID *format_prop2 = NULL;
    VkAndroidHardwareBufferFormatResolvePropertiesANDROID *format_resolve = NULL;
 
-   vk_foreach_struct(ext, pProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID:
-         format_prop = (void *)ext;
+         format_prop = ext;
          break;
       case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID:
-         format_prop2 = (void *)ext;
+         format_prop2 = ext;
          break;
       case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_RESOLVE_PROPERTIES_ANDROID:
-         format_resolve = (void *)ext;
+         format_resolve = ext;
          break;
       default:
          break;
@@ -1069,20 +1245,15 @@ vk_common_GetAndroidHardwareBufferPropertiesANDROID(
    }
 
    if (format_resolve) {
-      if (device->enabled_extensions.ANDROID_external_format_resolve) {
-         assert(format_prop2->externalFormat != VK_FORMAT_UNDEFINED);
-         const uint32_t num_bits = vk_format_get_component_bits(
-            format_prop2->externalFormat, UTIL_FORMAT_COLORSPACE_RGB, 1);
-         format_resolve->colorAttachmentFormat =
-            num_bits == 8 ? VK_FORMAT_R8G8B8A8_UNORM
-                          : VK_FORMAT_R16G16B16A16_UNORM;
+      assert(format_prop2->externalFormat != VK_FORMAT_UNDEFINED);
+      format_resolve->colorAttachmentFormat =
+         vk_external_format_to_efr_format((VkFormat)format_prop2->externalFormat);
 
+      if (format_resolve->colorAttachmentFormat != VK_FORMAT_UNDEFINED) {
          format_prop2->formatFeatures |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
          if (format_prop) {
             format_prop->formatFeatures |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
          }
-      } else {
-         format_resolve->colorAttachmentFormat = VK_FORMAT_UNDEFINED;
       }
    }
 
@@ -1130,7 +1301,7 @@ vk_android_get_ahb_image_properties(
 {
    VK_FROM_HANDLE(vk_physical_device, pdevice, pdev_handle);
    VkExternalImageFormatProperties *external_props;
-   VkAndroidHardwareBufferUsageANDROID *ahb_usage;
+   VkAndroidHardwareBufferUsageANDROID *ahb_usage_props;
 
    ASSERTED const VkPhysicalDeviceExternalImageFormatInfo *external_info =
       vk_find_struct_const(info->pNext,
@@ -1145,11 +1316,17 @@ vk_android_get_ahb_image_properties(
                        "type (%u) unsupported for AHB", info->type);
    }
 
-   if (!vk_ahb_probe_format(info->format, info->flags, info->usage)) {
-      return vk_errorf(
-         pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
-         "format (%u) flags (0x%x) usage (0x%x) unsupported for AHB",
-         info->format, info->flags, info->usage);
+   const uint32_t ahb_format = vk_image_format_to_ahb_format(info->format);
+   if (!ahb_format) {
+      return vk_errorf(pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                       "format (%u) unsupported for AHB", info->format);
+   }
+
+   const uint64_t ahb_usage = vk_image_format_info_to_ahb_usage(info);
+   if (!vk_ahb_probe_format(ahb_format, ahb_usage)) {
+      return vk_errorf(pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                       "ahb_format (%u) ahb_usage (0x%" PRIx64 ") unsupported",
+                       ahb_format, ahb_usage);
    }
 
    external_props =
@@ -1167,15 +1344,10 @@ vk_android_get_ahb_image_properties(
       };
    }
 
-   ahb_usage =
+   ahb_usage_props =
       vk_find_struct(props->pNext, ANDROID_HARDWARE_BUFFER_USAGE_ANDROID);
-   if (ahb_usage) {
-      VkImageCreateFlags2KHR image_flags = vk_image_format_info_2_flags(info);
-      VkImageUsageFlags2KHR image_usage = vk_image_format_info_2_usage(info);
-
-      ahb_usage->androidHardwareBufferUsage =
-         vk_image_usage_to_ahb_usage(image_flags, image_usage);
-   }
+   if (ahb_usage_props)
+      ahb_usage_props->androidHardwareBufferUsage = ahb_usage;
 
    return VK_SUCCESS;
 }
@@ -1199,14 +1371,185 @@ vk_android_get_ahb_buffer_properties(
    };
 }
 
-bool vk_android_rp_attachment_has_external_format(
+bool
+vk_android_rp_attachment_has_external_format(
    const VkAttachmentDescription2 *desc)
 {
-   const VkExternalFormatANDROID *format_info =
-      vk_find_struct_const(desc->pNext,
-                           EXTERNAL_FORMAT_ANDROID);
-   return (desc->format == VK_FORMAT_UNDEFINED) &&
-          (format_info != NULL);
+   return desc->format == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(desc->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+VkFormat
+vk_android_get_external_format(const void *pnext)
+{
+   const VkExternalFormatANDROID *info =
+      vk_find_struct_const(pnext, EXTERNAL_FORMAT_ANDROID);
+   return info ? (VkFormat)info->externalFormat : VK_FORMAT_UNDEFINED;
+}
+
+static bool
+subpass_uses_efr(const VkRenderPassCreateInfo2 *info, uint32_t s)
+{
+   const VkSubpassDescription2 *subpass = &info->pSubpasses[s];
+   if (!subpass->pResolveAttachments || subpass->colorAttachmentCount != 1)
+      return false;
+
+   const VkAttachmentReference2 *resolve_ref =
+      &subpass->pResolveAttachments[0];
+   return resolve_ref->attachment != VK_ATTACHMENT_UNUSED &&
+          vk_android_rp_attachment_has_external_format(
+             &info->pAttachments[resolve_ref->attachment]);
+}
+
+bool
+vk_android_is_efr_rp(struct vk_device *device,
+                     const VkRenderPassCreateInfo2 *info)
+{
+   const struct vk_properties *props = &device->physical->properties;
+   if (props->nullColorAttachmentWithExternalFormatResolve != VK_TRUE)
+      return false;
+
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (subpass_uses_efr(info, s))
+         return true;
+   }
+
+   return false;
+}
+
+VkResult
+vk_android_create_efr_rp(struct vk_device *device,
+                         const VkRenderPassCreateInfo2 *info,
+                         const VkAllocationCallbacks *alloc,
+                         VkRenderPass *out_rp_handle)
+{
+   uint32_t efr_subpass_count = 0;
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (subpass_uses_efr(info, s))
+         efr_subpass_count++;
+   }
+
+   STACK_ARRAY(VkAttachmentDescription2, attachments, info->attachmentCount);
+   STACK_ARRAY(VkSubpassDescription2, subpasses, info->subpassCount);
+   STACK_ARRAY(VkAttachmentReference2, color_refs, efr_subpass_count);
+
+   VkRenderPassCreateInfo2 local_info = *info;
+   local_info.pAttachments = attachments;
+   local_info.pSubpasses = subpasses;
+
+   typed_memcpy(attachments, info->pAttachments, info->attachmentCount);
+   for (uint32_t a = 0; a < info->attachmentCount; a++) {
+      VkAttachmentDescription2 *att = &attachments[a];
+      if (vk_android_rp_attachment_has_external_format(att)) {
+         VkFormat external_format = vk_android_get_external_format(att->pNext);
+         att->format = vk_external_format_to_efr_format(external_format);
+      }
+   }
+
+   VkAttachmentReference2 *color_ref_ptr = color_refs;
+
+   typed_memcpy(subpasses, info->pSubpasses, info->subpassCount);
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (!subpass_uses_efr(info, s))
+         continue;
+
+      VkSubpassDescription2 *subpass = &subpasses[s];
+      assert(subpass->colorAttachmentCount == 1);
+      assert(subpass->pResolveAttachments);
+
+      *color_ref_ptr = subpass->pResolveAttachments[0];
+      subpass->pColorAttachments = color_ref_ptr++;
+      subpass->pResolveAttachments = NULL;
+   }
+
+   VkResult result = device->dispatch_table.CreateRenderPass2(
+      vk_device_to_handle(device), &local_info, alloc, out_rp_handle);
+
+   STACK_ARRAY_FINISH(attachments);
+   STACK_ARRAY_FINISH(subpasses);
+   STACK_ARRAY_FINISH(color_refs);
+
+   return result;
+}
+
+bool
+vk_android_is_efr_rendering_info(const VkRenderingInfo *info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info);
+   return info->colorAttachmentCount == 1 &&
+          info->pColorAttachments[0].imageView == VK_NULL_HANDLE &&
+          info->pColorAttachments[0].resolveMode ==
+             VK_RESOLVE_MODE_EXTERNAL_FORMAT_DOWNSAMPLE_BIT_ANDROID;
+}
+
+const VkRenderingInfo *
+vk_android_get_efr_rendering_info(const VkRenderingInfo *info,
+                                  VkRenderingInfo *local_info,
+                                  VkRenderingAttachmentInfo *local_color_att)
+{
+   *local_color_att = info->pColorAttachments[0];
+   local_color_att->imageView = local_color_att->resolveImageView;
+   local_color_att->imageLayout = local_color_att->resolveImageLayout;
+   local_color_att->resolveImageView = VK_NULL_HANDLE;
+   local_color_att->resolveMode = VK_RESOLVE_MODE_NONE;
+
+   *local_info = *info;
+   local_info->pColorAttachments = local_color_att;
+   return local_info;
+}
+
+bool
+vk_android_is_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info && r_info);
+   return r_info->colorAttachmentCount == 1 &&
+          r_info->pColorAttachmentFormats[0] == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(info->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+const VkCommandBufferInheritanceRenderingInfo *
+vk_android_get_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info,
+   VkCommandBufferInheritanceRenderingInfo *local_info,
+   VkFormat *local_color_format)
+{
+   VkFormat external_format = vk_android_get_external_format(info->pNext);
+   *local_color_format = vk_external_format_to_efr_format(external_format);
+   *local_info = *r_info;
+   local_info->pColorAttachmentFormats = local_color_format;
+   return local_info;
+}
+
+bool
+vk_android_is_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info && r_info);
+   return r_info->colorAttachmentCount == 1 &&
+          r_info->pColorAttachmentFormats[0] == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(info->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+const VkPipelineRenderingCreateInfo *
+vk_android_get_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info,
+   VkPipelineRenderingCreateInfo *local_info,
+   VkFormat *local_color_format)
+{
+   VkFormat external_format = vk_android_get_external_format(info->pNext);
+   *local_color_format = vk_external_format_to_efr_format(external_format);
+
+   *local_info = *r_info;
+   local_info->pColorAttachmentFormats = local_color_format;
+   return local_info;
 }
 
 #endif /* ANDROID_API_LEVEL >= 26 */

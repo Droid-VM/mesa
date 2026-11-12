@@ -939,9 +939,11 @@ uint32_t ac_compute_num_tess_patches(const struct ac_compiler_info *info, uint32
    if (info->has_primid_instancing_bug && tess_uses_primid)
       return 1;
 
-   /* 256 threads per workgroup is the hw limit, but 192 performs better. */
+   /* 256 seems to have the best performance with the workloads we tested
+    * Many tests here: https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/44327
+    */
    const unsigned num_threads_per_patch = MAX2(num_tcs_input_cp, num_tcs_output_cp);
-   unsigned num_patches = 192 / num_threads_per_patch;
+   unsigned num_patches = 256 / num_threads_per_patch;
 
    /* 127 is the maximum value that fits in tcs_offchip_layout. */
    num_patches = MIN2(num_patches, 127);
@@ -996,7 +998,7 @@ uint32_t ac_compute_num_tess_patches(const struct ac_compiler_info *info, uint32
        (wave_size - threads_per_tg % wave_size >= MAX2(num_threads_per_patch, 8)))
       num_patches = (threads_per_tg & ~(wave_size - 1)) / num_threads_per_patch;
 
-   if (info->gfx_level == GFX6) {
+   if (info->has_lbpw_tcs_wg_bug) {
       /* GFX6 bug workaround, related to power management. Limit LS-HS
        * threadgroups to only one wave.
        */

@@ -30,6 +30,7 @@
 #include "main/bufferobj.h"
 
 #include "util/u_memory.h"
+#include "gallium/include/pipe/p_screen.h"
 
 #include "vbo_private.h"
 
@@ -41,15 +42,15 @@ void vbo_save_init( struct gl_context *ctx )
 {
    struct vbo_context *vbo = vbo_context(ctx);
    struct vbo_save_context *save = &vbo->save;
+   struct pipe_screen *screen = ctx->screen;
 
    vbo_save_api_init( save );
 
-   for (gl_vertex_processing_mode vpm = VP_MODE_FF; vpm < VP_MODE_MAX; ++vpm)
-      save->VAO[vpm] = NULL;
-
-   save->no_current_update = false;
+   save->restore_attrib_after_draw = true;
 
    ctx->Driver.CurrentSavePrimitive = PRIM_OUTSIDE_BEGIN_END;
+
+   save->free_bo_pool_n_entries = CLAMP((screen->caps.video_memory * 1024 * 1024lu * 0.1) / VBO_SAVE_BUFFER_SIZE, 1, 128);
 }
 
 
@@ -57,9 +58,6 @@ void vbo_save_destroy( struct gl_context *ctx )
 {
    struct vbo_context *vbo = vbo_context(ctx);
    struct vbo_save_context *save = &vbo->save;
-
-   for (gl_vertex_processing_mode vpm = VP_MODE_FF; vpm < VP_MODE_MAX; ++vpm)
-      _mesa_reference_vao(ctx, &save->VAO[vpm], NULL);
 
    if (save->prim_store) {
       free(save->prim_store->prims);
@@ -74,5 +72,9 @@ void vbo_save_destroy( struct gl_context *ctx )
 
    free(save->copied.buffer);
 
-   _mesa_reference_buffer_object(ctx, &save->current_bo, NULL);
+   if (save->free_bo_pool) {
+      for (int i = 0; i < save->free_bo_pool_n_entries; i++)
+         _vbo_release_pool_entry(ctx, &save->free_bo_pool[i]);
+      free(save->free_bo_pool);
+   }
 }

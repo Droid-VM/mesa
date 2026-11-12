@@ -5,13 +5,6 @@
 
 #include "nouveau_device.h"
 
-#ifdef __cplusplus
-#include <atomic>
-using std::atomic_uint_fast32_t;
-#else
-#include <stdatomic.h>
-#endif
-
 #include <sys/mman.h>
 
 #ifdef __cplusplus
@@ -39,7 +32,7 @@ struct nouveau_ws_bo {
    uint64_t map_handle;
    uint32_t handle;
    enum nouveau_ws_bo_flags flags;
-   atomic_uint_fast32_t refcnt;
+   uint32_t refcnt;
    uint8_t pte_kind;
 };
 

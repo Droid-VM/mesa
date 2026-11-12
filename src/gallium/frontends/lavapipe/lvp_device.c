@@ -22,6 +22,7 @@
  */
 
 #include "lvp_private.h"
+#include "lp_texture_handle.h"
 #include "lvp_conv.h"
 #include "lvp_acceleration_structure.h"
 
@@ -36,6 +37,7 @@
 #include "pipe/p_context.h"
 #include "draw/draw_context.h"
 #include "frontend/drisw_api.h"
+#include "lp_screen.h"
 
 #include "util/u_inlines.h"
 #include "util/os_file.h"
@@ -48,13 +50,17 @@
 #include "nir.h"
 #include "nir_builder.h"
 
+#ifdef HAVE_MALLINFO2
+#include <malloc.h>
+#endif
+
 #if DETECT_OS_LINUX
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include "vk_android.h"
 #endif
 
@@ -74,6 +80,9 @@
 
 #define LVP_SAMPLE_COUNTS (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT | \
                            VK_SAMPLE_COUNT_8_BIT)
+
+static struct list_head instance_list = {&instance_list, &instance_list};
+static simple_mtx_t instance_lock = SIMPLE_MTX_INITIALIZER;
 
 extern unsigned lp_native_vector_width;
 
@@ -119,7 +128,7 @@ static const struct vk_instance_extension_table lvp_instance_extensions_supporte
 #ifdef VK_USE_PLATFORM_METAL_EXT
    .EXT_metal_surface                        = true,
 #endif
-#ifndef VK_USE_PLATFORM_WIN32_KHR
+#if defined(LVP_USE_WSI_PLATFORM) && !defined(VK_USE_PLATFORM_WIN32_KHR)
    .EXT_headless_surface                     = true,
 #endif
 };
@@ -233,6 +242,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_calibrated_timestamps             = true,
    .EXT_color_write_enable                = true,
    .EXT_conditional_rendering             = true,
+   .EXT_cooperative_matrix_maintenance1   = true,
    .EXT_debug_marker                      = true,
    .EXT_depth_bias_control                = true,
    .EXT_depth_clip_enable                 = true,
@@ -266,7 +276,9 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
 #endif
    .EXT_mesh_shader                       = true,
    .EXT_multisampled_render_to_single_sampled = true,
-   .EXT_multisampled_render_to_swapchain = true,
+#ifdef LVP_USE_WSI_PLATFORM
+   .EXT_multisampled_render_to_swapchain  = true,
+#endif
    .EXT_multi_draw                        = true,
    .EXT_mutable_descriptor_type           = true,
    .EXT_nested_command_buffer             = true,
@@ -319,7 +331,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_robustness2                       = true,
    .EXT_zero_initialize_device_memory     = true,
    .AMDX_shader_enqueue                   = true,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    .ANDROID_native_buffer                 = true,
 #endif
    .GOOGLE_decorate_string                = true,
@@ -449,8 +461,8 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .alphaToOne                               = true,
       .multiViewport                            = true,
       .samplerAnisotropy                        = true,
-      .textureCompressionETC2                   = false,
-      .textureCompressionASTC_LDR               = false,
+      .textureCompressionETC2                   = true,
+      .textureCompressionASTC_LDR               = true,
       .textureCompressionBC                     = true,
       .occlusionQueryPrecise                    = true,
       .pipelineStatisticsQuery                  = true,
@@ -624,8 +636,10 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_EXT_multisampled_render_to_single_sampled */
       .multisampledRenderToSingleSampled = true,
 
+#ifdef LVP_USE_WSI_PLATFORM
       /* VK_EXT_multisampled_render_to_swapchain */
       .multisampledRenderToSwapchain = true,
+#endif
 
       /* VK_EXT_mutable_descriptor_type */
       .mutableDescriptorType = true,
@@ -909,10 +923,16 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .cooperativeMatrix = has_cooperative_matrix(),
       .cooperativeMatrixRobustBufferAccess = has_cooperative_matrix(),
 
-      .cooperativeMatrixFlexibleDimensions = true,
-      .cooperativeMatrixConversions = true,
+      .cooperativeMatrixProperties2 = true,
       .cooperativeMatrixReductions = true,
+      .cooperativeMatrixConversions = true,
       .cooperativeMatrixPerElementOperations = true,
+      .cooperativeMatrixGetCoordinate = true,
+
+      .cooperativeMatrixFlexibleDimensions = true,
+      .cooperativeMatrixConversionsNV = true,
+      .cooperativeMatrixReductionsNV = true,
+      .cooperativeMatrixPerElementOperationsNV = true,
       .cooperativeMatrixTensorAddressing = true,
       .cooperativeMatrixBlockLoads = true,
 
@@ -945,6 +965,8 @@ static VkImageLayout lvp_host_copy_image_layouts[] = {
    VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR,
    VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
    VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+   VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,
+   VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
 };
 
 static void
@@ -1150,8 +1172,8 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
 
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
-      .independentResolveNone = false,
-      .independentResolve = false,
+      .independentResolveNone = true,
+      .independentResolve = true,
 
       .filterMinmaxImageComponentMapping = true,
       .filterMinmaxSingleComponentFormats = true,
@@ -1503,6 +1525,8 @@ lvp_physical_device_init(struct lvp_physical_device *device,
    device->pscreen = pipe_loader_create_screen_vk(device->pld, true, false);
    if (!device->pscreen)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+   device->drv_pscreen = device->pscreen->get_driver_pipe_screen ?
+      device->pscreen->get_driver_pipe_screen(device->pscreen) : device->pscreen;
    for (unsigned i = 0; i < ARRAY_SIZE(device->drv_options); i++)
       device->drv_options[i] = device->pscreen->nir_options[MIN2(i, MESA_SHADER_COMPUTE)];
 
@@ -1517,25 +1541,14 @@ lvp_physical_device_init(struct lvp_physical_device *device,
 #if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
    int dmabuf_bits = DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
    int supported_dmabuf_bits = device->pscreen->caps.dmabuf;
-   const bool dmabuf_import_export = (supported_dmabuf_bits & dmabuf_bits) == dmabuf_bits;
-   const char *engine_name = instance->vk.app_info.engine_name;
-   /* if import or export is supported then EXT_external_memory_dma_buf is supported
-    *
-    * For zink, advertise the extension only when both import and export are
-    * supported since zink has assumed both for dmabuf support.
-    */
-   if (engine_name && strcmp(engine_name, "mesa zink") == 0)
-      device->vk.supported_extensions.EXT_external_memory_dma_buf = dmabuf_import_export;
-   else
-      device->vk.supported_extensions.EXT_external_memory_dma_buf = !!supported_dmabuf_bits;
-   if (dmabuf_import_export)
+   /* if import or export is supported then EXT_external_memory_dma_buf is supported */
+   if (supported_dmabuf_bits)
+      device->vk.supported_extensions.EXT_external_memory_dma_buf = true;
+   if ((supported_dmabuf_bits & dmabuf_bits) == dmabuf_bits)
       device->vk.supported_extensions.EXT_image_drm_format_modifier = true;
    if (supported_dmabuf_bits & DRM_PRIME_CAP_IMPORT)
       device->vk.supported_extensions.ANDROID_external_memory_android_hardware_buffer = true;
 #endif
-
-   /* SNORM blending on llvmpipe fails CTS - disable by default */
-   device->snorm_blend = debug_get_bool_option("LVP_SNORM_BLEND", false);
 
    lvp_get_features(device, &device->vk.supported_features);
    lvp_get_properties(device, &device->vk.properties);
@@ -1598,6 +1611,10 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateInstance(
    vk_instance_dispatch_table_from_entrypoints(
       &dispatch_table, &wsi_instance_entrypoints, false);
 
+   simple_mtx_lock(&instance_lock);
+   list_addtail(&instance->link, &instance_list);
+   simple_mtx_unlock(&instance_lock);
+
    result = vk_instance_init(&instance->vk,
                              &lvp_instance_extensions_supported,
                              &dispatch_table,
@@ -1642,6 +1659,11 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyInstance(
    driDestroyOptionInfo(&instance->drirc.available_options);
 
    vk_instance_finish(&instance->vk);
+
+   simple_mtx_lock(&instance_lock);
+   list_del(&instance->link);
+   simple_mtx_unlock(&instance_lock);
+
    vk_free(&instance->vk.alloc, instance);
 }
 
@@ -1751,7 +1773,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceQueueFamilyProperties2(
          VK_QUEUE_COMPUTE_BIT |
          VK_QUEUE_TRANSFER_BIT |
          (DETECT_OS_LINUX ? VK_QUEUE_SPARSE_BINDING_BIT : 0),
-         .queueCount = 1,
+         .queueCount = LVP_NUM_QUEUES,
          .timestampValidBits = 64,
          .minImageTransferGranularity = (VkExtent3D) { 1, 1, 1 },
       };
@@ -1791,12 +1813,26 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceMemoryProperties2(
                                          &pMemoryProperties->memoryProperties);
    VkPhysicalDeviceMemoryBudgetPropertiesEXT *props = vk_find_struct(pMemoryProperties, PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT);
    if (props) {
-      props->heapBudget[0] = pMemoryProperties->memoryProperties.memoryHeaps[0].size;
-      if (os_get_available_system_memory(&props->heapUsage[0])) {
-         props->heapUsage[0] = props->heapBudget[0] - props->heapUsage[0];
-      } else {
-         props->heapUsage[0] = 0;
+      if (!os_get_available_system_memory(&props->heapBudget[0])) {
+         props->heapBudget[0] = 0;
       }
+#ifdef HAVE_MALLINFO2
+      struct mallinfo2 info = mallinfo2();
+      props->heapUsage[0] = info.uordblks;
+#else
+      props->heapUsage[0] = pMemoryProperties->memoryProperties.memoryHeaps[0].size - props->heapBudget[0];
+#endif
+
+      simple_mtx_lock(&instance_lock);
+      struct lvp_instance *instance;
+      LIST_FOR_EACH_ENTRY(instance, &instance_list, link) {
+         struct lvp_physical_device *device;
+         LIST_FOR_EACH_ENTRY(device, &instance->vk.physical_devices.list, vk.link) {
+            uint64_t mem_file_size = llvmpipe_get_mem_file_size(device->drv_pscreen);
+            props->heapUsage[0] += mem_file_size;
+         }
+      }
+      simple_mtx_unlock(&instance_lock);
       memset(&props->heapBudget[1], 0, sizeof(props->heapBudget[0]) * (VK_MAX_MEMORY_HEAPS - 1));
       memset(&props->heapUsage[1], 0, sizeof(props->heapUsage[0]) * (VK_MAX_MEMORY_HEAPS - 1));
    }
@@ -1840,17 +1876,6 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(
    return lvp_GetInstanceProcAddr(instance, pName);
 }
 
-static void
-destroy_pipelines(struct lvp_queue *queue)
-{
-   struct lvp_device *device = lvp_queue_device(queue);
-   simple_mtx_lock(&queue->lock);
-   while (util_dynarray_contains(&queue->pipeline_destroys, struct lvp_pipeline*)) {
-      lvp_pipeline_destroy(device, util_dynarray_pop(&queue->pipeline_destroys, struct lvp_pipeline*), true);
-   }
-   simple_mtx_unlock(&queue->lock);
-}
-
 static VkResult
 lvp_queue_submit(struct vk_queue *vk_queue,
                  struct vk_queue_submit *submit)
@@ -1863,8 +1888,6 @@ lvp_queue_submit(struct vk_queue *vk_queue,
                                        VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
    if (result != VK_SUCCESS)
       return result;
-
-   simple_mtx_lock(&queue->lock);
 
    for (uint32_t i = 0; i < submit->buffer_bind_count; i++) {
       VkSparseBufferMemoryBindInfo *bind = &submit->buffer_binds[i];
@@ -1891,8 +1914,6 @@ lvp_queue_submit(struct vk_queue *vk_queue,
       lvp_execute_cmds(device, queue, cmd_buffer);
    }
 
-   simple_mtx_unlock(&queue->lock);
-
    if (submit->command_buffer_count > 0)
       queue->ctx->flush(queue->ctx, &queue->last_fence, 0);
 
@@ -1901,7 +1922,7 @@ lvp_queue_submit(struct vk_queue *vk_queue,
          vk_sync_as_lvp_pipe_sync(submit->signals[i].sync);
       lvp_pipe_sync_signal_with_fence(device, sync, queue->last_fence);
    }
-   destroy_pipelines(queue);
+   lvp_destroy_shaders(device, queue->ctx);
 
    return VK_SUCCESS;
 }
@@ -1928,9 +1949,6 @@ lvp_queue_init(struct lvp_device *device, struct lvp_queue *queue,
 
    queue->vk.driver_submit = lvp_queue_submit;
 
-   simple_mtx_init(&queue->lock, mtx_plain);
-   queue->pipeline_destroys = UTIL_DYNARRAY_INIT;
-
    return VK_SUCCESS;
 }
 
@@ -1940,9 +1958,10 @@ lvp_queue_finish(struct lvp_queue *queue)
    vk_queue_finish(&queue->vk);
    cso_unbind_context(queue->cso);
 
-   destroy_pipelines(queue);
-   simple_mtx_destroy(&queue->lock);
-   util_dynarray_fini(&queue->pipeline_destroys);
+   lvp_destroy_shaders(lvp_queue_device(queue), queue->ctx);
+
+   if (queue->last_fence)
+      queue->ctx->screen->fence_reference(queue->ctx->screen, &queue->last_fence, NULL);
 
    u_upload_destroy(queue->uploader);
    cso_destroy_context(queue->cso);
@@ -1963,12 +1982,13 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
 
    size_t state_size = lvp_get_rendering_state_size();
    device = vk_zalloc2(&physical_device->vk.instance->alloc, pAllocator,
-                       sizeof(*device) + state_size, 8,
+                       sizeof(*device) + state_size * LVP_NUM_QUEUES, 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!device)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   device->queue.state = device + 1;
+   for (unsigned i = 0; i < LVP_NUM_QUEUES; i++)
+      device->queue[i].state = (char *)(device + 1) + state_size * i;
    device->poison_mem = debug_get_bool_option("LVP_POISON_MEMORY", false);
    device->print_cmds = debug_get_bool_option("LVP_CMD_DEBUG", false);
 
@@ -1982,25 +2002,32 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
                                     &physical_device->vk,
                                     &dispatch_table, pCreateInfo,
                                     pAllocator);
-   if (result != VK_SUCCESS) {
-      vk_free(&device->vk.alloc, device);
-      return result;
-   }
+   if (result != VK_SUCCESS)
+      goto fail_alloc;
 
    vk_device_enable_threaded_submit(&device->vk);
    device->vk.command_buffer_ops = &lvp_cmd_buffer_ops;
 
    device->pscreen = physical_device->pscreen;
+   device->drv_pscreen = physical_device->drv_pscreen;
+
+   device->shader_destroys = UTIL_DYNARRAY_INIT;
+   simple_mtx_init(&device->shader_destroys_lock, mtx_plain);
 
    assert(pCreateInfo->queueCreateInfoCount <= LVP_NUM_QUEUES);
    if (pCreateInfo->queueCreateInfoCount) {
       assert(pCreateInfo->pQueueCreateInfos[0].queueFamilyIndex == 0);
-      assert(pCreateInfo->pQueueCreateInfos[0].queueCount == 1);
-      result = lvp_queue_init(device, &device->queue, pCreateInfo->pQueueCreateInfos, 0);
+      assert(pCreateInfo->pQueueCreateInfos[0].queueCount <= LVP_NUM_QUEUES);
+      device->queue_count = pCreateInfo->pQueueCreateInfos[0].queueCount;
+      for (uint32_t i = 0; i < device->queue_count; i++) {
+         result = lvp_queue_init(device, &device->queue[i], pCreateInfo->pQueueCreateInfos, i);
+         if (result != VK_SUCCESS)
+            break;
+      }
    } else {
       /* VK_KHR_maintenance9 allows zero queues devices used to compile shaders only.
-      *  Since we only ever create a single queue, and it has no hardward backing it,
-      *  we can just create a dummy queue on the behalf of the user.
+      *  Since the queue has no hardware backing it, we can just create a dummy
+      *  queue on the behalf of the user.
       */
       const float fake_priority = 1.0f;
       const VkDeviceQueueCreateInfo dummy_create_info = {
@@ -2011,32 +2038,31 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
          .queueCount = 1,
          .pQueuePriorities = &fake_priority
       };
-      result = lvp_queue_init(device, &device->queue, &dummy_create_info, 0);
+      device->queue_count = 1;
+      result = lvp_queue_init(device, &device->queue[0], &dummy_create_info, 0);
    }
 
-   if (result != VK_SUCCESS) {
-      vk_free(&device->vk.alloc, device);
-      return result;
-   }
+   if (result != VK_SUCCESS)
+      goto fail_queue;
 
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, physical_device->drv_options[MESA_SHADER_FRAGMENT], "dummy_frag");
    struct pipe_shader_state shstate = {0};
    shstate.type = PIPE_SHADER_IR_NIR;
    shstate.ir.nir = b.shader;
-   device->noop_fs = device->queue.ctx->create_fs_state(device->queue.ctx, &shstate);
+   device->noop_fs = device->queue[0].ctx->create_fs_state(device->queue[0].ctx, &shstate);
    _mesa_hash_table_init(&device->bda, NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);
    simple_mtx_init(&device->bda_lock, mtx_plain);
 
    uint32_t zero = 0;
-   device->zero_buffer = pipe_buffer_create_with_data(device->queue.ctx, 0, PIPE_USAGE_IMMUTABLE, sizeof(uint32_t), &zero);
+   device->zero_buffer = pipe_buffer_create_with_data(device->queue[0].ctx, 0, PIPE_USAGE_IMMUTABLE, sizeof(uint32_t), &zero);
 
    struct pipe_sampler_state null_sampler = {
       .seamless_cube_map = 1,
       .max_lod = 0.25,
    };
-   device->null_texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx,
+   device->null_texture_handle = llvmpipe_create_texture_handle(device->drv_pscreen,
       &(struct pipe_sampler_view){ 0 }, &null_sampler);
-   device->null_image_handle = (void *)(uintptr_t)device->queue.ctx->create_image_handle(device->queue.ctx,
+   device->null_image_handle = llvmpipe_create_image_handle(device->drv_pscreen,
       &(struct pipe_image_view){ 0 });
 
    device->bda_texture_handles = UTIL_DYNARRAY_INIT;
@@ -2045,10 +2071,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    device->group_handle_alloc = 1;
 
    result = vk_meta_device_init(&device->vk, &device->meta);
-   if (result != VK_SUCCESS) {
-      lvp_DestroyDevice(lvp_device_to_handle(device), pAllocator);
-      return result;
-   }
+   if (result != VK_SUCCESS)
+      goto fail_meta;
 
    lvp_device_init_accel_struct_state(device);
 
@@ -2056,6 +2080,25 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
 
    return VK_SUCCESS;
 
+fail_meta:
+   llvmpipe_delete_image_handle(device->drv_pscreen, device->null_image_handle);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, device->null_texture_handle);
+   pipe_resource_reference(&device->zero_buffer, NULL);
+   simple_mtx_destroy(&device->bda_lock);
+   _mesa_hash_table_fini(&device->bda, NULL);
+   device->queue[0].ctx->delete_fs_state(device->queue[0].ctx, device->noop_fs);
+fail_queue:
+   vk_foreach_queue_safe(iter, &device->vk) {
+      struct lvp_queue *queue = container_of(iter, struct lvp_queue, vk);
+      lvp_queue_finish(queue);
+   }
+   util_dynarray_fini(&device->shader_destroys);
+   simple_mtx_destroy(&device->shader_destroys_lock);
+   vk_device_finish(&device->vk);
+fail_alloc:
+   vk_free(&device->vk.alloc, device);
+
+   return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL lvp_DestroyDevice(
@@ -2064,32 +2107,31 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyDevice(
 {
    VK_FROM_HANDLE(lvp_device, device, _device);
 
-   lvp_device_finish_accel_struct_state(device);
-
    vk_meta_device_finish(&device->vk, &device->meta);
 
    util_dynarray_foreach(&device->bda_texture_handles, struct lp_texture_handle *, handle)
-      device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)*handle);
+      llvmpipe_delete_texture_handle(device->drv_pscreen, *handle);
 
    util_dynarray_fini(&device->bda_texture_handles);
 
    util_dynarray_foreach(&device->bda_image_handles, struct lp_texture_handle *, handle)
-      device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)*handle);
+      llvmpipe_delete_image_handle(device->drv_pscreen, *handle);
 
    util_dynarray_fini(&device->bda_image_handles);
 
-   device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)device->null_texture_handle);
-   device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)device->null_image_handle);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, device->null_texture_handle);
+   llvmpipe_delete_image_handle(device->drv_pscreen, device->null_image_handle);
 
-   device->queue.ctx->delete_fs_state(device->queue.ctx, device->noop_fs);
+   device->queue[0].ctx->delete_fs_state(device->queue[0].ctx, device->noop_fs);
 
-   if (device->queue.last_fence)
-      device->pscreen->fence_reference(device->pscreen, &device->queue.last_fence, NULL);
    _mesa_hash_table_fini(&device->bda, NULL);
    simple_mtx_destroy(&device->bda_lock);
    pipe_resource_reference(&device->zero_buffer, NULL);
 
-   lvp_queue_finish(&device->queue);
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      lvp_queue_finish(&device->queue[i]);
+   util_dynarray_fini(&device->shader_destroys);
+   simple_mtx_destroy(&device->shader_destroys_lock);
    vk_device_finish(&device->vk);
    vk_free(&device->vk.alloc, device);
 }
@@ -2175,8 +2217,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
    int priority = 0;
 
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
          import_info = (VkImportMemoryFdInfoKHR*)ext;
          assert_memhandle_type(import_info->handleType);
@@ -2187,7 +2229,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          break;
       }
       case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
-         mem_flags = (void*)ext;
+         mem_flags = ext;
          break;
       default:
          break;
@@ -2217,7 +2259,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
       mem->map = mem->vk.host_ptr;
       mem->memory_type = LVP_DEVICE_MEMORY_TYPE_USER_PTR;
    }
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    else if (mem->vk.ahardware_buffer) {
       error = lvp_import_ahb_memory(device, pAllocateInfo, mem);
       if (error != VK_SUCCESS)
@@ -2455,8 +2497,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetBufferMemoryRequirements2(
 {
    lvp_GetBufferMemoryRequirements(device, pInfo->buffer,
                                    &pMemoryRequirements->memoryRequirements);
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2492,8 +2534,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetImageMemoryRequirements2(
    lvp_GetImageMemoryRequirements(device, pInfo->image,
                                   &pMemoryRequirements->memoryRequirements);
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2569,7 +2611,7 @@ lvp_image_bind(struct lvp_device *device,
    VkResult result;
 
    if (!mem) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       return lvp_bind_anb_memory(device, bind_info);
 #else
       const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
@@ -2758,11 +2800,9 @@ lvp_sampler_init(struct lvp_device *device, struct lp_sampler_descriptor *desc, 
    state.reduction_mode = (enum pipe_tex_reduction_mode)vk_state->reduction_mode;
    memcpy(&state.border_color, &vk_state->border_color_value, sizeof(vk_state->border_color_value));
 
-   simple_mtx_lock(&device->queue.lock);
-   struct lp_texture_handle *texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx, NULL, &state);
+   struct lp_texture_handle *texture_handle = llvmpipe_create_texture_handle(device->drv_pscreen, NULL, &state);
    desc->sampler_index = texture_handle->sampler_index;
-   device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)texture_handle);
-   simple_mtx_unlock(&device->queue.lock);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, texture_handle);
 
    lp_jit_sampler_from_pipe(&desc->jit, &state);
 }
@@ -3030,6 +3070,26 @@ fill_matrix_prop_khr(struct __vk_outarray *base, struct matrix_prop *prop)
 }
 
 static void
+fill_matrix_prop_ext(struct __vk_outarray *base, struct matrix_prop *prop)
+{
+   vk_outarray(VkCooperativeMatrixProperties2EXT) *out = (void *)base;
+
+   vk_outarray_append_typed(VkCooperativeMatrixProperties2EXT, out, p)
+   {
+      *p = (struct VkCooperativeMatrixProperties2EXT){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_2_EXT,
+         .MGranularity = 8,
+         .NGranularity = 8,
+         .KGranularity = 8,
+         .AType = prop->a_type,
+         .BType = prop->b_type,
+         .CType = prop->c_type,
+         .ResultType = prop->r_type
+      };
+   }
+}
+
+static void
 fill_flexible_matrix_prop_nv(struct __vk_outarray *base, struct matrix_prop *prop)
 {
    vk_outarray(VkCooperativeMatrixFlexibleDimensionsPropertiesNV) *out = (void *)base;
@@ -3093,5 +3153,19 @@ lvp_GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV(
 {
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixFlexibleDimensionsPropertiesNV, out, pProperties, pPropertyCount);
    fill_array_sizes_structs(&out.base, fill_flexible_matrix_prop_nv);
+   return vk_outarray_status(&out);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+lvp_GetPhysicalDeviceCooperativeMatrixProperties2EXT(VkPhysicalDevice physicalDevice,
+                                                     const VkPhysicalDeviceCooperativeMatrixInfo2EXT *info,
+                                                     uint32_t *pPropertyCount,
+                                                     VkCooperativeMatrixProperties2EXT *pProperties)
+{
+   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixProperties2EXT, out, pProperties, pPropertyCount);
+
+   if (info->scope == VK_SCOPE_SUBGROUP_KHR &&
+       !(info->flags & VK_COOPERATIVE_MATRIX_SATURATING_ACCUMULATION_BIT_EXT))
+      fill_array_sizes_structs(&out.base, fill_matrix_prop_ext);
    return vk_outarray_status(&out);
 }

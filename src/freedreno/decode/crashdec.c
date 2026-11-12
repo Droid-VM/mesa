@@ -19,6 +19,8 @@
  */
 
 
+#include "util/log.h"
+
 #include "crashdec.h"
 #include "cffdec.h"
 
@@ -235,9 +237,16 @@ parseline_nowhitespace(const char *line, const char *fmt, ...)
 static uint32_t
 statetype_id(const char *name)
 {
-   if (!is_a7xx())
+   if (!name)
       return 0;
-   return enumval("a7xx_statetype_id", name);
+
+   if (is_a7xx())
+      return enumval("a7xx_statetype_id", name);
+
+   if (is_a6xx())
+      return enumval("a6xx_shader_id", name);
+
+   return 0;
 }
 
 static uint32_t
@@ -251,17 +260,32 @@ pipe_id(const char *name)
 static uint32_t
 debugbus_id(const char *name)
 {
-   if (!is_a7xx())
+   if (!name)
       return 0;
-   return enumval("a7xx_debugbus_id", name);
+
+   if (is_a7xx())
+      return enumval("a7xx_debugbus_id", name);
+
+   if (is_a6xx())
+      return enumval("a6xx_debugbus_id", name);
+
+   return 0;
 }
 
 static uint32_t
 cluster_id(const char *name)
 {
-   if (!is_a7xx() || !name)
+   if (!name)
       return 0;
-   return enumval("a7xx_cluster", name);
+
+   if (is_a7xx())
+      return enumval("a7xx_cluster", name);
+
+   if (is_a6xx()) {
+      return enumval("a6xx_cluster", name);
+   }
+
+   return 0;
 }
 
 /*
@@ -429,26 +453,43 @@ valid_header(uint32_t pkt)
  * looks for "IB" type packets and logs the target cmdstream buffers.
  */
 static void
-parse_ibs(const uint32_t *dwords, uint32_t sizedwords)
+parse_ibs(const uint32_t *dwords, uint32_t sizedwords, int level)
 {
    int dwords_left = sizedwords;
    uint32_t count = 0; /* dword count including packet header */
    uint32_t val;
+
+   if (level > 2)
+      return;
 
    while (dwords_left > 0) {
       if (pkt_is_regwrite(dwords[0], &val, &count)) {
          /* ignore */
       } else if (pkt_is_opcode(dwords[0], &val, &count)) {
          const char *name = pktname(val);
-         if (!strcmp(name, "CP_INDIRECT_BUFFER")) {
+         if (name && !strcmp(name, "CP_INDIRECT_BUFFER")) {
             uint64_t ibaddr;
             uint32_t ibsize;
 
             parse_cp_indirect(&dwords[1], count - 1, &ibaddr, &ibsize);
 
             /* map gpuaddr back to hostptr: */
-            void *ptr = hostptr(ibaddr);
-            snapshot_ib(ibaddr, ptr, ibsize);
+            uint32_t *ptr = hostptr(ibaddr);
+
+            /* A corrupt ibaddr won't land in anything the kernel
+             * captured, so there is nothing to record:
+             */
+            if (ptr) {
+               /* Clamp to what the kernel actually captured: */
+               uint32_t avail = hostlen(ibaddr) / 4;
+               if (ibsize > avail)
+                  ibsize = avail;
+
+               snapshot_ib(ibaddr, ptr, ibsize);
+
+               if (ibsize)
+                  parse_ibs(ptr, ibsize, level + 1);
+            }
          }
          // TODO CP_SET_DRAW_STATE and others?
       } else if (pkt_is_type2(dwords[0])) {
@@ -464,6 +505,9 @@ parse_ibs(const uint32_t *dwords, uint32_t sizedwords)
             return;
          }
       }
+
+      if (!count)
+         return;
 
       dwords += count;
       dwords_left -= count;
@@ -572,7 +616,7 @@ dump_cmdstream(void)
       handle_prefetch(buf, cmdszdw);
 
       if (snapshot) {
-         parse_ibs(buf, cmdszdw);
+         parse_ibs(buf, cmdszdw, 1);
       } else {
          dump_commands(buf, cmdszdw, 0);
       }
@@ -649,8 +693,13 @@ decode_bos(void)
 
          add_buffer(iova, size, buf);
 
-         if (size <= 0x40000)
+         if (size <= SNAPSHOT_MAX_GPU_OBJECT) {
             snapshot_gpu_object(iova, size, buf);
+         } else {
+            mesa_logw_once("note: BO %016" PRIx64 " (%u bytes) too large for "
+                           "snapshot, not included as a GPU object\n",
+                           iova, size);
+         }
 
          continue;
       }
@@ -687,11 +736,7 @@ decode_gmu_registers(void)
       uint32_t offset, value;
       parseline(line, "  - { offset: %x, value: %x }", &offset, &value);
 
-      assert(reg_buf.count < ARRAY_SIZE(reg_buf.regs));
-
-      reg_buf.regs[reg_buf.count].offset = offset / 4;
-      reg_buf.regs[reg_buf.count].value = value;
-      reg_buf.count++;
+      reg_buf_push(offset / 4, value);
 
       if (regacc_push(&r, (offset / 4) + gmu_offset, value)) {
          printf("\t%08"PRIx64"\t", r.value);
@@ -711,11 +756,7 @@ decode_registers(void)
       uint32_t offset, value;
       parseline(line, "  - { offset: %x, value: %x }", &offset, &value);
 
-      assert(reg_buf.count < ARRAY_SIZE(reg_buf.regs));
-
-      reg_buf.regs[reg_buf.count].offset = offset / 4;
-      reg_buf.regs[reg_buf.count].value = value;
-      reg_buf.count++;
+      reg_buf_push(offset / 4, value);
 
       reg_set(offset / 4, value);
       if (regacc_push(&r, offset / 4, value)) {
@@ -738,6 +779,27 @@ decode_clusters(void)
    uint32_t location = ~0;
 
    foreach_line_in_section (line) {
+      if (startswith_nowhitespace(line, "- {")) {
+         uint32_t offset, value;
+         parseline_nowhitespace(line, "- { offset: %x, value: %x }", &offset, &value);
+
+         reg_buf_push(offset / 4, value);
+
+         if (regacc_push(&r, offset / 4, value)) {
+            printf("\t%08"PRIx64, r.value);
+            dump_register_val(&r, 0);
+         }
+
+         continue;
+      }
+
+      /* Each cluster/context/pipe/location combination is a separate bank
+       * of registers and must become its own snapshot section, so flush
+       * the current bank before parsing the next header.
+       */
+      snapshot_cluster_regs(pipe_id(pipe_name), cluster_id(cluster_name),
+                            context, location);
+
       if (startswith_nowhitespace(line, "- cluster-name:")) {
          free(cluster_name);
          parseline_nowhitespace(line, "- cluster-name: %ms", &cluster_name);
@@ -747,35 +809,14 @@ decode_clusters(void)
       } else if (startswith_nowhitespace(line, "- location:")) {
          parseline_nowhitespace(line, "- location: %u", &location);
       } else if (startswith_nowhitespace(line, "- pipe:")) {
-         snapshot_cluster_regs(pipe_id(pipe_name), cluster_id(cluster_name),
-                               context, location);
-
          free(pipe_name);
          parseline_nowhitespace(line, "- pipe: %ms", &pipe_name);
-      } else {
-         uint32_t offset, value;
-         parseline_nowhitespace(line, "- { offset: %x, value: %x }", &offset, &value);
-
-         assert(reg_buf.count < ARRAY_SIZE(reg_buf.regs));
-
-         reg_buf.regs[reg_buf.count].offset = offset / 4;
-         reg_buf.regs[reg_buf.count].value = value;
-         reg_buf.count++;
-
-         if (regacc_push(&r, offset / 4, value)) {
-            printf("\t%08"PRIx64, r.value);
-            dump_register_val(&r, 0);
-         }
-
-         continue;
       }
       printf("%s", line);
    }
 
-   if (reg_buf.count) {
-      snapshot_cluster_regs(pipe_id(pipe_name), cluster_id(cluster_name),
-                            context, location);
-   }
+   snapshot_cluster_regs(pipe_id(pipe_name), cluster_id(cluster_name),
+                         context, location);
 
    free(cluster_name);
    free(pipe_name);
@@ -959,9 +1000,9 @@ decode_indexed_registers(void)
             dump_cp_ucode_dbg(buf);
 
          if (!strcmp(name, "CP_MEM_POOL_DBG"))
-            dump_cp_mem_pool(buf, false);
+            dump_cp_mem_pool(buf, sizedwords, false);
          if (!strcmp(name, "CP_BV_MEM_POOL_DBG"))
-            dump_cp_mem_pool(buf, true);
+            dump_cp_mem_pool(buf, sizedwords, true);
 
          if (dump)
             dump_hex_ascii(buf, 4 * sizedwords, 1);
@@ -1009,6 +1050,8 @@ decode_shader_blocks(void)
          parseline_nowhitespace(line, "- location: %d", &location);
       } else if (startswith_nowhitespace(line, "- sp:")) {
          parseline_nowhitespace(line, "- sp: %d", &sp);
+      } else if (startswith_nowhitespace(line, "- bank:")) {
+         parseline_nowhitespace(line, "- bank: %d", &sp);
       } else if (startswith_nowhitespace(line, "- usptp:")) {
          parseline_nowhitespace(line, "- usptp: %d", &usptp);
       } else if (startswith_nowhitespace(line, "size:")) {
@@ -1118,10 +1161,17 @@ decode(void)
          if ((major < 6) || ((major == 6) && (minor < 19)))
             gmu_offset = 0x1a800;
       } else if (startswith(line, "time:")) {
-         double time;
+         double time = 0;
 
-         parseline(line, "time: %d", &time);
+         parseline(line, "time: %lf", &time);
          snapshot_linux.seconds = (uint32_t)time;
+      } else if (startswith(line, "comm:")) {
+         char *comm = NULL;
+
+         parseline(line, "comm: %ms", &comm);
+         strncpy((char *)snapshot_linux.comm, comm,
+                 sizeof(snapshot_linux.comm) - 1);
+         free(comm);
       } else if (startswith(line, "revision:")) {
          if (strstr(line, ".")) {
             unsigned core, major, minor, patchid;

@@ -728,26 +728,31 @@ bi_tls_ptr(bool hi)
 bi_instr *
 bi_load_tl(bi_builder *b, unsigned bits, bi_index dst, unsigned offset)
 {
+   bi_instr *I;
    if (b->shader->arch >= 9) {
       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
-      return bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
-                        BI_SEG_TL, offset);
+      I = bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
+                     BI_SEG_TL, offset);
    } else {
-      return bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL,
-                        0);
+      I = bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
    }
+   I->mem_access = VA_MEMORY_ACCESS_FORCE;
+
+   return I;
 }
 
 void
 bi_store_tl(bi_builder *b, unsigned bits, bi_index src, unsigned offset)
 {
+   bi_instr *I;
    if (b->shader->arch >= 9) {
       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
-      bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
-               offset);
+      I = bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
+                   offset);
    } else {
-      bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
+      I = bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
    }
+   I->mem_access = VA_MEMORY_ACCESS_FORCE;
 }
 
 static void
@@ -815,7 +820,6 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
             b.cursor = bi_after_instr(I);
             bi_store_tl(&b, count * 32, src, offset + (extra * 4));
 
-            ctx->spills++;
             /* Don't disable filling if spill_point is before index. */
             fill = found_spill_point;
          }
@@ -829,7 +833,6 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
 
             bi_instr *ld = bi_load_tl(&b, bits, tmp, offset);
             ld->no_spill = true;
-            ctx->fills++;
          }
       }
    }
@@ -1177,18 +1180,9 @@ bi_out_of_ssa(bi_context *ctx)
 }
 
 static bool
-op_is_load_store(enum bi_opcode op)
+op_is_load(enum bi_opcode op)
 {
    switch (op) {
-   case BI_OPCODE_STORE_I8:
-   case BI_OPCODE_STORE_I16:
-   case BI_OPCODE_STORE_I24:
-   case BI_OPCODE_STORE_I32:
-   case BI_OPCODE_STORE_I48:
-   case BI_OPCODE_STORE_I64:
-   case BI_OPCODE_STORE_I96:
-   case BI_OPCODE_STORE_I128:
-      return true;
    case BI_OPCODE_LOAD_I8:
    case BI_OPCODE_LOAD_I16:
    case BI_OPCODE_LOAD_I24:
@@ -1203,7 +1197,25 @@ op_is_load_store(enum bi_opcode op)
    }
 }
 
-static uint64_t
+static bool
+op_is_store(enum bi_opcode op)
+{
+   switch (op) {
+   case BI_OPCODE_STORE_I8:
+   case BI_OPCODE_STORE_I16:
+   case BI_OPCODE_STORE_I24:
+   case BI_OPCODE_STORE_I32:
+   case BI_OPCODE_STORE_I48:
+   case BI_OPCODE_STORE_I64:
+   case BI_OPCODE_STORE_I96:
+   case BI_OPCODE_STORE_I128:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static void
 compute_spill_cost(bi_context *ctx)
 {
    void *mctx = ralloc_context(NULL);
@@ -1223,22 +1235,31 @@ compute_spill_cost(bi_context *ctx)
       bi_find_loop_blocks(ctx, block, loop_block);
 
       for (uint32_t b = 0; b < ctx->num_blocks; ++b) {
-         if (BITSET_SET(loop_block, b))
+         if (BITSET_TEST(loop_block, b))
             block_depth[b] += 1;
       }
    }
 
+   unsigned spills = 0, fills = 0;
    uint64_t cost = 0;
    bi_foreach_block(ctx, block) {
+      uint64_t per_spill_cost = 10 * (block_depth[block->index] + 1);
       bi_foreach_instr_in_block(block, I) {
-         if (op_is_load_store(I->op) && I->seg == BI_SEG_TL)
-            cost += 10 * (block_depth[block->index] + 1);
+         if (op_is_load(I->op) && I->seg == BI_SEG_TL) {
+            fills++;
+            cost += per_spill_cost;
+         } else if (op_is_store(I->op) && I->seg == BI_SEG_TL) {
+            spills++;
+            cost += per_spill_cost;
+         }
       }
    }
 
-   ralloc_free(mctx);
+   ctx->spills = spills;
+   ctx->fills = fills;
+   ctx->spill_cost = cost;
 
-   return cost;
+   ralloc_free(mctx);
 }
 
 void
@@ -1338,7 +1359,7 @@ bi_register_allocate(bi_context *ctx)
       }
    }
 
-   ctx->spill_cost = compute_spill_cost(ctx);
+   compute_spill_cost(ctx);
 
    assert(success);
    assert(l != NULL);

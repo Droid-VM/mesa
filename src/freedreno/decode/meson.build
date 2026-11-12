@@ -234,6 +234,7 @@ if with_tests
     ['dEQP-VK.draw.indirect_draw.indexed.indirect_draw_count.triangle_list', ['--frame', '0', '--once']],
     ['dEQP-VK.ycbcr.plane_view.image_view.g8_b8_r8_3plane_420_unorm_plane_0-a840', ['--draw', '5']],
     ['dEQP-VK.ycbcr.plane_view.image_view.g8_b8_r8_3plane_420_unorm_plane_0_fragment-a750', ['--draw', '5']],
+    ['dEQP-VK.ray_query.multiple_ray_queries.compute_shader-a840', ['--draw', '10']],
     # Test a lua script to ensure we don't break scripting API
     ['shadow', ['--script', files('scripts/parse-submits.lua')]],
   ]
@@ -300,6 +301,7 @@ if with_tests
   crashdec_tests = [
     ['crash', ['-sf']],
     ['crash_prefetch', ['-sf']],
+    ['crash_mempool', ['-sf']],
   ]
   foreach crashdec_test: crashdec_tests
     name = crashdec_test[0]

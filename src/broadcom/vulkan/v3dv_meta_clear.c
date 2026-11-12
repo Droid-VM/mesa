@@ -140,7 +140,7 @@ clear_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
 
       v3dv_job_start_frame(job, width, height, max_layer, false, 1,
                            internal_bpp, 4 * v3d_internal_bpp_words(internal_bpp),
-                           image->vk.samples > VK_SAMPLE_COUNT_1_BIT);
+                           image->vk.samples > VK_SAMPLE_COUNT_1_BIT, NULL);
 
       struct v3dv_meta_framebuffer framebuffer;
       v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
@@ -1040,7 +1040,7 @@ emit_subpass_color_clear_rects(struct v3dv_cmd_buffer *cmd_buffer,
 {
    /* Skip if attachment is unused in the current subpass */
    assert(rt_idx < subpass->color_count);
-   const uint32_t attachment_idx = subpass->color_attachments[rt_idx].attachment;
+   const uint32_t attachment_idx = subpass->color_attachments[rt_idx];
    if (attachment_idx == VK_ATTACHMENT_UNUSED)
       return;
 
@@ -1131,7 +1131,7 @@ emit_subpass_ds_clear_rects(struct v3dv_cmd_buffer *cmd_buffer,
                             const VkClearRect *rects)
 {
    /* Skip if attachment is unused in the current subpass */
-   const uint32_t attachment_idx = subpass->ds_attachment.attachment;
+   const uint32_t attachment_idx = subpass->ds_attachment;
    if (attachment_idx == VK_ATTACHMENT_UNUSED)
       return;
 

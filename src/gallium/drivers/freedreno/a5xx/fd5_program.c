@@ -100,7 +100,6 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
                 struct ir3_shader_linkage *l)
 {
    const struct ir3_stream_output_info *strmout = &v->stream_output;
-   unsigned ncomp[PIPE_MAX_SO_BUFFERS] = {0};
    unsigned prog[align(l->max_loc, 2) / 2];
 
    memset(prog, 0, sizeof(prog));
@@ -109,8 +108,6 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
       const struct ir3_stream_output *out = &strmout->output[i];
       gl_varying_slot slot = out->location;
       unsigned idx;
-
-      ncomp[out->output_buffer] += out->num_components;
 
       /* linkage map sorted by order frag shader wants things, so
        * a bit less ideal here..
@@ -141,18 +138,18 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
    OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 12 + (2 * ARRAY_SIZE(prog)));
    OUT_RING(ring, REG_A5XX_VPC_SO_BUF_CNTL);
    OUT_RING(ring, A5XX_VPC_SO_BUF_CNTL_ENABLE |
-                     COND(ncomp[0] > 0, A5XX_VPC_SO_BUF_CNTL_BUF0) |
-                     COND(ncomp[1] > 0, A5XX_VPC_SO_BUF_CNTL_BUF1) |
-                     COND(ncomp[2] > 0, A5XX_VPC_SO_BUF_CNTL_BUF2) |
-                     COND(ncomp[3] > 0, A5XX_VPC_SO_BUF_CNTL_BUF3));
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(0));
-   OUT_RING(ring, ncomp[0]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(1));
-   OUT_RING(ring, ncomp[1]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(2));
-   OUT_RING(ring, ncomp[2]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(3));
-   OUT_RING(ring, ncomp[3]);
+                     COND(strmout->stride[0] > 0, A5XX_VPC_SO_BUF_CNTL_BUF0) |
+                     COND(strmout->stride[1] > 0, A5XX_VPC_SO_BUF_CNTL_BUF1) |
+                     COND(strmout->stride[2] > 0, A5XX_VPC_SO_BUF_CNTL_BUF2) |
+                     COND(strmout->stride[3] > 0, A5XX_VPC_SO_BUF_CNTL_BUF3));
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(0));
+   OUT_RING(ring, strmout->stride[0]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(1));
+   OUT_RING(ring, strmout->stride[1]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(2));
+   OUT_RING(ring, strmout->stride[2]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(3));
+   OUT_RING(ring, strmout->stride[3]);
    OUT_RING(ring, REG_A5XX_VPC_SO_CNTL);
    OUT_RING(ring, A5XX_VPC_SO_CNTL_ENABLE);
    for (unsigned i = 0; i < ARRAY_SIZE(prog); i++) {
@@ -255,7 +252,7 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    uint32_t ij_regid[IJ_COUNT], vertex_regid, instance_regid, clip0_regid,
       clip1_regid;
    enum a3xx_threadsize fssz;
-   uint8_t psize_loc = ~0;
+   uint8_t psize_loc = ~0, pos_loc = 0;
    int i, j;
 
    setup_stages(emit, s);
@@ -434,6 +431,7 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    ir3_link_stream_out(&l, s[VS].v);
 
    /* a5xx appends pos/psize to end of the linkage map: */
+   pos_loc = l.max_loc;
    if (VALIDREG(pos_regid))
       ir3_link_add(&l, VARYING_SLOT_POS, pos_regid, 0xf, l.max_loc);
 
@@ -540,7 +538,7 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
          A5XX_HLSQ_CONTROL_3_REG_IJ_LINEAR_PIXEL(ij_regid[IJ_LINEAR_PIXEL]) |
          A5XX_HLSQ_CONTROL_3_REG_IJ_PERSP_CENTROID(
             ij_regid[IJ_PERSP_CENTROID]) |
-         A5XX_HLSQ_CONTROL_3_REG_IJ_PERSP_CENTROID(
+         A5XX_HLSQ_CONTROL_3_REG_IJ_LINEAR_CENTROID(
             ij_regid[IJ_LINEAR_CENTROID]));
    OUT_RING(
       ring,
@@ -586,6 +584,8 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
                     A5XX_GRAS_CNTL_COORD_MASK(s[FS].v->fragcoord_compmask) |
                        A5XX_GRAS_CNTL_IJ_LINEAR_PIXEL) |
                COND(s[FS].v->frag_face, A5XX_GRAS_CNTL_IJ_LINEAR_PIXEL) |
+               CONDREG(ij_regid[IJ_PERSP_CENTER_RHW],
+                       A5XX_GRAS_CNTL_IJ_LINEAR_PIXEL) |
                CONDREG(ij_regid[IJ_LINEAR_PIXEL], A5XX_GRAS_CNTL_IJ_LINEAR_PIXEL));
 
    OUT_PKT4(ring, REG_A5XX_RB_RENDER_CONTROL0, 2);
@@ -607,11 +607,17 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
               A5XX_RB_RENDER_CONTROL0_COORD_MASK(s[FS].v->fragcoord_compmask) |
                  A5XX_RB_RENDER_CONTROL0_IJ_LINEAR_PIXEL) |
          COND(s[FS].v->frag_face, A5XX_RB_RENDER_CONTROL0_IJ_LINEAR_PIXEL) |
+         CONDREG(ij_regid[IJ_PERSP_CENTER_RHW],
+                 A5XX_RB_RENDER_CONTROL0_IJ_LINEAR_PIXEL) |
          CONDREG(ij_regid[IJ_LINEAR_PIXEL], A5XX_RB_RENDER_CONTROL0_IJ_LINEAR_PIXEL));
    OUT_RING(ring,
             CONDREG(samp_mask_regid, A5XX_RB_RENDER_CONTROL1_SAMPLEMASK) |
                COND(s[FS].v->frag_face, A5XX_RB_RENDER_CONTROL1_FACENESS) |
-               CONDREG(samp_id_regid, A5XX_RB_RENDER_CONTROL1_SAMPLEID));
+               CONDREG(samp_id_regid, A5XX_RB_RENDER_CONTROL1_SAMPLEID) |
+               CONDREG(ij_regid[IJ_PERSP_CENTER_RHW],
+                       A5XX_RB_RENDER_CONTROL1_CENTERRHW) |
+               COND(s[FS].v->sample_shading,
+                    A5XX_RB_RENDER_CONTROL1_SAMPLEMODE(3)));
 
    OUT_PKT4(ring, REG_A5XX_SP_FS_OUTPUT_REG(0), 8);
    for (i = 0; i < 8; i++) {
@@ -621,7 +627,7 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    }
 
    OUT_PKT4(ring, REG_A5XX_VPC_PACK, 1);
-   OUT_RING(ring, A5XX_VPC_PACK_NUMNONPOSVAR(s[FS].v->total_in) |
+   OUT_RING(ring, A5XX_VPC_PACK_NUMNONPOSVAR(pos_loc) |
                      A5XX_VPC_PACK_PSIZELOC(psize_loc));
 
    if (!emit->binning_pass) {

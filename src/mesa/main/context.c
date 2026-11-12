@@ -80,6 +80,7 @@
 #include "util/u_thread.h"
 
 #include "accum.h"
+#include "apitrace.h"
 #include "arrayobj.h"
 #include "attrib.h"
 #include "bbox.h"
@@ -390,7 +391,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->MaxTextureLodBias = MAX_TEXTURE_LOD_BIAS;
    consts->MaxTextureBufferSize = 65536;
    consts->TextureBufferOffsetAlignment = 1;
-   consts->MaxArrayLockSize = MAX_ARRAY_LOCK_SIZE;
    consts->SubPixelBits = SUB_PIXEL_BITS;
    consts->MinPointSize = MIN_POINT_SIZE;
    consts->MaxPointSize = MAX_POINT_SIZE;
@@ -403,9 +403,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->MaxLineWidthAA = MAX_LINE_WIDTH;
    consts->LineWidthGranularity = (GLfloat) LINE_WIDTH_GRANULARITY;
    consts->MaxClipPlanes = 6;
-   consts->MaxLights = MAX_LIGHTS;
-   consts->MaxShininess = 128.0;
-   consts->MaxSpotExponent = 128.0;
    consts->MaxViewportWidth = 16384;
    consts->MaxViewportHeight = 16384;
    consts->MinMapBufferAlignment = 64;
@@ -434,9 +431,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
 
    for (i = 0; i < MESA_SHADER_MESH_STAGES; i++)
       init_program_limits(consts, i, &consts->Program[i]);
-
-   consts->MaxProgramMatrices = MAX_PROGRAM_MATRICES;
-   consts->MaxProgramMatrixStackDepth = MAX_PROGRAM_MATRIX_STACK_DEPTH;
 
    /* Set the absolute minimum possible GLSL version.  API_OPENGL_CORE can
     * mean an OpenGL 3.0 forward-compatible context, so that implies a minimum
@@ -530,7 +524,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
 
    /* GL_ARB_vertex_attrib_binding */
    consts->MaxVertexAttribRelativeOffset = 2047;
-   consts->MaxVertexAttribBindings = MAX_VERTEX_GENERIC_ATTRIBS;
 
    /* GL_ARB_compute_shader */
    consts->MaxComputeWorkGroupCount[0] = 65535;
@@ -550,12 +543,9 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->ContextReleaseBehavior = GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH;
 
    /** GL_ARB_tessellation_shader */
-   consts->MaxTessGenLevel = MAX_TESS_GEN_LEVEL;
-   consts->MaxPatchVertices = MAX_PATCH_VERTICES;
    consts->Program[MESA_SHADER_TESS_CTRL].MaxTextureImageUnits = MAX_TEXTURE_IMAGE_UNITS;
    consts->Program[MESA_SHADER_TESS_EVAL].MaxTextureImageUnits = MAX_TEXTURE_IMAGE_UNITS;
    consts->MaxTessPatchComponents = MAX_TESS_PATCH_COMPONENTS;
-   consts->MaxTessControlTotalOutputComponents = MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS;
    consts->PrimitiveRestartForPatches = false;
 
    /** GL_ARB_compute_variable_group_size */
@@ -873,6 +863,7 @@ _mesa_free_dispatch_tables(struct gl_dispatch *d)
    free(d->HWSelectModeBeginEnd);
    free(d->Save);
    free(d->ContextLost);
+   free(d->Trace);
 }
 
 void
@@ -915,9 +906,13 @@ _mesa_initialize_dispatch_tables(struct gl_context *ctx)
       _mesa_init_dispatch_save_begin_end(ctx);
    }
 
-   if ((MESA_VERBOSE & VERBOSE_API) &&
+   bool apitrace = _mesa_apitrace_enabled();
+   if (((MESA_VERBOSE & VERBOSE_API) || apitrace) &&
        !_mesa_init_dispatch_trace(ctx))
       return false;
+
+   if (apitrace)
+      _mesa_apitrace_init_dispatch(ctx);
 
    /* This binds the dispatch table to the context, but MakeCurrent will
     * bind it for the user. If glthread is enabled, it will override it.
@@ -1197,117 +1192,6 @@ _mesa_clear_releasebufs(struct gl_context *ctx)
 }
 
 /**
- * Copy attribute groups from one context to another.
- *
- * \param src source context
- * \param dst destination context
- * \param mask bitwise OR of GL_*_BIT flags
- *
- * According to the bits specified in \p mask, copies the corresponding
- * attributes from \p src into \p dst.  For many of the attributes a simple \c
- * memcpy is not enough due to the existence of internal pointers in their data
- * structures.
- */
-void
-_mesa_copy_context( const struct gl_context *src, struct gl_context *dst,
-                    GLuint mask )
-{
-   if (mask & GL_ACCUM_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Accum = src->Accum;
-   }
-   if (mask & GL_COLOR_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Color = src->Color;
-   }
-   if (mask & GL_CURRENT_BIT) {
-      /* OK to memcpy */
-      dst->Current = src->Current;
-   }
-   if (mask & GL_DEPTH_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Depth = src->Depth;
-   }
-   if (mask & GL_ENABLE_BIT) {
-      /* no op */
-   }
-   if (mask & GL_EVAL_BIT) {
-      /* OK to memcpy */
-      dst->Eval = src->Eval;
-   }
-   if (mask & GL_FOG_BIT) {
-      /* OK to memcpy */
-      dst->Fog = src->Fog;
-   }
-   if (mask & GL_HINT_BIT) {
-      /* OK to memcpy */
-      dst->Hint = src->Hint;
-   }
-   if (mask & GL_LIGHTING_BIT) {
-      /* OK to memcpy */
-      dst->Light = src->Light;
-   }
-   if (mask & GL_LINE_BIT) {
-      /* OK to memcpy */
-      dst->Line = src->Line;
-   }
-   if (mask & GL_LIST_BIT) {
-      /* OK to memcpy */
-      dst->List = src->List;
-   }
-   if (mask & GL_PIXEL_MODE_BIT) {
-      /* OK to memcpy */
-      dst->Pixel = src->Pixel;
-   }
-   if (mask & GL_POINT_BIT) {
-      /* OK to memcpy */
-      dst->Point = src->Point;
-   }
-   if (mask & GL_POLYGON_BIT) {
-      /* OK to memcpy */
-      dst->Polygon = src->Polygon;
-   }
-   if (mask & GL_POLYGON_STIPPLE_BIT) {
-      /* Use loop instead of memcpy due to problem with Portland Group's
-       * C compiler.  Reported by John Stone.
-       */
-      GLuint i;
-      for (i = 0; i < 32; i++) {
-         dst->PolygonStipple[i] = src->PolygonStipple[i];
-      }
-   }
-   if (mask & GL_SCISSOR_BIT) {
-      /* OK to memcpy */
-      dst->Scissor = src->Scissor;
-   }
-   if (mask & GL_STENCIL_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Stencil = src->Stencil;
-   }
-   if (mask & GL_TEXTURE_BIT) {
-      /* Cannot memcpy because of pointers */
-      _mesa_copy_texture_state(src, dst);
-   }
-   if (mask & GL_TRANSFORM_BIT) {
-      /* OK to memcpy */
-      dst->Transform = src->Transform;
-   }
-   if (mask & GL_VIEWPORT_BIT) {
-      unsigned i;
-      for (i = 0; i < src->Const.MaxViewports; i++) {
-         /* OK to memcpy */
-         dst->ViewportArray[i] = src->ViewportArray[i];
-      }
-   }
-
-   /* XXX FIXME:  Call callbacks?
-    */
-   dst->NewState = _NEW_ALL;
-   ST_SET_ALL_STATES(dst->NewDriverState);
-}
-
-
-/**
  * Check if the given context can render into the given framebuffer
  * by checking visual attributes.
  *
@@ -1350,7 +1234,7 @@ check_compatible(const struct gl_context *ctx,
 static void
 check_init_viewport(struct gl_context *ctx, GLuint width, GLuint height)
 {
-   if (!ctx->ViewportInitialized && width > 0 && height > 0) {
+   if (!ctx->ViewportInitialized) {
       unsigned i;
 
       /* Note: set flag here, before calling _mesa_set_viewport(), to prevent

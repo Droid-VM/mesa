@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -957,8 +957,8 @@ BOOL_32 EgBasedLib::SanityCheckMacroTiled(
     ADDR_TILEINFO* pTileInfo   ///< [in] macro-tiled parameters
     ) const
 {
-    BOOL_32 valid       = TRUE;
-    UINT_32 numPipes    = HwlGetPipes(pTileInfo);
+    BOOL_32                  valid    = TRUE;
+    [[maybe_unused]] UINT_32 numPipes = HwlGetPipes(pTileInfo);
 
     switch (pTileInfo->banks)
     {
@@ -2712,7 +2712,6 @@ ADDR_E_RETURNCODE EgBasedLib::HwlComputeBaseSwizzle(
         { 0, 7, 14, 5, 12, 3, 10, 1, 8, 15, 6, 13, 4, 11, 2, 9 }, // ADDR_SURF_16_BANK
     };
 
-    UINT_32 pipes = HwlGetPipes(pTileInfo);
     UINT_32 banks = pTileInfo ? pTileInfo->banks : 2;
     UINT_32 hwNumBanks;
 
@@ -2817,7 +2816,7 @@ UINT_32 EgBasedLib::GetBankPipeSwizzle(
     UINT_32 bankInterleaveBits = QLog2(m_bankInterleave);
     UINT_32 tileSwizzle = pipeSwizzle + ((bankSwizzle << bankInterleaveBits) << pipeBits);
 
-    baseAddr ^= tileSwizzle * m_pipeInterleaveBytes;
+    baseAddr ^= static_cast<UINT_64>(tileSwizzle * m_pipeInterleaveBytes);
     baseAddr >>= 8;
 
     return static_cast<UINT_32>(baseAddr);

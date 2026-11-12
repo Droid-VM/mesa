@@ -189,6 +189,7 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
    } else {
       gc->xid = xid;
       gc->share_xid = share_xid;
+      glx_display_add_context(gc);
    }
 
    free(attrib_list);

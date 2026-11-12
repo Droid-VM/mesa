@@ -56,7 +56,7 @@ piglit_folder = "/piglit"
 profile = "gpu"
 process_isolation = true
 timeout = 180.0
-  [piglit.env]
+[piglit.env]
   PIGLIT_NO_WINDOW = "1"
   PIGLIT_PLATFORM = "gbm"
   WAFFLE_PLATFORM = "gbm"
@@ -65,5 +65,5 @@ timeout = 180.0
 piglit_folder = "/piglit"
 profile = "cl"
 process_isolation = true
-  [piglit.env]
-  RUSTICL_ENABLE = "zink"
+[piglit.env]
+  RUSTICL_ENABLE = "zink:0"  # limit testing to one device

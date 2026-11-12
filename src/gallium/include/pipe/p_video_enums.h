@@ -28,6 +28,8 @@
 #ifndef PIPE_VIDEO_ENUMS_H
 #define PIPE_VIDEO_ENUMS_H
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -337,6 +339,17 @@ enum pipe_video_vpp_blend_mode
    PIPE_VIDEO_VPP_BLEND_MODE_NONE = 0x0,
    PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA = 0x1,
    PIPE_VIDEO_VPP_BLEND_MODE_PREMULTIPLIED_ALPHA = 0x2,
+   PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY = 0x4,
+};
+
+/* To be used for VPP state*/
+enum pipe_video_vpp_tone_mapping_type
+{
+   PIPE_VIDEO_VPP_TONE_MAPPING_NONE           = 0x00,
+   PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_HDR     = 0x01,
+   PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_SDR     = 0x02,
+   PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_EDR     = 0x04,
+   PIPE_VIDEO_VPP_TONE_MAPPING_SDR_TO_HDR     = 0x08,
 };
 
 /* To be used for VPP state*/
@@ -427,6 +440,33 @@ enum pipe_video_vpp_matrix_coefficients {
     PIPE_VIDEO_VPP_MCF_YCGCO_RE    = 16,
     PIPE_VIDEO_VPP_MCF_YCGCO_RO    = 17,
     PIPE_VIDEO_VPP_MCF_COUNT,
+};
+
+enum pipe_video_vpp_filter {
+   PIPE_VIDEO_VPP_FILTER_BRIGHTNESS,
+   PIPE_VIDEO_VPP_FILTER_CONTRAST,
+   PIPE_VIDEO_VPP_FILTER_HUE,
+   PIPE_VIDEO_VPP_FILTER_SATURATION,
+   PIPE_VIDEO_VPP_FILTER_SHARPENING,
+   PIPE_VIDEO_VPP_FILTER_MAX,
+};
+
+struct pipe_video_vpp_filter_range
+{
+   float min_value;
+   float max_value;
+   float default_value;
+   float step;
+};
+
+struct pipe_video_caps
+{
+   struct {
+      unsigned hdr_tone_mapping_modes;
+      bool color_balance;
+      bool sharpening;
+      struct pipe_video_vpp_filter_range filter_range[PIPE_VIDEO_VPP_FILTER_MAX];
+   } vpp;
 };
 
 /* To be used for VPP state*/

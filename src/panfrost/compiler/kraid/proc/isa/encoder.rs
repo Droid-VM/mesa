@@ -9,11 +9,14 @@ use quote::ToTokens;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-// We assume FAU index and flow will be handled elsewhere
+// The variable FAU page and flow are set at encode time from the sources and
+// the scheduled flow. A field pinned to an exact value (e.g. ADR, which reads
+// the PC on page 3) is a constant and must still be emitted here.
 fn skip_field(field: &InstrField) -> bool {
     match field {
         InstrField::Physical(f) => match f.name.as_str() {
-            "fau_page_index" | "flow" => true,
+            "fau_page_index" => f.expr.is_none(),
+            "flow" => true,
             _ => false,
         },
         _ => false,
@@ -156,9 +159,8 @@ impl SrcType {
                     SrcType::HWEnum(e.clone())
                 }
             }
-            FieldType::PcRelOffsetSigned | FieldType::PcRelOffsetUnsigned => {
-                SrcType::PcRelOffset
-            }
+            FieldType::PcRelOffsetSigned(_)
+            | FieldType::PcRelOffsetUnsigned(_) => SrcType::PcRelOffset,
             FieldType::Source | FieldType::Source64 => SrcType::Src,
             FieldType::Int(bits) => SrcType::Int(*bits),
             FieldType::Uint(bits) => SrcType::Uint(*bits),
@@ -233,8 +235,8 @@ fn field_type_to_tokens(field_type: &FieldType) -> TokenStream2 {
             let ident = &e.ident;
             quote! { #ident }
         }
-        FieldType::PcRelOffsetSigned => quote! { i64 },
-        FieldType::PcRelOffsetUnsigned => quote! { u64 },
+        FieldType::PcRelOffsetSigned(_) => quote! { i64 },
+        FieldType::PcRelOffsetUnsigned(_) => quote! { u64 },
         FieldType::Source => quote! { u16 },
         FieldType::Source64 => quote! { u16 },
         FieldType::Int(bits) => {
@@ -854,6 +856,7 @@ struct InstrVariantInfo {
     ident: Ident,
     arch: Range<u8>,
     exec_unit: Ident,
+    exec_time: u8,
     is_message: bool,
     srcs: Vec<InstrVariantSrcInfo>,
     sr_src: Option<InstrVariantSrcInfo>,
@@ -873,6 +876,7 @@ impl InstrVariantInfo {
         InstrVariantInfo {
             ident,
             exec_unit: ident!("{}", to_camel_case(&instr.exec_unit)),
+            exec_time: instr.exec_time,
             arch: instr.arch.clone(),
             is_message: false,
             srcs: Default::default(),
@@ -935,6 +939,7 @@ impl ToTokens for InstrVariantInfo {
         let InstrVariantInfo {
             ident,
             exec_unit,
+            exec_time,
             is_message,
             ..
         } = self;
@@ -960,6 +965,7 @@ impl ToTokens for InstrVariantInfo {
         ts.extend(quote! {
             const #ident: InstructionInfo = InstructionInfo {
                 exec_unit: ExecUnit::#exec_unit,
+                exec_time: #exec_time,
                 is_message: #is_message,
                 srcs: #srcs_ts,
                 sr_src: #sr_src_ts,
@@ -1006,6 +1012,10 @@ impl InstrEncVariant {
                     // Physical fields only show up as sources if we can't
                     // automatically calculate them.
                     if f.expr.is_some() {
+                        // A hardcoded slot (exact="slot0") is still a message
+                        if f.name == "message_slot_index" {
+                            info.is_message = true;
+                        }
                         continue;
                     }
                     let restrict = f.restrict.clone();
@@ -1396,10 +1406,10 @@ pub fn gen_encoder(
 
     let mut ts = quote! {
         use crate::isa::*;
-        use crate::bitview::*;
         use crate::data_type::DataType;
         use compiler::bitset::ConstBitSet;
         use compiler::enum_as_u8::EnumAsU8;
+        use mesa_util::bitview::*;
         use super::{SrRead, SrWrite};
 
         pub type InstructionInfo = super::InstructionInfo<SrcSwizzle, DstLanes>;
@@ -1469,6 +1479,15 @@ pub fn gen_encoder(
         .expect("Failed to create sample_position meta-enum");
 
     isa.enums.declare(&mut ts, true);
+
+    ts.extend(quote! {
+        struct FauSpecialIndexPage { }
+        impl FauSpecialPageResolver for FauSpecialIndexPage {
+            type P0 = FauSpecialIndexPage0T;
+            type P1 = FauSpecialIndexPage1T;
+            type P3 = FauSpecialIndexPage3T;
+        }
+    });
 
     let mut instrs: BTreeMap<_, InstrEnc> = Default::default();
     for i in isa.instrs {

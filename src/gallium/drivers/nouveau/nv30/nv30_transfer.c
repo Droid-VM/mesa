@@ -65,6 +65,8 @@ nv30_transfer_blit(XFER_ARGS)
       return false;
    if (src->cpp > 4)
       return false;
+   if (dst->domain != NOUVEAU_BO_VRAM)
+       return false;
    return true;
 }
 
@@ -160,6 +162,11 @@ nv30_transfer_rect_blit(XFER_ARGS)
        PUSH_REFN(push, refs, ARRAY_SIZE(refs)))
       return;
 
+   int w = dst->w;
+   int h = dst->h;
+   int x = 0;
+   int y = 0;
+
    /* various switches depending on cpp of the transfer */
    switch (dst->cpp) {
    case 4:
@@ -185,6 +192,18 @@ nv30_transfer_rect_blit(XFER_ARGS)
       return;
    }
 
+   /* hardware rounds down render target offset to 64 bytes, but surfaces
+    * with a size of 2x2 pixel (16bpp) or 1x1 pixel (32bpp) have an
+    * unaligned start address.  For these two important square formats
+    * we can hack around this limitation by adjusting the viewport origin
+    */
+   int off = dst->offset & 63;
+   if (off) {
+      x += off / (dst->cpp * 2);
+      w  = 16;
+      h  = 2;
+   }
+
    /* render target */
    if (!dst->pitch) {
       format |= NV30_3D_RT_FORMAT_TYPE_SWIZZLED;
@@ -200,11 +219,18 @@ nv30_transfer_rect_blit(XFER_ARGS)
    PUSH_DATA (push, dst->w << 16);
    PUSH_DATA (push, dst->h << 16);
    BEGIN_NV04(push, NV30_3D(RT_HORIZ), 5);
-   PUSH_DATA (push, dst->w << 16);
-   PUSH_DATA (push, dst->h << 16);
+   PUSH_DATA (push, w << 16);
+   PUSH_DATA (push, h << 16);
    PUSH_DATA (push, format);
    PUSH_DATA (push, stride);
    PUSH_RELOC(push, dst->bo, dst->offset, NOUVEAU_BO_LOW, 0, 0);
+
+   BEGIN_NV04(push, NV30_3D(VIEWPORT_TX_ORIGIN), 4);
+   PUSH_DATA (push, (y << 16) | x);
+   PUSH_DATA (push, 0);
+   PUSH_DATA (push, ((w - 1) << 16) | 0);
+   PUSH_DATA (push, ((h - 1) << 16) | 0);
+
    BEGIN_NV04(push, NV30_3D(RT_ENABLE), 1);
    PUSH_DATA (push, NV30_3D_RT_ENABLE_COLOR0);
 

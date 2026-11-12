@@ -136,6 +136,10 @@ struct wsi_device {
       /* Never report VK_SUBOPTIMAL_KHR. Used to workaround
        * games that cannot handle SUBOPTIMAL correctly. */
       bool ignore_suboptimal;
+
+      /* Select and read Present events on a separate connection to the X
+       * server, so the WSI never reads from the application's connection. */
+      bool dedicated_event_connection;
    } x11;
 
    struct {

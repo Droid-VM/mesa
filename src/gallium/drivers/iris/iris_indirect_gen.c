@@ -126,7 +126,7 @@ upload_state(struct iris_batch *batch,
              unsigned alignment)
 {
    void *p = NULL;
-   u_upload_alloc_ref(uploader, 0, size, alignment, &ref->offset, &ref->res, &p);
+   iris_u_upload_alloc_ref_to_iris_state_ref(uploader, 0, size, alignment, ref, &p);
    iris_use_pinned_bo(batch, iris_resource_bo(ref->res), false, IRIS_DOMAIN_NONE);
    return p;
 }
@@ -137,19 +137,21 @@ stream_state(struct iris_batch *batch,
              struct pipe_resource **out_res,
              unsigned size,
              unsigned alignment,
-             uint32_t *out_offset)
+             uint64_t *out_offset)
 {
    void *ptr = NULL;
+   uint32_t res_offset;
 
-   u_upload_alloc_ref(uploader, 0, size, alignment, out_offset, out_res, &ptr);
+   u_upload_alloc_ref(uploader, 0, size, alignment, &res_offset, out_res, &ptr);
 
    struct iris_bo *bo = iris_resource_bo(*out_res);
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
-   iris_record_state_size(batch->state_sizes,
+   *out_offset = res_offset;
+   iris_record_state_size(bo->bufmgr, batch->state_sizes,
                           bo->address + *out_offset, size);
-
-   *out_offset += iris_bo_offset_from_base_address(bo);
+   *out_offset += iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                     bo->address : iris_bo_offset_from_base_address(bo);
 
    return ptr;
 }
@@ -363,21 +365,39 @@ emit_indirect_generate_draw(struct iris_batch *batch,
       psx.PixelShaderComputesStencil = fs_data->computed_stencil;
 #endif
       psx.PixelShaderHasUAV = GFX_VER == 8;
+
+#if INTEL_WA_16030144090_GFX_VER
+      assert(!fs_data->is_per_sample);
+#endif
    }
 
-   iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
-      uint32_t cc_vp_address;
-      uint32_t *cc_vp_map =
-         stream_state(batch, ice->state.dynamic_uploader,
-                      &ice->state.last_res.cc_vp,
-                      4 * GENX(CC_VIEWPORT_length), 32, &cc_vp_address);
+   uint64_t cc_vp_address;
+   uint32_t *cc_vp_map = stream_state(batch, ice->state.dynamic_uploader,
+                                      &ice->state.last_res.cc_vp,
+                                      4 * GENX(CC_VIEWPORT_length), 32, &cc_vp_address);
 
-      iris_pack_state(GENX(CC_VIEWPORT), cc_vp_map, ccv) {
-         ccv.MinimumDepth = 0.0f;
-         ccv.MaximumDepth = 1.0f;
+   iris_pack_state(GENX(CC_VIEWPORT), cc_vp_map, ccv) {
+      ccv.MinimumDepth = 0.0f;
+      ccv.MaximumDepth = 1.0f;
+   }
+
+#if GFX_VERx10 >= 350
+   struct iris_bufmgr *bufmgr = screen->bufmgr;
+   if (iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+      iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), cc) {
+         cc.CCViewportPointer = ro_bo(NULL, cc_vp_address);
       }
+   } else {
+      iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
+         cc.CCViewportPointer = cc_vp_address;
+      }
+   }
+   batch->dfc_vp_sent = true;
+#else
+   iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
       cc.CCViewportPointer = cc_vp_address;
    }
+#endif
 
 #if GFX_VER >= 12
    /* Disable Primitive Replication. */

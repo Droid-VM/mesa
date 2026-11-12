@@ -82,7 +82,7 @@ nvkmd_nouveau_try_create_pdev(struct _drmDevice *drm_device,
    if (stat(drm_device->nodes[DRM_NODE_RENDER], &st)) {
       nouveau_ws_device_destroy(ws_dev);
       return vk_errorf(log_obj, VK_ERROR_INITIALIZATION_FAILED,
-                       "fstat() failed on %s: %m",
+                       "stat() failed on %s: %m",
                        drm_device->nodes[DRM_NODE_RENDER]);
    }
    const dev_t render_dev = st.st_rdev;

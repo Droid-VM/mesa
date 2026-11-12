@@ -189,7 +189,11 @@ sim_syncobj_wait(struct util_sync_provider *p,
 {
    struct sim_sync_provider *sim = (struct sim_sync_provider *)p;
 
-   const int poll_timeout = vn_timeout_to_poll_timeout(timeout_nsec);
+   const int64_t now = os_time_get_nano();
+   const uint64_t rel_timeout = timeout_nsec == INT64_MAX ? UINT64_MAX
+                                : timeout_nsec > now      ? timeout_nsec - now
+                                                          : 0;
+   const int poll_timeout = vn_timeout_to_poll_timeout(rel_timeout);
    const bool wait_all = !!(flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL);
 
    /* TODO poll all fds at the same time */
@@ -208,7 +212,8 @@ sim_syncobj_wait(struct util_sync_provider *p,
             continue;
          }
          mtx_unlock(&syncobj->mutex);
-         return -ETIME;
+         errno = ETIME;
+         return -errno;
       }
       mtx_unlock(&syncobj->mutex);
 

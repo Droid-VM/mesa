@@ -53,9 +53,6 @@ VkResult genX(init_device_state)(struct anv_device *device);
 
 void genX(init_cps_device_state)(struct anv_device *device);
 
-uint32_t genX(call_internal_shader)(nir_builder *b,
-                                    enum anv_internal_kernel_name shader_name);
-
 void genX(cmd_buffer_disable_hiz_planes)(struct anv_cmd_buffer *cmd_buffer);
 
 void
@@ -191,6 +188,19 @@ genX(cmd_buffer_set_coarse_pixel_active)(struct anv_cmd_buffer *cmd_buffer,
    return false;
 #endif
 }
+
+#if GFX_VERx10 >= 200
+void genX(cmd_buffer_emit_deferred_constant_cache_inval)(struct anv_cmd_buffer *cmd_buffer);
+
+static inline void
+genX(cmd_buffer_flush_deferred_constant_cache_inval)(struct anv_cmd_buffer *cmd_buffer)
+{
+   if (cmd_buffer->state.deferred_constant_cache_inval) {
+      genX(cmd_buffer_emit_deferred_constant_cache_inval)(cmd_buffer);
+      cmd_buffer->state.deferred_constant_cache_inval = false;
+   }
+}
+#endif
 
 void
 genX(setup_autostrip_state)(struct anv_cmd_buffer *cmd_buffer, bool enable);
@@ -439,10 +449,6 @@ genX(cmd_buffer_begin_companion_rcs_syncpoint)(struct anv_cmd_buffer *cmd_buffer
 void
 genX(cmd_buffer_end_companion_rcs_syncpoint)(struct anv_cmd_buffer *cmd_buffer,
                                              struct anv_state syncpoint);
-void
-genX(cmd_write_buffer_cp)(struct anv_cmd_buffer *cmd_buffer,
-                          VkDeviceAddress dstAddr,
-                          void *data, uint32_t size);
 
 void
 genX(emit_simple_shader_init)(struct anv_simple_shader *state);
@@ -580,7 +586,7 @@ genX(cmd_buffer_rhwo_wa_14024015672)(struct anv_cmd_buffer *cmd_buffer,
 {
    struct anv_device *device = cmd_buffer->device;
    const bool rhwo_opt_enable =
-      !device->physical->instance->drirc.debug.wa_14024015672_msaa &&
+      !device->physical->drirc.debug.wa_14024015672_msaa &&
       msaa_enabled;
    if (intel_needs_workaround(device->info, 14024015672) &&
        cmd_buffer->state.pending_rhwo_optimization_enabled != rhwo_opt_enable)
@@ -630,3 +636,95 @@ genX(anv_get_btd_dispatch_timeout_counter)(uint32_t dispatch_timeout_counter)
 
    return clamped_timeout_counter;
 }
+
+uint32_t genX(compute_walker2_get_stack_id_control_value)(const struct anv_device *device);
+
+#if GFX_VERx10 >= 200
+
+#define anv_dump_rsc_stage(stream, stage) do {                          \
+      u_foreach_bit(bit, stage) {                                       \
+         switch(1 << bit) {                                             \
+         case RESOURCE_BARRIER_STAGE_NONE:                              \
+            mesa_log_stream_printf(stream, "None,");                    \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_TOP:                               \
+            mesa_log_stream_printf(stream, "Top,");                     \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_COLOR:                             \
+            mesa_log_stream_printf(stream, "Color,");                   \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_GPGPU:                             \
+            mesa_log_stream_printf(stream, "GPGPU,");                   \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_GEOM:                              \
+            mesa_log_stream_printf(stream, "Geometry,");                \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_RASTER:                            \
+            mesa_log_stream_printf(stream, "Raster,");                  \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_DEPTH:                             \
+            mesa_log_stream_printf(stream, "Depth,");                   \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_PIXEL:                             \
+            mesa_log_stream_printf(stream, "Pixel,");                   \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_COLORANDCOMPUTE:                   \
+            mesa_log_stream_printf(stream, "ColorAndCompute,");         \
+            break;                                                      \
+         case RESOURCE_BARRIER_STAGE_GEOMETRYANDCOMPUTE:                \
+            mesa_log_stream_printf(stream, "GeometryAndCompute,");      \
+            break;                                                      \
+         default:                                                       \
+            UNREACHABLE("Unknown barrier stage");                       \
+         }                                                              \
+      }                                                                 \
+   } while (0)
+
+#define anv_dump_rsc_barrier_body(body, reason) do {                    \
+      if (!INTEL_DEBUG(DEBUG_PIPE_CONTROL))                             \
+         break;                                                         \
+                                                                        \
+      struct log_stream *stream = mesa_log_streami();                   \
+                                                                        \
+      mesa_log_stream_printf(                                           \
+         stream, "rb : Type=%s ",                                       \
+         body.BarrierType == RESOURCE_BARRIER_TYPE_IMMEDIATE ? "Immediate" : \
+         body.BarrierType == RESOURCE_BARRIER_TYPE_SIGNAL ? "Signal" :  \
+         body.BarrierType == RESOURCE_BARRIER_TYPE_WAIT ? "Wait" : "Unknown"); \
+                                                                        \
+      if (body.SignalStage) {                                           \
+         mesa_log_stream_printf(stream, " Signal=");                    \
+         anv_dump_rsc_stage(stream, body.SignalStage);                  \
+      }                                                                 \
+                                                                        \
+      if (body.WaitStage) {                                             \
+         mesa_log_stream_printf(stream, " Wait=");                      \
+         anv_dump_rsc_stage(stream, body.WaitStage);                    \
+      }                                                                 \
+                                                                        \
+      mesa_log_stream_printf(stream, " Flags=");                        \
+      if (body.L1DataportCacheInvalidate)                               \
+         mesa_log_stream_printf(stream, "+l1-dc-inval,");               \
+      if (body.DepthCache)                                              \
+         mesa_log_stream_printf(stream, "+ds-flush,");                  \
+      if (body.ColorCache)                                              \
+         mesa_log_stream_printf(stream, "+rt-flush,");                  \
+      if (body.L1DataportUAVFlush)                                      \
+         mesa_log_stream_printf(stream, "+l1-dp-uav-flush,");           \
+      if (body.TextureRO)                                               \
+         mesa_log_stream_printf(stream, "+tex-inval,");                 \
+      if (body.StateRO)                                                 \
+         mesa_log_stream_printf(stream, "+state-inval,");               \
+      if (body.VFRO)                                                    \
+         mesa_log_stream_printf(stream, "+vf-inval,");                  \
+      if (body.AMFS)                                                    \
+         mesa_log_stream_printf(stream, "+amfs,");                      \
+      if (body.ConstantCache)                                           \
+         mesa_log_stream_printf(stream, "+const-inval,");               \
+                                                                        \
+      mesa_log_stream_printf(stream, " reason: %s\n", reason);          \
+                                                                        \
+      mesa_log_stream_destroy(stream);                                  \
+   } while (0)
+
+#endif /* GFX_VERx10 >= 200 */

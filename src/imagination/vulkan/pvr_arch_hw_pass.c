@@ -342,7 +342,8 @@ static void pvr_finalise_po_alloc(const struct pvr_device *device,
 
    /* The number of output registers must be a power of two. */
    hw_render->output_regs_count =
-      util_next_power_of_two(ctx->alloc.output_regs_count);
+      (ctx->alloc.output_regs_count) ?
+      util_next_power_of_two(ctx->alloc.output_regs_count) : 0;
 
    assert(ctx->alloc.tile_buffers_count <= ctx->pass->max_tilebuffer_count);
    hw_render->tile_buffers_count = ctx->alloc.tile_buffers_count;
@@ -435,8 +436,10 @@ pvr_surface_setup_render_init(struct pvr_renderpass_context *ctx,
       buffer->used[start + i] = true;
    }
 
-   if (load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+   if (load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE ||
+       load_op == VK_ATTACHMENT_LOAD_OP_NONE) {
       *use_render_init = false;
+   }
 
    if (*use_render_init) {
       struct pvr_renderpass_colorinit *new_color_init;

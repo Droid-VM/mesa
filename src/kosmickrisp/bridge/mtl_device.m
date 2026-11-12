@@ -179,6 +179,24 @@ mtl_device_max_argument_buffer_sampler_count(mtl_device *dev)
    }
 }
 
+bool
+mtl_device_supports_bc_texture_compression(mtl_device *dev)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      return device.supportsBCTextureCompression;
+   }
+}
+
+bool
+mtl_device_supports_32_bit_float_filtering(mtl_device *dev)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      return device.supports32BitFloatFiltering;
+   }
+}
+
 /* Timestamp query */
 uint64_t
 mtl_device_get_gpu_timestamp(mtl_device *dev)

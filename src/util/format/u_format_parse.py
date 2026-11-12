@@ -270,6 +270,15 @@ class Format:
             if self.is_bitmask():
                 raise RuntimeError("Bitmask format {self.name} must not define endian-specific swizzles")
 
+        # Fixed little-endian formats use the little-endian layout on every
+        # host; big-endian hosts byte-swap on load and store instead.
+        self.le_byte_order = False
+        if 'byte_order' in source:
+            byte_order = consume_str(self, source, 'byte_order')
+            if byte_order != 'little':
+                raise RuntimeError(f"Format {self.name} has unknown byte_order {byte_order}")
+            self.le_byte_order = True
+
         self.le_alias = None
         self.be_alias = None
         if 'little_endian' in source:
@@ -289,7 +298,7 @@ class Format:
         consumed(self, source)
         del(source)
 
-        if self.is_bitmask() and not self.is_array():
+        if self.is_bitmask() and not self.is_array() and not self.le_byte_order:
             # Bitmask formats are "load a word the size of the block and
             # bitshift channels out of it." However, the channel shifts
             # defined in u_format_table.c are numbered right-to-left on BE
@@ -325,7 +334,8 @@ class Format:
             le_shift += channel.size
 
         be_shift = 0
-        for channel in reversed(self.be_channels):
+        for channel in (self.be_channels if self.le_byte_order
+                        else reversed(self.be_channels)):
             channel.shift = be_shift
             be_shift += channel.size
 

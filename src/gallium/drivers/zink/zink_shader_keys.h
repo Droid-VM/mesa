@@ -33,7 +33,8 @@ struct zink_vs_key_base {
    bool clip_halfz : 1;
    bool push_drawid : 1;
    bool robust_access : 1;
-   uint8_t pad : 4;
+   bool strip_psiz : 1; //drop the psiz output that the frontend injected
+   uint8_t pad : 3;
 };
 
 struct zink_vs_key {
@@ -79,14 +80,24 @@ struct zink_zs_swizzle_key {
    struct zink_zs_swizzle swizzle[32];
 };
 
+/* how the fragment shader's color outputs are rewritten, by descending priority:
+ * writes disabled beat forced dual source blending, which beats a single color buffer
+ */
+enum zink_fs_color_mode {
+   ZINK_FS_COLOR_ALL, //keep every color output
+   ZINK_FS_COLOR_DUAL, //forced dual source blending: the second output is needed
+   ZINK_FS_COLOR_NONE, //color writes are disabled: drop the color outputs
+   ZINK_FS_COLOR_SINGLE, //only one color buffer is bound: drop the other color outputs
+};
+
 struct zink_fs_key_base {
    bool point_coord_yinvert : 1;
    bool samples : 1;
-   bool force_dual_color_blend : 1;
    bool force_persample_interp : 1;
    bool fbfetch_ms : 1;
    bool shadow_needs_shader_swizzle : 1; //append zink_zs_swizzle_key after the key data
-   uint8_t pad : 2;
+   uint8_t color_mode : 2; //enum zink_fs_color_mode
+   uint8_t pad : 1;
    uint8_t coord_replace_bits;
 };
 

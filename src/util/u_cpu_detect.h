@@ -101,6 +101,7 @@ struct util_cpu_caps_t {
    unsigned has_avx512bw:1;
    unsigned has_avx512vl:1;
    unsigned has_avx512vbmi:1;
+   unsigned has_avx512fp16:1;
 
    unsigned has_clflushopt:1;
 
@@ -116,6 +117,11 @@ struct util_cpu_caps_t {
    unsigned max_vector_bits;
 
    uint16_t cpu_to_L3[UTIL_MAX_CPUS];
+
+   /* Affinity of the thread that ran detection, before any pinning by Mesa
+    * (e.g. from taskset); all ones if it couldn't be queried.
+    */
+   util_affinity_mask initial_affinity_mask;
 
    /* Affinity masks for each L3 cache. */
    util_affinity_mask *L3_affinity_mask;

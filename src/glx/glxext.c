@@ -31,6 +31,7 @@
 
 #if defined(GLX_DIRECT_RENDERING)
 #include "dri_common.h"
+#include "dri_screen.h"
 #endif
 
 #include "x11_dri3.h"
@@ -270,6 +271,15 @@ glx_display_free(struct glx_display *priv)
       gc->vtable->destroy(gc);
       __glXSetCurrentContextNull();
    }
+
+   /* destroy leftover contexts before their screens, and drop the ones current elsewhere */
+   list_for_each_entry_safe(struct glx_context, ctx, &priv->contexts, link) {
+      if (ctx->currentDpy)
+         ctx->in_display_list = false;
+      else
+         ctx->vtable->destroy(ctx);
+   }
+   simple_mtx_destroy(&priv->contexts_lock);
 
    /* Needs to be done before free screen. */
 #if defined(GLX_DIRECT_RENDERING)
@@ -976,6 +986,8 @@ __glXInitialize(Display * dpy)
    XESetErrorString (dpy, dpyPriv->codes.extension, __glXErrorString);
 
    dpyPriv->glXDrawHash = __glxHashCreate();
+   list_inithead(&dpyPriv->contexts);
+   simple_mtx_init(&dpyPriv->contexts_lock, mtx_plain);
 
    enum glx_driver glx_driver = 0;
    const char *env = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
@@ -1101,6 +1113,7 @@ __glXInitialize(Display * dpy)
 
    return dpyPriv;
 init_fail:
+   simple_mtx_destroy(&dpyPriv->contexts_lock);
 #if defined(GLX_DIRECT_RENDERING)
    _mesa_set_destroy(dpyPriv->zombieGLXDrawable, free_zombie_glx_drawable);
    __glxHashDestroy(dpyPriv->drawHash);

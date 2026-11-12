@@ -562,6 +562,8 @@ fd5_emit_tile_mem2gmem(struct fd_batch *batch, const struct fd_tile *tile)
    OUT_RING(ring, A5XX_RB_CNTL_WIDTH(gmem->bin_w) |
                      A5XX_RB_CNTL_HEIGHT(gmem->bin_h) | A5XX_RB_CNTL_BYPASS);
 
+   emit_msaa(ring, pfb->samples);
+
    if (fd_gmem_needs_restore(batch, tile, FD_BUFFER_COLOR)) {
       unsigned i;
       for (i = 0; i < pfb->nr_cbufs; i++) {

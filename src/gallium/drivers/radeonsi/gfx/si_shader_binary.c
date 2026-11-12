@@ -198,7 +198,7 @@ static void post_upload_binary(struct si_screen *sscreen, struct si_shader *shad
       si_cp_dma_copy_buffer(upload_ctx, &shader->bo->b.b, staging, 0, staging_offset,
                             binary_size);
       si_barrier_after_simple_buffer_op(upload_ctx, 0, &shader->bo->b.b, staging);
-      si_set_barrier_flags(upload_ctx, SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_L2);
+      si_set_barrier_flags(upload_ctx, AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_L2);
 
 #if 0 /* debug: validate whether the copy was successful */
       uint32_t *dst_binary = malloc(binary_size);
@@ -325,7 +325,17 @@ int si_shader_binary_upload_at(struct si_screen *sscreen, struct si_shader *shad
       r = upload_binary_raw(sscreen, shader, scratch_va, dma_upload, bo_offset);
    }
 
-   shader->config.lds_size = si_calculate_needed_lds_size(sscreen->info.gfx_level, shader);
+   /* For compute/task/mesh with ACO, shader->config.lds_size is more accurate
+    * because ACO can spill using LDS. For other stages with ACO, it might be
+    * too low because ac_ngg_subgroup_info/ac_legacy_gs_subgroup_info is
+    * only initialized after compilation in si_create_shader_variant(). LLVM
+    * doesn't set shader->config.lds_size and also doesn't spill to LDS.
+    *
+    * We can select between the two depending on the stage and backend, or just
+    * MAX2() them.
+    */
+   unsigned lds_size = si_calculate_needed_lds_size(sscreen->info.gfx_level, shader);
+   shader->config.lds_size = MAX2(shader->config.lds_size, lds_size);
 
    return r;
 }

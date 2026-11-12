@@ -131,7 +131,7 @@ struct vn_physical_device {
 
    struct vn_image_format_properties_cache image_format_cache;
 
-   bool descriptor_sizes_initialized;
+   atomic_bool descriptor_sizes_initialized;
    VkDeviceSize descriptor_sizes[VN_NUM_DESCRIPTOR_TYPES];
 };
 VK_DEFINE_HANDLE_CASTS(vn_physical_device,

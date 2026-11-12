@@ -24,17 +24,6 @@
 #include "sparse_array.h"
 #include "os_memory.h"
 
-/* Aligning our allocations to 64 has two advantages:
- *
- *  1. On x86 platforms, it means that they are cache-line aligned so we
- *     reduce the likelihood that one of our allocations shares a cache line
- *     with some other allocation.
- *
- *  2. It lets us use the bottom 6 bits of the pointer to store the tree level
- *     of the node so we can avoid some pointer indirections.
- */
-#define NODE_ALLOC_ALIGN 64
-
 void
 util_sparse_array_init(struct util_sparse_array *arr,
                        size_t elem_size, size_t node_size)
@@ -45,29 +34,15 @@ util_sparse_array_init(struct util_sparse_array *arr,
    assert(node_size >= 2 && node_size == (1ull << arr->node_size_log2));
 }
 
-#define NODE_PTR_MASK (~((uintptr_t)NODE_ALLOC_ALIGN - 1))
-#define NODE_LEVEL_MASK ((uintptr_t)NODE_ALLOC_ALIGN - 1)
 #define NULL_NODE 0
 
 static inline uintptr_t
 _util_sparse_array_node(void *data, unsigned level)
 {
    assert(data != NULL);
-   assert(((uintptr_t)data & NODE_LEVEL_MASK) == 0);
-   assert((level & NODE_PTR_MASK) == 0);
+   assert(((uintptr_t)data & UTIL_SPARSE_ARRAY_NODE_LEVEL_MASK) == 0);
+   assert((level & ~UTIL_SPARSE_ARRAY_NODE_LEVEL_MASK) == 0);
    return (uintptr_t)data | level;
-}
-
-static inline void *
-_util_sparse_array_node_data(uintptr_t handle)
-{
-   return (void *)(handle & NODE_PTR_MASK);
-}
-
-static inline unsigned
-_util_sparse_array_node_level(uintptr_t handle)
-{
-   return handle & NODE_LEVEL_MASK;
 }
 
 static inline void
@@ -104,7 +79,7 @@ _util_sparse_array_node_alloc(struct util_sparse_array *arr,
       size = sizeof(uintptr_t) << arr->node_size_log2;
    }
 
-   void *data = os_malloc_aligned(size, NODE_ALLOC_ALIGN);
+   void *data = os_malloc_aligned(size, UTIL_SPARSE_ARRAY_NODE_ALIGN);
    memset(data, 0, size);
 
    return _util_sparse_array_node(data, level);
@@ -129,7 +104,7 @@ _util_sparse_array_set_or_free_node(uintptr_t *node_ptr,
 }
 
 void *
-util_sparse_array_get(struct util_sparse_array *arr, uint64_t idx)
+_util_sparse_array_get_slow(struct util_sparse_array *arr, uint64_t idx)
 {
    const unsigned node_size_log2 = arr->node_size_log2;
    uintptr_t root = p_atomic_read(&arr->root);

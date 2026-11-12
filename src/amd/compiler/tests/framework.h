@@ -7,6 +7,7 @@
 #define ACO_TEST_COMMON_H
 
 #include "aco_builder.h"
+
 #include "util/macros.h"
 
 #include "amd_family.h"
@@ -20,7 +21,7 @@ struct TestDef {
    void (*func)();
 };
 
-extern std::map<std::string, TestDef> *tests;
+extern std::map<std::string, TestDef>* tests;
 extern FILE* output;
 
 bool set_variant(const char* name);

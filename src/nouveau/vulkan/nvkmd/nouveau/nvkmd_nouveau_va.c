@@ -25,7 +25,7 @@ alloc_heap_addr_locked(struct nvkmd_nouveau_dev *dev,
       if (fixed_addr < NVKMD_NOUVEAU_REPLAY_HEAP_START ||
           fixed_addr >= NVKMD_NOUVEAU_REPLAY_HEAP_END) {
          return vk_errorf(log_obj, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
-                          "Capture address 0x%" PRIx64 " not in the reaplay "
+                          "Capture address 0x%" PRIx64 " not in the replay "
                           "heap address range [0x%" PRIx64 ", 0x%" PRIx64 ")",
                           fixed_addr, NVKMD_NOUVEAU_REPLAY_HEAP_START,
                           NVKMD_NOUVEAU_REPLAY_HEAP_END);

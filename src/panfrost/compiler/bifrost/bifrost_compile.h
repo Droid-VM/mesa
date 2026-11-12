@@ -63,7 +63,7 @@ bifrost_precompiled_kernel_prepare_push_uniforms(
           user_data_size);
 }
 
-void bifrost_preprocess_nir(nir_shader *nir, uint64_t gpu_id);
+void bifrost_preprocess_nir(nir_shader *nir, unsigned arch);
 void bifrost_postprocess_nir(nir_shader *nir,
                              const struct pan_compile_inputs *inputs,
                              struct pan_shader_info *info);
@@ -126,8 +126,6 @@ bool valhall_can_merge_workgroups(nir_shader *nir);
       .late_lower_int64 = (arch >= 9),                                         \
       .lower_mul_high = true,                                                  \
       .lower_fisnormal = true,                                                 \
-      .lower_uadd_carry = true,                                                \
-      .lower_usub_borrow = true,                                               \
                                                                                \
       .has_ldexp = true,                                                       \
       .has_isub = true,                                                        \
@@ -153,6 +151,7 @@ bool valhall_can_merge_workgroups(nir_shader *nir);
       .support_indirect_inputs = 0 /* TODO support indirect varyings */,       \
       .lower_hadd = arch >= 11,                                                \
       .lower_hadd64 = true,                                                    \
+      .lower_mul_32x16 = true,                                                 \
       .discard_is_demote = true,                                               \
       .has_udot_4x8 = arch >= 9,                                               \
       .has_udot_4x8_sat = arch >= 9,                                           \
@@ -164,7 +163,10 @@ bool valhall_can_merge_workgroups(nir_shader *nir);
           nir_divergence_multiple_workgroup_per_compute_subgroup)              \
          : 0,                                                                  \
       .lower_mediump_io = pan_nir_lower_mediump_io,                            \
-      .io_options = nir_io_has_intrinsics, /* Skip unlowering IO to vars */    \
+      /* Skip unlowering IO to vars */                                         \
+      .io_options = nir_io_has_intrinsics | nir_io_non_interpolated_as_uint,   \
+      /* Valhall (arch >= 9) fp32 FLOG2/FEXP2 meet the CL ULP budget. */       \
+      .has_cl_log2_exp2 = arch >= 9,                                           \
    };
 
 DEFINE_OPTIONS(bifrost_nir_options_v6, 6, false);

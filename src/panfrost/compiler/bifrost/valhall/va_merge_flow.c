@@ -111,28 +111,114 @@ union_waits(enum va_flow x, enum va_flow y)
       return x | y;
 }
 
+static bool
+may_hoist_above_wait(bi_instr *I)
+{
+   if (I->op == BI_OPCODE_NOP || I->flow != VA_FLOW_NONE ||
+       bi_get_opcode_props(I)->message)
+      return false;
+
+   /* This helps to prevent unconditional branch and discard instructions
+    * from being hoisted.
+    */
+   if (I->nr_dests != 1 || I->dest[0].type != BI_INDEX_REGISTER)
+      return false;
+
+   bi_foreach_src(I, s) {
+      if (bi_is_null(I->src[s]))
+         continue;
+
+      if (I->src[s].type != BI_INDEX_CONSTANT && I->src[s].type != BI_INDEX_FAU)
+         return false;
+   }
+
+   return true;
+}
+
+/* A wait can only be merged onto a preceding instruction whose flow is a wait
+ * or none. If there is no such instruction, the wait remains a NOP. To try to
+ * avoid this, we look for another instruction that can be safely hoisted above
+ * the wait, so that the wait can be merged with it.
+ */
+static bi_instr *
+find_hoistable_instr(bi_block *block, bi_instr *nop, uint64_t pending_writes)
+{
+   uint64_t touched = pending_writes;
+
+   bi_foreach_instr_in_block_from(block, I, bi_next_op(nop)) {
+      if (I->op == BI_OPCODE_BLEND)
+         return NULL;
+
+      if (may_hoist_above_wait(I)) {
+         uint64_t dest = (uint64_t)bi_writemask(I, 0) << I->dest[0].value;
+
+         if (!(dest & touched))
+            return I;
+      }
+
+      bi_foreach_dest(I, d) {
+         if (I->dest[d].type == BI_INDEX_REGISTER)
+            touched |= (uint64_t)bi_writemask(I, d) << I->dest[d].value;
+      }
+
+      bi_foreach_src(I, s) {
+         if (I->src[s].type == BI_INDEX_REGISTER) {
+            unsigned pos = I->src[s].offset + I->src[s].value;
+            unsigned count = bi_count_read_registers(I, s);
+            touched |= BITFIELD64_RANGE(pos, count);
+         }
+      }
+   }
+
+   return NULL;
+}
+
 static void
 merge_waits(bi_block *block)
 {
    /* Most recent instruction with which we can merge, or NULL if none */
    bi_instr *last_free = NULL;
 
-   bi_foreach_instr_in_block_safe(block, I) {
-      if (last_free != NULL && I->op == BI_OPCODE_NOP &&
-          va_flow_is_wait_or_none(I->flow)) {
+   /* Keep track of registers that may still be written by a previously
+    * issued async instruction.
+    */
+   uint64_t pending_writes = 0;
 
-         /* Merge waits with compatible instructions */
-         last_free->flow = union_waits(last_free->flow, I->flow);
-         bi_remove_instruction(I);
-         continue;
+   for (unsigned i = 0; i < BI_NUM_SLOTS; ++i)
+      pending_writes |= block->scoreboard_in.write[i];
+
+   bi_foreach_instr_in_block_safe(block, I) {
+      if (I->op == BI_OPCODE_NOP && va_flow_is_wait_or_none(I->flow)) {
+         if (last_free == NULL && I->flow != VA_FLOW_NONE) {
+            last_free = find_hoistable_instr(block, I, pending_writes);
+
+            if (last_free != NULL) {
+               bi_remove_instruction(last_free);
+               list_addtail(&last_free->link, &I->link);
+            }
+         }
+
+         if (last_free != NULL) {
+            /* Merge waits with compatible instructions */
+            last_free->flow = union_waits(last_free->flow, I->flow);
+            bi_remove_instruction(I);
+            continue;
+         }
       }
 
       /* Don't move waits past async instructions, since they might be what
        * we're waiting for. If we wanted to optimize this case, we could check
        * the signaled slots.
        */
-      if (bi_get_opcode_props(I)->message)
+      if (bi_get_opcode_props(I)->message) {
          last_free = NULL;
+
+         bi_foreach_dest(I, d) {
+            if (I->dest[d].type == BI_INDEX_REGISTER)
+               pending_writes |= (uint64_t)bi_writemask(I, d)
+                                 << I->dest[d].value;
+         }
+      }
 
       /* We can only merge with instructions whose flow control is a wait.
        * This includes such an instruction after merging in a wait. It also

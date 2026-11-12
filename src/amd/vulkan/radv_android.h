@@ -1,6 +1,7 @@
 /*
  * Copyright © 2016 Red Hat.
  * Copyright © 2016 Bas Nieuwenhuizen
+ * Copyright © 2026 Advanced Micro Devices, Inc.
  *
  * based in part on anv driver which is:
  * Copyright © 2015 Intel Corporation
@@ -26,7 +27,7 @@
  * To actually enable the ext we also need
  * the necessary kernel support.
  */
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26
 #define RADV_SUPPORT_ANDROID_HARDWARE_BUFFER 1
 #include <vndk/hardware_buffer.h>
 #else
@@ -40,15 +41,14 @@ VkResult radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *bas
                                  const VkNativeBufferANDROID *gralloc_info, const VkAllocationCallbacks *alloc,
                                  VkImage *out_image_h);
 
+VkResult radv_android_get_wsi_memory(VkDevice device_h, const VkBindImageMemoryInfo *bind_info,
+                                     VkDeviceMemory *out_memory_h);
+
 unsigned radv_ahb_format_for_vk_format(VkFormat vk_format);
 
 VkFormat radv_select_android_external_format(const void *next, VkFormat default_format);
 
-VkResult radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority,
-                                const VkImportAndroidHardwareBufferInfoANDROID *info);
-
-VkResult radv_create_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority,
-                                const VkMemoryAllocateInfo *pAllocateInfo);
+VkResult radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority);
 
 bool radv_android_gralloc_supports_format(VkFormat format, VkImageUsageFlags2KHR usage);
 

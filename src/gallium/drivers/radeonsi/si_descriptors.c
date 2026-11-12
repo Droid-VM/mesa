@@ -27,7 +27,7 @@
  *
  *       | Image        | w/ FMASK   | Buffer       | NULL
  * [ 0: 3] Image[0:3]   | Image[0:3] | Buffer[0:3]  | Null[0:3]
- * [ 4: 7] Image[4:7]   | Image[4:7] | Buffer[4:7]  | 0
+ * [ 4: 7] Image[4:7]   | Image[4:7] | 0            | 0
  * [ 8:11] Null[0:3]    | Fmask[0:3] | Null[0:3]    | Null[0:3]
  * [12:15] Sampler[0:3] | Fmask[4:7] | Sampler[0:3] | Sampler[0:3]
  *
@@ -1133,7 +1133,7 @@ static void si_set_constant_buffer(struct si_context *sctx, struct si_buffer_res
    }
 
    sctx->descriptors_dirty |= 1u << descriptors_idx;
-   if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+   if (!si_descriptors_idx_is_compute(descriptors_idx))
       si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 }
 
@@ -1262,7 +1262,7 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
       buffers->enabled_mask &= ~(1llu << slot);
       buffers->writable_mask &= ~(1llu << slot);
       sctx->descriptors_dirty |= 1u << descriptors_idx;
-      if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+      if (!si_descriptors_idx_is_compute(descriptors_idx))
          si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
       return;
    }
@@ -1288,7 +1288,7 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
 
    buffers->enabled_mask |= 1llu << slot;
    sctx->descriptors_dirty |= 1lu << descriptors_idx;
-   if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+   if (!si_descriptors_idx_is_compute(descriptors_idx))
       si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 
    util_range_add(&buf->b.b, &buf->valid_buffer_range, sbuffer->buffer_offset,
@@ -1560,7 +1560,7 @@ static bool si_reset_buffer_resources(struct si_context *sctx, struct si_buffer_
       if (buffer && (!buf || buffer == buf)) {
          si_set_buf_desc_address(si_resource(buffer), buffers->offsets[i], descs->list + i * 4);
          sctx->descriptors_dirty |= 1u << descriptors_idx;
-         if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+         if (!si_descriptors_idx_is_compute(descriptors_idx))
             si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 
          radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, si_resource(buffer),
@@ -1716,7 +1716,7 @@ void si_rebind_buffer(struct si_context *sctx, struct pipe_resource *buf)
 
    /* Shader images */
    if (!buffer || buffer->bind_history & SI_BIND_IMAGE_BUFFER_ALL) {
-      unsigned mask = buffer ? (buffer->bind_history & SI_BIND_IMAGE_BUFFER_SHIFT) >>
+      unsigned mask = buffer ? (buffer->bind_history & SI_BIND_IMAGE_BUFFER_ALL) >>
                                SI_BIND_IMAGE_BUFFER_SHIFT : BITFIELD_MASK(SI_NUM_SHADERS);
       u_foreach_bit(shader, mask) {
          struct si_images *images = &sctx->images[shader];
@@ -1834,7 +1834,7 @@ static void si_upload_bindless_descriptors(struct si_context *sctx)
    /* Wait for graphics/compute to be idle before updating the resident
     * descriptors directly in memory, in case the GPU is using them.
     */
-   si_emit_barrier_direct(sctx, SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS);
+   si_emit_barrier_direct(sctx, AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS);
 
    util_dynarray_foreach (&sctx->resident_tex_handles, struct si_texture_handle *, tex_handle) {
       unsigned desc_slot = (*tex_handle)->desc_slot;
@@ -1856,13 +1856,16 @@ static void si_upload_bindless_descriptors(struct si_context *sctx)
       (*img_handle)->desc_dirty = false;
    }
 
-   assert(sctx->dirty_atoms & si_get_atom_bit(sctx, &sctx->atoms.s.barrier));
-   /* Invalidate scalar L0 because the cache doesn't know that L2 changed. */
-   sctx->barrier_flags |= SI_BARRIER_INV_SMEM;
+   /* Invalidate scalar L0 because the cache doesn't know that L2 changed.
+    * We don't need to dirty the barrier atom because if we reach this point
+    * it means the barrier emit function will be entered thanks to
+    * si_mark_bindless_descriptors_dirty.
+    */
+   sctx->barrier_flags |= AC_BARRIER_INV_SMEM;
 
    /* TODO: Range-invalidate GL2 */
    if (sctx->screen->info.cp_sdma_ge_use_system_memory_scope)
-      sctx->barrier_flags |= SI_BARRIER_INV_L2;
+      sctx->barrier_flags |= AC_BARRIER_INV_L2;
 
    sctx->bindless_descriptors_dirty = false;
 }
@@ -2658,7 +2661,11 @@ static void si_make_texture_handle_resident(struct pipe_context *ctx, uint64_t h
          struct si_texture *tex = (struct si_texture *)sview->base.texture;
 
          if (sctx->gfx_level < GFX12) {
-            if (depth_needs_decompression(tex, sview->is_stencil_sampler)) {
+            /* Unlike bound samplers, resident handles aren't updated when the texture is
+             * rendered to later, so always check depth textures for decompression. It does
+             * nothing while the texture isn't dirty.
+             */
+            if (tex->db_compatible) {
                util_dynarray_append(&sctx->resident_tex_needs_depth_decompress,
                                     tex_handle);
             }
@@ -3169,7 +3176,7 @@ void si_set_active_descriptors(struct si_context *sctx, unsigned desc_idx, uint6
    if (first < desc->first_active_slot ||
        first + count > desc->first_active_slot + desc->num_active_slots) {
       sctx->descriptors_dirty |= 1u << desc_idx;
-      if (desc_idx < SI_DESCS_FIRST_COMPUTE)
+      if (!si_descriptors_idx_is_compute(desc_idx))
          si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
    }
 

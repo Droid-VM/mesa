@@ -517,6 +517,7 @@ ir_validate::visit_leave(ir_expression *ir)
    case ir_unop_cos:
    case ir_unop_asin:
    case ir_unop_acos:
+   case ir_unop_tanh:
    case ir_unop_dFdx:
    case ir_unop_dFdx_coarse:
    case ir_unop_dFdx_fine:
@@ -810,13 +811,6 @@ ir_validate::visit_leave(ir_expression *ir)
       assert(ir->type == ir->operands[0]->type);
       assert(ir->type == ir->operands[1]->type);
       assert(glsl_type_is_integer_32(ir->type));
-      break;
-
-   case ir_binop_carry:
-   case ir_binop_borrow:
-      assert(ir->type == ir->operands[0]->type);
-      assert(ir->type == ir->operands[1]->type);
-      assert(ir->type->base_type == GLSL_TYPE_UINT);
       break;
 
    case ir_binop_less:

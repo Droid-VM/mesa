@@ -34,16 +34,13 @@ struct radeon_info;
  * around each command needed. The primary user of this is RGP.
  */
 struct ac_sqtt {
-   /* Only used by RadeonSI */
-   void *start_cs[2];
-   void *stop_cs[2];
    /* VkBuffer or struct si_resource */
    void *bo;
    uint64_t buffer_va;
    void *ptr;
+   /* Per-SE, aligned size */
    uint32_t buffer_size;
-   int start_frame;
-   char *trigger_file;
+   bool capture_cancelled;
    bool instruction_timing_enabled;
    uint32_t instruction_timing_se_mask;
 
@@ -528,9 +525,9 @@ struct rgp_sqtt_marker_pipeline_bind {
       struct {
          uint32_t identifier : 4;
          uint32_t ext_dwords : 3;
-         uint32_t bind_point : 1;
+         uint32_t bind_point : 2;
          uint32_t cb_id : 20;
-         uint32_t reserved : 4;
+         uint32_t reserved : 3;
       };
       uint32_t dword01;
    };

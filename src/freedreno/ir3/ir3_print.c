@@ -336,12 +336,16 @@ print_reg_name(struct log_stream *stream, struct ir3_instruction *instr,
                struct ir3_register *reg, bool dest)
 {
    if ((reg->flags & (IR3_REG_FABS | IR3_REG_SABS)) &&
-       (reg->flags & (IR3_REG_FNEG | IR3_REG_SNEG | IR3_REG_BNOT)))
+       (reg->flags & (IR3_REG_FNEG | IR3_REG_SNEG)))
       mesa_log_stream_printf(stream, "(absneg)");
-   else if (reg->flags & (IR3_REG_FNEG | IR3_REG_SNEG | IR3_REG_BNOT))
+   else if (reg->flags & (IR3_REG_FNEG | IR3_REG_SNEG))
       mesa_log_stream_printf(stream, "(neg)");
-   else if (reg->flags & (IR3_REG_FABS | IR3_REG_SABS))
-      mesa_log_stream_printf(stream, "(abs)");
+   else {
+      if (reg->flags & (IR3_REG_FABS | IR3_REG_SABS))
+         mesa_log_stream_printf(stream, "(abs)");
+      if (reg->flags & (IR3_REG_BNOT))
+         mesa_log_stream_printf(stream, "(not)");
+   }
 
    if (reg->flags & IR3_REG_FIRST_KILL)
       mesa_log_stream_printf(stream, "(kill)");

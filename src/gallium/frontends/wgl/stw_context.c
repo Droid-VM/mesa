@@ -50,8 +50,11 @@
 #include "stw_pixelformat.h"
 #include "stw_context.h"
 #include "stw_tls.h"
+#include "stw_apitrace.h"
 
 #include "main/context.h"
+#include "main/glthread.h"
+#include "util/u_driconf.h"
 
 struct stw_context *
 stw_current_context(void)
@@ -93,9 +96,11 @@ DrvCopyContext(DHGLRC dhrcSource, DHGLRC dhrcDest, UINT fuMask)
 }
 
 
-BOOL APIENTRY
-DrvShareLists(DHGLRC dhglrc1, DHGLRC dhglrc2)
+BOOL WINAPI
+stw_wglShareLists(HGLRC hglrc1, HGLRC hglrc2)
 {
+   DHGLRC dhglrc1 = (DHGLRC)(UINT_PTR)hglrc1;
+   DHGLRC dhglrc2 = (DHGLRC)(UINT_PTR)hglrc2;
    struct stw_context *ctx1;
    struct stw_context *ctx2;
    BOOL ret = false;
@@ -109,6 +114,8 @@ DrvShareLists(DHGLRC dhglrc1, DHGLRC dhglrc2)
    ctx2 = stw_lookup_context_locked( dhglrc2 );
 
    if (ctx1 && ctx2) {
+      _mesa_glthread_finish(ctx1->st->ctx);
+      _mesa_glthread_finish(ctx2->st->ctx);
       ret = _mesa_share_state(ctx2->st->ctx, ctx1->st->ctx);
       ctx1->shared = true;
       ctx2->shared = true;
@@ -120,34 +127,56 @@ DrvShareLists(DHGLRC dhglrc1, DHGLRC dhglrc2)
 }
 
 
+BOOL APIENTRY
+DrvShareLists(DHGLRC dhglrc1, DHGLRC dhglrc2)
+{
+   return STW_WGL(wglShareLists)((HGLRC)(UINT_PTR)dhglrc1,
+                                 (HGLRC)(UINT_PTR)dhglrc2);
+}
+
+
+HGLRC WINAPI
+stw_wglCreateContext(HDC hdc)
+{
+   return stw_wglCreateLayerContext(hdc, 0);
+}
+
+
 DHGLRC APIENTRY
 DrvCreateContext(HDC hdc)
 {
-   return DrvCreateLayerContext( hdc, 0 );
+   return (DHGLRC)(UINT_PTR)STW_WGL(wglCreateContext)(hdc);
+}
+
+
+HGLRC WINAPI
+stw_wglCreateLayerContext(HDC hdc, int iLayerPlane)
+{
+   if (!stw_dev)
+      return NULL;
+
+   const struct stw_pixelformat_info *pfi = stw_pixelformat_get_info_from_hdc(hdc);
+   if (!pfi)
+      return NULL;
+
+   struct stw_context *ctx = stw_create_context_attribs(hdc, iLayerPlane, NULL, stw_dev->fscreen, 1, 0, 0,
+                                                        WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
+                                                        pfi, WGL_NO_RESET_NOTIFICATION_ARB);
+   if (!ctx)
+      return NULL;
+
+   DHGLRC ret = stw_create_context_handle(ctx, 0);
+   if (!ret)
+      stw_destroy_context(ctx);
+
+   return (HGLRC)(UINT_PTR)ret;
 }
 
 
 DHGLRC APIENTRY
 DrvCreateLayerContext(HDC hdc, INT iLayerPlane)
 {
-   if (!stw_dev)
-      return 0;
-
-   const struct stw_pixelformat_info *pfi = stw_pixelformat_get_info_from_hdc(hdc);
-   if (!pfi)
-      return 0;
-
-   struct stw_context *ctx = stw_create_context_attribs(hdc, iLayerPlane, NULL, stw_dev->fscreen, 1, 0, 0,
-                                                        WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
-                                                        pfi, WGL_NO_RESET_NOTIFICATION_ARB);
-   if (!ctx)
-      return 0;
-
-   DHGLRC ret = stw_create_context_handle(ctx, 0);
-   if (!ret)
-      stw_destroy_context(ctx);
-
-   return ret;
+   return (DHGLRC)(UINT_PTR)STW_WGL(wglCreateLayerContext)(hdc, iLayerPlane);
 }
 
 /**
@@ -257,6 +286,10 @@ stw_create_context_attribs(HDC hdc, INT iLayerPlane, struct stw_context *shareCt
                             st_context_invalidate_state);
    }
 
+   /* Do this last. */
+   if (u_driconf_glthread_enabled(&stw_dev->option_cache))
+      _mesa_glthread_init(ctx->st->ctx);
+
    return ctx;
 
 no_st_ctx:
@@ -299,6 +332,8 @@ stw_create_context_handle(struct stw_context *ctx, DHGLRC handle)
 void
 stw_destroy_context(struct stw_context *ctx)
 {
+   _mesa_glthread_finish(ctx->st->ctx);
+
    if (ctx->hud) {
       hud_destroy(ctx->hud, NULL);
    }
@@ -308,9 +343,10 @@ stw_destroy_context(struct stw_context *ctx)
 }
 
 
-BOOL APIENTRY
-DrvDeleteContext(DHGLRC dhglrc)
+BOOL WINAPI
+stw_wglDeleteContext(HGLRC hglrc)
 {
+   DHGLRC dhglrc = (DHGLRC)(UINT_PTR)hglrc;
    struct stw_context *ctx ;
    BOOL ret = false;
 
@@ -326,14 +362,27 @@ DrvDeleteContext(DHGLRC dhglrc)
       struct stw_context *curctx = stw_current_context();
 
       /* Unbind current if deleting current context. */
-      if (curctx == ctx)
+      if (curctx == ctx) {
+         _mesa_glthread_finish(ctx->st->ctx);
          st_api_make_current(NULL, NULL, NULL);
+      }
 
       stw_destroy_context(ctx);
       ret = true;
    }
 
    return ret;
+}
+
+
+BOOL APIENTRY
+DrvDeleteContext(DHGLRC dhglrc)
+{
+   /* opengl32 deletes leftover contexts at exit, after the tracer may be gone */
+   if (!stw_dev)
+      return false;
+
+   return STW_WGL(wglDeleteContext)((HGLRC)(UINT_PTR)dhglrc);
 }
 
 BOOL
@@ -349,10 +398,8 @@ stw_unbind_context(struct stw_context *ctx)
    if (ctx != stw_current_context())
       return false;
 
-   if (stw_make_current( NULL, NULL, NULL ) == false)
-      return false;
-
-   return true;
+   /* traced as wglMakeCurrent(NULL, NULL) */
+   return STW_WGL(wglMakeCurrent)(NULL, NULL);
 }
 
 BOOL APIENTRY
@@ -395,6 +442,20 @@ stw_get_current_dc( void )
 
    return ctx->hDrawDC;
 }
+
+HGLRC WINAPI
+stw_wglGetCurrentContext(void)
+{
+   return (HGLRC)(UINT_PTR)stw_get_current_context();
+}
+
+
+HDC WINAPI
+stw_wglGetCurrentDC(void)
+{
+   return stw_get_current_dc();
+}
+
 
 HDC
 stw_get_current_read_dc( void )
@@ -443,6 +504,8 @@ stw_make_current(struct stw_framebuffer *fb, struct stw_framebuffer *fbRead, str
             return true;
          }
       } else {
+         _mesa_glthread_finish(old_ctx->st->ctx);
+
          if (old_ctx->shared ||
             /* Using a winsys framebuffer effectively means that there's sharing since another
              * context might end up using the same resources. */
@@ -467,6 +530,8 @@ stw_make_current(struct stw_framebuffer *fb, struct stw_framebuffer *fbRead, str
    }
 
    if (ctx) {
+      _mesa_glthread_finish(ctx->st->ctx);
+
       if (ctx->pfi && fb && fb->pfi != ctx->pfi) {
          SetLastError(ERROR_INVALID_PIXEL_FORMAT);
          goto fail;
@@ -970,12 +1035,19 @@ static const GLCLTPROCTABLE cpt =
 };
 
 
+BOOL WINAPI
+stw_wglMakeCurrent(HDC hdc, HGLRC hglrc)
+{
+   return stw_make_current_by_handles(hdc, hdc, (DHGLRC)(UINT_PTR)hglrc);
+}
+
+
 PGLCLTPROCTABLE APIENTRY
 DrvSetContext(HDC hdc, DHGLRC dhglrc, PFN_SETPROCTABLE pfnSetProcTable)
 {
    PGLCLTPROCTABLE r = (PGLCLTPROCTABLE)&cpt;
 
-   if (!stw_make_current_by_handles(hdc, hdc, dhglrc))
+   if (!STW_WGL(wglMakeCurrent)(hdc, (HGLRC)(UINT_PTR)dhglrc))
       r = NULL;
 
    return r;

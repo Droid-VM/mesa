@@ -134,76 +134,6 @@ get_compute_resolve_pipeline(struct radv_device *device, VkFormat format, uint8_
    return result;
 }
 
-static void
-radv_fixup_resolve_dst_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
-                                VkImageLayout image_layout, const VkImageSubresourceLayers *subresource,
-                                const VkOffset3D *offset, const VkExtent3D *extent, bool before_resolve)
-{
-   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-
-   const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf, cmd_buffer->qf);
-
-   const bool is_partial_resolve = offset->x || offset->y || offset->z || extent->width != image->vk.extent.width ||
-                                   extent->height != image->vk.extent.height || extent->depth != image->vk.extent.depth;
-
-   const VkImageSubresourceRange range = {
-      .aspectMask = subresource->aspectMask,
-      .baseMipLevel = subresource->mipLevel,
-      .levelCount = 1,
-      .baseArrayLayer = subresource->baseArrayLayer,
-      .layerCount = vk_image_subresource_layer_count(&image->vk, subresource),
-   };
-
-   if (vk_format_is_color(image->vk.format)) {
-      if (!radv_layout_dcc_compressed(device, image, subresource->mipLevel, image_layout, queue_mask))
-         return;
-
-      /* Nothing to do when compressed DCC writes are supported. */
-      if (radv_image_compress_dcc_on_image_stores(device, image))
-         return;
-
-      if (before_resolve) {
-         /* For partial resolves, DCC is decompressed before because image stores don't write the
-          * uncompressed DWORD to DCC. And then it's needed to re-initialize DCC to its uncompressed
-          * state after the copy.
-          */
-         if (is_partial_resolve)
-            radv_decompress_dcc(cmd_buffer, image, &range);
-      } else {
-         /* Fixup DCC after a copy on compute, but not for partial copies because decompressing the
-          * image also means that DCC is re-initialized to its uncompressed state.
-          */
-         if (!is_partial_resolve)
-            cmd_buffer->state.flush_bits |= radv_init_dcc(cmd_buffer, image, &range, DCC_UNCOMPRESSED);
-      }
-   } else {
-      if (!radv_layout_is_htile_compressed(device, image, subresource->mipLevel, image_layout, queue_mask))
-         return;
-
-      if (radv_image_decompress_htile_on_image_stores(device, image))
-         return;
-
-      if (before_resolve) {
-         if (is_partial_resolve) {
-            /* For partial resolves, HTILE is decompressed before because image stores don't write the
-             * uncompressed DWORD to HTILE. And then it's needed to re-initialize HTILE to its
-             * uncompressed state after the copy.
-             */
-            radv_expand_depth_stencil(cmd_buffer, image, &range, NULL);
-         }
-      } else {
-         /* Fixup HTILE after a copy on compute, but not for partial copies because decompressing
-          * the image also means that HTILE is re-initialized to its uncompressed state.
-          */
-         if (!is_partial_resolve) {
-            uint32_t htile_value = radv_get_htile_initial_value(device, image);
-
-            cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, image, &range, htile_value, false);
-         }
-      }
-   }
-}
-
 void
 radv_compute_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkFormat src_format,
                            VkImageLayout src_image_layout, struct radv_image *dst_image, VkFormat dst_format,
@@ -222,8 +152,9 @@ radv_compute_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image
       return;
    }
 
-   radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
-                                   &region->extent, true);
+   radv_meta_fixup_dst_metadata(cmd_buffer, dst_image, dst_image_layout, dst_image_layout, &region->dstSubresource,
+                                &region->dstOffset, &region->extent,
+                                radv_get_aspect_format(dst_image, region->dstSubresource.aspectMask), true);
 
    assert(vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource) ==
           vk_image_subresource_layer_count(&dst_image->vk, &region->dstSubresource));
@@ -274,7 +205,7 @@ radv_compute_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image
                            .pNext = &dst_iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(dst_image),
-                           .viewType = radv_meta_get_view_type(dst_image),
+                           .viewType = radv_meta_get_view_type(dst_image, false),
                            .format = vk_format_no_srgb(dst_format),
                            .subresourceRange =
                               {
@@ -319,6 +250,7 @@ radv_compute_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
 
-   radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
-                                   &region->extent, false);
+   radv_meta_fixup_dst_metadata(cmd_buffer, dst_image, dst_image_layout, dst_image_layout, &region->dstSubresource,
+                                &region->dstOffset, &region->extent,
+                                radv_get_aspect_format(dst_image, region->dstSubresource.aspectMask), false);
 }

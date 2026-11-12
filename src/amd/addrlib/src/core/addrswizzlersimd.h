@@ -57,6 +57,8 @@
 #if ADDR_HAS_AVX2
 #if _MSC_VER
 #include <Windows.h>
+#else
+#include <cpuid.h>
 #endif
 #include <immintrin.h>
 
@@ -85,7 +87,18 @@ static inline bool CpuSupportsAvx2() {
 #if _MSC_VER
     return IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
 #elif defined(__GNUC__)
-    return __builtin_cpu_supports("avx2");
+    // __builtin_cpu_supports() lowers to a PC-relative reference to the
+    // libgcc/compiler-rt __cpu_model global, which some clang+lld
+    // configurations reject when linking into a shared library (the
+    // symbol is treated as preemptible: "relocation R_X86_64_PC32 cannot
+    // be used against symbol '__cpu_model'"). Check CPUID directly instead.
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid_max(0, nullptr) < 7)
+    {
+        return false;
+    }
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    return (ebx & bit_AVX2) != 0;
 #else
 #error "What platform is this?"
 #endif
@@ -107,12 +120,12 @@ static inline bool CpuSupportsNeon() {
 }
 #endif
 
-constexpr UINT_64 GetMicroSwKey(const UINT_64* pEq, bool isPlanarMsaa = false)
+constexpr UINT_64 GetMicroSwKey(const UINT_64* pEq, UINT_32 microEqBits = 8, bool isPlanarMsaa = false)
 {
     UINT_64 out = 0;
 
     // Microswizzles never have move than 1 xor, so just use the log2 of each bit (6 bits each = 48 bits)
-    for (UINT_32 i = 0; i < 8; i++)
+    for (UINT_32 i = 0; i < microEqBits; i++)
     {
         if (pEq[i] != 0)
         {
@@ -126,6 +139,18 @@ constexpr UINT_64 GetMicroSwKey(const UINT_64* pEq, bool isPlanarMsaa = false)
     {
         out |= (static_cast<UINT_64>(1) << 48);
     }
+    out |= (static_cast<UINT_64>(microEqBits & 0xF) << 49);
+
+    return out;
+}
+
+constexpr UINT_64 GetBlockCopyKey(UINT_32 microEqBits, bool isNonTemporal, bool isBlockMemcpy, bool isHybridMemcpy)
+{
+    UINT_64 out = 0;
+    out |= (static_cast<UINT_64>(microEqBits & 0xF) << 0);
+    out |= (static_cast<UINT_64>(isNonTemporal) << 4);
+    out |= (static_cast<UINT_64>(isBlockMemcpy) << 5);
+    out |= (static_cast<UINT_64>(isHybridMemcpy) << 6);
 
     return out;
 }
@@ -150,7 +175,7 @@ AVX2_FUNC static inline void StreamCopyToImgAligned(
 {
     __m256i*       pAlignedOut  = reinterpret_cast<__m256i*>(pImg);
     const __m256i* pUnalignedIn = reinterpret_cast<const __m256i*>(pBuf);
-    ADDR_ASSERT(PowTwoAlign(uint64_t(size), 256ULL) == uint64_t(size));
+    ADDR_ASSERT(PowTwoAlign(uint64_t(size), 128ULL) == uint64_t(size));
     while (size > 0)
     {
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
@@ -158,12 +183,8 @@ AVX2_FUNC static inline void StreamCopyToImgAligned(
         _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
         _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
         _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
-        _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
-        _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
-        _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
-        _mm256_stream_si256(pAlignedOut++, _mm256_loadu_si256(pUnalignedIn++));
         
-        size -= 256;
+        size -= 128;
     }
 }
 
@@ -174,7 +195,7 @@ AVX2_FUNC static inline void StreamCopyFromImgAligned(
 {
     __m256i*       pUnalignedOut = reinterpret_cast<__m256i*>(pBuf);
     const __m256i* pAlignedIn    = reinterpret_cast<const __m256i*>(pImg);
-    ADDR_ASSERT(PowTwoAlign(uint64_t(size), 256ULL) == uint64_t(size));
+    ADDR_ASSERT(PowTwoAlign(uint64_t(size), 128ULL) == uint64_t(size));
     while (size > 0)
     {
         // Use streaming loads to optimize memory behavior-- this requires aligned memory.
@@ -182,12 +203,8 @@ AVX2_FUNC static inline void StreamCopyFromImgAligned(
         _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
         _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
         _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
-        _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
-        _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
-        _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
-        _mm256_storeu_si256(pUnalignedOut++, _mm256_stream_load_si256(pAlignedIn++));
         
-        size -= 256;
+        size -= 128;
     }
 }
 
@@ -203,8 +220,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Yes, that means double the load instructions
@@ -251,14 +268,14 @@ public:
         // Move each reg around to handle high bit swizzling
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, m2_0);
-        _mm256_stream_si256(pAlignedOut++, m2_2);
-        _mm256_stream_si256(pAlignedOut++, m2_1);
-        _mm256_stream_si256(pAlignedOut++, m2_3);
-        _mm256_stream_si256(pAlignedOut++, m2_4);
-        _mm256_stream_si256(pAlignedOut++, m2_6);
-        _mm256_stream_si256(pAlignedOut++, m2_5);
-        _mm256_stream_si256(pAlignedOut++, m2_7);
+        _mm256_storeu_si256(pAlignedOut++, m2_0);
+        _mm256_storeu_si256(pAlignedOut++, m2_2);
+        _mm256_storeu_si256(pAlignedOut++, m2_1);
+        _mm256_storeu_si256(pAlignedOut++, m2_3);
+        _mm256_storeu_si256(pAlignedOut++, m2_4);
+        _mm256_storeu_si256(pAlignedOut++, m2_6);
+        _mm256_storeu_si256(pAlignedOut++, m2_5);
+        _mm256_storeu_si256(pAlignedOut++, m2_7);
     }
 };
 
@@ -275,8 +292,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (16 col * 16b = 256b)
         // Each reg becomes: [ X3 X2 X1 X0 0 ]
@@ -313,14 +330,14 @@ public:
 
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, m1_0);
-        _mm256_stream_si256(pAlignedOut++, m1_1);
-        _mm256_stream_si256(pAlignedOut++, m1_2);
-        _mm256_stream_si256(pAlignedOut++, m1_3);
-        _mm256_stream_si256(pAlignedOut++, m1_4);
-        _mm256_stream_si256(pAlignedOut++, m1_5);
-        _mm256_stream_si256(pAlignedOut++, m1_6);
-        _mm256_stream_si256(pAlignedOut++, m1_7);
+        _mm256_storeu_si256(pAlignedOut++, m1_0);
+        _mm256_storeu_si256(pAlignedOut++, m1_1);
+        _mm256_storeu_si256(pAlignedOut++, m1_2);
+        _mm256_storeu_si256(pAlignedOut++, m1_3);
+        _mm256_storeu_si256(pAlignedOut++, m1_4);
+        _mm256_storeu_si256(pAlignedOut++, m1_5);
+        _mm256_storeu_si256(pAlignedOut++, m1_6);
+        _mm256_storeu_si256(pAlignedOut++, m1_7);
     }
 };
 
@@ -337,8 +354,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (8 col * 32b = 256b)
         // Each reg becomes: [ X2 X1 X0 0 0 ]
@@ -383,14 +400,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, unpack0);
-        _mm256_stream_si256(pAlignedOut++, unpack2);
-        _mm256_stream_si256(pAlignedOut++, unpack1);
-        _mm256_stream_si256(pAlignedOut++, unpack3);
-        _mm256_stream_si256(pAlignedOut++, unpack4);
-        _mm256_stream_si256(pAlignedOut++, unpack6);
-        _mm256_stream_si256(pAlignedOut++, unpack5);
-        _mm256_stream_si256(pAlignedOut++, unpack7);
+        _mm256_storeu_si256(pAlignedOut++, unpack0);
+        _mm256_storeu_si256(pAlignedOut++, unpack2);
+        _mm256_storeu_si256(pAlignedOut++, unpack1);
+        _mm256_storeu_si256(pAlignedOut++, unpack3);
+        _mm256_storeu_si256(pAlignedOut++, unpack4);
+        _mm256_storeu_si256(pAlignedOut++, unpack6);
+        _mm256_storeu_si256(pAlignedOut++, unpack5);
+        _mm256_storeu_si256(pAlignedOut++, unpack7);
     }
 };
 
@@ -406,8 +423,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 rows * (8 col * 64b = 256bx2)
         // Each reg becomes: [ X1 X0 0 0 0 ]
@@ -437,14 +454,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, perm0);
-        _mm256_stream_si256(pAlignedOut++, perm1);
-        _mm256_stream_si256(pAlignedOut++, perm4);
-        _mm256_stream_si256(pAlignedOut++, perm5);
-        _mm256_stream_si256(pAlignedOut++, perm2);
-        _mm256_stream_si256(pAlignedOut++, perm3);
-        _mm256_stream_si256(pAlignedOut++, perm6);
-        _mm256_stream_si256(pAlignedOut++, perm7);
+        _mm256_storeu_si256(pAlignedOut++, perm0);
+        _mm256_storeu_si256(pAlignedOut++, perm1);
+        _mm256_storeu_si256(pAlignedOut++, perm4);
+        _mm256_storeu_si256(pAlignedOut++, perm5);
+        _mm256_storeu_si256(pAlignedOut++, perm2);
+        _mm256_storeu_si256(pAlignedOut++, perm3);
+        _mm256_storeu_si256(pAlignedOut++, perm6);
+        _mm256_storeu_si256(pAlignedOut++, perm7);
     }
 };
 
@@ -460,8 +477,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 rows * (4 col * 128b = 256bx2)
         __m256i y0a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(VoidPtrInc(pBuf, (bufStrideY * 0) + 0)));
@@ -476,14 +493,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here. The rest are already right.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, y0a);
-        _mm256_stream_si256(pAlignedOut++, y1a);
-        _mm256_stream_si256(pAlignedOut++, y0b);
-        _mm256_stream_si256(pAlignedOut++, y1b);
-        _mm256_stream_si256(pAlignedOut++, y2a);
-        _mm256_stream_si256(pAlignedOut++, y3a);
-        _mm256_stream_si256(pAlignedOut++, y2b);
-        _mm256_stream_si256(pAlignedOut++, y3b);
+        _mm256_storeu_si256(pAlignedOut++, y0a);
+        _mm256_storeu_si256(pAlignedOut++, y1a);
+        _mm256_storeu_si256(pAlignedOut++, y0b);
+        _mm256_storeu_si256(pAlignedOut++, y1b);
+        _mm256_storeu_si256(pAlignedOut++, y2a);
+        _mm256_storeu_si256(pAlignedOut++, y3a);
+        _mm256_storeu_si256(pAlignedOut++, y2b);
+        _mm256_storeu_si256(pAlignedOut++, y3b);
     }
 };
 
@@ -500,8 +517,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 slices * 4 rows * (8 col * 8b = 64b)
         // We'll do one 64x4 gather-load for each slice.
@@ -545,14 +562,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, unpack0);
-        _mm256_stream_si256(pAlignedOut++, unpack2);
-        _mm256_stream_si256(pAlignedOut++, unpack1);
-        _mm256_stream_si256(pAlignedOut++, unpack3);
-        _mm256_stream_si256(pAlignedOut++, unpack4);
-        _mm256_stream_si256(pAlignedOut++, unpack6);
-        _mm256_stream_si256(pAlignedOut++, unpack5);
-        _mm256_stream_si256(pAlignedOut++, unpack7);
+        _mm256_storeu_si256(pAlignedOut++, unpack0);
+        _mm256_storeu_si256(pAlignedOut++, unpack2);
+        _mm256_storeu_si256(pAlignedOut++, unpack1);
+        _mm256_storeu_si256(pAlignedOut++, unpack3);
+        _mm256_storeu_si256(pAlignedOut++, unpack4);
+        _mm256_storeu_si256(pAlignedOut++, unpack6);
+        _mm256_storeu_si256(pAlignedOut++, unpack5);
+        _mm256_storeu_si256(pAlignedOut++, unpack7);
     }
 };
 
@@ -568,8 +585,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 slices * 4 rows * (4 col * 16b = 64b)
         // We'll do one 64x4 gather-load for each slice.
@@ -615,14 +632,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, permute0);
-        _mm256_stream_si256(pAlignedOut++, permute2);
-        _mm256_stream_si256(pAlignedOut++, permute1);
-        _mm256_stream_si256(pAlignedOut++, permute3);
-        _mm256_stream_si256(pAlignedOut++, permute4);
-        _mm256_stream_si256(pAlignedOut++, permute6);
-        _mm256_stream_si256(pAlignedOut++, permute5);
-        _mm256_stream_si256(pAlignedOut++, permute7);
+        _mm256_storeu_si256(pAlignedOut++, permute0);
+        _mm256_storeu_si256(pAlignedOut++, permute2);
+        _mm256_storeu_si256(pAlignedOut++, permute1);
+        _mm256_storeu_si256(pAlignedOut++, permute3);
+        _mm256_storeu_si256(pAlignedOut++, permute4);
+        _mm256_storeu_si256(pAlignedOut++, permute6);
+        _mm256_storeu_si256(pAlignedOut++, permute5);
+        _mm256_storeu_si256(pAlignedOut++, permute7);
     }
 };
 
@@ -639,8 +656,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 slices * 4 rows * (4 col * 32b = 128b)
         // Each reg becomes: [ X1 X0 0 0 ]
@@ -687,14 +704,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, perm0);
-        _mm256_stream_si256(pAlignedOut++, perm2);
-        _mm256_stream_si256(pAlignedOut++, perm1);
-        _mm256_stream_si256(pAlignedOut++, perm3);
-        _mm256_stream_si256(pAlignedOut++, perm4);
-        _mm256_stream_si256(pAlignedOut++, perm6);
-        _mm256_stream_si256(pAlignedOut++, perm5);
-        _mm256_stream_si256(pAlignedOut++, perm7);
+        _mm256_storeu_si256(pAlignedOut++, perm0);
+        _mm256_storeu_si256(pAlignedOut++, perm2);
+        _mm256_storeu_si256(pAlignedOut++, perm1);
+        _mm256_storeu_si256(pAlignedOut++, perm3);
+        _mm256_storeu_si256(pAlignedOut++, perm4);
+        _mm256_storeu_si256(pAlignedOut++, perm6);
+        _mm256_storeu_si256(pAlignedOut++, perm5);
+        _mm256_storeu_si256(pAlignedOut++, perm7);
     }
 };
 
@@ -710,8 +727,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 slices * 2 rows * (4 col * 64b = 256b)
         // Each reg becomes: [ X1 X0 0 0 0 ]
@@ -741,14 +758,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, z0x0);
-        _mm256_stream_si256(pAlignedOut++, z1x0);
-        _mm256_stream_si256(pAlignedOut++, z0x1);
-        _mm256_stream_si256(pAlignedOut++, z1x1);
-        _mm256_stream_si256(pAlignedOut++, z2x0);
-        _mm256_stream_si256(pAlignedOut++, z3x0);
-        _mm256_stream_si256(pAlignedOut++, z2x1);
-        _mm256_stream_si256(pAlignedOut++, z3x1);
+        _mm256_storeu_si256(pAlignedOut++, z0x0);
+        _mm256_storeu_si256(pAlignedOut++, z1x0);
+        _mm256_storeu_si256(pAlignedOut++, z0x1);
+        _mm256_storeu_si256(pAlignedOut++, z1x1);
+        _mm256_storeu_si256(pAlignedOut++, z2x0);
+        _mm256_storeu_si256(pAlignedOut++, z3x0);
+        _mm256_storeu_si256(pAlignedOut++, z2x1);
+        _mm256_storeu_si256(pAlignedOut++, z3x1);
     }
 };
 
@@ -765,8 +782,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 slices * 2 rows * (2 col * 128b = 256b)
         __m256i z0y0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(VoidPtrInc(pBuf, (bufStrideZ * 0))));
@@ -781,14 +798,14 @@ public:
         // The whole swizzle can be handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, z0y0);
-        _mm256_stream_si256(pAlignedOut++, z1y0);
-        _mm256_stream_si256(pAlignedOut++, z0y1);
-        _mm256_stream_si256(pAlignedOut++, z1y1);
-        _mm256_stream_si256(pAlignedOut++, z2y0);
-        _mm256_stream_si256(pAlignedOut++, z3y0);
-        _mm256_stream_si256(pAlignedOut++, z2y1);
-        _mm256_stream_si256(pAlignedOut++, z3y1);
+        _mm256_storeu_si256(pAlignedOut++, z0y0);
+        _mm256_storeu_si256(pAlignedOut++, z1y0);
+        _mm256_storeu_si256(pAlignedOut++, z0y1);
+        _mm256_storeu_si256(pAlignedOut++, z1y1);
+        _mm256_storeu_si256(pAlignedOut++, z2y0);
+        _mm256_storeu_si256(pAlignedOut++, z3y0);
+        _mm256_storeu_si256(pAlignedOut++, z2y1);
+        _mm256_storeu_si256(pAlignedOut++, z3y1);
     }
 };
 
@@ -805,8 +822,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Yes, that means double the load instructions
@@ -842,14 +859,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here. The rest are already right.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, concat0);
-        _mm256_stream_si256(pAlignedOut++, concat1);
-        _mm256_stream_si256(pAlignedOut++, concat2);
-        _mm256_stream_si256(pAlignedOut++, concat3);
-        _mm256_stream_si256(pAlignedOut++, concat4);
-        _mm256_stream_si256(pAlignedOut++, concat5);
-        _mm256_stream_si256(pAlignedOut++, concat6);
-        _mm256_stream_si256(pAlignedOut++, concat7);
+        _mm256_storeu_si256(pAlignedOut++, concat0);
+        _mm256_storeu_si256(pAlignedOut++, concat1);
+        _mm256_storeu_si256(pAlignedOut++, concat2);
+        _mm256_storeu_si256(pAlignedOut++, concat3);
+        _mm256_storeu_si256(pAlignedOut++, concat4);
+        _mm256_storeu_si256(pAlignedOut++, concat5);
+        _mm256_storeu_si256(pAlignedOut++, concat6);
+        _mm256_storeu_si256(pAlignedOut++, concat7);
     }
 };
 
@@ -865,8 +882,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (16 col * 16b = 256b)
         // Each reg becomes: [ X3 X2 X1 X0 0 ]
@@ -896,14 +913,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, perm0);
-        _mm256_stream_si256(pAlignedOut++, perm2);
-        _mm256_stream_si256(pAlignedOut++, perm4);
-        _mm256_stream_si256(pAlignedOut++, perm6);
-        _mm256_stream_si256(pAlignedOut++, perm1);
-        _mm256_stream_si256(pAlignedOut++, perm3);
-        _mm256_stream_si256(pAlignedOut++, perm5);
-        _mm256_stream_si256(pAlignedOut++, perm7);
+        _mm256_storeu_si256(pAlignedOut++, perm0);
+        _mm256_storeu_si256(pAlignedOut++, perm2);
+        _mm256_storeu_si256(pAlignedOut++, perm4);
+        _mm256_storeu_si256(pAlignedOut++, perm6);
+        _mm256_storeu_si256(pAlignedOut++, perm1);
+        _mm256_storeu_si256(pAlignedOut++, perm3);
+        _mm256_storeu_si256(pAlignedOut++, perm5);
+        _mm256_storeu_si256(pAlignedOut++, perm7);
     }
 };
 
@@ -919,8 +936,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (8 col * 32b = 256b)
         // Each reg becomes: [ X2 X1 X0 0 0 ]
@@ -950,14 +967,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, perm0);
-        _mm256_stream_si256(pAlignedOut++, perm2);
-        _mm256_stream_si256(pAlignedOut++, perm1);
-        _mm256_stream_si256(pAlignedOut++, perm3);
-        _mm256_stream_si256(pAlignedOut++, perm4);
-        _mm256_stream_si256(pAlignedOut++, perm6);
-        _mm256_stream_si256(pAlignedOut++, perm5);
-        _mm256_stream_si256(pAlignedOut++, perm7);
+        _mm256_storeu_si256(pAlignedOut++, perm0);
+        _mm256_storeu_si256(pAlignedOut++, perm2);
+        _mm256_storeu_si256(pAlignedOut++, perm1);
+        _mm256_storeu_si256(pAlignedOut++, perm3);
+        _mm256_storeu_si256(pAlignedOut++, perm4);
+        _mm256_storeu_si256(pAlignedOut++, perm6);
+        _mm256_storeu_si256(pAlignedOut++, perm5);
+        _mm256_storeu_si256(pAlignedOut++, perm7);
     }
 };
 
@@ -974,8 +991,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Each reg becomes: [ X3 X2 X1 X0 ]
@@ -1033,14 +1050,14 @@ public:
         // Finally, the top 3 bits of the swizzle are handled by the order of the registers here.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, permute0);
-        _mm256_stream_si256(pAlignedOut++, permute2);
-        _mm256_stream_si256(pAlignedOut++, permute1);
-        _mm256_stream_si256(pAlignedOut++, permute3);
-        _mm256_stream_si256(pAlignedOut++, permute4);
-        _mm256_stream_si256(pAlignedOut++, permute6);
-        _mm256_stream_si256(pAlignedOut++, permute5);
-        _mm256_stream_si256(pAlignedOut++, permute7);
+        _mm256_storeu_si256(pAlignedOut++, permute0);
+        _mm256_storeu_si256(pAlignedOut++, permute2);
+        _mm256_storeu_si256(pAlignedOut++, permute1);
+        _mm256_storeu_si256(pAlignedOut++, permute3);
+        _mm256_storeu_si256(pAlignedOut++, permute4);
+        _mm256_storeu_si256(pAlignedOut++, permute6);
+        _mm256_storeu_si256(pAlignedOut++, permute5);
+        _mm256_storeu_si256(pAlignedOut++, permute7);
     }
 };
 
@@ -1057,8 +1074,8 @@ public:
     AVX2_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Yes, that means double the load instructions
@@ -1105,14 +1122,14 @@ public:
         // The top 3 bits of the swizzle are handled by the order of the registers here. The rest are already right.
         // Use streaming stores to optimize memory behavior-- this requires aligned memory.
         __m256i* pAlignedOut = reinterpret_cast<__m256i*>(pImgMicroblock);
-        _mm256_stream_si256(pAlignedOut++, unpack0);
-        _mm256_stream_si256(pAlignedOut++, unpack2);
-        _mm256_stream_si256(pAlignedOut++, unpack1);
-        _mm256_stream_si256(pAlignedOut++, unpack3);
-        _mm256_stream_si256(pAlignedOut++, unpack4);
-        _mm256_stream_si256(pAlignedOut++, unpack6);
-        _mm256_stream_si256(pAlignedOut++, unpack5);
-        _mm256_stream_si256(pAlignedOut++, unpack7);
+        _mm256_storeu_si256(pAlignedOut++, unpack0);
+        _mm256_storeu_si256(pAlignedOut++, unpack2);
+        _mm256_storeu_si256(pAlignedOut++, unpack1);
+        _mm256_storeu_si256(pAlignedOut++, unpack3);
+        _mm256_storeu_si256(pAlignedOut++, unpack4);
+        _mm256_storeu_si256(pAlignedOut++, unpack6);
+        _mm256_storeu_si256(pAlignedOut++, unpack5);
+        _mm256_storeu_si256(pAlignedOut++, unpack7);
     }
 };
 #endif // ADDR_HAS_AVX2
@@ -1130,8 +1147,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Each reg becomes: [ X3 X2 X1 X0 ]
@@ -1197,8 +1214,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (16 col * 16b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1255,8 +1272,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (8 col * 32b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1315,8 +1332,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
 
         // Unaligned buffer loads for 4 rows * (8 col * 64b = 256bx2)
@@ -1350,8 +1367,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
 
         // Unaligned buffer loads for 4 rows * (4 col * 128b = 512b)
@@ -1384,8 +1401,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 slices * 4 rows * (4 col * 16b = 64b)
         // Do a lot of 64b (half reg) loads and join them
@@ -1501,8 +1518,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
 
         // Unaligned buffer loads for 8 slices * 4 rows * (4 col * 16b = 64b)
@@ -1619,8 +1636,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 rows * (8 col * 64b = 256bx2)
         // Each reg becomes: [ X1 X0 0 0 ]
@@ -1685,8 +1702,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 slices * 2 rows * (4 col * 64b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1725,8 +1742,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 4 slices * 2 rows * (4 col * 64b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1763,8 +1780,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Each reg becomes: [ X3 X2 X1 X0 ]
@@ -1809,8 +1826,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (16 col * 16b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1849,8 +1866,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 8 rows * (16 col * 16b = 256b)
         // ARM can do a 256b load/store, but the actual values are 128b.
@@ -1888,8 +1905,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Each reg becomes: [ X3 X2 X1 X0 ]
@@ -1972,8 +1989,8 @@ public:
     NEON_FUNC static void CopyMicroBlock(
         void*       pImgMicroblock,  // Microblock to write to
         const void* pBuf,            // Pointer to data starting from the first pixel of this block
-        size_t      bufStrideY,      // Stride of each row in pBuf
-        size_t      bufStrideZ)      // Stride of each slice in pBuf
+        UINT_64     bufStrideY,      // Stride of each row in pBuf
+        UINT_64     bufStrideZ)      // Stride of each slice in pBuf
     {
         // Unaligned buffer loads for 16 rows * (16 col * 8b = 128b)
         // Each reg becomes: [ X3 X2 X1 X0 ]

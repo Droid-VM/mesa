@@ -73,8 +73,7 @@ bool radv_nir_lower_draw_id_to_zero(nir_shader *shader);
 
 bool radv_nir_remap_color_attachment(nir_shader *shader, const struct radv_graphics_state_key *gfx_state);
 
-bool radv_nir_trim_fs_color_exports(nir_shader *shader, const struct radv_ps_epilog_key *epilog_key,
-                                    bool mrt0_alpha_is_dead);
+bool radv_nir_trim_fs_exports(nir_shader *shader, const struct radv_ps_epilog_key *epilog_key, bool mrt0_alpha_is_dead);
 
 bool radv_nir_lower_printf(nir_shader *shader, struct radv_debug_nir *debug_nir);
 

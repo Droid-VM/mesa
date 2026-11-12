@@ -22,7 +22,7 @@ layout(push_constant) uniform CONSTS
 void
 main()
 {
-   uint32_t bvh_offset = DEREF(args.src).bvh_offset;
+   uint32_t bvh_offset = DEREF(args.src).base.bvh_offset;
 
    VOID_REF src_bvh = OFFSET(args.src, bvh_offset);
    VOID_REF dst_bvh = OFFSET(args.dst, bvh_offset);
@@ -71,27 +71,56 @@ main()
    bounds.min = vec3(INFINITY);
    bounds.max = vec3(-INFINITY);
    if (is_leaf) {
-      VOID_REF src_leaf_node = OFFSET(src_bvh, child_offset);
+      radv_gfx12_primitive_node src_leaf_node = DEREF(REF(radv_gfx12_primitive_node)(OFFSET(src_bvh, child_offset)));
 
       uint32_t geometry_index = 0;
+      if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY) {
+         geometry_index =
+            src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 1] >> 4;
+      }
+
+      vk_bvh_geometry_data geom_data = args.geom_data0;
       if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
-         geometry_index = DEREF(REF(uint32_t)(src_leaf_node + RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET)) >> 4;
-
-      uint32_t primitive_index =
-         DEREF(REF(uint32_t)(src_leaf_node + RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET + 4)) & 0xfffffff;
-
-      vk_bvh_geometry_data geom_data;
-      if (RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
-         geom_data = args.geom_data0;
-      else
          geom_data = DEREF(INDEX(vk_bvh_geometry_data, args.geom_data, geometry_index));
 
-      VOID_REF dst_leaf_node = OFFSET(dst_bvh, child_offset);
+      uint32_t primitive_index =
+         src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4] & 0xfffffff;
+
+      bool is_pair = false;
       if (geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
-         radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, true);
+         uint32_t pair_desc = src_leaf_node.dwords[31] >> (32 - RADV_GFX12_PRIMITIVE_NODE_PAIR_DESC_SIZE);
+         is_pair = (pair_desc & (0xfff << 3)) != 0;
+      }
+
+      VOID_REF dst_leaf_node = OFFSET(dst_bvh, child_offset);
+
+      if (is_pair) {
+         uint32_t second_geometry_index = 0;
+         if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY) {
+            second_geometry_index =
+               (src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 1] & 0xf) << 24;
+            second_geometry_index |=
+               src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 2] >> 8;
+         }
+
+         vk_bvh_geometry_data second_geom_data = args.geom_data0;
+         if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
+            second_geom_data = DEREF(INDEX(vk_bvh_geometry_data, args.geom_data, second_geometry_index));
+
+         uint32_t second_primitive_index =
+            src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4] >> 28;
+         second_primitive_index |=
+            (src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 + 1] & 0xffffff) << 4;
+
+         radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, second_geom_data,
+                             second_primitive_index);
       } else {
-         VOID_REF src_ptr = OFFSET(geom_data.data, primitive_index * geom_data.stride);
-         radv_build_aabb(bounds, src_ptr, dst_leaf_node, geometry_index, primitive_index, true);
+         if (geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
+            radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, true);
+         } else {
+            VOID_REF src_ptr = OFFSET(geom_data.data, primitive_index * geom_data.stride);
+            radv_build_aabb(bounds, src_ptr, dst_leaf_node, geometry_index, primitive_index, true);
+         }
       }
    }
 
@@ -100,8 +129,8 @@ main()
    bool is_ready = is_leaf_or_invalid;
    while (true) {
       if (!is_ready) {
-         is_ready = atomicLoad(DEREF(INDEX(uint32_t, args.internal_ready_count, child_index)),
-                               gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsAcquire | gl_SemanticsMakeVisible) != 0;
+         is_ready = atomicLoad(DEREF(INDEX(uint32_t, args.internal_ready_count, child_index)), gl_ScopeDevice,
+                               gl_StorageSemanticsBuffer, gl_SemanticsAcquire | gl_SemanticsMakeVisible) != 0;
       }
 
       if (radv_ballot(cluster, is_ready) != 0xff)
@@ -121,7 +150,8 @@ main()
 
       if (cluster.invocation_index == 0) {
          if (is_root_node) {
-            DEREF(args.dst).aabb = total_bounds;
+            DEREF(args.dst).base.aabb = total_bounds;
+            radv_write_instance_filter_gfx12(args.dst, cluster, total_bounds, bounds, valid_child_count_minus_one);
          } else {
             DEREF(INDEX(vk_aabb, args.bounds, node_index - 1)) = total_bounds;
 
@@ -130,11 +160,8 @@ main()
          }
       }
 
-      vec3 origin = total_bounds.min;
-      vec3 extent = total_bounds.max - total_bounds.min;
-
-      extent = uintBitsToFloat((floatBitsToUint(extent) + uvec3(0x7fffff)) & 0x7f800000);
-      uvec3 extent_exponents = floatBitsToUint(extent) >> 23;
+      radv_gfx12_box_node_encoder box_encoder;
+      radv_gfx12_box_node_encoder_init(box_encoder, total_bounds);
 
       if (cluster.invocation_index == 0) {
          if (!RADV_TEST_BUILD_FLAG_UPDATE_IN_PLACE) {
@@ -142,26 +169,16 @@ main()
             DEREF(dst_node).internal_base_id = src_node.internal_base_id;
             DEREF(dst_node).parent_id = src_node.parent_id;
          }
-         DEREF(dst_node).origin = origin;
-         DEREF(dst_node).child_count_exponents = extent_exponents.x | (extent_exponents.y << 8) |
-                                                 (extent_exponents.z << 16) | (valid_child_count_minus_one << 28);
+         DEREF(dst_node).origin = total_bounds.min;
+         DEREF(dst_node).child_count_exponents =
+            radv_gfx12_box_node_encoder_get_exponents_count(box_encoder, valid_child_count_minus_one);
          if (!RADV_TEST_BUILD_FLAG_UPDATE_IN_PLACE)
             DEREF(dst_node).obb_matrix_index = 0x7f;
       }
 
       if (is_valid) {
-         radv_gfx12_box_child box_child;
-         box_child.dword0 = (child.dword0 & 0xFF000000) |
-                            min(uint32_t(floor((bounds.min.x - origin.x) / extent.x * float(0x1000))), 0xfff) |
-                            (min(uint32_t(floor((bounds.min.y - origin.y) / extent.y * float(0x1000))), 0xfff) << 12);
-         box_child.dword1 =
-            (child.dword1 & 0xFF000000) |
-            min(uint32_t(floor((bounds.min.z - origin.z) / extent.z * float(0x1000))), 0xfff) |
-            (min(uint32_t(ceil((bounds.max.x - origin.x) / extent.x * float(0x1000))) - 1, 0xfff) << 12);
-         box_child.dword2 =
-            (child.dword2 & 0xFF000000) |
-            min(uint32_t(ceil((bounds.max.y - origin.y) / extent.y * float(0x1000))) - 1, 0xfff) |
-            (min(uint32_t(ceil((bounds.max.z - origin.z) / extent.z * float(0x1000))) - 1, 0xfff) << 12);
+         radv_gfx12_box_child box_child = child;
+         radv_gfx12_box_node_encoder_set_child_bounds(box_encoder, box_child, bounds);
          DEREF(dst_node).children[cluster.invocation_index] = box_child;
       }
 

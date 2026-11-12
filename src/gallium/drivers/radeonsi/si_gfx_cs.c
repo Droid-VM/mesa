@@ -80,14 +80,14 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    struct radeon_cmdbuf *cs = &ctx->gfx_cs;
    struct radeon_winsys *ws = ctx->ws;
    struct si_screen *sscreen = ctx->screen;
-   const unsigned wait_ps_cs = SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS;
+   const unsigned wait_ps_cs = AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS;
    unsigned wait_flags = 0;
 
    if (ctx->gfx_flush_in_progress)
       return;
 
    /* The amdgpu kernel driver synchronizes execution for shared DMABUFs between
-    * processes on DRM >= 3.39.0, so we don't have to wait at the end of IBs to
+    * processes so we don't have to wait at the end of IBs to
     * make sure everything is idle.
     *
     * The amdgpu winsys synchronizes execution for buffers shared by different
@@ -96,12 +96,12 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
     * Interop with AMDVLK, RADV, or OpenCL within the same process requires
     * explicit fences or glFinish.
     */
-   if (sscreen->info.is_amdgpu && sscreen->info.drm_minor >= 39)
+   if (sscreen->info.is_amdgpu)
       flags |= RADEON_FLUSH_START_NEXT_GFX_IB_NOW;
 
    if (ctx->gfx_level <= GFX7) {
       /* Random hangs without waiting for shaders and flushing cache */
-      wait_flags |= wait_ps_cs | SI_BARRIER_INV_L2;
+      wait_flags |= wait_ps_cs | AC_BARRIER_INV_L2;
    } else if (!(flags & RADEON_FLUSH_START_NEXT_GFX_IB_NOW) ||
               ((flags & RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION) &&
                 !ws->cs_is_secure(cs))) {
@@ -148,7 +148,7 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
           * and make this process guilty of hanging.
           */
          if (ctx->gfx_level >= GFX12)
-            wait_flags |= SI_BARRIER_SYNC_VS;
+            wait_flags |= AC_BARRIER_SYNC_VS;
       }
    }
 
@@ -199,7 +199,7 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
       submission_id = ctx->ds_queue.submission_id;
    }
 
-   if (unlikely(ctx->sqtt))
+   if (unlikely(si_is_sqtt_active(ctx)))
       si_sqtt_describe_flush(ctx);
 
    /* Flush the CS. */
@@ -233,8 +233,8 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    si_begin_new_gfx_cs(ctx, false);
    ctx->gfx_flush_in_progress = false;
 
-   if (unlikely(ctx->sqtt && (flags & PIPE_FLUSH_END_OF_FRAME))) {
-      si_handle_sqtt(ctx, &ctx->gfx_cs);
+   if (unlikely(ctx->sqtt.data)) {
+      si_handle_sqtt(ctx, &ctx->gfx_cs, flags & PIPE_FLUSH_END_OF_FRAME);
    }
 
 #if SHADER_DEBUG_LOG
@@ -371,24 +371,26 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     * users (e.g. BO evictions and SDMA/UVD/VCE IBs) can modify our
     * buffers.
     *
-    * Gfx10+ automatically invalidates I$, SMEM$, VMEM$, and GL1$ at the beginning of IBs,
-    * so we only need to flush the GL2 cache.
+    * Gfx10+ is supposed to invalidate I$, SMEM$, VMEM$, and GL1$ at the beginning of IBs
+    * automatically, but stale descriptors and constants are still read after IB starts on
+    * gfx10.3 and gfx12 (see !44189, !44933, #15812), so invalidate them here on all gfx
+    * levels, along with GL2.
     *
     * Note that the cache flush done by the kernel at the end of GFX IBs
     * isn't useful here, because that flush can finish after the following
     * IB starts drawing.
     *
     * TODO: Do we also need to invalidate CB & DB caches?
+    * TODO: figure out why the automatic invalidation isn't enough on gfx10+
     */
-   new_barrier_flags = SI_BARRIER_INV_L2;
-   if (ctx->gfx_level < GFX10)
-      new_barrier_flags |= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
+   new_barrier_flags = AC_BARRIER_INV_L2 | AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM |
+                       AC_BARRIER_INV_VMEM;
 
    /* Disable pipeline stats if there are no active queries. */
    if (ctx->num_hw_pipestat_streamout_queries)
-      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
+      new_barrier_flags |= AC_BARRIER_PIPELINESTAT_START;
    else
-      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+      new_barrier_flags |= AC_BARRIER_PIPELINESTAT_STOP;
 
    ctx->pipeline_stats_enabled = -1; /* indicate that the current hw state is unknown */
 
@@ -396,10 +398,10 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     * When switching NGG->legacy, we need to flush VGT for certain hw generations.
     */
    if (ctx->screen->info.has_vgt_flush_ngg_legacy_bug && !ctx->ngg)
-      new_barrier_flags |= SI_BARRIER_EVENT_VGT_FLUSH;
+      new_barrier_flags |= AC_BARRIER_VGT_FLUSH;
 
    si_clear_and_set_barrier_flags(ctx,
-                            SI_BARRIER_EVENT_PIPELINESTAT_START | SI_BARRIER_EVENT_PIPELINESTAT_STOP,
+                            AC_BARRIER_PIPELINESTAT_START | AC_BARRIER_PIPELINESTAT_STOP,
                             new_barrier_flags);
    si_mark_atom_dirty(ctx, &ctx->atoms.s.spi_ge_ring_state);
 
@@ -443,7 +445,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
       return;
    }
 
-   if (unlikely(ctx->sqtt))
+   if (unlikely(si_is_sqtt_active(ctx)))
       si_sqtt_describe_begin(ctx, &ctx->gfx_cs);
 
    if (ctx->has_tessellation) {

@@ -58,6 +58,49 @@ debian-x86_64:
     reports:
       junit: artifacts/ci_scripts_report.xml
 
+debian-x86_64-no_gfx_compute:
+  extends:
+    - .meson-build-for-tests
+    - .use-debian/x86_64_build
+  variables:
+    UNWIND: "disabled"
+    C_ARGS: >
+      -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
+    RUN_MESON_TESTS: "false"
+    VIDEO_CODECS: "h264dec,h265dec,av1dec,vp9dec,jpegdec"
+    GALLIUM_DRIVERS: "radeonsi"
+    VULKAN_DRIVERS: ""
+    BUILDTYPE: "debugoptimized"
+    DRI_LOADERS: >
+      -D egl=disabled
+      -D gles1=disabled
+      -D gles2=disabled
+      -D gbm=disabled
+      -D glvnd=disabled
+      -D glx=disabled
+      -D opengl=false
+      -D platforms=
+    GALLIUM_ST: >
+      -D gallium-rusticl=false
+      -D gallium-va=enabled
+    EXTRA_OPTION: >
+      -D llvm=disabled
+      -D allow-fallback-for=libdrm,libva
+      -D libva:with_glx=no
+      -D libva:with_wayland=no
+      -D libva:with_x11=no
+      -D valgrind=disabled
+      -D spirv-tools=disabled
+      -D zlib=disabled
+      -D zstd=disabled
+      -D shader-cache=disabled
+      -D expat=disabled
+      -D perfetto=false
+    S3_ARTIFACT_NAME: mesa-x86_64-no_gfx_compute-${BUILDTYPE}
+
 debian-x86_64-asan:
   extends:
     - debian-x86_64
@@ -143,7 +186,6 @@ debian-x86_64-msan:
       -D precomp-compiler=enabled
       -D install-precomp-compiler=true
       -D tools=panfrost
-      -D panfrost-rust=true
 
 debian-x86_64-ubsan:
   extends:
@@ -201,7 +243,6 @@ debian-build-x86_64:
     EXTRA_OPTION: >
       -D spirv-to-dxil=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,intel-ui,nir,nouveau,lima,panfrost,asahi
-      -D panfrost-rust=true
       -D perfetto=true
     S3_ARTIFACT_NAME: debian-build-x86_64
 
@@ -233,7 +274,6 @@ debian-release:
       -D spirv-to-dxil=true
       -D tools=all
       -D mesa-clc=enabled
-      -D panfrost-rust=true
       -D precomp-compiler=enabled
       -D intel-rt=enabled
       -D imagination-srv=true
@@ -269,6 +309,7 @@ alpine-build-testing:
       -D llvm=enabled
       -D llvm-orcjit=true
       -D microsoft-clc=disabled
+      -D panfrost-rust=false
       -D shared-llvm=enabled
     UNWIND: "disabled"
     VULKAN_DRIVERS: "amd,broadcom,freedreno,intel,imagination"
@@ -313,9 +354,10 @@ fedora-release:
       -D gles2=enabled
       -D llvm=enabled
       -D microsoft-clc=disabled
+      -D panfrost-rust=true
       -D shared-llvm=enabled
     UNWIND: "disabled"
-    VULKAN_DRIVERS: "amd,asahi,broadcom,freedreno,imagination,intel,intel_hasvk"
+    VULKAN_DRIVERS: "amd,asahi,broadcom,freedreno,imagination,intel,intel_hasvk,nouveau"
 
 debian-android:
   extends:
@@ -343,7 +385,7 @@ debian-android:
       -D platforms=android
     FORCE_FALLBACK_FOR: llvm
     EXTRA_OPTION: >
-      -D amd-use-llvm=false
+      -D amd-options=
       -D android-stub=true
       -D platform-sdk-version=${ANDROID_SDK_VERSION}
       -D cpp_rtti=false
@@ -484,7 +526,6 @@ debian-arm64:
       -D teflon=true
       -D perfetto=true
       -D vulkan-layers=screenshot
-      -D panfrost-rust=true
       -D tools=drm-shim
     GALLIUM_ST:
       -D gallium-rusticl=true
@@ -507,7 +548,6 @@ debian-arm64-asan:
       -D valgrind=disabled
       -D tools=dlclose-skip
       -D gallium-rusticl=false
-      -D panfrost-rust=true
     ARTIFACTS_DEBUG_SYMBOLS: 1
     RUN_MESON_TESTS: "false"  # just too slow
     S3_ARTIFACT_NAME: mesa-arm64-asan-${BUILDTYPE}
@@ -542,8 +582,8 @@ debian-arm64-build-test:
       -D glvnd=disabled
     EXTRA_OPTION: >
       -D tools=panfrost,imagination
-      -D panfrost-rust=true
       -D perfetto=true
+      -D apitrace=true
 
 debian-arm64-release:
   extends:
@@ -570,6 +610,7 @@ debian-no-libdrm:
       -D gbm=disabled
       -D egl=enabled
       -D perfetto=true
+      -D apitrace=true
       -D platforms=x11,wayland
 
 debian-clang:
@@ -613,7 +654,6 @@ debian-clang:
       -D spirv-to-dxil=true
       -D imagination-srv=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,intel-ui,nir,nouveau,lima,panfrost,asahi,imagination
-      -D panfrost-rust=true
       -D vulkan-layers=device-select,overlay
       -D build-radv-tests=true
       -D build-aco-tests=true
@@ -622,6 +662,7 @@ debian-clang:
       -D intel-rt=enabled
       -D imagination-srv=true
       -D teflon=true
+      -D apitrace=true
     CC: clang-${LLVM_VERSION}
     CXX: clang++-${LLVM_VERSION}
 
@@ -646,7 +687,6 @@ debian-clang-release:
       -Wno-error=vla-cxx-extension
       -Wno-error=deprecated-declarations
     DRI_LOADERS: >
-      -D glx=xlib
       -D platforms=x11,wayland
     GALLIUM_ST: >
       -D gallium-extra-hud=true
@@ -701,7 +741,7 @@ debian-vulkan:
       -D build-aco-tests=true
       -D intel-rt=disabled
       -D imagination-srv=true
-      -D panfrost-rust=true
+      -D apitrace=true
 
 debian-x86_32:
   extends:
@@ -735,7 +775,6 @@ debian-x86_32:
       -D platforms=
       -D mesa-clc=enabled
       -D install-mesa-clc=true
-      -D panfrost-rust=true
 
 # In case of issues with this job, contact @frankbinns
 .debian-riscv64:

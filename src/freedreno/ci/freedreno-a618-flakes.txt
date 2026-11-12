@@ -226,7 +226,6 @@ glx@glx_arb_create_context_no_error@no error
 spec@arb_gpu_shader_fp64@execution@arb_gpu_shader_fp64-fs-getuniformdv
 spec@arb_gpu_shader_fp64@execution@arb_gpu_shader_fp64-gs-getuniformdv
 spec@arb_gpu_shader_fp64@execution@arb_gpu_shader_fp64-vs-getuniformdv
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT
 spec@ext_external_objects@vk-ping-pong-multi-sem
 spec@ext_external_objects@vk-ping-pong-single-sem
 spec@ext_packed_float@query-rgba-signed-components
@@ -353,11 +352,5 @@ android-dEQP-VK.pipeline.fast_linked_library.stencil.nocolor.format.d24_unorm_s8
 android-dEQP-VK.pipeline.fast_linked_library.stencil.nocolor.format.s8_uint.states.fail_repl.pass_decw.dfail_inv.comp_never.any
 android-dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d32_sfloat_s8_uint_separate_layouts.states.fail_incc.pass_decw.dfail_keep.comp_never.any
 android-dEQP-VK.renderpasses.renderpass1.dedicated_allocation.formats.r16g16_uint.input.clear.dont_care.self_dep_draw_use_input_aspect_ms
-
-# See this entry in the VKCTS 1.4.4.2 -> 1.4.5.3 uprev fails list.
-dEQP-VK.*.custom_resolve.*.fdm_subsampled
-
-# See this entry in the VKCTS 1.4.5.3 -> 1.4.6.1 uprev fails list.
-dEQP-VK.*.custom_resolve.*.fdm_nonsubsampled
 
 spec@!opengl 1.1@getteximage-depth@GL_TEXTURE_1D_ARRAY-GL_DEPTH_COMPONENT

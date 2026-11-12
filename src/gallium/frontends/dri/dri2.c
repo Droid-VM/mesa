@@ -59,18 +59,6 @@
 
 #include "drm-uapi/drm_fourcc.h"
 
-struct dri2_buffer
-{
-   __DRIbuffer base;
-   struct pipe_resource *resource;
-};
-
-static inline struct dri2_buffer *
-dri2_buffer(__DRIbuffer * driBufferPriv)
-{
-   return (struct dri2_buffer *) driBufferPriv;
-}
-
 /**
  * Invalidate the drawable.
  *
@@ -102,11 +90,6 @@ dri_invalidate_drawable(struct dri_drawable *drawable)
    p_atomic_inc(&drawable->base.stamp);
 }
 
-bool
-dri_image_drawable_get_buffers(struct dri_drawable *drawable,
-                               struct __DRIimageList *images,
-                               const enum st_attachment_type *statts,
-                               unsigned statts_count);
 bool
 dri_image_drawable_get_buffers(struct dri_drawable *drawable,
                                struct __DRIimageList *images,
@@ -154,21 +137,12 @@ dri_image_drawable_get_buffers(struct dri_drawable *drawable,
     *    st_api_make_current
     *    st_manager_validate_framebuffers (part of st_validate_state)
     */
-   return drawable->screen->image.loader->getBuffers(
+   return drawable->screen->loader.image->getBuffers(
                                           drawable,
                                           color_format,
                                           (uint32_t *)&drawable->base.stamp,
                                           drawable->loaderPrivate, buffer_mask,
                                           images);
-}
-
-static void
-dri2_release_buffer(__DRIbuffer *bPriv)
-{
-   struct dri2_buffer *buffer = dri2_buffer(bPriv);
-
-   pipe_resource_reference(&buffer->resource, NULL);
-   FREE(buffer);
 }
 
 void
@@ -183,7 +157,7 @@ dri2_set_in_fence_fd(struct dri_image *img, int fd)
  * Backend functions for pipe_frontend_drawable.
  */
 
-static void
+void
 dri2_allocate_textures(struct dri_context *ctx,
                        struct dri_drawable *drawable,
                        const enum st_attachment_type *statts,
@@ -193,7 +167,7 @@ dri2_allocate_textures(struct dri_context *ctx,
    struct pipe_resource templ;
    bool alloc_depthstencil = false;
    unsigned i, j;
-   const __DRIimageLoaderExtension *image = screen->image.loader;
+   const __DRIimageLoaderExtension *image = screen->loader.image;
    /* Image specific variables */
    struct __DRIimageList images;
 
@@ -262,45 +236,7 @@ dri2_allocate_textures(struct dri_context *ctx,
    templ.depth0 = 1;
    templ.array_size = 1;
 
-   if (images.image_mask & __DRI_IMAGE_BUFFER_FRONT) {
-      struct pipe_resource **buf =
-         &drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
-      struct pipe_resource *texture = images.front->texture;
-
-      drawable->w = texture->width0;
-      drawable->h = texture->height0;
-
-      pipe_resource_reference(buf, texture);
-      dri_image_fence_sync(ctx, images.front);
-   }
-
-   if (images.image_mask & __DRI_IMAGE_BUFFER_BACK) {
-      struct pipe_resource **buf =
-         &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-      struct pipe_resource *texture = images.back->texture;
-
-      drawable->w = texture->width0;
-      drawable->h = texture->height0;
-
-      pipe_resource_reference(buf, texture);
-      dri_image_fence_sync(ctx, images.back);
-   }
-
-   if (images.image_mask & __DRI_IMAGE_BUFFER_SHARED) {
-      struct pipe_resource **buf =
-         &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-      struct pipe_resource *texture = images.back->texture;
-
-      drawable->w = texture->width0;
-      drawable->h = texture->height0;
-
-      pipe_resource_reference(buf, texture);
-      dri_image_fence_sync(ctx, images.back);
-
-      ctx->is_shared_buffer_bound = true;
-   } else {
-      ctx->is_shared_buffer_bound = false;
-   }
+   ctx->is_shared_buffer_bound = dri_drawable_bind_images(ctx, drawable, &images);
 
    /* Note: if there is both a back and a front buffer,
     * then they have the same size.
@@ -308,56 +244,8 @@ dri2_allocate_textures(struct dri_context *ctx,
    templ.width0 = drawable->w;
    templ.height0 = drawable->h;
 
-   /* Allocate private MSAA colorbuffers. */
-   if (drawable->stvis.samples > 1) {
-      for (i = 0; i < statts_count; i++) {
-         enum st_attachment_type statt = statts[i];
-
-         if (statt == ST_ATTACHMENT_DEPTH_STENCIL)
-            continue;
-
-         if (drawable->textures[statt]) {
-            templ.format = drawable->textures[statt]->format;
-            templ.bind = drawable->textures[statt]->bind &
-                         (PIPE_BIND_RENDER_TARGET | PIPE_BIND_BLENDABLE |
-                          PIPE_BIND_SAMPLER_VIEW);
-            templ.nr_samples = drawable->stvis.samples;
-            templ.nr_storage_samples = drawable->stvis.samples;
-
-            /* Try to reuse the resource.
-             * (the other resource parameters should be constant)
-             */
-            if (!drawable->msaa_textures[statt] ||
-                drawable->msaa_textures[statt]->width0 != templ.width0 ||
-                drawable->msaa_textures[statt]->height0 != templ.height0) {
-               /* Allocate a new one. */
-               pipe_resource_reference(&drawable->msaa_textures[statt], NULL);
-
-               drawable->msaa_textures[statt] =
-                  screen->base.screen->resource_create(screen->base.screen,
-                                                       &templ);
-               assert(drawable->msaa_textures[statt]);
-
-               /* If there are any MSAA resources, we should initialize them
-                * such that they contain the same data as the single-sample
-                * resources we just got from the X server.
-                *
-                * The reason for this is that the gallium frontend (and
-                * therefore the app) can access the MSAA resources only.
-                * The single-sample resources are not exposed
-                * to the gallium frontend.
-                *
-                */
-               dri_pipe_blit(ctx->st->pipe,
-                             drawable->msaa_textures[statt],
-                             drawable->textures[statt]);
-            }
-         }
-         else {
-            pipe_resource_reference(&drawable->msaa_textures[statt], NULL);
-         }
-      }
-   }
+   dri_drawable_allocate_msaa_textures(ctx, drawable, statts, statts_count,
+                                       &templ);
 
    /* Allocate a private depth-stencil buffer. */
    if (alloc_depthstencil) {
@@ -403,14 +291,14 @@ dri2_allocate_textures(struct dri_context *ctx,
    }
 }
 
-static bool
+bool
 dri2_flush_frontbuffer(struct dri_context *ctx,
                        struct dri_drawable *drawable,
                        enum st_attachment_type statt)
 {
-   const __DRIimageLoaderExtension *image = drawable->screen->image.loader;
+   const __DRIimageLoaderExtension *image = drawable->screen->loader.image;
    const __DRImutableRenderBufferLoaderExtension *shared_buffer_loader =
-      drawable->screen->mutableRenderBuffer.loader;
+      drawable->screen->loader.mutable_render_buffer;
    struct pipe_context *pipe = ctx->st->pipe;
    struct pipe_fence_handle *fence = NULL;
    int fence_fd = -1;
@@ -465,23 +353,15 @@ dri2_flush_frontbuffer(struct dri_context *ctx,
 /**
  * The struct dri_drawable flush_swapbuffers callback
  */
-static void
+void
 dri2_flush_swapbuffers(struct dri_context *ctx,
                        struct dri_drawable *drawable)
 {
-   const __DRIimageLoaderExtension *image = drawable->screen->image.loader;
+   const __DRIimageLoaderExtension *image = drawable->screen->loader.image;
 
    if (image && image->flushSwapBuffers) {
       image->flushSwapBuffers(drawable, drawable->loaderPrivate);
    }
-}
-
-static void
-dri2_update_tex_buffer(struct dri_drawable *drawable,
-                       struct dri_context *ctx,
-                       struct pipe_resource *res)
-{
-   /* no-op */
 }
 
 static const struct dri2_format_mapping r8_b8_g8_mapping = {
@@ -870,8 +750,8 @@ dri_create_image_from_winsys(struct dri_screen *screen,
       struct pipe_resource *tex;
 
       templ.next = img->texture;
-      templ.width0 = width >> map->planes[i].width_shift;
-      templ.height0 = height >> map->planes[i].height_shift;
+      templ.width0 = DIV_ROUND_UP(width, 1 << map->planes[i].width_shift);
+      templ.height0 = DIV_ROUND_UP(height, 1 << map->planes[i].height_shift);
       if (use_lowered)
          templ.format = map->planes[i].dri_format;
       else
@@ -956,11 +836,31 @@ dri_create_image(struct dri_screen *screen,
    struct pipe_screen *pscreen = screen->base.screen;
    struct dri_image *img;
    struct pipe_resource templ;
+   enum pipe_format pipe_format;
    unsigned tex_usage = 0;
    unsigned count = _count;
 
    if (!map)
       return NULL;
+
+   if (modifiers && count > 0) {
+      bool has_valid_modifier = false;
+
+      /* It's acceptable to create an image with INVALID modifier in the list,
+       * but it cannot be on the only modifier (since it will certainly fail
+       * later). While we could easily catch this after modifier creation, doing
+       * the check here is a convenient debug check likely pointing at whatever
+       * interface the client is using to build its modifier list.
+       */
+      for (unsigned i = 0; i < count; i++) {
+         if (modifiers[i] != DRM_FORMAT_MOD_INVALID) {
+            has_valid_modifier = true;
+            break;
+         }
+      }
+      if (!has_valid_modifier)
+         return NULL;
+   }
 
    if (!pscreen->resource_create_with_modifiers && count > 0)
       return NULL;
@@ -969,14 +869,7 @@ dri_create_image(struct dri_screen *screen,
        height > pscreen->caps.max_texture_2d_size)
       return NULL;
 
-   if (pscreen->is_format_supported(pscreen, map->pipe_format, screen->target,
-                                    0, 0, PIPE_BIND_RENDER_TARGET))
-      tex_usage |= PIPE_BIND_RENDER_TARGET;
-   if (pscreen->is_format_supported(pscreen, map->pipe_format, screen->target, 0, 0,
-                                    PIPE_BIND_SAMPLER_VIEW) ||
-       pscreen->is_format_supported(pscreen, map->pipe_format, screen->target, 0, 0,
-                                    PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SAMPLER_VIEW_SUBOPTIMAL))
-      tex_usage |= PIPE_BIND_SAMPLER_VIEW;
+   pipe_format = dri2_get_create_format(screen, map->pipe_format, &tex_usage);
 
    if (!tex_usage)
       return NULL;
@@ -1003,7 +896,7 @@ dri_create_image(struct dri_screen *screen,
 
    memset(&templ, 0, sizeof(templ));
    templ.bind = tex_usage;
-   templ.format = map->pipe_format;
+   templ.format = pipe_format;
    templ.target = PIPE_TEXTURE_2D;
    templ.last_level = 0;
    templ.width0 = width;
@@ -1029,7 +922,7 @@ dri_create_image(struct dri_screen *screen,
    img->level = 0;
    img->layer = 0;
    img->dri_format = format;
-   img->dri_fourcc = map->dri_fourcc;
+   img->dri_fourcc = dri2_get_image_fourcc(screen, map, pipe_format);
    img->use = use;
    img->in_fence_fd = -1;
 
@@ -1058,7 +951,8 @@ dri2_query_image_common(struct dri_image *image, int attrib, int *value)
          if (!map)
             return false;
 
-         *value = map->dri_fourcc;
+         *value = dri2_get_image_fourcc(image->screen, map,
+                                        image->texture->format);
       }
       return true;
    case __DRI_IMAGE_ATTRIB_COMPRESSION_RATE:
@@ -1417,7 +1311,9 @@ dri2_from_dma_bufs(struct dri_screen *screen,
                     void *loaderPrivate)
 {
    struct dri_image *img;
-   const struct dri2_format_mapping *map = dri2_get_mapping_by_fourcc(fourcc);
+   struct dri2_format_mapping import_map;
+   const struct dri2_format_mapping *map =
+      dri2_get_import_mapping(screen, fourcc, &import_map);
 
    if (!screen->dmabuf_import) {
       if (error)
@@ -1437,8 +1333,9 @@ dri2_from_dma_bufs(struct dri_screen *screen,
    if (dri_flags & __DRI_IMAGE_PRIME_LINEAR_BUFFER)
       flags |= PIPE_BIND_PRIME_BLIT_DST;
 
-   const int expected_num_fds = dri2_get_modifier_num_planes(screen, modifier, fourcc);
-   if (!map || expected_num_fds == 0) {
+   const int expected_num_fds =
+      map ? dri2_get_modifier_num_planes(screen, modifier, map->dri_fourcc) : 0;
+   if (expected_num_fds == 0) {
       err = __DRI_IMAGE_ERROR_BAD_MATCH;
       goto exit;
    }
@@ -1730,19 +1627,6 @@ dri_set_blob_cache_funcs(struct dri_screen *screen, __DRIblobCacheSet set,
       return;
 
    disk_cache_set_callbacks(cache, set, get);
-}
-
-/*
- * Backend function init_screen.
- */
-
-void
-dri2_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits)
-{
-   drawable->allocate_textures = dri2_allocate_textures;
-   drawable->flush_frontbuffer = dri2_flush_frontbuffer;
-   drawable->update_tex_buffer = dri2_update_tex_buffer;
-   drawable->flush_swapbuffers = dri2_flush_swapbuffers;
 }
 
 /**

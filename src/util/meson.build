@@ -129,6 +129,8 @@ files_mesa_util = files(
   'texcompress_astc_luts_wrap.h',
   'texcompress_astc.cpp',
   'texcompress_astc.h',
+  'texcompress_etc.c',
+  'texcompress_etc.h',
   'timespec.h',
   'u_atomic.c',
   'u_atomic.h',
@@ -217,7 +219,7 @@ files_drirc = files('00-mesa-defaults.conf')
 devenv.set('DRIRC_CONFIGDIR', meson.current_source_dir())
 
 foreach i : [
-  [with_amd_vk, 'src/amd/vulkan', '00-radv-defaults.conf'],
+  [with_amd_vk, 'src/amd/vulkan', ['00-radv-defaults.conf', '01-radv-performance.conf']],
   [with_intel_vk, 'src/intel/vulkan', '00-anv-defaults.conf'],
   [with_intel_hasvk, 'src/intel/vulkan_hasvk', '00-hasvk-defaults.conf'],
   [with_nouveau_vk, 'src/nouveau/vulkan', '00-nvk-defaults.conf'],
@@ -242,10 +244,13 @@ foreach i : [
   [with_gallium_freedreno, 'src/gallium/drivers/freedreno', '00-msm-defaults.conf'],
   [with_gallium_d3d12, 'src/gallium/drivers/d3d12', '00-d3d12-defaults.conf'],
   [with_gallium_svga, 'src/gallium/drivers/svga', '00-vmwgfx-defaults.conf'],
+  [with_kosmickrisp_vk, 'src/kosmickrisp/vulkan', '00-kk-defaults.conf'],
 ]
   if i[0]
     driver_folder = dir_source_root / i[1]
-    files_drirc += files(driver_folder / i[2])
+    foreach f : [] + i[2]
+      files_drirc += files(driver_folder / f)
+    endforeach
     devenv.append('DRIRC_CONFIGDIR', driver_folder)
   endif
 endforeach
@@ -387,7 +392,11 @@ _libmesa_util = static_library(
 # hashed, and in practice it did in Freedreno and Intel drivers.
 # Forcing 2 flags below prevents it.
 idep_mesautil = declare_dependency(
-  sources : [shader_stats_h],
+  # While C targets pick up a dependency on u_format_gen.h from
+  # deps_for_libmesa_util -> idep_mesautilformat, rust targets don't recurse, so
+  # each user would each have to add idep_mesautilformat to their dependencies.
+  # Add it to the sources here so rust targets pick up the dep automatically.
+  sources : [shader_stats_h, u_format_gen_h],
   link_with : _libmesa_util,
   compile_args : [ '-DXXH_FORCE_ALIGN_CHECK=0', '-DXXH_FORCE_MEMORY_ACCESS=0' ],
   include_directories : [inc_util],
@@ -444,6 +453,10 @@ _libparson = static_library(
 idep_parson = declare_dependency(
   link_with :  _libparson,
 )
+
+if with_any_rust
+  subdir('rust')
+endif
 
 if with_tests
   # DRI_CONF macros use designated initializers (required for union

@@ -128,7 +128,7 @@ struct gamma_acceleration_structure {
    char *name = nullptr;
    void *data = nullptr;
 
-   uint32_t *primitive_counts = nullptr;
+   struct gamma_acceleration_structure_geometry_info *geometry_infos = nullptr;
    uint32_t *primitive_counts_exclusive_sum = nullptr;
    uint32_t primitive_count = 0;
 
@@ -176,6 +176,12 @@ struct gamma_acceleration_structure {
    void init_camera();
 
    void load(FILE *file, uint32_t chunk_size);
+
+   virtual char *write_build_info(char *dst_chunk) = 0;
+   /* Returns a vector of pointers to where geometry data should be written for
+    * each geometry. Overwrites *dst with the value write_build_info should return.
+    */
+   std::vector<char *> write_common_build_info(char **dst);
 };
 
 struct gamma_file_view {
@@ -206,6 +212,10 @@ struct gamma_file_view {
       bool render;
       gamma_vec3 camera_pivot;
    } rendering_state;
+
+   virtual ~gamma_file_view()
+   {
+   }
 
    virtual void load(FILE *file, const gamma_header *header);
 
@@ -250,6 +260,7 @@ struct gamma_file_view {
    void end_node_info();
 
    gamma_acceleration_structure *addr_to_acceleration_structure(uint64_t address);
+   uint32_t addr_to_id(uint64_t address);
 };
 
 std::unique_ptr<gamma_file_view> gamma_create_file_view(gamma_app *app, const char *file);

@@ -35,7 +35,9 @@ SOFTWARE.
 	<field name="SRC" low="0" high="15" type="#multisrc">
 		<param name="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 	</field>
+	<derived name="SRC1_BNOT" expr="#false" type="bool"/>
 	<pattern low="16" high="31">xxxxxxxxxxxxxxxx</pattern>
 	<field name="DST" low="32" high="39" type="#reg-gpr"/>
 	<field name="REPEAT" low="40" high="41" type="#rptN"/>

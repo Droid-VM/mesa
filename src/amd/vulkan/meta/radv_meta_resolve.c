@@ -20,14 +20,18 @@ enum radv_resolve_method {
 };
 
 static enum radv_resolve_method
-radv_get_resolve_method(struct radv_image *src_image, struct radv_image *dst_image)
+radv_get_resolve_method(const struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image,
+                        struct radv_image *dst_image)
 {
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
    /* Default to the fragment resolve path which is optimal for compression. */
    enum radv_resolve_method resolve_method = RESOLVE_FRAGMENT;
 
-   /* TODO: Add layers support to the fragment resolve path. */
-   if (src_image->vk.array_layers > 1 || dst_image->vk.array_layers > 1 ||
-       (dst_image->planes[0].surface.flags & RADEON_SURF_NO_RENDER_TARGET))
+   if (dst_image->planes[0].surface.flags & RADEON_SURF_NO_RENDER_TARGET ||
+       pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE ||
+       pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_FAST_CLEAR_ELSE_COMPUTE)
       resolve_method = RESOLVE_COMPUTE;
 
    return resolve_method;
@@ -92,9 +96,18 @@ radv_decompress_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
       const struct radv_image_view *d_iview = radv_image_view_from_handle(depth_att->imageView);
       const struct radv_image_view *s_iview = radv_image_view_from_handle(stencil_att->imageView);
       const struct radv_image_view *src_iview = d_iview ? d_iview : s_iview;
+      VkImageAspectFlags ds_att_aspects;
+
+      if (d_iview && s_iview) {
+         ds_att_aspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+      } else if (d_iview) {
+         ds_att_aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
+      } else {
+         ds_att_aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
+      }
 
       const VkImageSubresourceLayers subresource = {
-         .aspectMask = src_iview->vk.aspects,
+         .aspectMask = ds_att_aspects,
          .mipLevel = src_iview->vk.base_mip_level,
          .baseArrayLayer = src_iview->vk.base_array_layer,
          .layerCount = layer_count,
@@ -144,7 +157,7 @@ radv_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_im
                    struct radv_image *dst_image, VkImageLayout dst_image_layout, const VkImageResolve2 *region,
                    const VkResolveImageModeInfoKHR *resolve_mode_info)
 {
-   const enum radv_resolve_method resolve_method = radv_get_resolve_method(src_image, dst_image);
+   const enum radv_resolve_method resolve_method = radv_get_resolve_method(cmd_buffer, src_image, dst_image);
 
    if (vk_format_is_depth_or_stencil(src_image->vk.format)) {
       if ((region->srcSubresource.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) &&
@@ -280,6 +293,7 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
       const VkRenderingAttachmentInfo *stencil_att = pRenderingInfo->pStencilAttachment;
       struct radv_image_view *d_iview = NULL, *s_iview = NULL;
       struct radv_image_view *d_res_iview = NULL, *s_res_iview = NULL;
+      VkImageAspectFlags ds_att_aspects;
 
       d_iview = radv_image_view_from_handle(depth_att->imageView);
       if (depth_att->resolveMode != VK_RESOLVE_MODE_NONE && depth_att->resolveImageView != VK_NULL_HANDLE)
@@ -289,10 +303,19 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
       if (stencil_att->resolveMode != VK_RESOLVE_MODE_NONE && stencil_att->resolveImageView != VK_NULL_HANDLE)
          s_res_iview = radv_image_view_from_handle(stencil_att->resolveImageView);
 
+      if (d_iview && s_iview) {
+         ds_att_aspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+      } else if (d_iview) {
+         ds_att_aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
+      } else {
+         ds_att_aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
+      }
+
       struct radv_image_view *src_iview = d_iview ? d_iview : s_iview;
       struct radv_image_view *dst_iview = d_res_iview ? d_res_iview : s_res_iview;
 
-      const enum radv_resolve_method resolve_method = radv_get_resolve_method(src_iview->image, dst_iview->image);
+      const enum radv_resolve_method resolve_method =
+         radv_get_resolve_method(cmd_buffer, src_iview->image, dst_iview->image);
 
       VkImageResolve2 region = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_RESOLVE_2,
@@ -304,14 +327,14 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
             },
          .srcSubresource =
             (VkImageSubresourceLayers){
-               .aspectMask = src_iview->vk.aspects,
+               .aspectMask = ds_att_aspects,
                .mipLevel = src_iview->vk.base_mip_level,
                .baseArrayLayer = src_iview->vk.base_array_layer,
                .layerCount = layer_count,
             },
          .dstSubresource =
             (VkImageSubresourceLayers){
-               .aspectMask = dst_iview->vk.aspects,
+               .aspectMask = ds_att_aspects,
                .mipLevel = dst_iview->vk.base_mip_level,
                .baseArrayLayer = dst_iview->vk.base_array_layer,
                .layerCount = layer_count,
@@ -393,7 +416,7 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
          const uint32_t dst_base_layer = dst_is_3d ? 0 : dst_iview->vk.base_array_layer;
          const uint32_t dst_offset_z = dst_is_3d ? dst_iview->vk.base_array_layer : 0;
 
-         const enum radv_resolve_method resolve_method = radv_get_resolve_method(src_img, dst_img);
+         const enum radv_resolve_method resolve_method = radv_get_resolve_method(cmd_buffer, src_img, dst_img);
 
          VkImageResolve2 region = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_RESOLVE_2,
@@ -450,7 +473,7 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
 
    if (used_compute) {
       /* Make sure to synchronize resolves using compute shaders. */
-      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
                                       radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                             VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL);
    }

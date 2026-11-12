@@ -62,67 +62,6 @@ static const struct gl_tex_env_combine_state default_combine_state = {
 
 
 
-/**
- * Used by glXCopyContext to copy texture state from one context to another.
- */
-void
-_mesa_copy_texture_state( const struct gl_context *src, struct gl_context *dst )
-{
-   GLuint u, tex;
-
-   assert(src);
-   assert(dst);
-
-   dst->Texture.CurrentUnit = src->Texture.CurrentUnit;
-
-   /* per-unit state */
-   for (u = 0; u < src->Const.MaxCombinedTextureImageUnits; u++) {
-      dst->Texture.Unit[u].LodBias = src->Texture.Unit[u].LodBias;
-      dst->Texture.Unit[u].LodBiasQuantized = src->Texture.Unit[u].LodBiasQuantized;
-
-      /*
-       * XXX strictly speaking, we should compare texture names/ids and
-       * bind textures in the dest context according to id.  For now, only
-       * copy bindings if the contexts share the same pool of textures to
-       * avoid refcounting bugs.
-       */
-      if (dst->Shared == src->Shared) {
-         /* copy texture object bindings, not contents of texture objects */
-         _mesa_lock_context_textures(dst);
-
-         for (tex = 0; tex < NUM_TEXTURE_TARGETS; tex++) {
-            _mesa_reference_texobj(&dst->Texture.Unit[u].CurrentTex[tex],
-                                   src->Texture.Unit[u].CurrentTex[tex]);
-            if (src->Texture.Unit[u].CurrentTex[tex]) {
-               dst->Texture.NumCurrentTexUsed =
-                  MAX2(dst->Texture.NumCurrentTexUsed, u + 1);
-            }
-         }
-         dst->Texture.Unit[u]._BoundTextures = src->Texture.Unit[u]._BoundTextures;
-         _mesa_unlock_context_textures(dst);
-      }
-   }
-
-   for (u = 0; u < src->Const.MaxTextureCoordUnits; u++) {
-      dst->Texture.FixedFuncUnit[u].Enabled = src->Texture.FixedFuncUnit[u].Enabled;
-      dst->Texture.FixedFuncUnit[u].EnvMode = src->Texture.FixedFuncUnit[u].EnvMode;
-      COPY_4V(dst->Texture.FixedFuncUnit[u].EnvColor, src->Texture.FixedFuncUnit[u].EnvColor);
-      dst->Texture.FixedFuncUnit[u].TexGenEnabled = src->Texture.FixedFuncUnit[u].TexGenEnabled;
-      dst->Texture.FixedFuncUnit[u].GenS = src->Texture.FixedFuncUnit[u].GenS;
-      dst->Texture.FixedFuncUnit[u].GenT = src->Texture.FixedFuncUnit[u].GenT;
-      dst->Texture.FixedFuncUnit[u].GenR = src->Texture.FixedFuncUnit[u].GenR;
-      dst->Texture.FixedFuncUnit[u].GenQ = src->Texture.FixedFuncUnit[u].GenQ;
-      memcpy(dst->Texture.FixedFuncUnit[u].ObjectPlane,
-             src->Texture.FixedFuncUnit[u].ObjectPlane,
-             sizeof(src->Texture.FixedFuncUnit[u].ObjectPlane));
-      memcpy(dst->Texture.FixedFuncUnit[u].EyePlane,
-             src->Texture.FixedFuncUnit[u].EyePlane,
-             sizeof(src->Texture.FixedFuncUnit[u].EyePlane));
-
-      /* GL_EXT_texture_env_combine */
-      dst->Texture.FixedFuncUnit[u].Combine = src->Texture.FixedFuncUnit[u].Combine;
-   }
-}
 
 
 /*
@@ -674,13 +613,11 @@ update_single_program_texture(struct gl_context *ctx, struct gl_program *prog,
       texUnit->Sampler : &texObj->Sampler;
 
    if (likely(texObj)) {
-      if (_mesa_is_texture_complete(texObj, sampler,
-                                    ctx->Const.ForceIntegerTexNearest))
+      if (_mesa_is_texture_complete(ctx, texObj, sampler))
          return texObj;
 
       _mesa_test_texobj_completeness(ctx, texObj);
-      if (_mesa_is_texture_complete(texObj, sampler,
-                                    ctx->Const.ForceIntegerTexNearest))
+      if (_mesa_is_texture_complete(ctx, texObj, sampler))
          return texObj;
    }
 
@@ -824,12 +761,10 @@ update_ff_texture_state(struct gl_context *ctx,
          struct gl_sampler_object *sampler = texUnit->Sampler ?
             texUnit->Sampler : &texObj->Sampler;
 
-         if (!_mesa_is_texture_complete(texObj, sampler,
-                                        ctx->Const.ForceIntegerTexNearest)) {
+         if (!_mesa_is_texture_complete(ctx, texObj, sampler)) {
             _mesa_test_texobj_completeness(ctx, texObj);
          }
-         if (_mesa_is_texture_complete(texObj, sampler,
-                                       ctx->Const.ForceIntegerTexNearest)) {
+         if (_mesa_is_texture_complete(ctx, texObj, sampler)) {
             _mesa_reference_texobj(&texUnit->_Current, texObj);
             complete = true;
             break;

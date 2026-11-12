@@ -18,6 +18,7 @@
 #include "ac_gpu_info.h"
 #include "ac_linux_drm.h"
 #include "radv_radeon_winsys.h"
+#include "radv_amdgpu_winsys_public.h"
 
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
@@ -49,9 +50,10 @@ struct radv_amdgpu_winsys {
    bool dump_ibs;
    FILE *bo_history_logfile;
    bool chain_ib;
-   bool zero_all_vram_allocs;
    bool debug_vm;
-   uint64_t perftest;
+   bool gtt_spill;
+   bool always_valid_bos;
+   enum radv_amdgpu_cs_domain_mode cs_domain_mode;
 
    struct radv_amdgpu_alloc_tracker *alloc_tracker;
 

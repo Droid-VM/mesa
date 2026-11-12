@@ -41,6 +41,7 @@
 #include "state_tracker/st_context.h"
 #include "state_tracker/st_cb_bitmap.h"
 
+#define QUERY_COUNTER_BITS 64
 
 static struct gl_query_object *
 new_query_object(struct gl_context *ctx, GLuint id)
@@ -958,6 +959,7 @@ _mesa_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname,
 {
    struct gl_query_object *q = NULL, **bindpt = NULL;
    GET_CURRENT_CONTEXT(ctx);
+   struct st_context *st = st_context(ctx);
 
    if (!query_error_check_index(ctx, target, index))
       return;
@@ -1016,17 +1018,8 @@ _mesa_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname,
              */
             *params = 1;
             break;
-         case GL_TIME_ELAPSED:
-            *params = ctx->Const.QueryCounterBits.TimeElapsed;
-            break;
          case GL_TIMESTAMP:
             *params = ctx->Const.QueryCounterBits.Timestamp;
-            break;
-         case GL_PRIMITIVES_GENERATED:
-            *params = ctx->Const.QueryCounterBits.PrimitivesGenerated;
-            break;
-         case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-            *params = ctx->Const.QueryCounterBits.PrimitivesWritten;
             break;
          case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
          case GL_TRANSFORM_FEEDBACK_OVERFLOW:
@@ -1036,47 +1029,36 @@ _mesa_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname,
              */
             *params = 1;
             break;
+         case GL_TIME_ELAPSED:
+         case GL_PRIMITIVES_GENERATED:
+         case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+            *params = QUERY_COUNTER_BITS;
+            break;
          case GL_VERTICES_SUBMITTED:
-            *params = ctx->Const.QueryCounterBits.VerticesSubmitted;
-            break;
          case GL_PRIMITIVES_SUBMITTED:
-            *params = ctx->Const.QueryCounterBits.PrimitivesSubmitted;
-            break;
          case GL_VERTEX_SHADER_INVOCATIONS:
-            *params = ctx->Const.QueryCounterBits.VsInvocations;
-            break;
          case GL_TESS_CONTROL_SHADER_PATCHES:
-            *params = ctx->Const.QueryCounterBits.TessPatches;
-            break;
          case GL_TESS_EVALUATION_SHADER_INVOCATIONS:
-            *params = ctx->Const.QueryCounterBits.TessInvocations;
-            break;
          case GL_GEOMETRY_SHADER_INVOCATIONS:
-            *params = ctx->Const.QueryCounterBits.GsInvocations;
-            break;
          case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
-            *params = ctx->Const.QueryCounterBits.GsPrimitives;
-            break;
          case GL_FRAGMENT_SHADER_INVOCATIONS:
-            *params = ctx->Const.QueryCounterBits.FsInvocations;
-            break;
          case GL_COMPUTE_SHADER_INVOCATIONS:
-            *params = ctx->Const.QueryCounterBits.ComputeInvocations;
-            break;
          case GL_CLIPPING_INPUT_PRIMITIVES:
-            *params = ctx->Const.QueryCounterBits.ClInPrimitives;
-            break;
          case GL_CLIPPING_OUTPUT_PRIMITIVES:
-            *params = ctx->Const.QueryCounterBits.ClOutPrimitives;
+            if (st->screen->caps.query_pipeline_statistics ||
+                st->screen->caps.query_pipeline_statistics_single)
+               *params = QUERY_COUNTER_BITS;
+            else
+               *params = 0;
             break;
          case GL_TASK_SHADER_INVOCATIONS_EXT:
-            *params = ctx->Const.QueryCounterBits.TsInvocations;
-            break;
          case GL_MESH_SHADER_INVOCATIONS_EXT:
-            *params = ctx->Const.QueryCounterBits.MsInvocations;
-            break;
          case GL_MESH_PRIMITIVES_GENERATED_EXT:
-            *params = ctx->Const.QueryCounterBits.MeshPrimitivesGenerated;
+            if (st->screen->caps.mesh_shader &&
+                st->screen->caps.mesh.pipeline_statistic_queries)
+               *params = QUERY_COUNTER_BITS;
+            else
+               *params = 0;
             break;
          default:
             _mesa_problem(ctx,
@@ -1351,48 +1333,6 @@ _mesa_init_queryobj(struct gl_context *ctx)
       ctx->Const.QueryCounterBits.SamplesPassed = 64;
    else
       ctx->Const.QueryCounterBits.SamplesPassed = 0;
-
-   ctx->Const.QueryCounterBits.TimeElapsed = 64;
-   ctx->Const.QueryCounterBits.Timestamp = 64;
-   ctx->Const.QueryCounterBits.PrimitivesGenerated = 64;
-   ctx->Const.QueryCounterBits.PrimitivesWritten = 64;
-
-   if (screen->caps.query_pipeline_statistics ||
-       screen->caps.query_pipeline_statistics_single) {
-      ctx->Const.QueryCounterBits.VerticesSubmitted = 64;
-      ctx->Const.QueryCounterBits.PrimitivesSubmitted = 64;
-      ctx->Const.QueryCounterBits.VsInvocations = 64;
-      ctx->Const.QueryCounterBits.TessPatches = 64;
-      ctx->Const.QueryCounterBits.TessInvocations = 64;
-      ctx->Const.QueryCounterBits.GsInvocations = 64;
-      ctx->Const.QueryCounterBits.GsPrimitives = 64;
-      ctx->Const.QueryCounterBits.FsInvocations = 64;
-      ctx->Const.QueryCounterBits.ComputeInvocations = 64;
-      ctx->Const.QueryCounterBits.ClInPrimitives = 64;
-      ctx->Const.QueryCounterBits.ClOutPrimitives = 64;
-   } else {
-      ctx->Const.QueryCounterBits.VerticesSubmitted = 0;
-      ctx->Const.QueryCounterBits.PrimitivesSubmitted = 0;
-      ctx->Const.QueryCounterBits.VsInvocations = 0;
-      ctx->Const.QueryCounterBits.TessPatches = 0;
-      ctx->Const.QueryCounterBits.TessInvocations = 0;
-      ctx->Const.QueryCounterBits.GsInvocations = 0;
-      ctx->Const.QueryCounterBits.GsPrimitives = 0;
-      ctx->Const.QueryCounterBits.FsInvocations = 0;
-      ctx->Const.QueryCounterBits.ComputeInvocations = 0;
-      ctx->Const.QueryCounterBits.ClInPrimitives = 0;
-      ctx->Const.QueryCounterBits.ClOutPrimitives = 0;
-   }
-
-   if (screen->caps.mesh_shader && screen->caps.mesh.pipeline_statistic_queries) {
-      ctx->Const.QueryCounterBits.TsInvocations = 64;
-      ctx->Const.QueryCounterBits.MsInvocations = 64;
-      ctx->Const.QueryCounterBits.MeshPrimitivesGenerated = 64;
-   } else {
-      ctx->Const.QueryCounterBits.TsInvocations = 0;
-      ctx->Const.QueryCounterBits.MsInvocations = 0;
-      ctx->Const.QueryCounterBits.MeshPrimitivesGenerated = 0;
-   }
 }
 
 

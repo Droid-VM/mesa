@@ -205,12 +205,16 @@
         <size name="Get" mode="get"/>
     </enum>
 
-    <function name="RenderbufferStorageMultisampleEXT" alias="RenderbufferStorageMultisample">
+    <!-- Not an alias of RenderbufferStorageMultisample: on GLES it is the
+         EXT_multisampled_render_to_texture function, whose renderbuffers
+         are implicitly resolved. -->
+    <function name="RenderbufferStorageMultisampleEXT" es2="2.0">
         <param name="target" type="GLenum"/>
         <param name="samples" type="GLsizei"/>
         <param name="internalformat" type="GLenum"/>
         <param name="width" type="GLsizei"/>
         <param name="height" type="GLsizei"/>
+        <glx rop="4331"/>
     </function>
 </category>
 

@@ -735,6 +735,20 @@ recompute_vertex_format_fields(struct gl_vertex_format *vertex_format,
    assert(vertex_format->_PipeFormat <= 255);
 }
 
+ALWAYS_INLINE static void
+update_format_fallback_mask(const struct gl_context *ctx,
+                            struct gl_vertex_array_object *vao,
+                            gl_vert_attrib attrib)
+{
+   const GLbitfield bit = VERT_BIT(attrib);
+   const bool fallback =
+      BITSET_TEST(ctx->Array.VertexFormatFallbacks,
+                  vao->VertexAttrib[attrib].Format._PipeFormat);
+
+   vao->FormatFallbackMask =
+      (vao->FormatFallbackMask & ~bit) | (fallback ? bit : 0);
+}
+
 void
 _mesa_set_vertex_format(struct gl_vertex_format *vertex_format,
                         GLubyte size, GLenum16 type, GLenum16 format,
@@ -855,6 +869,7 @@ _mesa_update_array_format(struct gl_context *ctx,
    array->Format.User = new_format;
    recompute_vertex_format_fields(&array->Format, size, type, format,
                                   normalized, integer, doubles);
+   update_format_fallback_mask(ctx, vao, attrib);
 
    if (vao->Enabled & VERT_BIT(attrib)) {
       ST_SET_STATE(ctx->NewDriverState, ST_NEW_VERTEX_ARRAYS);
@@ -2734,10 +2749,10 @@ _mesa_GetVertexArrayIndexed64iv(GLuint vaobj, GLuint index,
     * limit must be MAX_VERTEX_ATTRIB_BINDINGS.  Both limits are currently
     * required to be the same, so in practice this doesn't matter.
     */
-   if (index >= ctx->Const.MaxVertexAttribBindings) {
+   if (index >= MAX_VERTEX_GENERIC_ATTRIBS) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glGetVertexArrayIndexed64iv(index"
                   "%d >= the value of GL_MAX_VERTEX_ATTRIB_BINDINGS (%d))",
-                  index, ctx->Const.MaxVertexAttribBindings);
+                  index, MAX_VERTEX_GENERIC_ATTRIBS);
       return;
    }
 
@@ -3248,7 +3263,7 @@ vertex_array_vertex_buffer_err(struct gl_context *ctx,
     *    "An INVALID_VALUE error is generated if <bindingindex> is greater than
     *     the value of MAX_VERTEX_ATTRIB_BINDINGS."
     */
-   if (bindingIndex >= ctx->Const.MaxVertexAttribBindings) {
+   if (bindingIndex >= MAX_VERTEX_GENERIC_ATTRIBS) {
       _mesa_error(ctx, GL_INVALID_VALUE,
                   "%s(bindingindex=%u > "
                   "GL_MAX_VERTEX_ATTRIB_BINDINGS)",
@@ -3493,11 +3508,11 @@ vertex_array_vertex_buffers_err(struct gl_context *ctx,
     *    "An INVALID_OPERATION error is generated if <first> + <count>
     *     is greater than the value of MAX_VERTEX_ATTRIB_BINDINGS."
     */
-   if (first + count > ctx->Const.MaxVertexAttribBindings) {
+   if (first + count > MAX_VERTEX_GENERIC_ATTRIBS) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "%s(first=%u + count=%d > the value of "
                   "GL_MAX_VERTEX_ATTRIB_BINDINGS=%u)",
-                  func, first, count, ctx->Const.MaxVertexAttribBindings);
+                  func, first, count, MAX_VERTEX_GENERIC_ATTRIBS);
       return;
    }
 
@@ -3840,7 +3855,7 @@ vertex_array_attrib_binding(struct gl_context *ctx,
       return;
    }
 
-   if (bindingIndex >= ctx->Const.MaxVertexAttribBindings) {
+   if (bindingIndex >= MAX_VERTEX_GENERIC_ATTRIBS) {
       _mesa_error(ctx, GL_INVALID_VALUE,
                   "%s(bindingindex=%u >= "
                   "GL_MAX_VERTEX_ATTRIB_BINDINGS)",
@@ -3955,7 +3970,7 @@ vertex_array_binding_divisor(struct gl_context *ctx,
     *    "An INVALID_VALUE error is generated if <bindingindex> is greater
     *     than or equal to the value of MAX_VERTEX_ATTRIB_BINDINGS."
     */
-   if (bindingIndex >= ctx->Const.MaxVertexAttribBindings) {
+   if (bindingIndex >= MAX_VERTEX_GENERIC_ATTRIBS) {
       _mesa_error(ctx, GL_INVALID_VALUE,
                   "%s(bindingindex=%u > "
                   "GL_MAX_VERTEX_ATTRIB_BINDINGS)",
@@ -4103,6 +4118,7 @@ init_array(struct gl_context *ctx,
 
    _mesa_set_vertex_format(&array->Format, size, type, GL_RGBA,
                            GL_FALSE, GL_FALSE, GL_FALSE);
+   update_format_fallback_mask(ctx, vao, index);
    array->Stride = 0;
    array->Ptr = NULL;
    array->RelativeOffset = 0;
@@ -4152,6 +4168,14 @@ init_default_vao_state(struct gl_context *ctx)
    }
 
    vao->_AttributeMapMode = ATTRIBUTE_MAP_MODE_IDENTITY;
+}
+
+void
+_mesa_update_vao_format_fallbacks(struct gl_context *ctx,
+                                  struct gl_vertex_array_object *vao)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(vao->VertexAttrib); i++)
+      update_format_fallback_mask(ctx, vao, (gl_vert_attrib)i);
 }
 
 /**

@@ -202,6 +202,7 @@ i915_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
       i915->base.clear = i915_clear_render;
 
    i915->base.draw_vbo = i915_draw_vbo;
+   i915->base.draw_vbo_buffers = util_draw_vbo_buffers;
 
    /* init this before draw */
    slab_create(&i915->transfer_pool, sizeof(struct pipe_transfer), 16);

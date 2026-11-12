@@ -16,11 +16,13 @@
 #include "clb097.h"
 
 static enum nil_view_type
-vk_image_view_type_to_nil_view_type(VkImageViewType view_type)
+vk_image_view_type_to_nil_view_type(VkImageViewType view_type, VkImageCreateFlags create_flags)
 {
+   const bool single_layer_aliasing = create_flags & VK_IMAGE_CREATE_ALIAS_SINGLE_LAYER_DESCRIPTOR_BIT_KHR;
+
    switch (view_type) {
-   case VK_IMAGE_VIEW_TYPE_1D:         return NIL_VIEW_TYPE_1D;
-   case VK_IMAGE_VIEW_TYPE_2D:         return NIL_VIEW_TYPE_2D;
+   case VK_IMAGE_VIEW_TYPE_1D:         return single_layer_aliasing ? NIL_VIEW_TYPE_1D_ARRAY : NIL_VIEW_TYPE_1D;
+   case VK_IMAGE_VIEW_TYPE_2D:         return single_layer_aliasing ? NIL_VIEW_TYPE_2D_ARRAY : NIL_VIEW_TYPE_2D;
    case VK_IMAGE_VIEW_TYPE_3D:         return NIL_VIEW_TYPE_3D;
    case VK_IMAGE_VIEW_TYPE_CUBE:       return NIL_VIEW_TYPE_CUBE;
    case VK_IMAGE_VIEW_TYPE_1D_ARRAY:   return NIL_VIEW_TYPE_1D_ARRAY;
@@ -155,7 +157,8 @@ nvk_image_view_init_no_alloc(struct nvk_device *dev,
          p_format = nil_image.format.p_format;
 
       struct nil_view nil_view = {
-         .view_type = vk_image_view_type_to_nil_view_type(view->vk.view_type),
+         .view_type = vk_image_view_type_to_nil_view_type(view->vk.view_type,
+                                                          image->vk.create_flags),
          .format = nil_format(p_format),
          .base_level = view->vk.base_mip_level,
          .num_levels = view->vk.level_count,

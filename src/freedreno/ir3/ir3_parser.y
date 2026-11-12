@@ -84,6 +84,7 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %token <tok> T_A_LOCALMEM
 %token <tok> T_A_CONSTLEN
 %token <tok> T_A_EARLYPREAMBLE
+%token <tok> T_A_WAVESIZE
 %token <tok> T_A_FULLNOPSTART
 %token <tok> T_A_FULLNOPEND
 %token <tok> T_A_FULLSYNCSTART
@@ -93,6 +94,7 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 /* src register flags */
 %token <tok> T_ABSNEG
 %token <tok> T_NEG
+%token <tok> T_NOT
 %token <tok> T_ABS
 %token <tok> T_R
 %token <tok> T_LAST
@@ -510,6 +512,7 @@ header:            localsize_header
 |                  localmem_header
 |                  earlypreamble_header
 |                  constlen_header
+|                  wavesize_header
 
 const_val:         T_FLOAT   { $$ = fui($1); }
 |                  T_INT     { $$ = $1;      }
@@ -590,6 +593,17 @@ localmem_header: T_A_LOCALMEM const_val { variant->shared_size = $2; }
 earlypreamble_header: T_A_EARLYPREAMBLE { variant->early_preamble = 1; }
 
 constlen_header: T_A_CONSTLEN const_val { variant->constlen = $2; }
+
+wavesize_header: T_A_WAVESIZE T_IDENTIFIER {
+                       if (!strcmp($2, "single"))
+                          variant->shader_options.real_wavesize = IR3_SINGLE_ONLY;
+                       else if (!strcmp($2, "double"))
+                          variant->shader_options.real_wavesize = IR3_DOUBLE_ONLY;
+                       else {
+                          yyerror("@wavesize must be single or double");
+                          YYERROR;
+                       }
+}
 
 /* Stubs for now */
 in_header:         T_A_IN '(' T_REGISTER ')' T_IDENTIFIER '(' T_IDENTIFIER '=' integer ')' { }
@@ -1053,6 +1067,9 @@ cat6_store:        T_OP_STG   { new_instr(OPC_STG); dummy_dst(); }   cat6_type '
 |                  T_OP_STL  { new_instr(OPC_STL); dummy_dst(); }  cat6_type 'l' '[' src cat6_dst_offset ']' ',' src ',' immediate
 |                  T_OP_STLW { new_instr(OPC_STLW); dummy_dst(); } cat6_type 'l' '[' src cat6_dst_offset ']' ',' src ',' immediate
 
+cat6_blockcopy:    T_OP_G2L { new_instr(OPC_G2L); dummy_dst(); } cat6_type 'l' '[' src ']' ',' 'g' '[' src ']' ',' immediate
+|                  T_OP_L2G { new_instr(OPC_L2G); dummy_dst(); } cat6_type 'g' '[' src ']' ',' 'l' '[' src ']' ',' immediate
+
 cat6_loadib:       T_OP_LDIB { new_instr(OPC_LDIB); } cat6_typed cat6_dim cat6_type '.' cat6_immed dst_reg ',' 'g' '[' immediate ']' ',' src ',' src
 cat6_storeib:      T_OP_STIB { new_instr(OPC_STIB); dummy_dst(); } cat6_typed cat6_dim cat6_type '.' cat6_immed'g' '[' immediate ']' ',' src ',' src ',' src
 
@@ -1201,6 +1218,7 @@ cat6_todo:         T_OP_G2L                 { new_instr(OPC_G2L); }
 |                  T_OP_RESFMT              { new_instr(OPC_RESFMT); }
 
 cat6_instr:        cat6_load
+|                  cat6_blockcopy
 |                  cat6_loadib
 |                  cat6_store
 |                  cat6_storeib
@@ -1370,6 +1388,7 @@ dst_reg:           dst                 { $1->flags |= IR3_REG_R; }
 
 src_reg_flag:      T_ABSNEG       { rflags.flags |= IR3_REG_ABS|IR3_REG_NEGATE; }
 |                  T_NEG          { rflags.flags |= IR3_REG_NEGATE; }
+|                  T_NOT          { rflags.flags |= IR3_REG_BNOT; }
 |                  T_ABS          { rflags.flags |= IR3_REG_ABS; }
 |                  T_R            { rflags.flags |= IR3_REG_R; }
 |                  T_LAST         { rflags.flags |= IR3_REG_LAST_USE; }

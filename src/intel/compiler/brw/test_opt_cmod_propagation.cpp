@@ -2813,3 +2813,119 @@ TEST_F(cmod_propagation_test, mov_nz_to_mov_sat_nz)
 
    EXPECT_NO_PROGRESS(brw_opt_cmod_propagation, bld);
 }
+
+TEST_F(cmod_propagation_test, distinct_accumulator_writer)
+{
+   set_gfx_verx10(125);
+
+   brw_builder bld = make_shader();
+   brw_builder exp = make_shader();
+
+   brw_reg a = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg b = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg c = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg d = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg acc0 = retype(brw_acc_reg(8), BRW_TYPE_F);
+   brw_reg acc2 = acc0;
+   acc2.nr += 2;
+
+   bld.ADD(acc0, a, b);
+   bld.MUL(acc2, c, d);
+   bld.CMP(bld.null_reg_f(), acc0, brw_imm_f(0),
+           BRW_CONDITIONAL_GE);
+
+   EXPECT_PROGRESS(brw_opt_cmod_propagation, bld);
+
+   exp.ADD(acc0, a, b)->conditional_mod = BRW_CONDITIONAL_GE;
+   exp.MUL(acc2, c, d);
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}
+
+TEST_F(cmod_propagation_test, mac_explict_accumulator_write)
+{
+   brw_builder bld = make_shader(MESA_SHADER_FRAGMENT, 16);
+   brw_builder exp = make_shader(MESA_SHADER_FRAGMENT, 16);
+
+   brw_reg src0 = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg src1 = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg acc0 = retype(brw_acc_reg(8), BRW_TYPE_F);
+
+   bld.MAC(acc0, src0, src1);
+   bld.CMP(bld.null_reg_f(), acc0, brw_imm_f(0),
+           BRW_CONDITIONAL_GE);
+
+   EXPECT_PROGRESS(brw_opt_cmod_propagation, bld);
+
+   exp.MAC(acc0, src0, src1)
+      ->conditional_mod = BRW_CONDITIONAL_GE;
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}
+
+TEST_F(cmod_propagation_test, mac_implict_accumulator_write)
+{
+   brw_builder bld = make_shader(MESA_SHADER_FRAGMENT, 16);
+
+   brw_reg src0 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src1 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src2 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src3 = vgrf(bld, BRW_TYPE_F);
+   brw_reg dst0 = vgrf(bld, BRW_TYPE_F);
+   brw_reg acc0 = retype(brw_acc_reg(8), BRW_TYPE_F);
+
+   bld.MAC(acc0, src2, src3);
+   bld.MAC(dst0, src0, src1);
+   bld.CMP(bld.null_reg_f(), acc0, brw_imm_f(0),
+           BRW_CONDITIONAL_GE);
+
+   EXPECT_NO_PROGRESS(brw_opt_cmod_propagation, bld);
+}
+
+TEST_F(cmod_propagation_test, add_explict_accumulator_write)
+{
+   brw_builder bld = make_shader(MESA_SHADER_FRAGMENT, 16);
+   brw_builder exp = make_shader(MESA_SHADER_FRAGMENT, 16);
+
+   brw_reg src0 = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg dst0 = vgrf(bld, exp, BRW_TYPE_F);
+   brw_reg acc0 = retype(brw_acc_reg(8), BRW_TYPE_F);
+
+   bld.ADD(dst0, acc0, negate(src0));
+   bld.CMP(bld.null_reg_f(), acc0, src0,
+           BRW_CONDITIONAL_L);
+
+   EXPECT_PROGRESS(brw_opt_cmod_propagation, bld);
+
+   exp.ADD(dst0, acc0, negate(src0))
+      ->conditional_mod = BRW_CONDITIONAL_L;
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}
+
+TEST_F(cmod_propagation_test, add_implict_accumulator_write)
+{
+   brw_builder bld = make_shader(MESA_SHADER_FRAGMENT, 16);
+
+   brw_reg src0 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src1 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src2 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src3 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src4 = vgrf(bld, BRW_TYPE_F);
+   brw_reg src5 = vgrf(bld, BRW_TYPE_F);
+   brw_reg dst0 = vgrf(bld, BRW_TYPE_F);
+   brw_reg dst1 = vgrf(bld, BRW_TYPE_F);
+   brw_reg dst2 = vgrf(bld, BRW_TYPE_F);
+   brw_reg acc0 = retype(brw_acc_reg(8), BRW_TYPE_F);
+
+   bld.ADD(dst0, acc0, negate(src0));
+   bld.MAC(dst1, src1, src2);
+   bld.CMP(bld.null_reg_f(), acc0, src0,
+           BRW_CONDITIONAL_L);
+   bld.ADD(dst0, src3, acc0);
+   bld.MAC(dst2, src4, src5);
+   bld.CMP(bld.null_reg_f(), negate(src3), acc0,
+           BRW_CONDITIONAL_G);
+
+   EXPECT_NO_PROGRESS(brw_opt_cmod_propagation, bld);
+}

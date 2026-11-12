@@ -56,6 +56,7 @@
 #include "loader_dri_helper.h"
 #include "pipe-loader/pipe_loader.h"
 #include "pipe/p_screen.h"
+#include "state_tracker/st_context.h"
 
 driOptionDescription __dri2ConfigOptions[] = {
       DRI_CONF_SECTION_DEBUG
@@ -74,20 +75,6 @@ driOptionDescription __dri2ConfigOptions[] = {
 /*****************************************************************/
 /*@{*/
 
-static void
-setupLoaderExtensions(struct dri_screen *screen,
-                      const __DRIextension **extensions)
-{
-   static const struct dri_extension_match matches[] = {
-       {__DRI_IMAGE_LOOKUP, 1, offsetof(struct dri_screen, dri2.image), true},
-       {__DRI_SWRAST_LOADER, 1, offsetof(struct dri_screen, swrast_loader), true},
-       {__DRI_IMAGE_LOADER, 1, offsetof(struct dri_screen, image.loader), true},
-       {__DRI_MUTABLE_RENDER_BUFFER_LOADER, 1, offsetof(struct dri_screen, mutableRenderBuffer.loader), true},
-       {__DRI_KOPPER_LOADER, 1, offsetof(struct dri_screen, kopper_loader), true},
-   };
-   loader_bind_extensions(screen, matches, ARRAY_SIZE(matches), extensions);
-}
-
 /**
  * This is the first entrypoint in the driver called by the DRI driver loader
  * after dlopen()ing it.
@@ -97,7 +84,7 @@ setupLoaderExtensions(struct dri_screen *screen,
  */
 struct dri_screen *
 driCreateNewScreen3(int scrn, int fd,
-                    const __DRIextension **loader_extensions,
+                    const struct dri_loader_funcs *loader,
                     enum dri_screen_type type,
                     const struct dri_config ***driver_configs, bool driver_name_is_inferred,
                     bool has_multibuffer, void *data)
@@ -108,7 +95,7 @@ driCreateNewScreen3(int scrn, int fd,
     if (!screen)
        return NULL;
 
-    setupLoaderExtensions(screen, loader_extensions);
+    screen->loader = *loader;
 
     screen->loaderPrivate = data;
 
@@ -429,13 +416,14 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
 {
     const struct gl_config *modes = (config != NULL) ? &config->modes : NULL;
     gl_api mesa_api;
-    struct __DriverContextConfig ctx_config;
-
-    ctx_config.major_version = 1;
-    ctx_config.minor_version = 0;
-    ctx_config.flags = 0;
-    ctx_config.attribute_mask = 0;
-    ctx_config.priority = __DRI_CTX_PRIORITY_MEDIUM;
+    unsigned major_version = 1;
+    unsigned minor_version = 0;
+    uint32_t flags = 0;
+    unsigned priority = __DRI_CTX_PRIORITY_MEDIUM;
+    bool lose_context_on_reset = false;
+    bool release_none = false;
+    bool no_error = false;
+    bool protected_context = false;
 
     assert((num_attribs == 0) || (attribs != NULL));
 
@@ -461,55 +449,31 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
     for (unsigned i = 0; i < num_attribs; i++) {
         switch (attribs[i * 2]) {
         case __DRI_CTX_ATTRIB_MAJOR_VERSION:
-            ctx_config.major_version = attribs[i * 2 + 1];
+            major_version = attribs[i * 2 + 1];
             break;
         case __DRI_CTX_ATTRIB_MINOR_VERSION:
-            ctx_config.minor_version = attribs[i * 2 + 1];
+            minor_version = attribs[i * 2 + 1];
             break;
         case __DRI_CTX_ATTRIB_FLAGS:
-            ctx_config.flags = attribs[i * 2 + 1];
+            flags = attribs[i * 2 + 1];
             break;
         case __DRI_CTX_ATTRIB_RESET_STRATEGY:
-            if (attribs[i * 2 + 1] != __DRI_CTX_RESET_NO_NOTIFICATION) {
-                ctx_config.attribute_mask |=
-                    __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY;
-                ctx_config.reset_strategy = attribs[i * 2 + 1];
-            } else {
-                ctx_config.attribute_mask &=
-                    ~__DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY;
-            }
+            lose_context_on_reset =
+               attribs[i * 2 + 1] != __DRI_CTX_RESET_NO_NOTIFICATION;
             break;
         case __DRI_CTX_ATTRIB_PRIORITY:
-            ctx_config.attribute_mask |= __DRIVER_CONTEXT_ATTRIB_PRIORITY;
-            ctx_config.priority = attribs[i * 2 + 1];
+            priority = attribs[i * 2 + 1];
             break;
         case __DRI_CTX_ATTRIB_RELEASE_BEHAVIOR:
-            if (attribs[i * 2 + 1] != __DRI_CTX_RELEASE_BEHAVIOR_FLUSH) {
-                ctx_config.attribute_mask |=
-                    __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR;
-                ctx_config.release_behavior = attribs[i * 2 + 1];
-            } else {
-                ctx_config.attribute_mask &=
-                    ~__DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR;
-            }
+            release_none =
+               attribs[i * 2 + 1] == __DRI_CTX_RELEASE_BEHAVIOR_NONE;
             break;
         case __DRI_CTX_ATTRIB_NO_ERROR:
-            if (attribs[i * 2 + 1] != 0) {
-               ctx_config.attribute_mask |=
-                  __DRIVER_CONTEXT_ATTRIB_NO_ERROR;
-               ctx_config.no_error = attribs[i * 2 + 1];
-            } else {
-               ctx_config.attribute_mask &=
-                  ~__DRIVER_CONTEXT_ATTRIB_NO_ERROR;
-            }
+            no_error = attribs[i * 2 + 1] != 0;
             break;
         case __DRI_CTX_ATTRIB_PROTECTED:
-           if (attribs[i * 2 + 1]) {
-              ctx_config.attribute_mask |= __DRIVER_CONTEXT_ATTRIB_PROTECTED;
-           } else {
-              ctx_config.attribute_mask &= ~__DRIVER_CONTEXT_ATTRIB_PROTECTED;
-           }
-           break;
+            protected_context = attribs[i * 2 + 1] != 0;
+            break;
         default:
             /* We can't create a context that satisfies the requirements of an
              * attribute that we don't understand.  Return failure.
@@ -526,7 +490,7 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
      * 3.2+ in any case.
      */
     if (mesa_api == API_OPENGL_COMPAT &&
-        ctx_config.major_version == 3 && ctx_config.minor_version == 1 &&
+        major_version == 3 && minor_version == 1 &&
         screen->max_gl_compat_version < 31)
        mesa_api = API_OPENGL_CORE;
 
@@ -538,7 +502,7 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
      * GL_ARB_compatiblity in such case.
      */
     if (mesa_api == API_OPENGL_CORE &&
-        ctx_config.major_version == 3 && ctx_config.minor_version == 1 &&
+        major_version == 3 && minor_version == 1 &&
         screen->max_gl_compat_version == 31 &&
         screen->max_gl_core_version == 31)
        mesa_api = API_OPENGL_COMPAT;
@@ -573,8 +537,8 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
      */
     if (mesa_api != API_OPENGL_COMPAT
         && mesa_api != API_OPENGL_CORE
-        && (ctx_config.flags & ~(__DRI_CTX_FLAG_DEBUG |
-                                 __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS))) {
+        && (flags & ~(__DRI_CTX_FLAG_DEBUG |
+                      __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS))) {
         *error = __DRI_CTX_ERROR_BAD_FLAG;
         return NULL;
     }
@@ -590,7 +554,7 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
      *
      * In Mesa, a debug context is the same as a regular context.
      */
-    if ((ctx_config.flags & __DRI_CTX_FLAG_FORWARD_COMPATIBLE) != 0) {
+    if ((flags & __DRI_CTX_FLAG_FORWARD_COMPATIBLE) != 0) {
        mesa_api = API_OPENGL_CORE;
     }
 
@@ -598,40 +562,91 @@ driCreateContextAttribs(struct dri_screen *screen, int api,
                                     | __DRI_CTX_FLAG_FORWARD_COMPATIBLE
                                     | __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS
                                     | __DRI_CTX_FLAG_RESET_ISOLATION);
-    if (ctx_config.flags & ~allowed_flags) {
+    if (flags & ~allowed_flags) {
         *error = __DRI_CTX_ERROR_UNKNOWN_FLAG;
         return NULL;
     }
 
     *error = validate_context_version(screen, mesa_api,
-                                      ctx_config.major_version,
-                                      ctx_config.minor_version);
+                                      major_version,
+                                      minor_version);
     if (*error != __DRI_CTX_ERROR_SUCCESS)
        return NULL;
 
-    struct dri_context *ctx = dri_create_context(screen, mesa_api,
-                                                 modes, &ctx_config, error,
-                                                 shared, data, thread_safe);
-    return ctx;
-}
+    uint32_t screen_allowed_flags = __DRI_CTX_FLAG_DEBUG |
+                                    __DRI_CTX_FLAG_FORWARD_COMPATIBLE;
+    if (screen->has_reset_status_query)
+       screen_allowed_flags |= __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS;
 
-static struct dri_context *
-driCreateNewContextForAPI(struct dri_screen *screen, int api,
-                          const struct dri_config *config,
-                          struct dri_context *shared, void *data, bool thread_safe)
-{
-    unsigned error;
+    if (flags & ~screen_allowed_flags) {
+       *error = __DRI_CTX_ERROR_UNKNOWN_FLAG;
+       return NULL;
+    }
 
-    return driCreateContextAttribs(screen, api, config, shared, 0, NULL,
-                                   &error, data, thread_safe);
+    if ((lose_context_on_reset && !screen->has_reset_status_query) ||
+        (protected_context && !screen->has_protected_context)) {
+       *error = __DRI_CTX_ERROR_UNKNOWN_ATTRIBUTE;
+       return NULL;
+    }
+
+    struct st_context_attribs st_attribs = {0};
+    switch (mesa_api) {
+    case API_OPENGLES:
+    case API_OPENGLES2:
+       st_attribs.profile = mesa_api;
+       break;
+    default:
+       if (driQueryOptionb(&screen->dev->option_cache, "force_compat_profile"))
+          st_attribs.profile = API_OPENGL_COMPAT;
+       else
+          st_attribs.profile = mesa_api;
+       st_attribs.major = major_version;
+       st_attribs.minor = minor_version;
+
+       if (flags & __DRI_CTX_FLAG_FORWARD_COMPATIBLE)
+          st_attribs.flags |= ST_CONTEXT_FLAG_FORWARD_COMPATIBLE;
+       break;
+    }
+
+    if (flags & __DRI_CTX_FLAG_DEBUG)
+       st_attribs.flags |= ST_CONTEXT_FLAG_DEBUG;
+    if (flags & __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS)
+       st_attribs.context_flags |= PIPE_CONTEXT_ROBUST_BUFFER_ACCESS;
+    if (lose_context_on_reset)
+       st_attribs.context_flags |= PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET;
+    if (no_error)
+       st_attribs.flags |= ST_CONTEXT_FLAG_NO_ERROR;
+    if (release_none)
+       st_attribs.flags |= ST_CONTEXT_FLAG_RELEASE_NONE;
+    if (protected_context)
+       st_attribs.context_flags |= PIPE_CONTEXT_PROTECTED;
+
+    switch (priority) {
+    case __DRI_CTX_PRIORITY_LOW:
+       st_attribs.context_flags |= PIPE_CONTEXT_LOW_PRIORITY;
+       break;
+    case __DRI_CTX_PRIORITY_HIGH:
+       st_attribs.context_flags |= PIPE_CONTEXT_HIGH_PRIORITY;
+       break;
+    case __DRI_CTX_PRIORITY_REALTIME:
+       st_attribs.context_flags |= PIPE_CONTEXT_REALTIME_PRIORITY;
+       break;
+    default:
+       break;
+    }
+
+    return dri_create_context(screen, &st_attribs, modes, error,
+                              shared, data, thread_safe);
 }
 
 struct dri_context *
 driCreateNewContext(struct dri_screen *screen, const struct dri_config *config,
                     struct dri_context *shared, void *data, bool thread_safe)
 {
-    return driCreateNewContextForAPI(screen, __DRI_API_OPENGL,
-                                     config, shared, data, thread_safe);
+    unsigned error;
+
+    return driCreateContextAttribs(screen, __DRI_API_OPENGL, config, shared,
+                                   0, NULL, &error, data, thread_safe);
 }
 
 /**
@@ -830,20 +845,6 @@ dri2GalliumConfigQuerys(struct dri_screen *screen, const char *var, char **val)
     return 0;
 }
 
-/**
- * \brief the DRI2ConfigQueryExtension struct.
- *
- * We first query the driver option cache. Then the dri2 option cache.
- */
-const __DRI2configQueryExtension dri2GalliumConfigQueryExtension = {
-   .base = { __DRI2_CONFIG_QUERY, 2 },
-
-   .configQueryb        = dri2GalliumConfigQueryb,
-   .configQueryi        = dri2GalliumConfigQueryi,
-   .configQueryf        = dri2GalliumConfigQueryf,
-   .configQuerys        = dri2GalliumConfigQuerys,
-};
-
 
 unsigned int
 driGetAPIMask(struct dri_screen *screen)
@@ -858,19 +859,22 @@ driGetAPIMask(struct dri_screen *screen)
  * driver.
  */
 void
-driSwapBuffersWithDamage(struct dri_drawable *drawable, int nrects, const int *rects)
+driSwapBuffers(struct dri_drawable *drawable, int nrects, const int *rects)
 {
-   assert(drawable->screen->swrast_loader);
+   assert(drawable->screen->loader.swrast);
 
-   drawable->swap_buffers_with_damage(drawable, nrects, rects);
-}
-
-void
-driSwapBuffers(struct dri_drawable *drawable)
-{
-   assert(drawable->screen->swrast_loader);
-
-   drawable->swap_buffers(drawable);
+   switch (drawable->screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      dri2_swap_buffers(drawable, nrects, rects);
+      break;
+   case DRI_SCREEN_SWRAST:
+      drisw_swap_buffers(drawable, nrects, rects);
+      break;
+   case DRI_SCREEN_KOPPER:
+      kopper_swap_buffers(drawable, nrects, rects);
+      break;
+   }
 }
 
 int

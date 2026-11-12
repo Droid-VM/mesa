@@ -89,8 +89,6 @@ struct llvmpipe_context;
 
 
 struct lp_geometry_shader {
-   bool no_tokens;
-   struct pipe_stream_output_info stream_output;
    struct draw_geometry_shader *dgs;
 };
 
@@ -182,6 +180,9 @@ llvmpipe_init_gs_funcs(struct llvmpipe_context *llvmpipe);
 
 void
 llvmpipe_init_tess_funcs(struct llvmpipe_context *llvmpipe);
+
+void
+llvmpipe_set_tess_ccw_flip(struct pipe_context *pipe, bool enable);
 
 void
 llvmpipe_init_task_funcs(struct llvmpipe_context *llvmpipe);

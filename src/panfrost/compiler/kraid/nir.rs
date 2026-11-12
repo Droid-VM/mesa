@@ -67,7 +67,9 @@ impl<'a> PhiAllocMap<'a> {
 }
 
 fn mem_access_from_nir(intrin: &nir_intrinsic_instr) -> MemAccess {
-    if (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0 {
+    if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+        MemAccess::Const
+    } else if (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0 {
         MemAccess::Force
     } else if (intrin.access() & ACCESS_ISTREAM_PAN) != 0 {
         MemAccess::IStream
@@ -78,19 +80,47 @@ fn mem_access_from_nir(intrin: &nir_intrinsic_instr) -> MemAccess {
     }
 }
 
+impl From<ALUType> for NumericType {
+    fn from(value: ALUType) -> Self {
+        match value.base_type() {
+            ALUType::FLOAT => NumericType::Float,
+            ALUType::INT => NumericType::SignedInteger,
+            ALUType::UINT => NumericType::UnsignedInteger,
+            ALUType::INVALID => NumericType::Auto,
+            _ => panic!("Invalid NIR ALU type"),
+        }
+    }
+}
+
+fn sample_position_from_pan(n: u32) -> SamplePosition {
+    match n {
+        PAN_SAMPLE_LOC_CENTER => SamplePosition::Center,
+        PAN_SAMPLE_LOC_CENTROID => SamplePosition::Centroid,
+        PAN_SAMPLE_LOC_EXPLICIT => SamplePosition::Explicit,
+        PAN_SAMPLE_LOC_SAMPLE => SamplePosition::Sample,
+        _ => panic!("Invalid sample_pos: {n}"),
+    }
+}
+
 struct ShaderFromNir<'a> {
     model: &'a dyn Model,
     nir: &'a nir_shader,
     ssa_map: FxHashMap<u32, Vec<SSAValue>>,
-    preload_map: FxHashMap<PreloadReg, SSAValue>,
+    preload_map: FxHashMap<RegRef, (PreloadRegSet, SSARef)>,
     rtz_fp16: bool,
     rtz_fp32: bool,
     ftz_fp32: bool,
     info: ShaderInfo,
+    constant_pool_label: Option<Label>,
+    constant_pool_used: bool,
 }
 
 impl<'a> ShaderFromNir<'a> {
-    fn new(model: &'a dyn Model, nir: &'a nir_shader) -> Self {
+    fn new(
+        model: &'a dyn Model,
+        nir: &'a nir_shader,
+        inputs: &pan_compile_inputs,
+    ) -> Self {
         let fc = nir.info.float_controls_execution_mode;
         let rtz_fp16 = (fc & FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16) != 0;
         let rtz_fp32 = (fc & FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32) != 0;
@@ -106,8 +136,11 @@ impl<'a> ShaderFromNir<'a> {
             ftz_fp32,
             info: ShaderInfo {
                 tls_size: nir.scratch_size,
+                is_blend: inputs.is_blend,
                 ..ShaderInfo::default()
             },
+            constant_pool_label: None,
+            constant_pool_used: false,
         }
     }
 
@@ -137,6 +170,17 @@ impl<'a> ShaderFromNir<'a> {
 
     fn get_src(&self, src: &nir_src) -> Src {
         self.get_src_ssa(src).into()
+    }
+
+    fn get_f32_src(&self, src: &nir_src) -> Src {
+        assert!(src.bit_size() == 16 || src.bit_size() == 32);
+        assert!(src.num_components() == 1);
+        let mut ssa: Src = self.get_src_ssa(src).into();
+        // Default swizzle is .h0h0, we instead want .hf0
+        if src.bit_size() == 16 {
+            ssa = ssa.swizzle(Swizzle::HF0);
+        }
+        ssa
     }
 
     fn get_swiz_src(&self, def: &nir_def, swizzle: &[u8]) -> Src {
@@ -170,8 +214,11 @@ impl<'a> ShaderFromNir<'a> {
                 Src::from(src_vec[usize::from(w)]).swizzle(swizzle)
             }
             32 => {
-                assert_eq!(swizzle.len(), 1);
-                src_vec[usize::from(swizzle[0])].into()
+                // We can have more than one source component in the case of
+                // nir_op_f2f16 where we support vec2.
+                let vec: SSARef =
+                    swizzle.iter().map(|c| src_vec[usize::from(*c)]).collect();
+                vec.into()
             }
             64 => {
                 assert_eq!(swizzle.len(), 1);
@@ -202,15 +249,19 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
-    fn preload(
-        &mut self,
-        b: &mut impl SSABuilder,
-        reg: PreloadReg,
-    ) -> SSAValue {
-        *self
+    fn preload(&mut self, b: &mut impl SSABuilder, reg: PreloadReg) -> SSARef {
+        let reg_ref = self.model.preload_reg(reg).expect("Unsupported preload");
+        // Must be register-aligned
+        assert!(reg_ref.bytes() % 4 == 0);
+
+        let bits = u16::from(reg_ref.bytes()) * 8;
+        let (pre, ssa) = self
             .preload_map
-            .entry(reg)
-            .or_insert_with(|| b.alloc_ssa(32))
+            .entry(reg_ref)
+            .or_insert_with(|| (Default::default(), b.alloc_ref(bits)));
+
+        pre.insert(reg);
+        ssa.clone()
     }
 
     fn special_fau(&self, special: SpecialFAU) -> FAURef {
@@ -286,6 +337,16 @@ impl<'a> ShaderFromNir<'a> {
         } else if bits == 16 {
             let ssa = b.copy_i16((imm_u32[0] as u16).into());
             self.set_ssa(&load.def, vec![ssa]);
+        } else if load.def.bit_size == 64 {
+            let mut ssa = Vec::new();
+            for i in 0..load.def.num_components {
+                let off = usize::from(i * 2);
+                let n = u64::from(imm_u32[off])
+                    | (u64::from(imm_u32[off + 1]) << 32);
+                ssa.extend(b.copy_i64(n.into()).iter().copied());
+            }
+
+            self.set_ssa(&load.def, ssa);
         } else {
             self.set_ssa(
                 &load.def,
@@ -580,18 +641,25 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_f2f16 | nir_op_f2f16_rtz | nir_op_f2f16_rtne => {
                 assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToF16 {
-                    dst: dst.into(),
-                    src: srcs(0),
-                    round: match alu.op {
-                        nir_op_f2f16 => self.fround(16),
-                        nir_op_f2f16_rtne => FRound::NearestEven,
-                        nir_op_f2f16_rtz => FRound::TowardsZero,
-                        _ => panic!("Invalid f2f16 op"),
-                    },
-                    clamp: FClamp::None,
-                });
+                let round = match alu.op {
+                    nir_op_f2f16 => self.fround(16),
+                    nir_op_f2f16_rtne => FRound::NearestEven,
+                    nir_op_f2f16_rtz => FRound::TowardsZero,
+                    _ => panic!("Invalid f2f16 op"),
+                };
+                match alu.def.num_components {
+                    1 => b.f32_to_f16_to(dst.into(), srcs(0), round),
+                    2 => {
+                        assert!(self.model.arch() <= 10);
+                        b.push_op(OpV2F32ToV2F16 {
+                            dst: dst.into(),
+                            srcs: [srcs(0).word(0), srcs(0).word(1)],
+                            round,
+                            clamp: FClamp::None,
+                        });
+                    }
+                    _ => panic!("Unspported nir_op_f2f16 vector size"),
+                }
             }
             nir_op_f2f32 => {
                 assert!(alu.get_src(0).bit_size() == 16);
@@ -601,62 +669,96 @@ impl<'a> ShaderFromNir<'a> {
                     src: srcs(0),
                 });
             }
-            nir_op_u2f32 => {
+            nir_op_pack_half_2x16_split | nir_op_pack_half_2x16_rtz_split => {
                 assert!(alu.get_src(0).bit_size() == 32);
+                assert!(alu.get_src(1).bit_size() == 32);
+                assert!(alu.def.bit_size() == 32);
+                assert!(self.model.arch() <= 10);
+
+                let round = if alu.op == nir_op_pack_half_2x16_rtz_split {
+                    FRound::TowardsZero
+                } else {
+                    self.fround(16)
+                };
+                b.push_op(OpV2F32ToV2F16 {
+                    dst: dst.into(),
+                    srcs: [srcs(0), srcs(1)],
+                    round,
+                    clamp: FClamp::None,
+                });
+            }
+            nir_op_u2f32 => {
+                assert!(
+                    self.model.arch() <= 10 || alu.get_src(0).bit_size() == 32
+                );
                 assert!(alu.def.num_components == 1);
                 b.push_op(OpIToF32 {
                     dst: dst.into(),
-                    src_type: DataType::U32,
+                    src_type: DataType::u(alu.get_src(0).bit_size()),
                     src: srcs(0),
                     round: self.fround(alu.def.bit_size),
                 });
             }
-            nir_op_f2u32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
+            nir_op_f2u32 | nir_op_f2u32_rtne | nir_op_f2i32
+            | nir_op_f2i32_rtne => {
                 assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::U32,
-                    src: srcs(0),
-                    round: FRound::TowardsZero,
-                });
-            }
-            nir_op_f2u32_rtne => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::U32,
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                });
-            }
-            nir_op_f2i32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::S32,
-                    src: srcs(0),
-                    round: FRound::TowardsZero,
-                });
-            }
-            nir_op_f2i32_rtne => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::S32,
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                });
+                let round = match alu.op {
+                    nir_op_f2u32 | nir_op_f2i32 => FRound::TowardsZero,
+                    nir_op_f2u32_rtne | nir_op_f2i32_rtne => {
+                        FRound::NearestEven
+                    }
+                    _ => unreachable!(),
+                };
+                let dst_type = match alu.op {
+                    nir_op_f2u32 | nir_op_f2u32_rtne => DataType::U32,
+                    nir_op_f2i32 | nir_op_f2i32_rtne => DataType::S32,
+                    _ => unreachable!(),
+                };
+                match alu.get_src(0).bit_size() {
+                    32 => {
+                        b.push_op(OpF32ToI32 {
+                            dst: dst.into(),
+                            dst_type,
+                            src: srcs(0),
+                            round,
+                        });
+                    }
+                    16 => {
+                        assert!(self.model.arch() <= 10);
+                        b.push_op(OpF16ToI32 {
+                            dst: dst.into(),
+                            dst_type,
+                            src: srcs(0),
+                            round,
+                        });
+                    }
+                    _ => unreachable!(),
+                }
             }
             nir_op_i2f32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
+                assert!(
+                    self.model.arch() <= 10 || alu.get_src(0).bit_size() == 32
+                );
                 assert!(alu.def.num_components == 1);
                 b.push_op(OpIToF32 {
                     dst: dst.into(),
-                    src_type: DataType::S32,
+                    src_type: DataType::s(alu.get_src(0).bit_size()),
+                    src: srcs(0),
+                    round: self.fround(alu.def.bit_size),
+                });
+            }
+            nir_op_i2f16 | nir_op_u2f16 => {
+                assert!(self.model.arch() <= 10);
+
+                let num_type = if alu.op == nir_op_i2f16 {
+                    NumericType::SignedInteger
+                } else {
+                    NumericType::UnsignedInteger
+                };
+
+                b.push_op(OpIToF16 {
+                    dst: dst.into(),
+                    src_type: src_type(0, num_type),
                     src: srcs(0),
                     round: self.fround(alu.def.bit_size),
                 });
@@ -718,7 +820,7 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_feq_pan | nir_op_fge_pan | nir_op_flt_pan
             | nir_op_fneu_pan => {
-                b.push_op(OpFCmp {
+                b.push_op(OpCmp {
                     dst: dst.into(),
                     src_type: src_type(0, NumericType::Float),
                     res_type: CmpResultType::M1,
@@ -730,15 +832,13 @@ impl<'a> ShaderFromNir<'a> {
                         _ => panic!("Usupported float comparison"),
                     },
                     srcs: [srcs(0), srcs(1)],
-                    accum: 0_u32.into(),
+                    accum: Src::zero(alu.def.bit_size),
                     accum_op: CmpAccumOp::None,
                 });
             }
             nir_op_fround_even | nir_op_ftrunc | nir_op_fceil
             | nir_op_ffloor => {
-                debug_assert!(alu.def.bit_size == 32);
-                debug_assert!(alu.def.num_components == 1);
-
+                let src_type = src_type(0, NumericType::Float);
                 let round = match alu.op {
                     nir_op_fround_even => FRound::NearestEven,
                     nir_op_ftrunc => FRound::TowardsZero,
@@ -755,7 +855,7 @@ impl<'a> ShaderFromNir<'a> {
 
                     b.push_op(OpFlush {
                         dst: t.into(),
-                        src_type: DataType::F32,
+                        src_type,
                         src: srcs(0),
                         ftz: true,
                         flush_inf: false,
@@ -769,6 +869,7 @@ impl<'a> ShaderFromNir<'a> {
 
                 b.push_op(OpFRound {
                     dst: dst.into(),
+                    src_type,
                     src,
                     round,
                 });
@@ -780,6 +881,16 @@ impl<'a> ShaderFromNir<'a> {
                     round: self.fround(alu.def.bit_size),
                     clamp: FClamp::None,
                     srcs: [srcs(0), srcs(1), srcs(2)],
+                });
+            }
+            nir_op_fma_rscale_pan => {
+                assert!(alu.get_src(0).bit_size() == 32);
+                b.push_op(OpFmaRScale {
+                    dst: dst.into(),
+                    round: self.fround(alu.def.bit_size),
+                    clamp: FClamp::None,
+                    srcs: [srcs(0), srcs(1), srcs(2)],
+                    scale: srcs(3),
                 });
             }
             nir_op_fmul => {
@@ -842,18 +953,26 @@ impl<'a> ShaderFromNir<'a> {
                 b.fexp_32_to(dst.into(), srcs(1), log2_base);
             }
             nir_op_frexp_exp => {
-                assert!(alu.get_src(0).bit_size() == 32);
+                assert!(alu.def.bit_size == 32);
+
+                let src = match alu.get_src(0).bit_size() {
+                    32 => srcs(0),
+                    16 => srcs(0).swizzle(Swizzle::HF0),
+                    _ => unreachable!(),
+                };
+
                 b.push_op(OpFrexpE {
                     dst: dst.into(),
-                    src: srcs(0),
+                    src_type: DataType::F32,
+                    src,
                     mode: FrexpMode::Normal,
                     neg_result: false,
                 });
             }
             nir_op_frexp_sig => {
-                assert!(alu.get_src(0).bit_size() == 32);
                 b.push_op(OpFrexpM {
                     dst: dst.into(),
+                    src_type: src_type(0, NumericType::Float),
                     src: srcs(0),
                     mode: FrexpMode::Normal,
                 });
@@ -900,13 +1019,7 @@ impl<'a> ShaderFromNir<'a> {
                 debug_assert!(alu.def.bit_size == 32);
                 debug_assert!(alu.def.num_components == 1);
 
-                let x16 = b.alloc_ssa(16);
-                b.push_op(OpF32ToF16 {
-                    dst: x16.into(),
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                    clamp: FClamp::None,
-                });
+                let x16 = b.f32_to_f16(srcs(0), FRound::NearestEven);
 
                 let flush16 = b.alloc_ssa(16);
                 b.push_op(OpFlush {
@@ -922,14 +1035,6 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     src: flush16.into(),
                 });
-            }
-            nir_op_fsin => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                b.fsincos_32_to(dst.into(), srcs(0), false);
-            }
-            nir_op_fcos => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                b.fsincos_32_to(dst.into(), srcs(0), true);
             }
             nir_op_i2i8 | nir_op_i2i16 | nir_op_i2i32 => {
                 let dst_bits = alu.def.bit_size;
@@ -961,6 +1066,26 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     dst_type: dst_type(NumericType::SignedInteger),
                     src: srcs(0),
+                });
+            }
+            nir_op_uhadd | nir_op_ihadd | nir_op_urhadd | nir_op_irhadd => {
+                assert!(self.model.arch() <= 10);
+                let dst_type = match alu.op {
+                    nir_op_uhadd | nir_op_urhadd => {
+                        dst_type(NumericType::UnsignedInteger)
+                    }
+                    nir_op_ihadd | nir_op_irhadd => {
+                        dst_type(NumericType::SignedInteger)
+                    }
+                    _ => unreachable!(),
+                };
+                let round_up = matches!(alu.op, nir_op_urhadd | nir_op_irhadd);
+
+                b.push_op(OpHAdd {
+                    dst: dst.into(),
+                    dst_type,
+                    round_up,
+                    srcs: [srcs(0), srcs(1)],
                 });
             }
             nir_op_iadd | nir_op_iadd_sat | nir_op_uadd_sat => {
@@ -1029,7 +1154,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     dst_type: dst_type(NumericType::Integer),
                     saturate: false,
-                    srcs: [0_u32.into(), srcs(0)],
+                    srcs: [Src::zero(alu.def.bit_size), srcs(0)],
                 });
             }
             nir_op_inot => {
@@ -1041,7 +1166,7 @@ impl<'a> ShaderFromNir<'a> {
                     not_result: true,
                     src0: srcs(0),
                     shift: Src::from(0_u8),
-                    src2: 0_u32.into(),
+                    src2: Src::zero(alu.def.bit_size),
                 });
             }
             nir_op_ieq_pan | nir_op_ige_pan | nir_op_ilt_pan
@@ -1083,13 +1208,13 @@ impl<'a> ShaderFromNir<'a> {
                     // clean this up in almost all cases.
                     b.copy_i32_to(dst[1].into(), dst[0].into());
                 } else {
-                    b.push_op(OpICmp {
+                    b.push_op(OpCmp {
                         dst: dst.into(),
                         src_type: src_type(0, num_type),
                         res_type: CmpResultType::M1,
                         cmp_op,
                         srcs: [srcs(0), srcs(1)],
-                        accum: 0_u32.into(),
+                        accum: Src::zero(alu.def.bit_size),
                         accum_op: CmpAccumOp::None,
                     });
                 }
@@ -1188,27 +1313,29 @@ impl<'a> ShaderFromNir<'a> {
                     }
                 };
 
-                let logic_op = if src_is_zero(2) {
-                    LogicOp::None
-                } else {
-                    match alu.op {
-                        nir_op_arshift_and_pan
-                        | nir_op_lshift_and_pan
-                        | nir_op_rshift_and_pan
-                        | nir_op_lrot_and_pan
-                        | nir_op_rrot_and_pan => LogicOp::And,
-                        nir_op_arshift_or_pan
-                        | nir_op_lshift_or_pan
-                        | nir_op_rshift_or_pan
-                        | nir_op_lrot_or_pan
-                        | nir_op_rrot_or_pan => LogicOp::Or,
-                        nir_op_arshift_xor_pan
-                        | nir_op_lshift_xor_pan
-                        | nir_op_rshift_xor_pan
-                        | nir_op_lrot_xor_pan
-                        | nir_op_rrot_xor_pan => LogicOp::Xor,
-                        _ => unreachable!(),
-                    }
+                let logic_op = match alu.op {
+                    nir_op_arshift_and_pan
+                    | nir_op_lshift_and_pan
+                    | nir_op_rshift_and_pan
+                    | nir_op_lrot_and_pan
+                    | nir_op_rrot_and_pan => LogicOp::And,
+                    nir_op_arshift_or_pan
+                    | nir_op_lshift_or_pan
+                    | nir_op_rshift_or_pan
+                    | nir_op_lrot_or_pan
+                    | nir_op_rrot_or_pan => LogicOp::Or,
+                    nir_op_arshift_xor_pan
+                    | nir_op_lshift_xor_pan
+                    | nir_op_rshift_xor_pan
+                    | nir_op_lrot_xor_pan
+                    | nir_op_rrot_xor_pan => LogicOp::Xor,
+                    _ => unreachable!(),
+                };
+
+                // Zero is the identity for OR/XOR
+                let logic_op = match (logic_op, src_is_zero(2)) {
+                    (LogicOp::Or | LogicOp::Xor, true) => LogicOp::None,
+                    (x, _) => x,
                 };
 
                 b.push_op(OpShiftLop {
@@ -1284,32 +1411,58 @@ impl<'a> ShaderFromNir<'a> {
     }
 
     fn parse_tex(&mut self, b: &mut impl SSABuilder, tex: &nir_tex_instr) {
-        let mut tex_h = None;
+        let mut tex_handle = None;
         let mut sr: [&[SSAValue]; 2] = [&[], &[]];
+        let mut var_handle = None;
+        let mut var_buf_offset = None;
         for src in tex.srcs_as_slice() {
             match src.src_type {
                 nir_tex_src_texture_handle => {
                     let vec = self.get_src_ssa(&src.src);
                     assert_eq!(vec.comps(), 2);
-                    tex_h = Some(vec);
+                    tex_handle = Some(vec);
                 }
                 nir_tex_src_backend1 => sr[0] = self.get_ssa(src.src.as_def()),
                 nir_tex_src_backend2 => sr[1] = self.get_ssa(src.src.as_def()),
+                nir_tex_src_var_buf_offset_pan => {
+                    let vec = self.get_src_ssa(&src.src);
+                    assert_eq!(vec.comps(), 1);
+                    var_buf_offset = Some(Src::from(vec));
+                }
+                nir_tex_src_var_handle_pan => {
+                    let vec = self.get_src_ssa(&src.src);
+                    assert_eq!(vec.comps(), 1);
+                    var_handle = Some(Src::from(vec));
+                }
                 _ => panic!("Unknown tex source"),
             }
         }
-        let tex_h = tex_h.unwrap();
-        let sr = SSARef::from_iter(
-            sr[0].iter().copied().chain(sr[1].iter().copied()),
-        );
+        let tex_handle = tex_handle.unwrap().into();
+        let sr = if !sr[0].is_empty() {
+            Some(SSARef::from_iter(
+                sr[0].iter().copied().chain(sr[1].iter().copied()),
+            ))
+        } else {
+            None
+        };
 
         let flags: pan_va_tex_flags =
             unsafe { std::mem::transmute(tex.backend_flags) };
-        let skip = flags.skip();
+        let skip = tex.skip_helpers() != 0;
         let wide_indices = flags.wide_indices();
         let array_enable = flags.array_enable();
         let texel_offset = flags.texel_offset();
         let compare_enable = flags.compare_enable();
+        let projection_enable = flags.projection_enable();
+        let sample_position = sample_position_from_pan(flags.var_sample_loc());
+
+        let sample = if (var_handle.is_some() || var_buf_offset.is_some())
+            && sample_position != SamplePosition::Center
+        {
+            Src::from(self.preload(b, PreloadReg::SampleCentroidId))
+        } else {
+            Src::from(0_u32)
+        };
 
         let dim = match tex.sampler_dim.into() {
             GLSL_SAMPLER_DIM_1D | GLSL_SAMPLER_DIM_BUF => TexDim::Tex1D,
@@ -1331,71 +1484,280 @@ impl<'a> ShaderFromNir<'a> {
             BI_VA_LOD_MODE_GRDESC => TexLodMode::GradientDesc,
             _ => panic!("Unknown LOD mode: {}", flags.lod_mode()),
         };
-        let write_mask =
-            TexWriteMask::new(tex.def.components_read().try_into().unwrap());
+        let var_mem_type = if flags.var_buf_src_f16() {
+            DataType::F16
+        } else {
+            DataType::F32
+        };
+        let comps_read = u8::try_from(tex.def.components_read()).unwrap();
 
-        let dst_type = DataType::get(
-            write_mask.comps(),
+        let dst0_comps = if tex.op == nir_texop_dual_pan {
+            // Since the two texture ops are identical, we can simply divide by
+            // 2 to get the per-tex number of components from the NIR dest.
+            assert!(tex.def.num_components % 2 == 0);
+            tex.def.num_components / 2
+        } else {
+            tex.def.num_components
+        };
+        let dst1_comps = tex.def.num_components - dst0_comps;
+
+        let u8_mask = |bits: u8| u8::MAX >> (8 - bits);
+        let make_consecutive = |comps: u8| {
+            debug_assert!(comps <= 0xf);
+            u8_mask(comps.max(1).ilog2() as u8 + 1)
+        };
+
+        // Figure out the write masks.  The first write mask can be anything
+        // but the second write mask must be contiguous components.  If we're
+        // not TEX_DUAL, the second write mask will be empty.
+        let dst0_comps_read = comps_read & u8_mask(dst0_comps);
+        let dst1_comps_read = comps_read >> dst0_comps;
+        let wm0 = if var_handle.is_some() || var_buf_offset.is_some() {
+            if tex.op == nir_texop_dual_pan {
+                u8_mask(4)
+            } else {
+                make_consecutive(dst0_comps_read)
+            }
+        } else {
+            dst0_comps_read.max(1)
+        };
+        let wm1 = if tex.op == nir_texop_dual_pan {
+            make_consecutive(dst1_comps_read)
+        } else {
+            assert!(dst1_comps == 0);
+            0
+        };
+        let write_masks = [TexWriteMask::new(wm0), TexWriteMask::new(wm1)];
+        debug_assert!((comps_read & !(wm0 | (wm1 << dst0_comps))) == 0);
+        debug_assert!(
+            tex.op == nir_texop_dual_pan || write_masks[1].is_empty()
+        );
+
+        let dst0_type = DataType::get(
+            write_masks[0].comps(),
             NumericType::Auto,
             tex.def.bit_size,
         );
-        let tmp = b.alloc_ref(dst_type.total_bits().into());
+
+        // Now allocate the tex destination.  The second tex (if any) is aligned
+        // to a whole register.
+        let mut dst_bits = u16::from(write_masks[0].comps() * tex.def.bit_size);
+        if !write_masks[1].is_empty() {
+            dst_bits = dst_bits.next_multiple_of(32);
+            dst_bits += u16::from(write_masks[1].comps() * tex.def.bit_size);
+        }
+        let tmp = b.alloc_ref(dst_bits);
 
         match tex.op {
+            nir_texop_dual_pan => {
+                assert!(!wide_indices);
+                let dst1_type = DataType::get(
+                    write_masks[1].comps(),
+                    NumericType::Auto,
+                    tex.def.bit_size,
+                );
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        lod_mode,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
+            }
             nir_texop_tex | nir_texop_txb | nir_texop_txl | nir_texop_txd => {
-                b.push_op(OpTexSingle {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    array_enable,
-                    texel_offset,
-                    compare_enable,
-                    lod_mode,
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        lod_mode,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             nir_texop_txf | nir_texop_txf_ms => {
+                assert!(!projection_enable);
                 b.push_op(OpTexFetch {
                     dst: tmp.clone().into(),
-                    dst_type,
+                    dst_type: dst0_type,
                     skip,
                     dim,
-                    write_mask,
+                    write_mask: write_masks[0],
                     wide_indices,
                     array_enable,
                     texel_offset,
-                    data: sr.into(),
-                    handle: tex_h.into(),
+                    data: sr
+                        .expect("TEX_FETCH does not have VAR_ variants")
+                        .into(),
+                    handle: tex_handle,
                 });
             }
             nir_texop_tg4 => {
-                b.push_op(OpTexGather {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    array_enable,
-                    texel_offset,
-                    compare_enable,
-                    coord_mode: TexCoordMode::F32,
-                    gather_comp: match tex.component() {
-                        0 => TexGatherComp::R,
-                        1 => TexGatherComp::G,
-                        2 => TexGatherComp::B,
-                        3 => TexGatherComp::A,
-                        c => panic!("Invalid texture gather component: {c}"),
-                    },
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+                let gather_comp = match tex.component() {
+                    0 => TexGatherComp::R,
+                    1 => TexGatherComp::G,
+                    2 => TexGatherComp::B,
+                    3 => TexGatherComp::A,
+                    c => panic!("Invalid texture gather component: {c}"),
+                };
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        gather_comp,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        gather_comp,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        coord_mode: TexCoordMode::F32,
+                        gather_comp,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             nir_texop_gradient_pan => {
                 let coord_mode = if flags.force_delta_enable() {
@@ -1406,45 +1768,98 @@ impl<'a> ShaderFromNir<'a> {
                 } else {
                     TexGradientCoordMode::Coords
                 };
-                b.push_op(OpTexGradient {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    coord_mode,
-                    lod_bias_disable: flags.lod_bias_disable(),
-                    lod_clamp_disable: flags.lod_clamp_disable(),
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert_eq!(coord_mode, TexGradientCoordMode::Coords);
+                    b.push_op(OpVarTexBufGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert_eq!(coord_mode, TexGradientCoordMode::Coords);
+                    b.push_op(OpVarTexGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        coord_mode,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             _ => panic!("Unsupported tex instruction"),
         }
 
-        let mut comps = (0_u8..).into_iter();
+        let mut c = 0_u8;
         let mut vec_srcs = Vec::new();
         if tex.def.bit_size == 16 {
-            for i in 0..tex.def.num_components {
-                if write_mask.has_comp(i) {
-                    let c = comps.next().unwrap();
-                    let ssa = tmp[usize::from(c) / 2];
-                    vec_srcs.push(Src::from(ssa).half(c % 2));
-                } else {
-                    vec_srcs.push(Src::from(0_u16));
+            for t in 0..2 {
+                // Each texture destination starts at a whole register
+                debug_assert!((c & 1) == 0);
+                let dst_comps = [dst0_comps, dst1_comps][t];
+                for i in 0..dst_comps {
+                    if write_masks[t].has_comp(i) {
+                        let ssa = tmp[usize::from(c) / 2];
+                        vec_srcs.push(Src::from(ssa).half(c % 2));
+                        c += 1;
+                    } else {
+                        vec_srcs.push(Src::from(0_u16));
+                    }
+                }
+                if (write_masks[t].comps() & 1) != 0 {
+                    c += 1;
                 }
             }
         } else {
             assert_eq!(tex.def.bit_size, 32);
-            for i in 0..tex.def.num_components {
-                if write_mask.has_comp(i) {
-                    let c = comps.next().unwrap();
-                    let ssa = tmp[usize::from(c)];
-                    vec_srcs.push(Src::from(ssa));
-                } else {
-                    vec_srcs.push(Src::from(0_u32));
+            for t in 0..2 {
+                let dst_comps = [dst0_comps, dst1_comps][t];
+                for i in 0..dst_comps {
+                    if write_masks[t].has_comp(i) {
+                        let ssa = tmp[usize::from(c)];
+                        vec_srcs.push(Src::from(ssa));
+                        c += 1;
+                    } else {
+                        vec_srcs.push(Src::from(0_u32));
+                    }
                 }
             }
         }
@@ -1476,21 +1891,19 @@ impl<'a> ShaderFromNir<'a> {
                     src: self.get_src(&srcs[0]),
                 });
             }
-            nir_intrinsic_barrier => {
-                match intrin.execution_scope() {
-                    SCOPE_NONE | SCOPE_SUBGROUP => {
-                        // TODO: Scheduling barrier
-                    }
-                    SCOPE_WORKGROUP => {
-                        assert!(matches!(
-                            self.nir.info.stage(),
-                            MESA_SHADER_COMPUTE | MESA_SHADER_KERNEL
-                        ));
-                        b.push_op(OpBarrier {});
-                    }
-                    _ => panic!("Unsupported barrier scope"),
+            nir_intrinsic_barrier => match intrin.execution_scope() {
+                SCOPE_NONE | SCOPE_SUBGROUP => {
+                    b.push_op(OpScheduleBarrier {});
                 }
-            }
+                SCOPE_WORKGROUP => {
+                    assert!(matches!(
+                        self.nir.info.stage(),
+                        MESA_SHADER_COMPUTE | MESA_SHADER_KERNEL
+                    ));
+                    b.push_op(OpBarrier {});
+                }
+                _ => panic!("Unsupported barrier scope"),
+            },
             nir_intrinsic_cmat_muladd_pan => {
                 let src_a = self.get_src(&srcs[0]);
                 let src_b = self.get_src(&srcs[1]);
@@ -1543,9 +1956,9 @@ impl<'a> ShaderFromNir<'a> {
                 }
             }
             nir_intrinsic_cubeface_pan => {
-                let x = self.get_src(&srcs[0]);
-                let y = self.get_src(&srcs[1]);
-                let z = self.get_src(&srcs[2]);
+                let x = self.get_f32_src(&srcs[0]);
+                let y = self.get_f32_src(&srcs[1]);
+                let z = self.get_f32_src(&srcs[2]);
                 let dst = self.alloc_ssa(b, &intrin.def);
                 b.push_op(OpCubeFaceMax {
                     dst: dst[0].into(),
@@ -1557,8 +1970,8 @@ impl<'a> ShaderFromNir<'a> {
                 });
             }
             nir_intrinsic_cube_ssel_pan | nir_intrinsic_cube_tsel_pan => {
-                let x = self.get_src(&srcs[0]);
-                let y = self.get_src(&srcs[1]);
+                let x = self.get_f32_src(&srcs[0]);
+                let y = self.get_f32_src(&srcs[1]);
                 let idx = self.get_src(&srcs[2]);
                 let dst = self.alloc_ssa(b, &intrin.def).into();
                 b.push_op(OpCubeSel {
@@ -1570,6 +1983,22 @@ impl<'a> ShaderFromNir<'a> {
                     },
                     coords: [x, y],
                     idx,
+                });
+            }
+            nir_intrinsic_fsin_table_pan => {
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpFSinTable {
+                    dst,
+                    src: self.get_f32_src(&srcs[0]),
+                    offset: false,
+                });
+            }
+            nir_intrinsic_fcos_table_pan => {
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpFCosTable {
+                    dst,
+                    src: self.get_f32_src(&srcs[0]),
+                    offset: false,
                 });
             }
             nir_intrinsic_ddx
@@ -1685,15 +2114,76 @@ impl<'a> ShaderFromNir<'a> {
                     handle,
                 });
             }
+            nir_intrinsic_load_tile_pan | nir_intrinsic_load_tile_res_pan => {
+                assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
+                assert_eq!(intrin.def.num_components, intrin.num_components);
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    intrin.dest_type().into(),
+                    intrin.def.bit_size,
+                );
+
+                let pixel = self.get_src(&srcs[0]);
+                let coverage = self.get_src(&srcs[1]);
+                let conversion = self.get_src(&srcs[2]);
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+
+                let is_resource =
+                    intrin.intrinsic == nir_intrinsic_load_tile_res_pan;
+                let z_stencil = matches!(
+                    intrin.io_semantics().location(),
+                    FRAG_RESULT_DEPTH | FRAG_RESULT_STENCIL
+                );
+
+                b.push_op(OpLdTile {
+                    dst,
+                    dst_type,
+                    pixel,
+                    coverage,
+                    conversion,
+                    is_resource,
+                    z_stencil,
+                    z_last_read: false, // TODO: optimize???
+                });
+            }
+            nir_intrinsic_store_tile_pan => {
+                assert_eq!(srcs[0].bit_size(), intrin.src_type().bit_size());
+
+                let src_type = DataType::get(
+                    srcs[0].num_components(),
+                    intrin.src_type().into(),
+                    srcs[0].bit_size(),
+                );
+
+                let data = self.get_src(&srcs[0]);
+                let pixel = self.get_src(&srcs[1]);
+                let coverage = self.get_src(&srcs[2]);
+                let conversion = self.get_src(&srcs[3]);
+
+                b.push_op(OpStTile {
+                    src_type,
+                    data,
+                    pixel,
+                    coverage,
+                    conversion,
+                });
+            }
             nir_intrinsic_load_global | nir_intrinsic_load_global_constant => {
                 let bits = intrin.def.bit_size * intrin.def.num_components;
                 let (addr, offset) = self.get_src_add_imm(&srcs[0], 16, true);
+                let is_const =
+                    intrin.intrinsic == nir_intrinsic_load_global_constant;
                 let dst = self.alloc_ssa(b, &intrin.def).into();
                 b.push_op(OpLoad {
                     dst,
                     dst_type: DataType::i(bits),
                     is_tls: (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0,
-                    access: mem_access_from_nir(intrin),
+                    access: if is_const {
+                        MemAccess::Const
+                    } else {
+                        mem_access_from_nir(intrin)
+                    },
                     addr,
                     offset: offset.try_into().unwrap(),
                 });
@@ -1702,16 +2192,9 @@ impl<'a> ShaderFromNir<'a> {
                 assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
                 assert_eq!(intrin.def.num_components, intrin.num_components);
 
-                let num_type = match intrin.dest_type().base_type() {
-                    ALUType::FLOAT => NumericType::Float,
-                    ALUType::INT => NumericType::SignedInteger,
-                    ALUType::UINT => NumericType::UnsignedInteger,
-                    ALUType::INVALID => NumericType::Auto,
-                    _ => panic!("Invalid NIR ALU type"),
-                };
                 let dst_type = DataType::get(
                     intrin.def.num_components,
-                    num_type,
+                    intrin.dest_type().into(),
                     intrin.def.bit_size,
                 );
 
@@ -1726,6 +2209,21 @@ impl<'a> ShaderFromNir<'a> {
                     cvt,
                     offset: offset.try_into().unwrap(),
                 });
+            }
+            nir_intrinsic_load_constant_base_ptr => {
+                assert_eq!(intrin.def.bit_size, 64);
+                assert_eq!(intrin.def.num_components, 1);
+                let label = self
+                    .constant_pool_label
+                    .expect("Shader has no constant data");
+                self.constant_pool_used = true;
+                let pc = self.special_fau(SpecialFAU::Pc);
+                let ssa = self.alloc_ssa(b, &intrin.def);
+                b.push_op(OpAdr {
+                    dst: ssa[0].into(),
+                    label,
+                });
+                b.copy_i32_to(ssa[1].into(), pc.word(1).into());
             }
             nir_intrinsic_load_scratch_base_ptr => {
                 assert_eq!(intrin.def.bit_size, 64);
@@ -1745,11 +2243,16 @@ impl<'a> ShaderFromNir<'a> {
                 let bits = intrin.def.bit_size * intrin.def.num_components;
                 let handle = self.get_src(&srcs[0]);
                 let offset = self.get_src(&srcs[1]);
+                let is_const = intrin.intrinsic == nir_intrinsic_load_ubo;
                 let dst = self.alloc_ssa(b, &intrin.def).into();
                 b.push_op(OpLdPka {
                     dst,
                     dst_type: DataType::i(bits),
-                    access: mem_access_from_nir(intrin),
+                    access: if is_const {
+                        MemAccess::Const
+                    } else {
+                        mem_access_from_nir(intrin)
+                    },
                     offset,
                     handle,
                 });
@@ -1775,16 +2278,9 @@ impl<'a> ShaderFromNir<'a> {
                 assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
                 assert_eq!(intrin.def.num_components, intrin.num_components);
 
-                let num_type = match intrin.dest_type().base_type() {
-                    ALUType::FLOAT => NumericType::Float,
-                    ALUType::INT => NumericType::SignedInteger,
-                    ALUType::UINT => NumericType::UnsignedInteger,
-                    ALUType::INVALID => NumericType::Auto,
-                    _ => panic!("Invalid NIR ALU type"),
-                };
                 let dst_type = DataType::get(
                     intrin.def.num_components,
-                    num_type,
+                    intrin.dest_type().into(),
                     intrin.def.bit_size,
                 );
 
@@ -1853,16 +2349,9 @@ impl<'a> ShaderFromNir<'a> {
                 assert_eq!(srcs[0].num_components(), intrin.num_components);
                 let bits = srcs[0].bit_size() * srcs[0].num_components();
 
-                let num_type = match intrin.src_type().base_type() {
-                    ALUType::FLOAT => NumericType::Float,
-                    ALUType::INT => NumericType::SignedInteger,
-                    ALUType::UINT => NumericType::UnsignedInteger,
-                    ALUType::INVALID => NumericType::Auto,
-                    _ => panic!("Invalid NIR ALU type"),
-                };
                 let src_type = DataType::get(
                     srcs[0].num_components(),
-                    num_type,
+                    intrin.src_type().into(),
                     srcs[0].bit_size(),
                 );
 
@@ -1889,9 +2378,9 @@ impl<'a> ShaderFromNir<'a> {
                     self.preload(b, PreloadReg::LocalId2),
                 ];
                 let local_id = [
-                    Src::from(preload[0]).swizzle(Swizzle::widen_u16(0)),
-                    Src::from(preload[0]).swizzle(Swizzle::widen_u16(1)),
-                    Src::from(preload[1]).swizzle(Swizzle::widen_u16(0)),
+                    Src::from(preload[0][0]).swizzle(Swizzle::widen_u16(0)),
+                    Src::from(preload[0][0]).swizzle(Swizzle::widen_u16(1)),
+                    Src::from(preload[1][0]).swizzle(Swizzle::widen_u16(0)),
                 ];
                 let ssa = local_id.into_iter().map(|src| {
                     let def = b.alloc_ssa(32);
@@ -1906,17 +2395,17 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_load_workgroup_id => {
                 let ssa = vec![
-                    self.preload(b, PreloadReg::WorkgroupId0),
-                    self.preload(b, PreloadReg::WorkgroupId1),
-                    self.preload(b, PreloadReg::WorkgroupId2),
+                    self.preload(b, PreloadReg::WorkgroupId0)[0],
+                    self.preload(b, PreloadReg::WorkgroupId1)[0],
+                    self.preload(b, PreloadReg::WorkgroupId2)[0],
                 ];
                 self.set_ssa(&intrin.def, ssa);
             }
             nir_intrinsic_load_global_invocation_id => {
                 let ssa = vec![
-                    self.preload(b, PreloadReg::GlobalId0),
-                    self.preload(b, PreloadReg::GlobalId1),
-                    self.preload(b, PreloadReg::GlobalId2),
+                    self.preload(b, PreloadReg::GlobalId0)[0],
+                    self.preload(b, PreloadReg::GlobalId1)[0],
+                    self.preload(b, PreloadReg::GlobalId2)[0],
                 ];
                 self.set_ssa(&intrin.def, ssa);
             }
@@ -1924,16 +2413,9 @@ impl<'a> ShaderFromNir<'a> {
                 assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
                 assert_eq!(intrin.def.num_components, intrin.num_components);
 
-                let num_type = match intrin.dest_type().base_type() {
-                    ALUType::FLOAT => NumericType::Float,
-                    ALUType::INT => NumericType::SignedInteger,
-                    ALUType::UINT => NumericType::UnsignedInteger,
-                    ALUType::INVALID => NumericType::Auto,
-                    _ => panic!("Invalid NIR ALU type"),
-                };
                 let dst_type = DataType::get(
                     intrin.def.num_components,
-                    num_type,
+                    intrin.dest_type().into(),
                     intrin.def.bit_size,
                 );
 
@@ -1954,8 +2436,11 @@ impl<'a> ShaderFromNir<'a> {
             | nir_intrinsic_load_raw_vertex_id
             | nir_intrinsic_load_instance_id
             | nir_intrinsic_load_draw_id
-            | nir_intrinsic_load_layer_id
-            | nir_intrinsic_load_idvs_output_buf_index_pan => {
+            | nir_intrinsic_load_idvs_output_buf_index_pan
+            | nir_intrinsic_load_sample_centroid_pan
+            | nir_intrinsic_load_cumulative_coverage_pan
+            | nir_intrinsic_load_sample_mask
+            | nir_intrinsic_load_primitive_id => {
                 assert_eq!(intrin.def.bit_size, 32);
                 assert_eq!(intrin.def.num_components, 1);
 
@@ -1964,26 +2449,92 @@ impl<'a> ShaderFromNir<'a> {
                     nir_intrinsic_load_raw_vertex_id => PreloadReg::VertexId,
                     nir_intrinsic_load_instance_id => PreloadReg::InstanceId,
                     nir_intrinsic_load_draw_id => PreloadReg::DrawId,
-                    nir_intrinsic_load_layer_id => PreloadReg::FrameArgLow,
                     nir_intrinsic_load_idvs_output_buf_index_pan => {
                         PreloadReg::InternalId
                     }
+                    nir_intrinsic_load_sample_centroid_pan => {
+                        PreloadReg::SampleCentroidId
+                    }
+                    nir_intrinsic_load_cumulative_coverage_pan
+                    | nir_intrinsic_load_sample_mask => {
+                        PreloadReg::CumulativeCoverage
+                    }
+                    nir_intrinsic_load_primitive_id => PreloadReg::PrimitiveId,
                     _ => unreachable!(),
                 };
                 let ssa = self.preload(b, reg);
-                self.set_ssa(&intrin.def, vec![ssa]);
+                self.set_ssa(&intrin.def, ssa.to_vec());
+            }
+            nir_intrinsic_load_frame_arg_pan => {
+                let ssa = self.preload(b, PreloadReg::FrameArg);
+                self.set_ssa(&intrin.def, ssa.to_vec());
             }
             nir_intrinsic_load_view_index => {
-                // v14+ is the only architecture supporting multiview directly
-                // others lower VS multiview in NIR
-                let reg = if self.nir.info.stage() == MESA_SHADER_VERTEX {
-                    assert!(b.arch() >= 14);
-                    PreloadReg::ViewId
-                } else {
-                    PreloadReg::FrameArgLow
-                };
-                let ssa = self.preload(b, reg);
-                self.set_ssa(&intrin.def, vec![ssa]);
+                assert!(b.arch() >= 14);
+                assert!(self.nir.info.stage() == MESA_SHADER_VERTEX);
+                let ssa = self.preload(b, PreloadReg::ViewId);
+                self.set_ssa(&intrin.def, ssa.to_vec());
+            }
+            nir_intrinsic_load_sample_id => {
+                // sample_id is in bits 16..24, Upper bits seem to read garbage
+                // (despite being architecturally defined as zero), so use a
+                // 5-bit mask instead of 8-bits
+                let raw_reg = self.preload(b, PreloadReg::SampleCentroidId);
+
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpShiftLop {
+                    dst,
+                    dst_type: DataType::U32,
+                    shift_op: ShiftOp::RShift,
+                    logic_op: LogicOp::And,
+                    not_result: false,
+                    src0: raw_reg.into(),
+                    shift: 16_u8.into(),
+                    src2: 0x1f_u32.into(),
+                });
+            }
+            nir_intrinsic_load_sample_positions_pan => {
+                assert_eq!(intrin.def.bit_size, 64);
+                assert_eq!(intrin.def.num_components, 1);
+                let fau = self.special_fau(SpecialFAU::Sample);
+                let dst = b.copy_i64(fau.into());
+                self.set_ssa(&intrin.def, dst.to_vec());
+            }
+            nir_intrinsic_load_sample_mask_in => {
+                assert_eq!(intrin.def.bit_size, 32);
+                assert_eq!(intrin.def.num_components, 1);
+                let reg = self.preload(b, PreloadReg::RasterizerCoverage);
+                let dst =
+                    b.copy_i32(Src::from(reg).swizzle(Swizzle::widen_u16(0)));
+                self.set_ssa(&intrin.def, vec![dst]);
+            }
+            nir_intrinsic_load_pixel_coord => {
+                assert_eq!(intrin.def.bit_size, 16);
+                assert_eq!(intrin.def.num_components, 2);
+                let ssa = self.preload(b, PreloadReg::PositionXY);
+                self.set_ssa(&intrin.def, ssa.to_vec());
+            }
+            nir_intrinsic_load_front_face => {
+                assert_eq!(intrin.def.bit_size, 32);
+                assert_eq!(intrin.def.num_components, 1);
+
+                let raw = self.preload(b, PreloadReg::PrimitiveFlags);
+
+                // Facing is the only field in the low byte, so select it
+                // rather than masking: (primitive_flags & 1) == 0 is front
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpCmp {
+                    dst,
+                    src_type: DataType::U32,
+                    res_type: CmpResultType::M1,
+                    cmp_op: CmpOp::Eq,
+                    srcs: [
+                        Src::from(raw).swizzle(Swizzle::widen_u8(0)),
+                        0_u32.into(),
+                    ],
+                    accum: 0_u32.into(),
+                    accum_op: CmpAccumOp::None,
+                });
             }
             nir_intrinsic_load_shader_output_pan => {
                 assert_eq!(intrin.def.bit_size, 32);
@@ -1991,6 +2542,295 @@ impl<'a> ShaderFromNir<'a> {
                 let fau = self.special_fau(SpecialFAU::ShaderOutput);
                 let dst = b.copy_i32(fau.word(0).into());
                 self.set_ssa(&intrin.def, vec![dst]);
+            }
+            nir_intrinsic_load_blend_descriptor_pan => {
+                assert_eq!(intrin.def.bit_size, 64);
+                assert_eq!(intrin.def.num_components, 1);
+                let rt = intrin.base();
+                let fau = SpecialFAU::blend_descriptor(rt.try_into().unwrap());
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.copy_i64_to(dst, self.special_fau(fau).into());
+            }
+            nir_intrinsic_load_blend_input_pan => {
+                let is_primary =
+                    intrin.io_semantics().dual_source_blend_index() == 0;
+                let bits = intrin.def.bit_size;
+                let comps = intrin.def.num_components();
+                debug_assert!(bits == 16 || bits == 32);
+
+                let regs = if is_primary {
+                    PreloadReg::BlendInputSrc0
+                } else {
+                    PreloadReg::BlendInputSrc1
+                };
+
+                // We already know that the preloaded registers match whatever
+                // format we have, so just cast the source to the correct n. of
+                // SSAs
+                let mut ssa = self.preload(b, regs).to_vec();
+                let reg_count = (bits * comps).div_ceil(32);
+                ssa.truncate(reg_count.into());
+                self.set_ssa(&intrin.def, ssa);
+            }
+            nir_intrinsic_blend_return_pan => {
+                let addr = self.preload(b, PreloadReg::BlendReturnAddr);
+                // Jump only if addr != 0, otherwise continue into a .end
+                b.push_op(OpJump {
+                    not: false,
+                    cond: addr.clone().into(),
+                    address: addr.into(),
+                    combine_op: BranchCombineOp::None,
+                });
+            }
+            nir_intrinsic_load_var_pan => {
+                assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
+                assert_eq!(intrin.def.num_components, intrin.num_components);
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    intrin.dest_type().into(),
+                    intrin.def.bit_size,
+                );
+
+                let handle = self.get_src(&srcs[0]);
+                let src = self.get_src(&srcs[1]);
+
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpLdVar {
+                    dst,
+                    dst_type,
+                    src,
+                    handle,
+                    sample_position: sample_position_from_pan(intrin.flags()),
+                    update: VaryingUpdateMode::Store,
+                });
+            }
+            nir_intrinsic_load_var_flat_pan => {
+                assert_eq!(intrin.def.bit_size, intrin.dest_type().bit_size());
+                assert_eq!(intrin.def.num_components, intrin.num_components);
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    intrin.dest_type().into(),
+                    intrin.def.bit_size,
+                );
+                // Flat varyings with i16/u16 aren't encodable
+                debug_assert!(
+                    dst_type.num_type() == NumericType::Float
+                        || dst_type.bits() == 32
+                );
+                let handle = self.get_src(&srcs[0]);
+
+                self.info.uses_flat_shading = true;
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpLdVarFlat {
+                    dst,
+                    dst_type,
+                    handle,
+                });
+            }
+            nir_intrinsic_load_var_buf_pan => {
+                assert_eq!(intrin.def.num_components, intrin.num_components);
+                assert!(intrin.src_type().base_type() == ALUType::FLOAT);
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    NumericType::Float,
+                    intrin.def.bit_size,
+                );
+
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpLdVarBuf {
+                    dst,
+                    dst_type,
+                    src: self.get_src(&srcs[1]),
+                    offset: self.get_src(&srcs[0]),
+                    mem_type: DataType::f(intrin.src_type().bit_size()),
+                    sample_position: sample_position_from_pan(intrin.flags()),
+                    update: VaryingUpdateMode::Store,
+                });
+            }
+            nir_intrinsic_load_var_buf_flat_pan => {
+                assert_eq!(intrin.def.bit_size, intrin.src_type().bit_size());
+                assert_eq!(intrin.def.num_components, intrin.num_components);
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    NumericType::Integer,
+                    intrin.def.bit_size,
+                );
+
+                self.info.uses_flat_shading = true;
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpLdVarBufFlat {
+                    dst,
+                    dst_type,
+                    offset: self.get_src(&srcs[0]),
+                });
+            }
+            nir_intrinsic_load_var_special_pan => {
+                let flags: pan_bi_var_special_flags =
+                    unsafe { std::mem::transmute(intrin.flags()) };
+
+                let dst_type = DataType::get(
+                    intrin.def.num_components,
+                    NumericType::Float,
+                    intrin.def.bit_size,
+                );
+
+                let name = match flags.name() {
+                    PAN_VARYING_NAME_POINT => VarSpecialName::Point,
+                    PAN_VARYING_NAME_FRAG_Z => VarSpecialName::FragZ,
+                    PAN_VARYING_NAME_FRAG_W => VarSpecialName::FragW,
+                    _ => panic!("Invalid varying name"),
+                };
+                let update = match name {
+                    VarSpecialName::Point => VaryingUpdateMode::Clobber,
+                    VarSpecialName::Bary => VaryingUpdateMode::Store,
+                    VarSpecialName::FragW => VaryingUpdateMode::Clobber,
+                    VarSpecialName::FragZ => VaryingUpdateMode::None,
+                };
+
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpLdVarSpecial {
+                    dst,
+                    dst_type,
+                    src: self.get_src(&srcs[0]),
+                    name,
+                    sample_position: sample_position_from_pan(
+                        flags.sample_loc(),
+                    ),
+                    update,
+                });
+            }
+            nir_intrinsic_atest_pan => {
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                let datum =
+                    self.special_fau(SpecialFAU::ATestDatum).word(0).into();
+                b.push_op(OpATest {
+                    dst,
+                    coverage: self.get_src(&srcs[0]),
+                    alpha: self.get_f32_src(&srcs[1]),
+                    datum,
+                });
+            }
+            nir_intrinsic_zs_emit_pan => {
+                let coverage = self.get_src(&srcs[0]);
+                let flags = intrin.flags();
+                let use_depth = (flags & (1 << FRAG_RESULT_DEPTH)) != 0;
+                let use_stencil = (flags & (1 << FRAG_RESULT_STENCIL)) != 0;
+                debug_assert!(use_depth || use_stencil);
+
+                let depth = if use_depth {
+                    self.get_src(&srcs[1])
+                } else {
+                    0_u32.into()
+                };
+
+                let stencil = if use_stencil {
+                    self.get_src(&srcs[2])
+                } else {
+                    0_u32.into()
+                };
+
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpZSEmit {
+                    dst,
+                    depth,
+                    stencil,
+                    coverage,
+                    use_depth,
+                    use_stencil,
+                });
+            }
+            nir_intrinsic_blend_pan | nir_intrinsic_blend2_pan => {
+                let coverage = self.get_src(&srcs[0]);
+                let descr = self.get_src(&srcs[1]);
+                let color = self.get_src(&srcs[2]);
+
+                assert_eq!(srcs[2].num_components(), 4);
+
+                let mut color_type = DataType::get(
+                    srcs[2].num_components(),
+                    intrin.src_type().into(),
+                    srcs[2].bit_size(),
+                );
+
+                let loc = intrin.io_semantics().location();
+                assert!((FRAG_RESULT_DATA0..=FRAG_RESULT_DATA7).contains(&loc));
+                let render_target_idx =
+                    (loc - FRAG_RESULT_DATA0).try_into().unwrap();
+
+                let old_blend_type = self.info.blend_types
+                    [usize::from(render_target_idx)]
+                .replace(color_type);
+                assert!(old_blend_type.is_none());
+
+                let has_second_color =
+                    intrin.intrinsic == nir_intrinsic_blend2_pan;
+                let second_color = if has_second_color {
+                    let second_color = self.get_src(&srcs[3]);
+                    let second_type = DataType::get(
+                        srcs[3].num_components(),
+                        intrin.dest_type().into(),
+                        intrin.dest_type().bit_size(),
+                    );
+                    let old_blend_type =
+                        self.info.blend1_type.replace(second_type);
+                    assert!(old_blend_type.is_none());
+
+                    second_color
+                } else {
+                    0_u32.into()
+                };
+
+                let untyped_color = unsafe {
+                    self.nir.info.__bindgen_anon_1.fs.untyped_color_outputs()
+                };
+                if untyped_color {
+                    color_type = DataType::get(
+                        color_type.comps(),
+                        NumericType::Auto,
+                        color_type.bits(),
+                    );
+                }
+
+                if self.info.is_blend {
+                    assert!(second_color.is_zero());
+                    b.push_op(OpBlend {
+                        color_type,
+                        descr,
+                        coverage,
+                        color,
+                        render_target_idx,
+                        offset: 0,
+                    });
+                } else {
+                    let sample_id =
+                        self.preload(b, PreloadReg::SampleCentroidId);
+                    b.push_op(OpBlendCall {
+                        color_type,
+                        descr,
+                        coverage,
+                        sample_id: sample_id.into(),
+                        color,
+                        second_color,
+                        render_target_idx,
+                        has_second_color,
+                    });
+                }
+            }
+            nir_intrinsic_demote_if => {
+                b.push_op(OpDiscard {
+                    cmp_op: CmpOp::Ne,
+                    srcs: [self.get_f32_src(&srcs[0]), 0_u32.into()],
+                });
+            }
+            nir_intrinsic_demote => {
+                b.push_op(OpDiscard {
+                    cmp_op: CmpOp::Eq,
+                    srcs: [0_u32.into(), 0_u32.into()],
+                });
             }
             nir_intrinsic_load_push_constant => {
                 assert!(intrin.base() == 0);
@@ -2184,17 +3024,35 @@ impl<'a> ShaderFromNir<'a> {
     fn create_preload_instrs(&mut self) -> Vec<Instr> {
         let mut preloaded: Vec<_> = self.preload_map.drain().collect();
         // All keys are different, we can use an unstable sort
-        preloaded.sort_unstable_by_key(|(reg, _ssa)| *reg);
+        preloaded.sort_unstable_by_key(|(reg, _ssa)| reg.idx);
+
+        // preload regs should never intersect
+        debug_assert!(
+            preloaded
+                .windows(2)
+                .all(|w| w[0].0.intersect(w[1].0).is_none()),
+            "overlapping preloaded registers"
+        );
 
         preloaded
             .into_iter()
-            .map(|(preload, ssa)| {
-                let reg = self.model.preload_reg(preload).unwrap();
-                self.info.register_preload |= 1 << reg.idx;
-                Instr::from(OpRegIn {
-                    dst: ssa.into(),
-                    dst_type: DataType::I32,
-                    reg,
+            .flat_map(|(reg, (preloads, ssa))| {
+                self.info.add_preload(&reg);
+
+                // Split preloads into multiple registers, we don't have any vec
+                // shrink pass and they might pollute liveness
+                assert!(reg.bytes() % 4 == 0);
+                let regs = reg.bytes() / 4;
+                (0..regs).map(move |i| {
+                    Instr::from(OpRegIn {
+                        dst: ssa[i as usize].into(),
+                        dst_type: DataType::I32,
+                        reg: reg.word(i),
+                        preload: Some(PreloadInfo {
+                            set: preloads,
+                            comp: i,
+                        }),
+                    })
                 })
             })
             .collect()
@@ -2209,6 +3067,9 @@ impl<'a> ShaderFromNir<'a> {
 
         // Pre-populate the block table so we have the same numbering as NIR
         let mut label_alloc: LabelAllocator = Default::default();
+        if self.nir.constant_data_size > 0 {
+            self.constant_pool_label = Some(label_alloc.alloc());
+        }
         let mut block_map: BlockLabelMap = Default::default();
         for nb in nfi.iter_blocks() {
             block_map.add(nb, label_alloc.alloc());
@@ -2232,18 +3093,38 @@ impl<'a> ShaderFromNir<'a> {
             blocks[0].instrs.splice(..0, self.create_preload_instrs());
         }
 
+        let constant_pool = self.constant_pool_used.then(|| ConstantPool {
+            label: self.constant_pool_label.unwrap(),
+            // SAFETY: constant_pool_used implies constant_pool_label was
+            // allocated, so constant_data_size > 0 and NIR guarantees that
+            // constant_data then points to that many bytes, owned by the
+            // nir_shader we borrow.
+            data: unsafe {
+                std::slice::from_raw_parts(
+                    self.nir.constant_data as *const u8,
+                    self.nir.constant_data_size as usize,
+                )
+            }
+            .to_vec(),
+        });
+
         Shader {
             model: self.model,
             ssa_alloc,
             phi_alloc,
             blocks,
             info: self.info,
+            constant_pool,
         }
     }
 }
 
 impl<'a> Shader<'a> {
-    pub fn from_nir(model: &'a dyn Model, nir: &'a nir_shader) -> Self {
-        ShaderFromNir::new(model, nir).parse_shader()
+    pub fn from_nir(
+        model: &'a dyn Model,
+        nir: &'a nir_shader,
+        inputs: &pan_compile_inputs,
+    ) -> Self {
+        ShaderFromNir::new(model, nir, inputs).parse_shader()
     }
 }

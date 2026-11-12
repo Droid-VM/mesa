@@ -141,7 +141,7 @@ i915_gem_create_context_engines(int fd,
    struct drm_i915_gem_context_create_ext_setparam low_latency_param = {
       .param = {
          .param = I915_CONTEXT_PARAM_LOW_LATENCY,
-         .value = flags & INTEL_GEM_CREATE_CONTEXT_EXT_LOW_LATENCY_FLAG,
+         .value = (flags & INTEL_GEM_CREATE_CONTEXT_EXT_LOW_LATENCY_FLAG) != 0,
       }
    };
    struct drm_i915_gem_context_create_ext create = {
@@ -294,6 +294,17 @@ i915_gem_supports_protected_context(int fd)
 
    i915_gem_destroy_context(fd, ctx_id);
    return ret;
+}
+
+bool
+i915_gem_supports_huc(int fd)
+{
+   int val = 0;
+
+   if (!i915_gem_get_param(fd, I915_PARAM_HUC_STATUS, &val))
+      return false;
+
+   return val > 0;
 }
 
 bool

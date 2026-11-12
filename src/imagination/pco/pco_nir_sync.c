@@ -24,6 +24,12 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+/** Context struct for barrier lowering. */
+struct pco_barrier_ctx {
+   bool *uses_usclib;
+   unsigned cnt_seq_offset;
+};
+
 /**
  * \brief Lowers a barrier instruction.
  *
@@ -39,7 +45,6 @@ lower_barrier(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
       return false;
 
    struct shader_info *info = &b->shader->info;
-   bool *uses_usclib = cb_data;
 
    mesa_scope exec_scope = nir_intrinsic_execution_scope(intr);
 
@@ -52,17 +57,26 @@ lower_barrier(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
       return true;
    }
 
-   /* TODO: We might be able to re-use barrier counters. */
-   unsigned counter_offset = info->shared_size;
-   info->shared_size += sizeof(uint32_t);
-   info->zero_initialize_shared_memory = true;
+   struct pco_barrier_ctx *ctx = cb_data;
+   if (ctx->cnt_seq_offset == ~0) {
+      ctx->cnt_seq_offset = info->shared_size;
+      /* Reserve 2x 32-bit coeffs for the barrier and sequence counters. */
+      info->shared_size += 2 * sizeof(uint32_t);
+      info->zero_initialize_shared_memory = true;
+   }
 
-   *uses_usclib = true;
+   unsigned counter_offset = ctx->cnt_seq_offset;
+   unsigned sequence_offset = counter_offset + sizeof(uint32_t);
+
+   *ctx->uses_usclib = true;
 
    unsigned num_slots = DIV_ROUND_UP(wg_size, ROGUE_MAX_INSTANCES_PER_TASK);
 
    b->cursor = nir_before_instr(&intr->instr);
-   usclib_barrier(b, nir_imm_int(b, num_slots), nir_imm_int(b, counter_offset));
+   usclib_barrier(b,
+                  nir_imm_int(b, num_slots),
+                  nir_imm_int(b, counter_offset),
+                  nir_imm_int(b, sequence_offset));
    nir_instr_remove(&intr->instr);
    return true;
 }
@@ -75,10 +89,15 @@ lower_barrier(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
  */
 bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data)
 {
+   struct pco_barrier_ctx ctx = {
+      .uses_usclib = &data->common.uses.usclib,
+      .cnt_seq_offset = ~0,
+   };
+
    bool progress = nir_shader_intrinsics_pass(shader,
                                               lower_barrier,
                                               nir_metadata_none,
-                                              &data->common.uses.usclib);
+                                              &ctx);
 
    data->common.uses.barriers |= progress;
 
@@ -172,6 +191,7 @@ static bool lower_global_atomic_intrinsic(nir_builder *b,
                 intrin->def.num_components,
                 intrin->def.bit_size);
    new_intrin->src[0] = nir_src_for_ssa(new_src);
+   nir_intrinsic_set_access(new_intrin, nir_intrinsic_access(intrin));
    assert(nir_intrinsic_has_atomic_op(intrin));
    nir_intrinsic_set_atomic_op(new_intrin, nir_intrinsic_atomic_op(intrin));
 
@@ -447,6 +467,8 @@ lower_reduction(nir_builder *b,
 
    if (!cluster_size)
       cluster_size = ROGUE_MAX_INSTANCES_PER_TASK;
+
+   assert(cluster_size <= ROGUE_MAX_INSTANCES_PER_TASK);
 
    nir_def *cluster_num = nir_udiv_imm(b, invocation_id, cluster_size);
    nir_def *cluster_id = nir_umod_imm(b, invocation_id, cluster_size);

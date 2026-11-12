@@ -31,6 +31,7 @@
 #include "pipe/p_state.h"
 
 #include "state_tracker/st_context.h"
+#include "main/glthread.h"
 
 #include "stw_st.h"
 #include "stw_device.h"
@@ -52,13 +53,20 @@ struct stw_st_framebuffer {
 
    struct pipe_resource *textures[ST_ATTACHMENT_COUNT];
    struct pipe_resource *msaa_textures[ST_ATTACHMENT_COUNT];
-   struct pipe_resource *back_texture;
-   bool needs_fake_front;
+   /* the front buffer is used, so front and back draw to msaa_textures at one sample */
+   bool front_offscreen;
    unsigned texture_width, texture_height;
    unsigned texture_mask;
 };
 
 static uint32_t stwfb_ID = 0;
+
+/* drawing goes to msaa_textures, and textures only get copies to present */
+static inline bool
+stw_st_offscreen(const struct stw_st_framebuffer *stwfb)
+{
+   return stwfb->stvis.samples > 1 || stwfb->front_offscreen;
+}
 
 /**
  * Is the given mutex held by the calling thread?
@@ -165,18 +173,20 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
    templ.array_size = 1;
    templ.last_level = 0;
 
-   /* As of now, the only stw_winsys_framebuffer implementation is
-    * d3d12_wgl_framebuffer and it doesn't support front buffer
-    * drawing. A fake front texture is needed to handle that scenario.
-    * For MSAA, we just need to make sure that the back buffer also
-    * exists, so we can blt to it during flush_frontbuffer. */
+   /* d3d12 can't draw to its front buffer, and a zink swapchain may have no image for it
+    * while the back holds one, so once the front is used, draw both offscreen
+    */
    if ((mask & ST_ATTACHMENT_FRONT_LEFT_MASK) &&
-       stwfb->fb->winsys_framebuffer &&
-       (stwfb->stvis.buffer_mask & ST_ATTACHMENT_BACK_LEFT_MASK)) {
-      if (stwfb->stvis.samples <= 1)
-         stwfb->needs_fake_front = true;
-      else
+       (stwfb->stvis.buffer_mask & ST_ATTACHMENT_BACK_LEFT_MASK) &&
+       (stwfb->fb->winsys_framebuffer || stw_dev->zink)) {
+      /* winsys framebuffers present the front through the back, see flush_front */
+      if (stwfb->fb->winsys_framebuffer)
          mask |= ST_ATTACHMENT_BACK_LEFT_MASK;
+      if (stwfb->stvis.samples <= 1 && !stwfb->front_offscreen) {
+         stwfb->front_offscreen = true;
+         /* other contexts on this window have to pick up the offscreen buffers */
+         p_atomic_inc(&stwfb->base.stamp);
+      }
    }
 
    /* If we're being asked to use a copy swap mode, make sure we have a front buffer */
@@ -190,7 +200,6 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
          pipe_resource_reference(&stwfb->msaa_textures[i], NULL);
          pipe_resource_reference(&stwfb->textures[i], NULL);
       }
-      pipe_resource_reference(&stwfb->back_texture, NULL);
 
       if (stwfb->fb->winsys_framebuffer) {
          templ.nr_samples = templ.nr_storage_samples = 1;
@@ -249,10 +258,10 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
       if (format != PIPE_FORMAT_NONE) {
          templ.format = format;
 
-         if ((bind & PIPE_BIND_DEPTH_STENCIL) == 0 && stwfb->stvis.samples > 1) {
+         if ((bind & PIPE_BIND_DEPTH_STENCIL) == 0 && stw_st_offscreen(stwfb)) {
             templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
             templ.nr_samples = templ.nr_storage_samples =
-               stwfb->stvis.samples;
+               MAX2(stwfb->stvis.samples, 1);
 
             stwfb->msaa_textures[i] =
                stw_dev->screen->resource_create(stw_dev->screen, &templ);
@@ -294,34 +303,17 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
       }
    }
 
-   /* When a fake front buffer is needed for drawing, we use the back buffer
-    * as it reduces the number of blits needed:
-    *
-    *   - When flushing the front buffer, we only need to swap the real buffers
-    *   - When swapping buffers, we can safely overwrite the fake front buffer
-    *     as it is now invalid anyway.
-    *
-    * A new texture is created to store the back buffer content.
-    */
-   if (stwfb->needs_fake_front) {
-      if (!stwfb->back_texture) {
+   /* buffers from before switching to offscreen drawing keep their contents */
+   if (stwfb->front_offscreen) {
+      for (i = ST_ATTACHMENT_FRONT_LEFT; i <= ST_ATTACHMENT_BACK_LEFT; i++) {
+         if (!stwfb->textures[i] || stwfb->msaa_textures[i])
+            continue;
          templ.format = stwfb->stvis.color_format;
          templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
          templ.nr_samples = templ.nr_storage_samples = 1;
-
-         stwfb->back_texture =
-            stw_dev->screen->resource_create(stw_dev->screen, &templ);
-
-         /* TODO Only blit if there is something currently drawn on the back buffer */
-         stw_pipe_blit(st->pipe,
-                       stwfb->back_texture,
-                       stwfb->textures[ST_ATTACHMENT_BACK_LEFT]);
+         stwfb->msaa_textures[i] = stw_dev->screen->resource_create(stw_dev->screen, &templ);
+         stw_pipe_blit(st->pipe, stwfb->msaa_textures[i], stwfb->textures[i]);
       }
-
-      /* Copying front texture content to fake front texture (back texture) */
-      stw_pipe_blit(st->pipe,
-                    stwfb->textures[ST_ATTACHMENT_BACK_LEFT],
-                    stwfb->textures[ST_ATTACHMENT_FRONT_LEFT]);
    }
 
    stwfb->texture_width = width;
@@ -354,22 +346,11 @@ stw_st_framebuffer_validate(struct st_context *st,
    }
 
    struct pipe_resource **textures =
-      stwfb->stvis.samples > 1 ? stwfb->msaa_textures
-                               : stwfb->textures;
+      stw_st_offscreen(stwfb) ? stwfb->msaa_textures
+                              : stwfb->textures;
 
-   for (i = 0; i < count; i++) {
-      struct pipe_resource *texture = NULL;
-
-      if (stwfb->needs_fake_front) {
-         if (statts[i] == ST_ATTACHMENT_FRONT_LEFT)
-            texture = textures[ST_ATTACHMENT_BACK_LEFT]; /* Fake front buffer */
-         else if (statts[i] == ST_ATTACHMENT_BACK_LEFT)
-            texture = stwfb->back_texture;
-      } else {
-         texture = textures[statts[i]];
-      }
-      pipe_resource_reference(&out[i], texture);
-   }
+   for (i = 0; i < count; i++)
+      pipe_resource_reference(&out[i], textures[statts[i]]);
 
    if (resolve && stwfb->stvis.samples > 1) {
       if (statt_mask & BITFIELD_BIT(ST_ATTACHMENT_FRONT_LEFT))
@@ -396,18 +377,16 @@ notify_before_flush_cb(void* _args)
    struct st_context *st = args->st;
    struct pipe_context *pipe = st->pipe;
 
-   if (args->stwfb->stvis.samples > 1) {
-      /* Resolve the MSAA back buffer. */
-      stw_pipe_blit(pipe,
-                    args->stwfb->textures[ST_ATTACHMENT_BACK_LEFT],
-                    args->stwfb->msaa_textures[ST_ATTACHMENT_BACK_LEFT]);
+   if (stw_st_offscreen(args->stwfb)) {
+      /* Resolve the MSAA back buffer. zink only presents it at the end of a frame,
+       * and an earlier copy would hold a swapchain image the front may need
+       */
+      if (!stw_dev->zink || (args->flags & ST_FLUSH_END_OF_FRAME))
+         stw_pipe_blit(pipe,
+                       args->stwfb->textures[ST_ATTACHMENT_BACK_LEFT],
+                       args->stwfb->msaa_textures[ST_ATTACHMENT_BACK_LEFT]);
 
       /* FRONT_LEFT is resolved in flush_frontbuffer. */
-   } else if (args->stwfb->back_texture) {
-      /* Fake front texture is dirty ?? */
-      stw_pipe_blit(pipe,
-                    args->stwfb->textures[ST_ATTACHMENT_BACK_LEFT],
-                    args->stwfb->back_texture);
    }
 
    if (args->stwfb->textures[ST_ATTACHMENT_BACK_LEFT])
@@ -424,11 +403,16 @@ stw_st_flush(struct st_context *st,
    struct pipe_fence_handle **pfence = NULL;
    struct pipe_fence_handle *fence = NULL;
 
+   _mesa_glthread_finish(st->ctx);
+
    args.st = st;
    args.stwfb = stwfb;
    args.flags = flags;
 
-   if (flags & ST_FLUSH_END_OF_FRAME && !stwfb->fb->winsys_framebuffer)
+   /* zink presents from its own queue in submission order, so only presents
+    * that read the image on the cpu need the frame to be finished
+    */
+   if (flags & ST_FLUSH_END_OF_FRAME && !stwfb->fb->winsys_framebuffer && !stw_dev->zink)
       flags |= ST_FLUSH_WAIT;
 
    if (flags & ST_FLUSH_WAIT)
@@ -484,16 +468,12 @@ stw_st_framebuffer_flush_front(struct st_context *st,
    enum st_attachment_type flush_statt = statt;
 
    /* Resolve the front buffer. */
-   if (stwfb->stvis.samples > 1) {
+   if (stw_st_offscreen(stwfb)) {
       if (stwfb->fb->winsys_framebuffer)
          flush_statt = ST_ATTACHMENT_BACK_LEFT;
 
       stw_pipe_blit(pipe, stwfb->textures[flush_statt],
                     stwfb->msaa_textures[statt]);
-   } else if (stwfb->needs_fake_front) {
-      /* fake front texture is now invalid */
-      p_atomic_inc(&stwfb->base.stamp);
-      flush_statt = ST_ATTACHMENT_BACK_LEFT;
    } else if (stwfb->fb->winsys_framebuffer &&
               stwfb->fb->winsys_framebuffer->flush_frontbuffer) {
       stwfb->fb->winsys_framebuffer->flush_frontbuffer(stwfb->fb->winsys_framebuffer, pipe);
@@ -561,7 +541,6 @@ stw_st_destroy_framebuffer_locked(struct pipe_frontend_drawable *drawable)
       pipe_resource_reference(&stwfb->msaa_textures[i], NULL);
       pipe_resource_reference(&stwfb->textures[i], NULL);
    }
-   pipe_resource_reference(&stwfb->back_texture, NULL);
 
    /* Notify the st manager that the framebuffer interface is no
     * longer valid.
@@ -605,15 +584,13 @@ stw_st_swap_framebuffer_locked(struct st_context *st,
     */
    if ((stwfb->pfd_flags & PFD_SWAP_COPY) && st) {
       assert((stwfb->texture_mask & (front | back)) == (front | back));
-      if (stwfb->stvis.samples > 1)
+      if (stwfb->front_offscreen)
+         stw_pipe_blit(st->pipe, stwfb->msaa_textures[back], stwfb->msaa_textures[front]);
+      else if (stwfb->stvis.samples > 1)
          stw_pipe_blit(st->pipe, stwfb->msaa_textures[back], stwfb->textures[front]);
       else
          stw_pipe_blit(st->pipe, stwfb->textures[back], stwfb->textures[front]);
    }
-
-   /* Fake front texture is now dirty */
-   if (stwfb->needs_fake_front)
-      p_atomic_inc(&stwfb->base.stamp);
 
    /* convert to mask */
    front = 1 << front;

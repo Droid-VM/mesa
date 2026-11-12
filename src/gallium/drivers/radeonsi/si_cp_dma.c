@@ -150,7 +150,7 @@ void si_cp_dma_clear_buffer(struct si_context *sctx, struct radeon_cmdbuf *cs,
    assert(size && size % 4 == 0);
 
    if (!sctx->screen->info.cp_dma_use_L2)
-      si_set_barrier_flags(sctx, SI_BARRIER_INV_L2);
+      si_set_barrier_flags(sctx, AC_BARRIER_INV_L2);
 
    /* Mark the buffer range of destination as valid (initialized),
     * so that transfer_map knows it should wait for the GPU when mapping
@@ -223,7 +223,7 @@ void si_cp_dma_copy_buffer(struct si_context *sctx, struct pipe_resource *dst,
    assert(dst && src);
 
    if (!sctx->screen->info.cp_dma_use_L2)
-      si_set_barrier_flags(sctx, SI_BARRIER_INV_L2);
+      si_set_barrier_flags(sctx, AC_BARRIER_INV_L2);
 
    /* Mark the buffer range of destination as valid (initialized),
     * so that transfer_map knows it should wait for the GPU when mapping
@@ -238,7 +238,7 @@ void si_cp_dma_copy_buffer(struct si_context *sctx, struct pipe_resource *dst,
    unsigned realign_size = 0;
 
    /* The workarounds aren't needed on Fiji and beyond. */
-   if (sctx->family <= CHIP_CARRIZO || sctx->family == CHIP_STONEY) {
+   if (sctx->screen->info.has_cp_dma_unaligned_copy_perf_issue) {
       /* If the size is not aligned, we must add a dummy copy at the end
        * just to align the internal counter. Otherwise, the DMA engine
        * would slow down by an order of magnitude for following copies.

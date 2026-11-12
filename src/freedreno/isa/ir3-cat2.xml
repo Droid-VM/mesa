@@ -87,6 +87,8 @@ SOFTWARE.
 	<field name="SRC1_R" pos="43" type="bool" display="(r)"/>
 	<field name="SRC2_R" pos="51" type="bool" display="(r)"/>
 	<derived name="ZERO" expr="#zero" type="bool" display=""/>
+	<derived name="SRC1_BNOT" expr="#false" type="bool"/>
+	<derived name="SRC2_BNOT" expr="#false" type="bool"/>
 	<encode>
 		<map name="SAT">!!(src->flags &amp; IR3_INSTR_SAT)</map>
 		<map name="DST_CONV">
@@ -109,6 +111,7 @@ SOFTWARE.
 		<field name="SRC1" low="0" high="15" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 	</override>
 	<display>
@@ -119,6 +122,7 @@ SOFTWARE.
 	<field name="SRC1" low="0" high="15" type="#multisrc">
 		<param name="SRC1_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 </bitset>
 
@@ -133,10 +137,12 @@ SOFTWARE.
 		<field name="SRC1" low="0" high="15" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 		<field name="SRC2" low="16" high="31" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 	</override>
 	<display>
@@ -145,10 +151,12 @@ SOFTWARE.
 	<field name="SRC1" low="0" high="15" type="#multisrc">
 		<param name="SRC1_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<field name="SRC2" low="16" high="31" type="#multisrc">
 		<param name="SRC2_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<pattern low="48" high="50">xxx</pattern>  <!-- COND -->
 </bitset>
@@ -163,10 +171,12 @@ SOFTWARE.
 		<field name="SRC1" low="0" high="15" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 		<field name="SRC2" low="16" high="31" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 	</override>
 	<display>
@@ -175,10 +185,12 @@ SOFTWARE.
 	<field name="SRC1" low="0" high="15" type="#multisrc">
 		<param name="SRC1_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<field name="SRC2" low="16" high="31" type="#multisrc">
 		<param name="SRC2_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<field name="COND" low="48" high="50" type="#cond"/>
 	<encode>
@@ -196,10 +208,12 @@ SOFTWARE.
 		<field name="SRC1" low="0" high="15" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 		<field name="SRC2" low="16" high="31" type="#multisrc">
 			<param name="ZERO" as="SRC_R"/>
 			<param name="FULL"/>
+			<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 		</field>
 	</override>
 	<display>
@@ -209,10 +223,12 @@ SOFTWARE.
 	<field name="SRC1" low="0" high="15" type="#multisrc">
 		<param name="SRC1_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC1_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<field name="SRC2" low="16" high="31" type="#multisrc">
 		<param name="SRC2_R" as="SRC_R"/>
 		<param name="FULL"/>
+		<param name="SRC2_BNOT" as="MOD_IS_BNOT"/>
 	</field>
 	<pattern low="48" high="49">xx</pattern>  <!-- COND -->
 	<pattern low="53" high="58">111001</pattern>
@@ -281,6 +297,8 @@ SOFTWARE.
 
 <bitset name="add.u" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">010000</pattern>
+
+	<!-- (neg) src modifiers are ignored. -->
 </bitset>
 
 <bitset name="add.s" extends="#instruction-cat2-2src">
@@ -325,18 +343,26 @@ SOFTWARE.
 
 <bitset name="and.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">011100</pattern>
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
+	<derived name="SRC2_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="or.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">011101</pattern>
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
+	<derived name="SRC2_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="not.b" extends="#instruction-cat2-1src">
 	<pattern low="53" high="58">011110</pattern>
+
+	<!-- src1 (neg) modifier is ignored on a5xx-a7xx -->
 </bitset>
 
 <bitset name="xor.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">011111</pattern>
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
+	<derived name="SRC2_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="cmpv.u" extends="#instruction-cat2-2src-cond">
@@ -381,34 +407,59 @@ SOFTWARE.
 
 <bitset name="bfrev.b" extends="#instruction-cat2-1src">
 	<pattern low="53" high="58">110011</pattern>
+
+	<!-- blob disassembles bfrev.b's modifier as (neg) instead of (not), but it's ignored on a530 and (not) on a660/a750 -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="clz.s" extends="#instruction-cat2-1src">
+	<doc>Number of leading bits (including sign) that match the sign bit, or -1 for input of 0/~0.</doc>
 	<pattern low="53" high="58">110100</pattern>
+
+	<!-- (neg) flag is a no-op, which matches the behavior of a (not) for this opcode -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="clz.b" extends="#instruction-cat2-1src">
+	<doc>Number of leading zeroes, or -1 if the input was 0.</doc>
 	<pattern low="53" high="58">110101</pattern>
+
+	<!-- blob disassembles clz.b's modifier as (neg) instead of (not), but it behaves as (not) on a5xx-a7xx -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="shl.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">110110</pattern>
+
+	<!-- (neg) mods are ignored on a5xx.  On a6xx+ it's (not) in src1 and (neg) in src2. -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="shr.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">110111</pattern>
+	<!-- (neg) mods are ignored on a5xx.  On a6xx+ it's (not) in src1 and (neg) in src2. -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="ashr.b" extends="#instruction-cat2-2src">
 	<pattern low="53" high="58">111000</pattern>
+
+	<!-- (neg) mods are ignored on a5xx.  On a6xx+ it's ignored in src1 and (neg) in src2. -->
 </bitset>
 
 <bitset name="mgen.b" extends="#instruction-cat2-2src">
+	<doc>Returns (1 &lt;&lt; (src0 &amp; (bit_size - 1)) - 1) &lt;&lt; (src1 &amp; (bit_size - 1)).</doc>
 	<pattern low="53" high="58">111010</pattern>
+
+	<!-- (neg) modifier is ignored on a5xx-a7xx -->
 </bitset>
 
 <bitset name="getbit.b" extends="#instruction-cat2-2src">
+	<doc>Returns src0 >> (src1 &amp; (bit_size - 1)) &amp; 1.</doc>
 	<pattern low="53" high="58">111011</pattern>
+
+	<!-- (neg) mods are ignored on a5xx.  On a6xx+ it's (not) in src1 and ignored in src2. -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="setrm" extends="#instruction-cat2-1src">
@@ -417,6 +468,9 @@ SOFTWARE.
 
 <bitset name="cbits.b" extends="#instruction-cat2-1src">
 	<pattern low="53" high="58">111101</pattern>
+
+	<!-- blob disassembles cbits.b's modifier as (neg) instead of (not), but it's ignored on a530 and behaves as not on a660/a750 -->
+	<derived name="SRC1_BNOT" expr="#true" type="bool"/>
 </bitset>
 
 <bitset name="shb" extends="#instruction-cat2-2src">

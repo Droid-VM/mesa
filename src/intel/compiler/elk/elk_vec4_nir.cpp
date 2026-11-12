@@ -1280,24 +1280,6 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
       inst = emit_math(ELK_SHADER_OPCODE_POW, dst, op[0], op[1]);
       break;
 
-   case nir_op_uadd_carry: {
-      assert(instr->def.bit_size < 64);
-      struct elk_reg acc = retype(elk_acc_reg(8), ELK_REGISTER_TYPE_UD);
-
-      emit(ADDC(dst_null_ud(), op[0], op[1]));
-      emit(MOV(dst, src_reg(acc)));
-      break;
-   }
-
-   case nir_op_usub_borrow: {
-      assert(instr->def.bit_size < 64);
-      struct elk_reg acc = retype(elk_acc_reg(8), ELK_REGISTER_TYPE_UD);
-
-      emit(SUBB(dst_null_ud(), op[0], op[1]));
-      emit(MOV(dst, src_reg(acc)));
-      break;
-   }
-
    case nir_op_ftrunc:
       inst = emit(RNDZ(dst, op[0]));
       if (devinfo->ver < 6) {

@@ -107,7 +107,7 @@ struct i915_fp_compile {
 /* Construct a ureg:
  */
 #define UREG(type, nr)                                                         \
-   (((type) << UREG_TYPE_SHIFT) | ((nr) << UREG_NR_SHIFT) |                    \
+   (((unsigned)(type) << UREG_TYPE_SHIFT) | ((nr) << UREG_NR_SHIFT) |                    \
     (X << UREG_CHANNEL_X_SHIFT) | (Y << UREG_CHANNEL_Y_SHIFT) |                \
     (Z << UREG_CHANNEL_Z_SHIFT) | (W << UREG_CHANNEL_W_SHIFT) |                \
     (ZERO << UREG_CHANNEL_ZERO_SHIFT) | (ONE << UREG_CHANNEL_ONE_SHIFT))
@@ -166,7 +166,7 @@ swizzle(int reg, uint32_t x, uint32_t y, uint32_t z, uint32_t w)
 
 #define UREG_MASK 0xffffff00
 #define UREG_TYPE_NR_MASK                                                      \
-   ((REG_TYPE_MASK << UREG_TYPE_SHIFT) | (REG_NR_MASK << UREG_NR_SHIFT))
+   (((unsigned)REG_TYPE_MASK << UREG_TYPE_SHIFT) | (REG_NR_MASK << UREG_NR_SHIFT))
 
 /***********************************************************************
  * Public interface for the compiler

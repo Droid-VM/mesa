@@ -105,7 +105,6 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->constant_buffer_offset_alignment = 16;
    caps->min_map_buffer_alignment = NOUVEAU_MIN_BUFFER_MAP_ALIGN;
    caps->max_viewports = 1;
@@ -129,6 +128,7 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->clear_scissored = true;
    caps->allow_mapped_buffers_during_execution = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
    caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
    /* nv35 capabilities */
@@ -137,13 +137,14 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->supported_prim_modes_with_restart =
    caps->supported_prim_modes = BITFIELD_MASK(MESA_PRIM_COUNT);
    /* nv4x capabilities */
-   caps->blend_equation_separate =
-   caps->npot_textures =
    caps->conditional_render =
    caps->texture_mirror_clamp =
    caps->texture_mirror_clamp_to_edge =
    caps->primitive_restart =
    caps->primitive_restart_fixed_index = eng3d->oclass >= NV40_3D_CLASS;
+   /* nv4x only, but we need to fake these to get gles 2.0 on nv3x */
+   caps->blend_equation_separate = true;
+   caps->npot_textures = true;
    /* unsupported */
    caps->emulate_nonfixed_primitive_restart = false;
    caps->depth_clip_disable_separate = false;
@@ -366,7 +367,8 @@ nv30_screen_is_format_supported(struct pipe_screen *pscreen,
    .force_indirect_unrolling = nir_var_all,\
    .force_indirect_unrolling_sampler = true,\
    .max_unroll_iterations = 32,\
-   .no_integers = true
+   .no_integers = true, \
+   .fdot_replicates = true
 
 // VERTEX
 

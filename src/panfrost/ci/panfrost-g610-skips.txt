@@ -17,13 +17,3 @@ dEQP-VK.wsi.xlib.maintenance1.present_fence.fifo.*
 # OpenCL-CTS OpenCL-GL sharing needs explicit Rusticl/Panfrost interop
 # enablement before this is a valid CTS target for the G610 job
 OpenCL-GL Sharing
-
-# OpenCL-CTS tests that time out
-^Images \(Kernel max size\)$
-^Images \(Kernel pitch\)$
-^Images \(Kernel\)$
-^Images \(clCopyImage\)$
-^Images \(clFillImage max size\)$
-^Images \(clFillImage pitch\)$
-^Images \(clFillImage\)$
-^Select$

@@ -451,6 +451,20 @@ def conversion_expr(src_channel,
     return value
 
 
+def emit_channel_bswaps(format, channels):
+    '''Byte-swap each channel of a fixed little-endian array format.'''
+
+    if not format.le_byte_order:
+        return
+
+    for channel in channels:
+        if channel.type != VOID and channel.size > 8:
+            # float and double fields can't go through util_bswap*
+            assert channel.type != FLOAT or channel.size == 16
+            print('         pixel.%s = util_bswap%u(pixel.%s);' %
+                  (channel.name, channel.size, channel.name))
+
+
 def generate_unpack_kernel(format, dst_channel, dst_native_type):
 
     if not is_format_supported(format):
@@ -462,6 +476,8 @@ def generate_unpack_kernel(format, dst_channel, dst_native_type):
         depth = format.block_size()
         print('         uint%u_t value;' % (depth))
         print('         memcpy(&value, src, sizeof value);')
+        if format.le_byte_order:
+            print('         value = util_bswap%u(value);' % depth)
 
         # Compute the intermediate unshifted values
         for i in range(format.nr_channels()):
@@ -516,6 +532,7 @@ def generate_unpack_kernel(format, dst_channel, dst_native_type):
     def unpack_from_struct(channels, swizzles):
         print('         struct util_format_%s pixel;' % format.short_name())
         print('         memcpy(&pixel, src, sizeof pixel);')
+        emit_channel_bswaps(format, channels)
 
         for i in range(4):
             swizzle = swizzles[i]
@@ -587,6 +604,8 @@ def generate_pack_kernel(format, src_channel, src_native_type):
                 if value is not None:
                     print('         value |= %s;' % (value))
 
+        if format.le_byte_order:
+            print('         value = util_bswap%u(value);' % format.block_size())
         print('         memcpy(dst, &value, sizeof value);')
 
     def pack_into_struct(channels, swizzles):
@@ -610,6 +629,7 @@ def generate_pack_kernel(format, src_channel, src_native_type):
                                     dst_colorspace = dst_colorspace)
             print('         pixel.%s = %s;' % (dst_channel.name, value))
 
+        emit_channel_bswaps(format, channels)
         print('         memcpy(dst, &pixel, sizeof pixel);')
 
     if format.is_bitmask():
@@ -705,6 +725,17 @@ def generate_format_fetch(format, dst_channel, dst_native_type):
     print()
 
 
+def print_le_byte_order_guard(format, directive, file=None):
+    '''Fixed little-endian formats are aliases of the host-endian ones on
+    little-endian hosts, so everything generated for them is big-endian only.
+    '''
+
+    if format.le_byte_order:
+        print(directive, file=file or sys.stdout)
+        if file is None:
+            print(directive, file=sys.stdout2)
+
+
 def is_format_hand_written(format):
     return format.layout != PLAIN or format.colorspace == ZS
 
@@ -725,6 +756,7 @@ def generate(formats):
 
     for format in formats:
         if not is_format_hand_written(format):
+            print_le_byte_order_guard(format, '#if UTIL_ARCH_BIG_ENDIAN')
 
             if is_format_supported(format) and not format.is_bitmask():
                 generate_format_type(format)
@@ -770,3 +802,5 @@ def generate(formats):
 
                 generate_format_unpack(format, channel, native_type, suffix)
                 generate_format_pack(format, channel, native_type, suffix)
+
+            print_le_byte_order_guard(format, '#endif')

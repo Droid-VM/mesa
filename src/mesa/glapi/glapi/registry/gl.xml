@@ -194,6 +194,7 @@ typedef unsigned int GLhandleARB;
         <enum value="0x0040" name="GL_MAP_PERSISTENT_BIT_EXT" group="MapBufferAccessMask,BufferStorageMask"/>
         <enum value="0x0080" name="GL_MAP_COHERENT_BIT" group="MapBufferAccessMask,BufferStorageMask"/>
         <enum value="0x0080" name="GL_MAP_COHERENT_BIT_EXT" group="MapBufferAccessMask,BufferStorageMask"/>
+        <enum value="0x4000" name="GL_MAP_CLIENT_POINTER_BIT_MESA" group="MapBufferAccessMask,BufferStorageMask"/>
     </enums>
 
     <enums namespace="GL" group="MemoryBarrierMask" type="bitmask">
@@ -416,6 +417,10 @@ typedef unsigned int GLhandleARB;
     <enums namespace="GL" group="FfdMaskSGIX" type="bitmask">
         <enum value="0x00000001" name="GL_TEXTURE_DEFORMATION_BIT_SGIX" group="FfdMaskSGIX"/>
         <enum value="0x00000002" name="GL_GEOMETRY_DEFORMATION_BIT_SGIX" group="FfdMaskSGIX"/>
+    </enums>
+
+    <enums namespace="GL" group="ClientPointerFlagsMESA" type="bitmask">
+        <enum value="0x00000001" name="GL_CLIENT_POINTER_RELEASE_ALL_MESA" group="ClientPointerFlagsMESA"/>
     </enums>
 
 
@@ -7032,6 +7037,19 @@ typedef unsigned int GLhandleARB;
             <unused start="0x9740" end="0x975F" vendor="MESA"/>
     </enums>
 
+    <enums namespace="GL" start="0x9790" end="0x979F" vendor="MESA">
+        <enum value="0x9790" name="GL_BUFFER_CLIENT_POINTER_SIZE_MESA" group="BufferPNameARB"/>
+        <enum value="0x9791" name="GL_CLIENT_POINTER_STREAM_DRAW_MESA" group="BufferUsageARB"/>
+        <enum value="0x9792" name="GL_CLIENT_POINTER_STREAM_READ_MESA" group="BufferUsageARB"/>
+        <enum value="0x9793" name="GL_CLIENT_POINTER_STREAM_COPY_MESA" group="BufferUsageARB"/>
+        <enum value="0x9794" name="GL_CLIENT_POINTER_STATIC_DRAW_MESA" group="BufferUsageARB"/>
+        <enum value="0x9795" name="GL_CLIENT_POINTER_STATIC_READ_MESA" group="BufferUsageARB"/>
+        <enum value="0x9796" name="GL_CLIENT_POINTER_STATIC_COPY_MESA" group="BufferUsageARB"/>
+        <enum value="0x9797" name="GL_CLIENT_POINTER_DYNAMIC_DRAW_MESA" group="BufferUsageARB"/>
+        <enum value="0x9798" name="GL_CLIENT_POINTER_DYNAMIC_READ_MESA" group="BufferUsageARB"/>
+        <enum value="0x9799" name="GL_CLIENT_POINTER_DYNAMIC_COPY_MESA" group="BufferUsageARB"/>
+    </enums>
+
 <!-- Enums reservable for future use. To reserve a new range, allocate one
      or more multiples of 16 starting at the lowest available point in this
      block and note it in a new <enums> block immediately above.
@@ -7041,8 +7059,8 @@ typedef unsigned int GLhandleARB;
      file) File requests in the Khronos Bugzilla, OpenGL project, Registry
      component. -->
 
-    <enums namespace="GL" start="0x9760" end="99999" vendor="ARB" comment="RESERVED FOR FUTURE ALLOCATIONS BY KHRONOS">
-        <unused start="0x9760" end="99999" comment="RESERVED"/>
+    <enums namespace="GL" start="0x97A0" end="99999" vendor="ARB" comment="RESERVED FOR FUTURE ALLOCATIONS BY KHRONOS">
+        <unused start="0x97A0" end="99999" comment="RESERVED"/>
     </enums>
 
 <!-- Historical large block allocations, all unused except (in older days) by IBM -->
@@ -7153,6 +7171,11 @@ typedef unsigned int GLhandleARB;
             <proto>void <name>glActiveVaryingNV</name></proto>
             <param class="program"><ptype>GLuint</ptype> <name>program</name></param>
             <param len="COMPSIZE(name)">const <ptype>GLchar</ptype> *<name>name</name></param>
+        </command>
+        <command>
+            <proto>void <name>glAddClientPointerRangeMESA</name></proto>
+            <param><ptype>GLvoid *</ptype> <name>addr</name></param>
+            <param><ptype>GLsizeiptr</ptype> <name>size</name></param>
         </command>
         <command>
             <proto>void <name>glAlphaFragmentOp1ATI</name></proto>
@@ -22365,6 +22388,11 @@ typedef unsigned int GLhandleARB;
             <proto>void <name>glReferencePlaneSGIX</name></proto>
             <param len="4">const <ptype>GLdouble</ptype> *<name>equation</name></param>
             <glx type="render" opcode="2071"/>
+        </command>
+        <command>
+            <proto>void* <name>glReleaseClientPointerRangeMESA</name></proto>
+            <param group="ClientPointerFlagsMESA"><ptype>GLbitfield</ptype> <name>flags</name></param>
+            <param><ptype>GLsizeiptr *</ptype> <name>size</name></param>
         </command>
         <command>
             <proto>void <name>glReleaseShaderCompiler</name></proto>
@@ -43454,6 +43482,24 @@ typedef unsigned int GLhandleARB;
         <extension name="GL_MESA_framebuffer_swap_xy" supported="gl|glcore|gles2">
             <require>
                 <enum name="GL_FRAMEBUFFER_SWAP_XY_MESA"/>
+            </require>
+        </extension>
+        <extension name="GL_MESA_map_buffer_client_pointer" supported="gl">
+            <require>
+                <enum name="GL_MAP_CLIENT_POINTER_BIT_MESA"/>
+                <enum name="GL_BUFFER_CLIENT_POINTER_SIZE_MESA"/>
+                <enum name="GL_CLIENT_POINTER_RELEASE_ALL_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STREAM_DRAW_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STREAM_READ_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STREAM_COPY_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STATIC_DRAW_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STATIC_READ_MESA"/>
+                <enum name="GL_CLIENT_POINTER_STATIC_COPY_MESA"/>
+                <enum name="GL_CLIENT_POINTER_DYNAMIC_DRAW_MESA"/>
+                <enum name="GL_CLIENT_POINTER_DYNAMIC_READ_MESA"/>
+                <enum name="GL_CLIENT_POINTER_DYNAMIC_COPY_MESA"/>
+                <command name="glAddClientPointerRangeMESA"/>
+                <command name="glReleaseClientPointerRangeMESA"/>
             </require>
         </extension>
         <extension name="GL_MESA_pack_invert" supported="gl">

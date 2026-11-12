@@ -6,6 +6,7 @@
 from mako.template import Template
 import sys
 import argparse
+import yaml
 from enum import Enum
 
 def max_bitfield_val(high, low, shift):
@@ -14,6 +15,8 @@ def max_bitfield_val(high, low, shift):
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--import-path', required=True)
 parser.add_argument('--nvtop', action='store_true')
+parser.add_argument('-q', '--quirks', action='store_true',
+                    help='List quirks applied to specified GPU (chip-id or name)')
 args = parser.parse_args()
 sys.path.insert(0, args.import_path)
 
@@ -36,6 +39,21 @@ class CCUColorCacheFraction(Enum):
     EIGHTH = 3
     THREE_QUARTER = 3  # a8xx_gen2 and later
 
+quirk_names = {
+    "QCTDD06363318": "movs_half",
+    "QCTDD08049535": "numnonposvar_alignment",
+    "QCTDD08407086": "cs_lock_unlock",
+    "QCTDD08517960": "fs_constlen",
+    "QCTDD08901551": "stsc_ss",
+    "QCTDD09112208": "cmdbuf_start_cs",
+    "QCTDD10204462": "flat_ei",
+    "QCTDD10497382": "rt_workaround",
+    "QCTDD10789828": "no_a0_ep",
+    "QCTDD11147232": "alias_mova",
+    "QCTDD11183148": "alias_pred",
+    "QCTDD12766770": "r8g8_fc_alignment",
+    "QCTDD13523866": "dummy_alu",
+}
 
 class State(object):
     def __init__(self):
@@ -105,8 +123,11 @@ class GPUInfo(Struct):
                  tile_max_w, tile_max_h, num_vsc_pipes,
                  cs_shared_mem_size, num_sp_cores, wave_granularity, fibers_per_sp,
                  highest_bank_bit = 0, ubwc_swizzle = 0x7, macrotile_mode = 0,
-                 threadsize_base = 64, max_waves = 16, compute_lb_size = 0):
+                 threadsize_base = 64, max_waves = 16, compute_lb_size = 0,
+                 reg_size_vec4 = 0):
         self.chip          = chip.value
+        self.props = Struct()
+        self.props.reg_size_vec4 = reg_size_vec4
         self.gmem_align_w  = gmem_align_w
         self.gmem_align_h  = gmem_align_h
         self.tile_align_w  = tile_align_w
@@ -127,6 +148,29 @@ class GPUInfo(Struct):
         s.gpu_infos.append(self)
 
 
+class A5xxGPUInfo(GPUInfo):
+    """The a5xx parts differ in how many SP cores they have, in the size
+       of their register file and how waves are allocated from it, and in
+       where their SoC interleaves memory."""
+    def __init__(self, num_sp_cores, highest_bank_bit, reg_size_vec4,
+                 wave_granularity):
+        super().__init__(
+            CHIP.A5XX,
+            gmem_align_w = 64,  gmem_align_h = 32,
+            tile_align_w = 64,  tile_align_h = 32,
+            tile_max_w   = 1024, # max_bitfield_val(7, 0, 5)
+            tile_max_h   = 1024, # bins of 2048 rows and up render wrong with hw binning
+            num_vsc_pipes = 16,
+            cs_shared_mem_size = 32 * 1024,
+            wave_granularity = wave_granularity,
+            fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
+            threadsize_base = 32,
+            reg_size_vec4 = reg_size_vec4,
+            num_sp_cores = num_sp_cores,
+            highest_bank_bit = highest_bank_bit,
+        )
+
+
 class A6xxGPUInfo(GPUInfo):
     """The a6xx generation has a lot more parameters, and is broken down
        into distinct sub-generations.  The template parameter avoids
@@ -135,7 +179,7 @@ class A6xxGPUInfo(GPUInfo):
     def __init__(self, chip, template, num_ccu,
                  tile_align_w, tile_align_h, tile_max_w, tile_max_h, num_vsc_pipes,
                  cs_shared_mem_size, wave_granularity, fibers_per_sp,
-                 magic_regs, raw_magic_regs = None, highest_bank_bit = 15,
+                 raw_magic_regs = None, highest_bank_bit = 15,
                  ubwc_swizzle = 0x6, macrotile_mode = 1,
                  threadsize_base = 64, max_waves = 16, num_slices = 0):
         if chip == CHIP.A6XX:
@@ -166,13 +210,15 @@ class A6xxGPUInfo(GPUInfo):
         self.num_slices = num_slices
 
         self.props = Struct()
+        self.quirks = Struct()
 
-        self.magic = Struct()
-
-        for name, val in magic_regs.items():
-            setattr(self.magic, name, val)
-
+        raw_magic_regs_set = set()
         if raw_magic_regs:
+            for r in raw_magic_regs:
+                offset = int(r[0])
+                if offset in raw_magic_regs_set:
+                    raise ValueError("duplicate raw magic reg")
+                raw_magic_regs_set.add(offset)
             self.magic_raw = [[int(r[0]), r[1]] for r in raw_magic_regs]
 
         templates = template if isinstance(template, list) else [template]
@@ -187,8 +233,15 @@ class GPUProps(dict):
     unique_props = dict()
     def apply_props(self, gpu_info):
         for name, val in self.items():
-            setattr(getattr(gpu_info, "props"), name, val)
-            GPUProps.unique_props[(name, "props")] = val
+            structname = "props"
+            if name.startswith("QCTDD"):
+                if "_" in name:
+                    raise ValueError("invalid quirk name")
+                if name in quirk_names:
+                    name = name + "_" + quirk_names[name]
+                structname = "quirks"
+            setattr(getattr(gpu_info, structname), name, val)
+            GPUProps.unique_props[(name, structname)] = val
 
 template = """\
 /* Copyright © 2021 Google, Inc.
@@ -268,8 +321,36 @@ static const struct msm_id_struct msm_ids[] = {
 };
 """
 
+def get_quirks(id, info):
+    quirks = set()
+    for q, val in vars(info.quirks).items():
+        q = q.split("_")[0]
+        if val:
+            quirks.add(q)
+    magic = {}
+    for r in info.magic_raw:
+        offset = hex(r[0])
+        val = hex(r[1])
+        magic[offset] = val
+    return {
+        'name':    id.name,
+        'chip_id': hex(id.chip_id),
+        'quirks':  list(quirks),
+        'magic':   magic,
+    }
+
+def print_quirk_report():
+    quirk_report = []
+    for id, info in s.gpus.items():
+        if info.chip < 6:
+            continue
+        quirk_report.append(get_quirks(id, info))
+    print(yaml.dump(quirk_report))
+
 def main():
     if args.nvtop:
         print(Template(nvtop_template).render(s=s, unique_props=GPUProps.unique_props))
+    elif args.quirks:
+        print_quirk_report()
     else:
         print(Template(template).render(s=s, unique_props=GPUProps.unique_props))

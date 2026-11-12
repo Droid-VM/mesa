@@ -99,4 +99,13 @@
 #define V3D_TILE_ALLOC_OVERFLOW_BLOCK_SIZE_ENUM \
         (V3D_TILE_ALLOC_OVERFLOW_BLOCK_SIZE >> 7)
 
+/* Default max size of the bo cache, in MB.
+ *
+ * This value comes from testing different Vulkan application. Greater values
+ * didn't get any further performance benefit. This looks somewhat small, but
+ * from testing those applications, the main consumer of the bo cache are
+ * the bos used for the CLs, that are usually small.
+ */
+#define V3D_DEFAULT_MAX_BO_CACHE_SIZE 64
+
 #endif /* V3D_LIMITS_H */

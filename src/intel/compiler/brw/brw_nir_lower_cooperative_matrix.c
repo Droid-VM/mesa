@@ -481,12 +481,23 @@ lower_cmat_convert(nir_builder *b, nir_intrinsic_instr *intrin,
    const unsigned dst_components = glsl_get_vector_elements(dst_info->type);
    const unsigned dst_bits = glsl_base_type_bit_size(dst_info->desc.element_type);
 
+   /* Apply signedness information from convert operation. */
+   const nir_cmat_signed signed_mask = nir_intrinsic_cmat_signed_mask(intrin);
+   struct glsl_cmat_description dst_desc = dst_info->desc;
+   struct glsl_cmat_description src_desc = src_info->desc;
+   dst_desc.element_type =
+      glsl_apply_signedness_to_base_type(
+         (enum glsl_base_type)dst_desc.element_type, signed_mask & NIR_CMAT_RESULT_SIGNED);
+   src_desc.element_type =
+      glsl_apply_signedness_to_base_type(
+         (enum glsl_base_type)src_desc.element_type, signed_mask & NIR_CMAT_A_SIGNED);
+
    nir_def *result = nir_convert_cmat_intel(b,
                                             dst_components,
                                             dst_info->packing_factor * dst_bits,
                                             src,
-                                            .dst_cmat_desc = dst_info->desc,
-                                            .src_cmat_desc = src_info->desc);
+                                            .dst_cmat_desc = dst_desc,
+                                            .src_cmat_desc = src_desc);
 
    nir_store_deref(b, dst_slice, result, nir_component_mask(result->num_components));
    b->fp_math_ctrl = nir_fp_fast_math;

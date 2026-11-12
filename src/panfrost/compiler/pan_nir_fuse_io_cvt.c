@@ -51,7 +51,7 @@ reinsert_mp_cvt(nir_builder *b, nir_instr *instr, nir_def *def)
 
 static bool
 op_supports_cvt_fusion(nir_shader *s, nir_intrinsic_instr *instr,
-                       uint64_t gpu_id, bool *is_vary)
+                       bool *is_vary)
 {
    /* We might also convert LD_CVT but I haven't seen any case where it's
     * useful, maybe enable it when we have a case to check it on.
@@ -84,17 +84,12 @@ op_supports_cvt_fusion(nir_shader *s, nir_intrinsic_instr *instr,
    }
 }
 
-struct fuse_ctx {
-   uint64_t gpu_id;
-   const struct pan_varying_layout *layout;
-};
-
 static bool
 fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr,
-              const struct fuse_ctx *ctx)
+              const struct pan_varying_layout *layout)
 {
    bool is_varying;
-   if (!op_supports_cvt_fusion(b->shader, intr, ctx->gpu_id, &is_varying))
+   if (!op_supports_cvt_fusion(b->shader, intr, &is_varying))
       return false;
 
    unsigned orig_bit_size = intr->def.bit_size;
@@ -125,7 +120,7 @@ fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr,
           * is to discard the const modifier, this is safe.
           */
          struct pan_varying_slot *slot = (struct pan_varying_slot *)
-            pan_varying_layout_find_slot(ctx->layout, sem.location);
+            pan_varying_layout_find_slot(layout, sem.location);
          slot->alu_type = nir_alu_type_get_type_size(slot->alu_type) |
                           nir_type_float;
       }
@@ -163,11 +158,11 @@ fuse_tex_instr(struct nir_builder *b, nir_tex_instr *tex)
 static bool
 fuse_instr(struct nir_builder *b, nir_instr *instr, void *data)
 {
-   const struct fuse_ctx *ctx = data;
+   const struct pan_varying_layout *layout = data;
 
    switch (instr->type) {
    case nir_instr_type_intrinsic:
-      return fuse_io_instr(b, nir_instr_as_intrinsic(instr), ctx);
+      return fuse_io_instr(b, nir_instr_as_intrinsic(instr), layout);
    case nir_instr_type_tex:
       return fuse_tex_instr(b, nir_instr_as_tex(instr));
    default:
@@ -176,13 +171,9 @@ fuse_instr(struct nir_builder *b, nir_instr *instr, void *data)
 }
 
 bool
-pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
-                    const struct pan_varying_layout *layout)
+pan_nir_fuse_io_cvt(nir_shader *nir, const struct pan_varying_layout *layout)
 {
-   struct fuse_ctx ctx = {
-      .gpu_id = gpu_id,
-      .layout = layout,
-   };
    return nir_shader_instructions_pass(nir, fuse_instr,
-                                       nir_metadata_control_flow, (void *)&ctx);
+                                       nir_metadata_control_flow,
+                                       (void *)layout);
 }

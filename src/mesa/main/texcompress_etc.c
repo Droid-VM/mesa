@@ -114,39 +114,6 @@ _mesa_texstore_etc1_rgb8(UNUSED_TEXSTORE_PARAMS)
    return GL_FALSE;
 }
 
-
-/**
- * Decode texture data in format `MESA_FORMAT_ETC1_RGB8` to
- * `MESA_FORMAT_ABGR8888`.
- *
- * The size of the source data must be a multiple of the ETC1 block size,
- * which is 8, even if the texture image's dimensions are not aligned to 4.
- * From the GL_OES_compressed_ETC1_RGB8_texture spec:
- *   The texture is described as a number of 4x4 pixel blocks. If the
- *   texture (or a particular mip-level) is smaller than 4 pixels in
- *   any dimension (such as a 2x2 or a 8x1 texture), the texture is
- *   found in the upper left part of the block(s), and the rest of the
- *   pixels are not used. For instance, a texture of size 4x2 will be
- *   placed in the upper half of a 4x4 block, and the lower half of the
- *   pixels in the block will not be accessed.
- *
- * \param src_width in pixels
- * \param src_height in pixels
- * \param dst_stride in bytes
- */
-void
-_mesa_etc1_unpack_rgba8888(uint8_t *dst_row,
-                           unsigned dst_stride,
-                           const uint8_t *src_row,
-                           unsigned src_stride,
-                           unsigned src_width,
-                           unsigned src_height)
-{
-   etc1_unpack_rgba8888(dst_row, dst_stride,
-                        src_row, src_stride,
-                        src_width, src_height);
-}
-
 static uint8_t
 etc2_base_color1_t_mode(const uint8_t *in, GLuint index)
 {
@@ -1189,82 +1156,6 @@ _mesa_texstore_etc2_srgb8_punchthrough_alpha1(UNUSED_TEXSTORE_PARAMS)
 
    return GL_FALSE;
 }
-
-
-/**
- * Decode texture data in any one of following formats:
- * `MESA_FORMAT_ETC2_RGB8`
- * `MESA_FORMAT_ETC2_SRGB8`
- * `MESA_FORMAT_ETC2_RGBA8_EAC`
- * `MESA_FORMAT_ETC2_SRGB8_ALPHA8_EAC`
- * `MESA_FORMAT_ETC2_R11_EAC`
- * `MESA_FORMAT_ETC2_RG11_EAC`
- * `MESA_FORMAT_ETC2_SIGNED_R11_EAC`
- * `MESA_FORMAT_ETC2_SIGNED_RG11_EAC`
- * `MESA_FORMAT_ETC2_RGB8_PUNCHTHROUGH_ALPHA1`
- * `MESA_FORMAT_ETC2_SRGB8_PUNCHTHROUGH_ALPHA1`
- *
- * The size of the source data must be a multiple of the ETC2 block size
- * even if the texture image's dimensions are not aligned to 4.
- *
- * \param src_width in pixels
- * \param src_height in pixels
- * \param dst_stride in bytes
- */
-
-void
-_mesa_unpack_etc2_format(uint8_t *dst_row,
-                         unsigned dst_stride,
-                         const uint8_t *src_row,
-                         unsigned src_stride,
-                         unsigned src_width,
-                         unsigned src_height,
-			 mesa_format format,
-			 bool bgra)
-{
-   if (format == MESA_FORMAT_ETC2_RGB8)
-      etc2_unpack_rgb8(dst_row, dst_stride,
-                       src_row, src_stride,
-                       src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_SRGB8)
-      etc2_unpack_srgb8(dst_row, dst_stride,
-                        src_row, src_stride,
-			src_width, src_height, bgra);
-   else if (format == MESA_FORMAT_ETC2_RGBA8_EAC)
-      etc2_unpack_rgba8(dst_row, dst_stride,
-                        src_row, src_stride,
-                        src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_SRGB8_ALPHA8_EAC)
-      etc2_unpack_srgb8_alpha8(dst_row, dst_stride,
-                               src_row, src_stride,
-			       src_width, src_height, bgra);
-   else if (format == MESA_FORMAT_ETC2_R11_EAC)
-      etc2_unpack_r11(dst_row, dst_stride,
-                      src_row, src_stride,
-                      src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_RG11_EAC)
-      etc2_unpack_rg11(dst_row, dst_stride,
-                       src_row, src_stride,
-                       src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_SIGNED_R11_EAC)
-      etc2_unpack_signed_r11(dst_row, dst_stride,
-                             src_row, src_stride,
-                             src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_SIGNED_RG11_EAC)
-      etc2_unpack_signed_rg11(dst_row, dst_stride,
-                              src_row, src_stride,
-                              src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_RGB8_PUNCHTHROUGH_ALPHA1)
-      etc2_unpack_rgb8_punchthrough_alpha1(dst_row, dst_stride,
-                                           src_row, src_stride,
-                                           src_width, src_height);
-   else if (format == MESA_FORMAT_ETC2_SRGB8_PUNCHTHROUGH_ALPHA1)
-      etc2_unpack_srgb8_punchthrough_alpha1(dst_row, dst_stride,
-                                            src_row, src_stride,
-					    src_width, src_height, bgra);
-}
-
-
 
 static void
 fetch_etc1_rgb8(const GLubyte *map,

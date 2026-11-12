@@ -79,11 +79,11 @@ radv_tex_mipfilter(VkSamplerMipmapMode mode)
 {
    switch (mode) {
    case VK_SAMPLER_MIPMAP_MODE_NEAREST:
-      return V_008F38_SQ_TEX_Z_FILTER_POINT;
+      return V_008F38_SQ_TEX_MIP_FILTER_POINT;
    case VK_SAMPLER_MIPMAP_MODE_LINEAR:
-      return V_008F38_SQ_TEX_Z_FILTER_LINEAR;
+      return V_008F38_SQ_TEX_MIP_FILTER_LINEAR;
    default:
-      return V_008F38_SQ_TEX_Z_FILTER_NONE;
+      return V_008F38_SQ_TEX_MIP_FILTER_NONE;
    }
 }
 
@@ -166,6 +166,8 @@ radv_register_border_color(struct radv_device *device, VkClearColorValue value, 
          goto exit;
       }
    } else {
+      *index = RADV_BORDER_COLOR_COUNT;
+
       for (uint32_t i = 0; i < RADV_BORDER_COLOR_COUNT; i++) {
          if (!device->border_color_data.used[i]) {
             *index = i;
@@ -174,7 +176,7 @@ radv_register_border_color(struct radv_device *device, VkClearColorValue value, 
       }
 
       if (*index == RADV_BORDER_COLOR_COUNT) {
-         result = VK_ERROR_UNKNOWN;
+         result = VK_ERROR_TOO_MANY_OBJECTS;
          goto exit;
       }
    }
@@ -276,7 +278,7 @@ radv_sampler_init(struct radv_device *device, struct radv_sampler *sampler, cons
          result =
             radv_register_border_color(device, sampler->vk.border_color_value, request_index, &border_color_index);
          if (result != VK_SUCCESS)
-            return result;
+            return result == VK_ERROR_TOO_MANY_OBJECTS ? VK_ERROR_UNKNOWN : result;
 
          sampler->border_color_index = border_color_index;
          sampler_state.border_color_index = border_color_index;

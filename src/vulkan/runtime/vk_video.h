@@ -290,16 +290,6 @@ struct vk_video_h265_slice_params {
    int16_t delta_chroma_offset_l1[16][2];
 };
 
-void
-vk_video_parse_h265_slice_header(const struct VkVideoDecodeInfoKHR *frame_info,
-                                 const VkVideoDecodeH265PictureInfoKHR *pic_info,
-                                 const StdVideoH265SequenceParameterSet *sps,
-                                 const StdVideoH265PictureParameterSet *pps,
-                                 void *slice_data,
-                                 uint32_t slice_size,
-                                 struct vk_video_h265_slice_params *params);
-
-
 struct vk_video_h265_reference {
    const VkVideoPictureResourceInfoKHR *pPictureResource;
    StdVideoDecodeH265ReferenceInfoFlags flags;
@@ -386,6 +376,29 @@ vk_video_encode_av1_seq_hdr(const struct vk_video_session_parameters *params,
                             size_t size_limit,
                             size_t *data_size_ptr,
                             void *data_ptr);
+
+struct vk_video_av1_frame_hdr_offsets {
+   uint32_t obu_size_byte_offset;
+   uint32_t base_q_idx_bit_offset;
+   uint32_t segmentation_bit_offset;
+   uint32_t loop_filter_params_bit_offset;
+   uint32_t cdef_params_bit_offset;
+   uint32_t cdef_params_size_in_bits;
+   uint32_t size_in_bits;
+};
+
+VkResult
+vk_video_encode_av1_frame_hdr(const struct vk_video_session_parameters *params,
+                              const StdVideoEncodeAV1PictureInfo *pic_info,
+                              uint32_t base_q_idx,
+                              bool reference_select, bool restoration_support,
+                              bool generate_obu_extension,
+                              uint32_t frame_width, uint32_t frame_height,
+                              uint32_t obu_size_bytes,
+                              size_t size_limit,
+                              size_t *data_size_ptr,
+                              void *data_ptr,
+                              struct vk_video_av1_frame_hdr_offsets *offsets);
 
 VkResult
 vk_video_is_profile_supported(const VkVideoProfileInfoKHR *video_profile);

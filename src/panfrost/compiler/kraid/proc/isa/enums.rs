@@ -89,10 +89,11 @@ impl Enum {
         let may_be_data_type =
             xml.children.len() > 0 && name != "ls_multi_sr_count_m";
 
+        let enum_arch = xml.get_arch(arch.clone());
         let mut e = Enum {
             name,
             ident,
-            arch: xml.get_arch(arch.clone()).into(),
+            arch: enum_arch.clone().into(),
             has_none: false,
             is_bool: xml.children.len() == 2,
             is_data_type: may_be_data_type,
@@ -101,7 +102,7 @@ impl Enum {
         };
 
         for child in xml.children.into_iter() {
-            let v = EnumValue::from_xml(child, arch.clone())?;
+            let v = EnumValue::from_xml(child, enum_arch.clone())?;
 
             if v.name == "none" {
                 e.has_none = true;
@@ -419,7 +420,7 @@ impl Enum {
                 {
                     cases_ts.extend(quote! {
                         #e_ident::#ident => {
-                            if #arch.contains(arch) {
+                            if (#arch).contains(arch) {
                                 Ok(#value)
                             } else {
                                 Err(#err.into())
@@ -716,7 +717,7 @@ pub enum EnumType {
 }
 
 impl EnumType {
-    fn ident(&self) -> &Ident {
+    pub fn ident(&self) -> &Ident {
         match self {
             EnumType::Enum(e) => &e.ident,
             EnumType::Meta(m) => &m.ident,

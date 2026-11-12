@@ -5,8 +5,8 @@
  */
 #include <llvm/Config/llvm-config.h>
 
-#include "helpers.h"
 #include "amdgfxregs.h"
+#include "helpers.h"
 
 using namespace aco;
 

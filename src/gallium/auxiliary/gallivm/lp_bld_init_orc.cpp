@@ -38,6 +38,11 @@
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#if LLVM_VERSION_MAJOR >= 18
+#include "llvm/ExecutionEngine/Orc/Debugging/DebugInfoSupport.h"
+#include "llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h"
+#include "llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderPerf.h"
+#endif
 #include <llvm/ExecutionEngine/ObjectCache.h>
 #include "llvm/ExecutionEngine/JITLink/JITLink.h"
 #include <llvm/Target/TargetMachine.h>
@@ -258,7 +263,8 @@ public:
    static void remove_jd(LLVMOrcJITDylibRef jd) {
       using llvm::orc::ExecutionSession;
       using llvm::orc::JITDylib;
-      auto& es = LPJit::get_instance()->lljit->getExecutionSession();
+      if (!jit) return;
+      auto& es = jit->lljit->getExecutionSession();
       ExitOnErr(es.removeJITDylib(* ::unwrap(jd)));
    }
 
@@ -299,6 +305,7 @@ LPJit* LPJit::jit = NULL;
 void lpjit_exit()
 {
    delete LPJit::jit;
+   LPJit::jit = nullptr;
 }
 
 LLVMErrorRef module_transform(void *Ctx, LLVMModuleRef mod) {
@@ -339,6 +346,13 @@ LPJit::LPJit() :jit_dylib_count(0) {
          .setJITTargetMachineBuilder(std::move(JTMB))
 #ifdef USE_JITLINK
          .setObjectLinkingLayerCreator(
+#if LLVM_VERSION_MAJOR >= 23
+            /* LLVM 23 added a JITLinkMemoryManager argument, use it as our
+             * JITLinkMemoryManager. */
+            [&](ExecutionSession &ES, llvm::jitlink::JITLinkMemoryManager &MM) {
+               return std::make_unique<ObjectLinkingLayer>(ES, MM);
+            })
+#else
 #if LLVM_VERSION_MAJOR >= 21
             /* LLVM 21 removed the Triple argument */
             [&](ExecutionSession &ES) {
@@ -348,6 +362,7 @@ LPJit::LPJit() :jit_dylib_count(0) {
                return std::make_unique<ObjectLinkingLayer>(
                   ES, ExitOnErr(llvm::jitlink::InProcessMemoryManager::Create()));
             })
+#endif
 #else
 #if LLVM_USE_INTEL_JITEVENTS
          .RegisterJITEventListener(
@@ -355,6 +370,27 @@ LPJit::LPJit() :jit_dylib_count(0) {
 #endif
 #endif
          .create());
+
+#if defined(USE_JITLINK) && LLVM_VERSION_MAJOR >= 18 && DETECT_OS_LINUX
+   if (gallivm_debug & GALLIVM_DEBUG_SYMBOLS) {
+      ExecutionSession &ES = lljit->getExecutionSession();
+      ObjectLinkingLayer &OL = dynamic_cast<ObjectLinkingLayer&>(lljit->getObjLinkingLayer());
+      JITDylib &plugin_jd = ES.createBareJITDylib("orc_plugin");
+      MangleAndInterner mangle(ES, lljit->getDataLayout());
+      llvm::cantFail(plugin_jd.define(absoluteSymbols(SymbolMap({
+#define SYMBOL(s) { mangle(#s), \
+   { ExecutorAddr::fromPtr(&s), \
+     llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable } }
+         SYMBOL(llvm_orc_registerJITLoaderPerfStart),
+         SYMBOL(llvm_orc_registerJITLoaderPerfEnd),
+         SYMBOL(llvm_orc_registerJITLoaderPerfImpl),
+#undef SYMBOL
+      }))));
+      OL.addPlugin(ExitOnErr(DebugInfoPreservationPlugin::Create()));
+      OL.addPlugin(ExitOnErr(PerfSupportPlugin::Create(
+         ES.getExecutorProcessControl(), plugin_jd, true, true)));
+   }
+#endif
 
    LLVMOrcIRTransformLayerRef TL = wrap(&lljit->getIRTransformLayer());
    LLVMOrcIRTransformLayerSetTransform(TL, *module_transform_wrapper, NULL);
@@ -661,6 +697,8 @@ gallivm_compile_module(struct gallivm_state *gallivm)
          (void *)os_time_get_nano);
 
    lp_build_coro_add_malloc_hooks(gallivm);
+
+   lp_disable_eh_frame(gallivm);
 
    /* Dump bitcode to a file */
    if (gallivm_debug & GALLIVM_DEBUG_DUMP_BC &&

@@ -36,9 +36,6 @@ struct tu_lrz_state
    /* Being invalid at the very start means ew could e.g. skip the clearing. */
    bool valid_at_start: 1;
 
-   /* Sticky for the RP duration */
-   bool disable_write_for_rp : 1;
-
    /* Allows to temporary disable LRZ */
    bool enabled : 1;
    bool fast_clear : 1;
@@ -55,6 +52,8 @@ struct tu_lrz_state
 
    enum tu_lrz_direction prev_direction;
 };
+
+struct tu_render_pass_state;
 
 template <chip CHIP>
 void
@@ -130,6 +129,11 @@ tu_lrz_flush_valid_at_secondary_rp_boundary(
    struct tu_cmd_buffer *cmd,
    const struct tu_lrz_state &secondary_lrz,
    struct tu_cs *cs);
+
+void
+tu_lrz_merge_stencil_tag_state_at_rp_boundary(struct tu_cmd_buffer *cmd,
+                                              const struct tu_render_pass_state &secondary_rp,
+                                              struct tu_cs *cs);
 
 template <chip CHIP>
 void

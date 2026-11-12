@@ -59,7 +59,8 @@ is_indexed(enum draw_type type)
 }
 
 static void
-draw_emit_xfb(fd_cs &cs, struct CP_DRAW_INDX_OFFSET_0 *draw0,
+draw_emit_xfb(struct fd_context *ctx, fd_cs &cs,
+              struct CP_DRAW_INDX_OFFSET_0 *draw0,
               const struct pipe_draw_info *info,
               const struct pipe_draw_indirect_info *indirect)
 {
@@ -67,12 +68,19 @@ draw_emit_xfb(fd_cs &cs, struct CP_DRAW_INDX_OFFSET_0 *draw0,
       fd_stream_output_target(indirect->count_from_stream_output);
    struct fd_resource *offset = fd_resource(target->offset_buf);
 
+   if (ctx->screen->info->props.draw_auto_stale_stride_quirk)
+      fd_pkt4(cs, 1).add(A6XX_PC_AUTO_VERTEX_STRIDE(target->stride));
+
    fd_pkt7(cs, CP_DRAW_AUTO, 6)
       .add(pack_CP_DRAW_INDX_OFFSET_0(*draw0))
       .add(CP_DRAW_AUTO_1(info->instance_count))
       .add(CP_DRAW_AUTO_NUM_VERTICES_BASE(offset->bo, 0))
-      /* byte counter offset subtraced from the value read from above: */
-      .add(CP_DRAW_AUTO_4(0))
+      /* byte counter offset subtracted from the value read from above.  The
+       * CP shifts it right by two before the subtraction on both a6xx and
+       * a7xx, which cancels out against the units of the counter in either
+       * case, so this stays in bytes.
+       */
+      .add(CP_DRAW_AUTO_4(target->base.buffer_offset))
       .add(CP_DRAW_AUTO_5(target->stride));
 }
 
@@ -485,7 +493,7 @@ draw_vbos(struct fd_context *ctx, const struct pipe_draw_info *info,
    if (is_indirect(DRAW)) {
       assert(num_draws == 1);  /* only >1 for direct draws */
       if (DRAW == DRAW_INDIRECT_OP_XFB) {
-         draw_emit_xfb(cs, &draw0, info, indirect);
+         draw_emit_xfb(ctx, cs, &draw0, info, indirect);
       } else {
          const struct ir3_const_state *const_state = ir3_const_state(emit.vs);
          uint32_t dst_offset_dp =

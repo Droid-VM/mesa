@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "compiler/brw/brw_eu_defines.h"
 #include "util/hash_table.h"
 #include "util/lut.h"
 #include "util/macros.h"
+#include "util/sparse_bitset.h"
 #include "util/u_math.h"
 #include "jay_builder.h"
 #include "jay_builder_opcodes.h"
@@ -43,7 +45,9 @@ lower_contiguous_sources(jay_builder *b, jay_inst *I)
                seen[nr_seen++] = index;
             } else {
                /* Insert a copy to access a duplicated index */
-               jay_def copy = jay_alloc_def(b, I->src[s].file, 1);
+               jay_def copy =
+                  jay_alloc_def(b, I->src[s].file,
+                                jay_size_to_bits(I->src[s].size), 1);
                jay_def x = jay_extract(I->src[s], c);
                x.negate = x.abs = false; /* XXX: rework modifiers */
                jay_MOV(b, copy, x);
@@ -87,7 +91,7 @@ lower_imm_to_ugpr(jay_builder *b,
     * The spiller should rematerialize constants where necessary to ensure we
     * don't lose the wave, but we could still probably optimize this.
     */
-   jay_def x = jay_alloc_def(b, UGPR, is_64bit ? 2 : 1);
+   jay_def x = jay_alloc_def(b, UGPR, 32, is_64bit ? 2 : 1);
    _mesa_hash_table_u64_insert(constants, key, jay_MOV(b, x, imm));
    return x;
 }
@@ -187,7 +191,7 @@ lower_immediates(jay_builder *b, jay_inst *I, struct hash_table_u64 *constants)
 }
 
 static void
-lower_bf16_restrictions(jay_inst *I, jay_function *f)
+lower_bf16_restrictions(jay_builder *b, jay_inst *I)
 {
    /* BSpec 56640 disallows broadcast of bfloat16 scalar.
     * Insert a MOV to eliminate bfloat scalar broadcast.
@@ -196,11 +200,78 @@ lower_bf16_restrictions(jay_inst *I, jay_function *f)
       bool is_bf16 = jay_src_type(I, s) == JAY_TYPE_BF16;
       bool is_broadcast = I->src[s].file == UGPR;
       if (is_bf16 && is_broadcast && I->dst.file != UGPR) {
-         jay_builder b = jay_init_builder(f, jay_before_inst(I));
-         jay_def tmp = jay_alloc_def(&b, GPR, 1);
-         jay_MOV(&b, tmp, I->src[s]);
+         b->cursor = jay_before_inst(I);
+         jay_def tmp = jay_alloc_def(b, GPR, 32, 1);
+         jay_MOV(b, tmp, I->src[s]);
          jay_replace_src(&I->src[s], tmp);
       }
+   }
+}
+
+/*
+ * If multiple phis in a block read the same source, RA will need to insert at
+ * least one copy regardless, but the messy resulting phi webs means RA will end
+ * up inserting many copies (or even swaps). Instead, we lower away repeated
+ * sources pre-RA by inserting that single copy preemptively, allowing RA's phi
+ * web heuristics to do their job.
+ *
+ * This is less heavyhanded than a full CSSA lowering.
+ */
+static void
+lower_repeated_phi_srcs(jay_function *f,
+                        jay_block *block,
+                        struct u_sparse_bitset *seen)
+{
+   jay_foreach_phi_src_in_block(block, phi) {
+      unsigned idx = jay_index(phi->src[0]);
+      if (u_sparse_bitset_test(seen, idx)) {
+         jay_builder b = jay_init_builder(f, jay_after_block_logical(block));
+         jay_def repl = jay_alloc_def(&b, phi->src[0].file,
+                                      jay_size_to_bits(phi->src[0].size), 1);
+         jay_inst *mov = jay_MOV(&b, repl, phi->src[0]);
+         if (jay_is_flag(phi->src[0])) {
+            mov->type = jay_flag_type(f);
+         }
+
+         jay_replace_src(&phi->src[0], repl);
+      } else {
+         u_sparse_bitset_set(seen, idx);
+      }
+   }
+
+   u_sparse_bitset_clear_all(seen);
+}
+
+static void
+lower_send_desc_address_registers(jay_builder *b, jay_inst *I)
+{
+   if (I->op != JAY_OPCODE_SEND)
+      return;
+
+   for (unsigned i = 0; i < 2; ++i) {
+      if (jay_is_null(I->src[i]))
+         continue;
+
+      /* desc/ex_desc should have been in a UGPR so we could have more easily
+       * performed optimizations with it. It doesn't need to be an address
+       * register yet since we're moving it to one here.
+       */
+      assert(jay_is_uniform(I->src[i]));
+
+      b->cursor = jay_before_inst(I);
+      jay_def tmp = jay_alloc_def(b, J_ADDRESS, 32, 1);
+
+      if (i == 0 || !jay_send_bindless(I)) {
+         jay_PACK_MLEN(b, tmp, I->src[i], jay_null());
+      } else {
+         /* We are using both an address register and the immediate portion of
+          * the SEND instruction. The message length will be packed into the
+          * immediate, so no PACK_MLEN is needed for the address register.
+          */
+         jay_MOV(b, tmp, I->src[i]);
+      }
+
+      jay_replace_src(&I->src[i], tmp);
    }
 }
 
@@ -217,6 +288,9 @@ jay_lower_pre_ra(jay_shader *s)
        */
       _mesa_hash_table_u64_clear(constants);
 
+      struct u_sparse_bitset phi_srcs;
+      u_sparse_bitset_init(&phi_srcs, f->ssa_alloc, NULL);
+
       jay_foreach_block(f, block) {
          if (f->prioritize_pressure) {
             _mesa_hash_table_u64_clear(constants);
@@ -225,31 +299,23 @@ jay_lower_pre_ra(jay_shader *s)
          jay_foreach_inst_in_block(block, I) {
             jay_builder b = { .shader = s, .func = f };
 
-            lower_bf16_restrictions(I, f);
+            lower_send_desc_address_registers(&b, I);
+
+            lower_bf16_restrictions(&b, I);
 
             /* We use predicated-default with flags to optimize OR/AND of
              * booleans. RA forcibly ties the flags for this case, so insert
              * copies to legalize that. These copies are usually coalesced.
              */
-            if (I->predication == JAY_PREDICATED_DEFAULT) {
+            if (I->predication > 1) {
                b.cursor = jay_before_inst(I);
-               jay_def copy = jay_alloc_def(&b, FLAG, 1);
+               jay_def copy = jay_alloc_def(&b, FLAG, 32, 1);
                jay_MOV(&b, copy, I->src[I->num_srcs - 1])->type =
-                  JAY_TYPE_U | s->dispatch_width;
+                  jay_flag_type(f);
                assert(jay_defs_equivalent(I->src[I->num_srcs - 1],
                                           I->src[I->num_srcs - 2]));
                jay_replace_src(&I->src[I->num_srcs - 1], copy);
                jay_replace_src(&I->src[I->num_srcs - 2], copy);
-            }
-
-            /* Shuffle(UGPR) can result from copyprop if there's a mismatch
-             * between isel and divergence analysis (e.g. because multipolygon
-             * is disabled). Legalize.
-             */
-            if (I->op == JAY_OPCODE_SHUFFLE && I->src[0].file == UGPR) {
-               assert(!I->predication);
-               I->op = JAY_OPCODE_MOV;
-               jay_shrink_sources(I, 1);
             }
 
             /* lower_immediates must be last since it consumes I */
@@ -258,7 +324,11 @@ jay_lower_pre_ra(jay_shader *s)
                                                 jay_before_function(f);
             lower_immediates(&b, I, constants);
          }
+
+         lower_repeated_phi_srcs(f, block, &phi_srcs);
       }
+
+      u_sparse_bitset_free(&phi_srcs);
    }
 
    _mesa_hash_table_u64_destroy(constants);

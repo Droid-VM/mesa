@@ -22,6 +22,7 @@ enum mme_tu104_instr_parts {
 #define MME_TU104_BUILDER_MAX_INSTS 128
 
 struct mme_tu104_builder {
+   uint32_t cls_eng3d;
    uint32_t inst_count;
    struct mme_tu104_inst insts[MME_TU104_BUILDER_MAX_INSTS];
    enum mme_tu104_instr_parts inst_parts;

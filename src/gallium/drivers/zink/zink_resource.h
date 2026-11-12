@@ -32,7 +32,10 @@
 #define ZINK_BIND_MUTABLE (1u << 28)
 #define ZINK_BIND_DMABUF (1u << 29)
 #define ZINK_BIND_TRANSIENT (1u << 30) //transient fb attachment
-#define ZINK_BIND_VIDEO (1u << 31)
+#define ZINK_BIND_VIDEO (1u << 31) //from video frontend
+#define ZINK_RESOURCE_FLAG_VIDEO_DPB (PIPE_RESOURCE_FLAG_DRV_PRIV << 0) //separate video buffer
+#define ZINK_RESOURCE_FLAG_VIDEO_OUTPUT (PIPE_RESOURCE_FLAG_DRV_PRIV << 1) //separate video buffer
+#define ZINK_RESOURCE_FLAG_INTERNAL_ONLY (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +46,16 @@ zink_resource_image_hic_transition(struct zink_screen *screen, struct zink_resou
 
 bool
 zink_screen_resource_init(struct pipe_screen *pscreen);
+void
+zink_resource_struct_pools_init(struct zink_screen *screen);
+void
+zink_resource_struct_pools_deinit(struct zink_screen *screen);
+#define ZINK_OBJ_CACHE_MAX_BYTES (256 * 1024 * 1024)
+/* the byte limit is also capped to this fraction of device memory */
+#define ZINK_OBJ_CACHE_MEM_DIV 64
+
+unsigned
+zink_resource_object_cache_release(struct zink_screen *screen);
 
 void
 zink_context_resource_init(struct pipe_context *pctx);
@@ -106,6 +119,12 @@ zink_resource_copies_reset(struct zink_resource *res);
 #include "zink_batch.h"
 #include "zink_bo.h"
 #include "zink_kopper.h"
+
+static inline bool
+zink_resource_has_bindless(const struct zink_resource *res)
+{
+   return res->bindless[0] || res->bindless[1];
+}
 
 static ALWAYS_INLINE bool
 zink_resource_usage_is_unflushed(const struct zink_resource *res)
@@ -185,9 +204,13 @@ zink_batch_resource_usage_set(struct zink_batch_state *bs, struct zink_resource 
             util_dynarray_append(&bs->acquires, acquire);
       } else if (res->obj->exportable) {
          struct pipe_resource *pres = NULL;
-         bool found = false;
          simple_mtx_lock(&bs->exportable_lock);
-         _mesa_set_search_or_add(&bs->dmabuf_exports, res, &found);
+         struct hash_entry *he = _mesa_hash_table_search(&bs->exports, res);
+         bool found = he != NULL;
+         if (!found)
+            he = _mesa_hash_table_insert(&bs->exports, res, NULL);
+         if (write)
+            he->data = (void *)(uintptr_t)true;
          simple_mtx_unlock(&bs->exportable_lock);
          if (!found) {
             pipe_resource_reference(&pres, &res->base.b);
@@ -229,6 +252,7 @@ zink_resource_disable_unordered(struct zink_resource *res, bool disable_write)
 {
    res->obj->unordered_read = false;
    res->obj->ordered_access_is_copied = false;
+   res->obj->has_ordered_access = true;
    if (disable_write)
       zink_resource_disable_unordered_write(res);
 }

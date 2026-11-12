@@ -10,6 +10,7 @@ files_libzink = files(
   'zink_compiler.c',
   'zink_context.c',
   'zink_kopper.c',
+  'zink_list_restart.c',
   'zink_descriptors.c',
   'zink_draw.cpp',
   'zink_fence.c',
@@ -23,6 +24,7 @@ files_libzink = files(
   'zink_state.c',
   'zink_surface.c',
   'zink_synchronization.cpp',
+  'zink_video.c',
 )
 
 zink_device_info = custom_target(
@@ -76,8 +78,7 @@ if host_machine.system() == 'darwin'
       endif
     endif
     inc_zink_vk += include_directories(moltenvk_includes)
-  else
-    error('moltenvk-dir is required but not set.')
+    zink_c_args += '-DHAVE_MOLTENVK'
   endif
 
   zink_c_args += ['-x','objective-c'] # Put compiler into objective-C mode to allow for MacOS types, like IOSurface and CAMetalLayer
@@ -102,7 +103,7 @@ libzink = static_library(
   include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_vulkan_util, inc_zink_vk],
   link_args : [ld_args_build_id],
   dependencies: [
-    idep_nir_headers, idep_mesautil, idep_vulkan_util_headers,
+    idep_nir_headers, idep_mesautil, idep_vulkan_util_headers, idep_vtn,
     idep_vulkan_wsi_defines, idep_vulkan_util, dep_libdrm, vulkan_wsi_deps, idep_ntv,
   ],
   c_args: zink_c_args,

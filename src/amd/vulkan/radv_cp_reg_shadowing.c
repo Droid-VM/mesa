@@ -30,8 +30,8 @@ radv_create_shadow_regs_preamble(struct radv_device *device, struct radv_queue_s
 
    /* allocate memory for queue_state->shadowed_regs where register states are saved */
    result = radv_bo_create(device, NULL, SI_SHADOWED_REG_BUFFER_SIZE, 4096, RADEON_DOMAIN_VRAM,
-                           RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0,
-                           true, &queue_state->shadowed_regs);
+                           RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0, true,
+                           &queue_state->shadowed_regs);
    if (result != VK_SUCCESS)
       goto fail;
 

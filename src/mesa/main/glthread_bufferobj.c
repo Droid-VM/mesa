@@ -509,13 +509,14 @@ _mesa_marshal_BufferSubData_merged(GLuint target_or_name, GLintptr offset,
    /* Fast path: Copy the data to an upload buffer, and use the GPU
     * to copy the uploaded data to the destination buffer.
     */
-   /* TODO: Handle offset == 0 && size < buffer_size.
-    *       If offset == 0 and size == buffer_size, it's better to discard
-    *       the buffer storage, but we don't know the buffer size in glthread.
+   /* Note: if offset == 0 and size == buffer_size, it would be better to
+    * discard the buffer storage, but we don't know the buffer size in
+    * glthread.
     */
    if (ctx->Const.AllowGLThreadBufferSubDataOpt &&
        ctx->Dispatch.Current != ctx->Dispatch.ContextLost &&
-       data && offset > 0 && size > 0) {
+       data && size > 0 && offset >= 0 &&
+       (offset > 0 || cmd_size > MARSHAL_MAX_CMD_SIZE)) {
       struct gl_buffer_object *upload_buffer = NULL;
       unsigned upload_offset = 0;
 

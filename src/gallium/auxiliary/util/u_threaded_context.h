@@ -35,6 +35,8 @@
  *    driver functions that take a context (fence_finish, texture_get_handle)
  *    should manually unwrap pipe_context by doing:
  *      pipe = threaded_context_unwrap_sync(pipe);
+ *    and, to also unwrap debug driver contexts, follow it with:
+ *      pipe = pipe_get_driver_context(pipe);
  *
  *    pipe_context::priv is used to unwrap the context, so drivers and state
  *    trackers shouldn't use it.
@@ -166,7 +168,9 @@
  * There are 1 driver callback and 1 TC callback:
  *
  * 1) is_resource_busy: It returns true when a resource is busy. If this is NULL,
- *    the resource is considered always busy.
+ *    the resource is considered always busy. After it has returned true a few
+ *    times, the threaded context stops calling it and considers all buffers
+ *    busy until the driver flushes.
  *
  * 2) tc_driver_internal_flush_notify: If the driver set
  *    driver_calls_flush_notify = true in threaded_context_create, it should
@@ -265,6 +269,16 @@ struct tc_unflushed_batch_token;
  */
 #define TC_MAX_BUFFER_LISTS   (TC_MAX_BATCHES * 4)
 
+/* The default and the maximum of threaded_context_options::driver_flush_interval.
+ *
+ * Up to TC_MAX_BATCHES buffer lists can belong to batches which haven't
+ * finished executing, and the buffer lists of all batches that have been
+ * executed since the last driver flush are still in use too. The interval is
+ * limited so that all of them always fit in the ring.
+ */
+#define TC_DEFAULT_DRIVER_FLUSH_INTERVAL  (TC_MAX_BUFFER_LISTS / 2)
+#define TC_MAX_DRIVER_FLUSH_INTERVAL      (TC_MAX_BUFFER_LISTS - TC_MAX_BATCHES)
+
 /* This mask is used to get a hash of a buffer ID. It's also the bit size of
  * the buffer list - 1. It must be 2^n - 1. The size should be as low as
  * possible to minimize memory usage, but high enough to minimize hash
@@ -291,31 +305,39 @@ enum tc_binding_type {
    TC_BINDING_UBO_TCS,
    TC_BINDING_UBO_TES,
    TC_BINDING_UBO_CS,
+   TC_BINDING_UBO_TASK,
+   TC_BINDING_UBO_MESH,
    TC_BINDING_SAMPLERVIEW_VS,
    TC_BINDING_SAMPLERVIEW_FS,
    TC_BINDING_SAMPLERVIEW_GS,
    TC_BINDING_SAMPLERVIEW_TCS,
    TC_BINDING_SAMPLERVIEW_TES,
    TC_BINDING_SAMPLERVIEW_CS,
+   TC_BINDING_SAMPLERVIEW_TASK,
+   TC_BINDING_SAMPLERVIEW_MESH,
    TC_BINDING_SSBO_VS,
    TC_BINDING_SSBO_FS,
    TC_BINDING_SSBO_GS,
    TC_BINDING_SSBO_TCS,
    TC_BINDING_SSBO_TES,
    TC_BINDING_SSBO_CS,
+   TC_BINDING_SSBO_TASK,
+   TC_BINDING_SSBO_MESH,
    TC_BINDING_IMAGE_VS,
    TC_BINDING_IMAGE_FS,
    TC_BINDING_IMAGE_GS,
    TC_BINDING_IMAGE_TCS,
    TC_BINDING_IMAGE_TES,
    TC_BINDING_IMAGE_CS,
+   TC_BINDING_IMAGE_TASK,
+   TC_BINDING_IMAGE_MESH,
 };
 
 typedef void (*tc_replace_buffer_storage_func)(struct pipe_context *ctx,
                                                struct pipe_resource *dst,
                                                struct pipe_resource *src,
                                                unsigned minimum_num_rebinds,
-                                               uint32_t rebind_mask,
+                                               uint64_t rebind_mask,
                                                uint32_t delete_buffer_id);
 typedef struct pipe_fence_handle *(*tc_create_fence_func)(struct pipe_context *ctx,
                                                           struct tc_unflushed_batch_token *token);
@@ -376,6 +398,18 @@ struct threaded_resource {
     * ranges.
     */
    struct util_range pending_staging_uploads_range;
+
+   /* Number of transfers referencing the current cpu_storage (heap or clientptr_storage) */
+   int cpu_storage_map_count;
+
+   /* Lock on both cpu_storage and clientptr_storage */
+   simple_mtx_t cpu_storage_lock;
+
+   /* Client pointer backed cpu_storage */
+   struct tc_clientptr_storage *clientptr_storage;
+
+   /* Entry for cpu_storage_resources */
+   struct list_head clientptr_heap_link;
 };
 
 struct threaded_transfer {
@@ -393,6 +427,11 @@ struct threaded_transfer {
    struct util_range *valid_buffer_range;
 
    bool cpu_storage_mapped;
+
+   uint8_t *clientptr;
+   int clientptr_refcnt;
+
+   struct pipe_transfer *clientptr_upload;
 };
 
 struct threaded_query {
@@ -563,6 +602,14 @@ struct threaded_context_options {
    bool driver_calls_flush_notify;
 
    /**
+    * Only used if driver_calls_flush_notify is set: if the driver hasn't
+    * flushed on its own while this many batches were executed, TC flushes it
+    * so that buffer lists can be reused. 0 selects the default, and the value
+    * is limited to TC_MAX_DRIVER_FLUSH_INTERVAL.
+    */
+   unsigned driver_flush_interval;
+
+   /**
     * If true, ctx->get_device_reset_status() will be called without
     * synchronizing with driver thread.  Drivers can enable this to avoid
     * TC syncs if their implementation of get_device_reset_status() is
@@ -585,6 +632,7 @@ struct threaded_context_options {
 
 struct tc_vertex_buffers {
    struct tc_call_base base;
+   bool merge_with_draw;
    uint8_t count;
    struct pipe_vertex_buffer slot[0]; /* more will be allocated if needed */
 };
@@ -635,6 +683,11 @@ struct threaded_context {
    thrd_t driver_thread;
 #endif
 
+   /* Number of "busy" replies from is_resource_busy since the driver last flushed. It's reset by
+    * the driver thread, so it's accessed atomically.
+    */
+   uint32_t num_busy_replies;
+
    bool seen_tcs;
    bool seen_tes;
    bool seen_gs;
@@ -652,12 +705,13 @@ struct threaded_context {
    bool seen_shader_buffers[MESA_SHADER_MESH_STAGES];
    bool seen_image_buffers[MESA_SHADER_MESH_STAGES];
    bool seen_sampler_buffers[MESA_SHADER_MESH_STAGES];
+   bool pending_vbs_seen_draws;
 
    int8_t last_completed;
    int8_t batch_generation;
 
    uint8_t num_vertex_buffers;
-   unsigned max_const_buffers;
+   uint8_t num_const_buffers[MESA_SHADER_MESH_STAGES];
    unsigned max_shader_buffers;
    unsigned max_images;
    unsigned max_samplers;
@@ -676,6 +730,8 @@ struct threaded_context {
     */
    struct util_queue_fence *signal_fences_next_flush[TC_MAX_BUFFER_LISTS];
    unsigned num_signal_fences_next_flush;
+   /* Number of batches which have been executed since the last driver flush. */
+   unsigned num_batches_since_driver_flush;
 
    /* Bound buffers are tracked here using threaded_resource::buffer_id_hash.
     * 0 means unbound.
@@ -689,6 +745,8 @@ struct threaded_context {
    uint64_t image_buffers_writeable_mask[MESA_SHADER_MESH_STAGES];
    uint32_t sampler_buffers[MESA_SHADER_MESH_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
+   struct tc_vertex_buffers *pending_vbs; //for enqueue
+
    struct tc_batch batch_slots[TC_MAX_BATCHES];
    struct tc_buffer_list buffer_lists[TC_MAX_BUFFER_LISTS];
    /* the current framebuffer attachments; [PIPE_MAX_COLOR_BUFS] is the zsbuf */
@@ -696,10 +754,12 @@ struct threaded_context {
    struct pipe_resource *fb_resolve;
    /* accessed by main thread; preserves info across batches */
    struct tc_renderpass_info *renderpass_info_recording;
-   /* accessed by driver thread */
-   struct tc_renderpass_info *renderpass_info;
    /* internal-only: if dsa/fs are bound between render passes */
    void *pending_renderpass_dsa, *pending_renderpass_fs;
+
+   /* accessed by driver thread */
+   alignas(MESA_CACHE_LINE_SIZE) struct tc_renderpass_info *renderpass_info;
+   struct tc_vertex_buffers *deferred_vbs; //for exec
 };
 
 
@@ -707,6 +767,29 @@ void threaded_resource_init(struct pipe_resource *res, bool allow_cpu_storage);
 void threaded_resource_deinit(struct pipe_resource *res);
 struct pipe_context *threaded_context_unwrap_sync(struct pipe_context *pipe);
 void tc_driver_internal_flush_notify(struct threaded_context *tc);
+
+struct tc_clientptr_heap
+{
+   struct pipe_clientptr_heap b;
+
+   /* threaded_resources with clientptr-backed cpu_storage (for reclaim/release_all = true) */
+   struct list_head cpu_storage_resources;
+   simple_mtx_t cpu_storage_resources_lock;
+
+   /* former clientptr-backed cpu_storage ranges to be freed through clientptr_reclaim */
+   struct list_head free_ranges;
+   simple_mtx_t free_ranges_lock;
+};
+
+void
+tc_clientptr_heap_init(struct tc_clientptr_heap *clientptr_heap);
+void
+tc_clientptr_heap_deinit(struct tc_clientptr_heap *clientptr_heap);
+bool
+tc_clientptr_reclaim(struct tc_clientptr_heap *clientptr_heap,
+                                       bool release_all, struct pipe_clientptr_range *range);
+void
+threaded_resource_free_clientptr_storage(struct threaded_resource *tres);
 
 /** function for getting the current renderpass info:
  * - renderpass info is always non-null
@@ -814,6 +897,8 @@ static inline void
 tc_buffer_disable_cpu_storage(struct pipe_resource *buf)
 {
    struct threaded_resource *tres = threaded_resource(buf);
+
+   threaded_resource_free_clientptr_storage(tres);
 
    if (tres->cpu_storage) {
       align_free(tres->cpu_storage);

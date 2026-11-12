@@ -83,7 +83,7 @@ fn fill_destination(pair: Pair<Rule>, dest: &mut etna_inst_dst) {
 }
 
 fn fill_mem_destination(pair: Pair<Rule>, dest: &mut etna_inst_dst) {
-    dest.set_use(1);
+    dest.set_use(0);
 
     for item in pair.into_inner() {
         match item.as_rule() {

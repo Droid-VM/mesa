@@ -109,6 +109,10 @@ genX(libanv_dgc_dump)(global uint32_t *cmd_base,
          printf("COMPUTE_WALKER\n");
          bias_dwords = 2;
          break;
+      case CMD5(3, 2, 2, 8, 0):
+         printf("COMPUTE_WALKER_2\n");
+         bias_dwords = 2;
+         break;
       case 0x10000000:
          printf("MI_STORE_DATA_IMM\n");
          bias_dwords = 2;

@@ -126,8 +126,7 @@ void si_init_resource_fields(struct si_screen *sscreen, struct si_resource *res,
        res->b.b.flags & SI_RESOURCE_FLAG_GL2_BYPASS)
       res->flags |= RADEON_FLAG_GL2_BYPASS;
 
-   if (res->b.b.flags & SI_RESOURCE_FLAG_DISCARDABLE &&
-       sscreen->info.drm_major == 3 && sscreen->info.drm_minor >= 47) {
+   if (res->b.b.flags & SI_RESOURCE_FLAG_DISCARDABLE) {
       /* Assume VRAM, so that we can use BIG_PAGE. */
       assert(res->domains == RADEON_DOMAIN_VRAM);
       res->flags |= RADEON_FLAG_DISCARDABLE;
@@ -281,7 +280,7 @@ static bool si_invalidate_buffer(struct si_context *sctx, struct si_resource *bu
 
 /* Replace the storage of dst with src. */
 void si_replace_buffer_storage(struct pipe_context *ctx, struct pipe_resource *dst,
-                               struct pipe_resource *src, unsigned num_rebinds, uint32_t rebind_mask,
+                               struct pipe_resource *src, unsigned num_rebinds, uint64_t rebind_mask,
                                uint32_t delete_buffer_id)
 {
    struct si_context *sctx = (struct si_context *)ctx;

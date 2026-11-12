@@ -130,7 +130,12 @@ main(int argc, char **argv)
          return 1;
       }
 
-      fread(map, 1, len, fp);
+      if (fread(map, 1, len, fp) != len) {
+         fprintf(stderr, "Failed to read map buffer\n");
+         ralloc_free(mem_ctx);
+         fclose(fp);
+         return 1;
+      }
       map[len] = 0;
       fclose(fp);
 

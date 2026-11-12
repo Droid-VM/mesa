@@ -9,8 +9,8 @@ has_unpack_sat = 'c && v3d_device_has_unpack_sat(c->devinfo)'
 has_unpack_max0 = 'c && v3d_device_has_unpack_max0(c->devinfo)'
 
 lower_alu = [
-    (('f2i8', a), ('i2i8', ('f2i32', a))),
-    (('f2i16', a), ('i2i16', ('f2i32', a))),
+    (('f2i8', a), ('u2u8', ('f2i32', a))),
+    (('f2i16', a), ('u2u16', ('f2i32', a))),
 
     (('f2u8', a), ('u2u8', ('f2u32', a))),
     (('f2u16', a), ('u2u16', ('f2u32', a))),
@@ -21,9 +21,12 @@ lower_alu = [
     (('u2f32', 'a@8'), ('u2f32', ('u2u32', a))),
     (('u2f32', 'a@16'), ('u2f32', ('u2u32', a))),
 
-    (('fmin', ('fmax', a, -1.0), 1.0), ('fsat_signed', a), has_unpack_sat),
-    (('fmax', ('fmin', a, 1.0), -1.0), ('fsat_signed', a), has_unpack_sat),
-    (('fmax', a, 0.0), ('fclamp_pos', a), has_unpack_max0),
+    # 32-bit only: these lower to FMOV with an f32 input unpack, which would
+    # misinterpret f16 bits. For f16 the original fmin/fmax are already single
+    # native instructions, so a conversion round-trip would only be worse.
+    (('fmin', ('fmax', 'a@32', -1.0), 1.0), ('fsat_signed', a), has_unpack_sat),
+    (('fmax', ('fmin', 'a@32', 1.0), -1.0), ('fsat_signed', a), has_unpack_sat),
+    (('fmax', 'a@32', 0.0), ('fclamp_pos', a), has_unpack_max0),
 ]
 
 def main():

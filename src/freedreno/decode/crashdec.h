@@ -85,7 +85,7 @@ is_gmu_legacy(void)
 }
 
 void dump_register(struct regacc *r);
-void dump_cp_mem_pool(uint32_t *mempool, bool is_bv);
+void dump_cp_mem_pool(uint32_t *mempool, uint32_t sizedwords, bool is_bv);
 void handle_prefetch(const uint32_t *dwords, uint32_t sizedwords);
 
 struct a6xx_hfi_state {

@@ -52,6 +52,27 @@ src_as_float(const brw_reg &src)
 }
 
 static bool
+implicit_accumulator_conflict(const intel_device_info *devinfo,
+                              const brw_inst *scan_inst, const brw_reg &reg,
+                              unsigned exec_size)
+{
+   if (!reg.is_accumulator() ||
+       (scan_inst->opcode != BRW_OPCODE_MAC &&
+        scan_inst->opcode != BRW_OPCODE_MACH &&
+        !scan_inst->writes_accumulator_implicitly(devinfo))) {
+      return false;
+   }
+
+   unsigned implicit_bits = brw_implicit_accumulator_bits(scan_inst->exec_size,
+                                                          scan_inst->group,
+                                                          scan_inst->dst.type);
+
+   unsigned explicit_bits = brw_explicit_accumulator_bits(exec_size, reg);
+
+   return (implicit_bits & explicit_bits) != 0;
+}
+
+static bool
 cmod_propagate_cmp_to_add(const intel_device_info *devinfo, brw_inst *inst)
 {
    bool read_flag = false;
@@ -107,6 +128,13 @@ cmod_propagate_cmp_to_add(const intel_device_info *devinfo, brw_inst *inst)
                           inst->src[0], inst->size_read(devinfo, 0)) ||
           regions_overlap(scan_inst->dst, scan_inst->size_written,
                           inst->src[1], inst->size_read(devinfo, 1))) {
+         break;
+      }
+
+      if (implicit_accumulator_conflict(devinfo, scan_inst, inst->src[0],
+                                        inst->exec_size) ||
+          implicit_accumulator_conflict(devinfo, scan_inst, inst->src[1],
+                                        inst->exec_size)) {
          break;
       }
 
@@ -274,7 +302,13 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
            inst->opcode != BRW_OPCODE_MOV) ||
           inst->predicate != BRW_PREDICATE_NONE ||
           !inst->dst.is_null() ||
-          !inst->src[0].is_grf())
+          !(inst->src[0].is_grf() || inst->src[0].is_accumulator()))
+         continue;
+
+      /* Integer accumulators are weird, so they are not currently
+       * supported. Perhaps this could be enabled later.
+       */
+      if (inst->src[0].is_accumulator() && !brw_type_is_float(inst->src[0].type))
          continue;
 
       /* An ABS source modifier can only be handled when processing a compare
@@ -614,6 +648,11 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
              regs_are_same(inst->src[0], scan_inst->src[0])) {
             inst->remove();
             progress = true;
+            break;
+         }
+
+         if (implicit_accumulator_conflict(devinfo, scan_inst,
+                                           inst->src[0], inst->exec_size)) {
             break;
          }
 

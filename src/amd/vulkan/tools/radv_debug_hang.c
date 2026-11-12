@@ -198,10 +198,9 @@ radv_init_trace(struct radv_device *device)
    struct radeon_winsys *ws = device->ws;
    VkResult result;
 
-   result = radv_bo_create(
-      device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_GL2_BYPASS,
-      RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
+   result = radv_bo_create(device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_GL2_BYPASS,
+                           RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
    if (result != VK_SUCCESS)
       return false;
 
@@ -388,71 +387,9 @@ radv_dump_descriptors(struct radv_device *device, FILE *f)
    }
 }
 
-struct radv_shader_inst {
-   char text[160];  /* one disasm line */
-   unsigned offset; /* instruction offset */
-   unsigned size;   /* instruction size >= 4 */
-};
-
-/* Split a disassembly string into lines and add them to the array pointed
- * to by "instructions". */
 static void
-radv_add_split_disasm(const char *disasm, uint64_t start_addr, unsigned *num, struct radv_shader_inst *instructions)
-{
-   struct radv_shader_inst *last_inst = *num ? &instructions[*num - 1] : NULL;
-   const char *next;
-   const char *repeat = strstr(disasm, "then repeated");
-
-   while ((next = strchr(disasm, '\n'))) {
-      struct radv_shader_inst *inst = &instructions[*num];
-      unsigned len = next - disasm;
-
-      if (repeat >= disasm && repeat < next) {
-         uint32_t repeat_count;
-         sscanf(repeat, "then repeated %u times", &repeat_count);
-
-         for (uint32_t i = 0; i < repeat_count; i++) {
-            inst = &instructions[*num];
-            memcpy(inst, last_inst, sizeof(struct radv_shader_inst));
-            inst->offset = last_inst->offset + last_inst->size * (i + 1);
-            (*num)++;
-         }
-
-         last_inst = inst;
-
-         disasm = next + 1;
-         repeat = strstr(disasm, "then repeated");
-         continue;
-      }
-
-      if (!memchr(disasm, ';', len)) {
-         /* Ignore everything that is not an instruction. */
-         disasm = next + 1;
-         continue;
-      }
-
-      assert(len < ARRAY_SIZE(inst->text));
-      memcpy(inst->text, disasm, len);
-      inst->text[len] = 0;
-      inst->offset = last_inst ? last_inst->offset + last_inst->size : 0;
-
-      const char *semicolon = strchr(disasm, ';');
-      assert(semicolon);
-      /* 9 = 8 hex digits + a leading space */
-      inst->size = (next - semicolon) / 9 * 4;
-
-      snprintf(inst->text + len, ARRAY_SIZE(inst->text) - len, " [PC=0x%" PRIx64 ", off=%u, size=%u]",
-               start_addr + inst->offset, inst->offset, inst->size);
-
-      last_inst = inst;
-      (*num)++;
-      disasm = next + 1;
-   }
-}
-
-static void
-radv_dump_annotated_shader(const struct radv_shader *shader, mesa_shader_stage stage, struct ac_wave_info *waves,
-                           unsigned num_waves, FILE *f)
+radv_dump_annotated_shader(const struct radv_device *device, const struct radv_shader *shader, mesa_shader_stage stage,
+                           struct ac_wave_info *waves, unsigned num_waves, FILE *f)
 {
    uint64_t start_addr, end_addr;
    unsigned i;
@@ -476,81 +413,13 @@ radv_dump_annotated_shader(const struct radv_shader *shader, mesa_shader_stage s
    waves = &waves[i];
    num_waves -= i;
 
-   /* Get the list of instructions.
-    * Buffer size / 4 is the upper bound of the instruction count.
-    */
-   unsigned num_inst = 0;
-   struct radv_shader_inst *instructions = calloc(shader->code_size / 4, sizeof(struct radv_shader_inst));
-
-   radv_add_split_disasm(shader->dbg.disasm_string, start_addr, &num_inst, instructions);
-
    fprintf(f, COLOR_YELLOW "%s - annotated disassembly:" COLOR_RESET "\n", radv_get_shader_name(&shader->info, stage));
 
-   /* Maps a given offset inside the shader binary to a given debug_info index */
-   struct ac_shader_debug_info **debug_info_mapping = NULL;
-   if (shader->dbg.debug_info_count > 0) {
-      debug_info_mapping = calloc(shader->code_size, sizeof(struct ac_shader_debug_info *));
-      for (uint32_t debug_index = 0; debug_index < shader->dbg.debug_info_count; debug_index++) {
-         struct ac_shader_debug_info *debug_info = &shader->dbg.debug_info[debug_index];
-         if (debug_info->type != ac_shader_debug_info_src_loc)
-            continue;
-
-         /* Such a debug_info marks the end of a range of instructions with location info */
-         if (!debug_info->src_loc.file)
-            continue;
-
-         uint32_t range_start = debug_info->offset;
-         uint32_t range_end = shader->code_size; /* Last debug_info spans until the end of the shader */
-
-         if (debug_index + 1 <
-             shader->dbg.debug_info_count) { /* Only if there is another debug_info after the current one */
-            struct ac_shader_debug_info *next_debug_info = &shader->dbg.debug_info[debug_index + 1];
-            range_end = next_debug_info->offset;
-         }
-
-         for (uint32_t offset = range_start; offset < range_end; offset++)
-            debug_info_mapping[offset] = debug_info;
-      }
-   }
-
-   /* Print instructions with annotations. */
-   for (i = 0; i < num_inst; i++) {
-      struct radv_shader_inst *inst = &instructions[i];
-
-      /* Print source location, if we have it */
-      if (debug_info_mapping) {
-         struct ac_shader_debug_info *debug_info = debug_info_mapping[inst->offset];
-         if (debug_info) {
-            /* Found the source location, print it */
-            fprintf(f, "// 0x%x %s:%u:%u\n", debug_info->offset, debug_info->src_loc.file, debug_info->src_loc.line,
-                    debug_info->src_loc.column);
-         }
-      }
-
-      fprintf(f, "%s\n", inst->text);
-
-      /* Print which waves execute the instruction right now. */
-      while (num_waves && start_addr + inst->offset == waves->pc) {
-         fprintf(f,
-                 "          " COLOR_GREEN "^ SE%u SH%u CU%u "
-                 "SIMD%u WAVE%u  EXEC=%016" PRIx64 "  ",
-                 waves->se, waves->sh, waves->cu, waves->simd, waves->wave, waves->exec);
-
-         if (inst->size == 4) {
-            fprintf(f, "INST32=%08X" COLOR_RESET "\n", waves->inst_dw0);
-         } else {
-            fprintf(f, "INST64=%08X %08X" COLOR_RESET "\n", waves->inst_dw0, waves->inst_dw1);
-         }
-
-         waves->matched = true;
-         waves = &waves[1];
-         num_waves--;
-      }
-   }
+   struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+   radv_print_shader_disasm(&dbg, shader->code_size, waves, num_waves, start_addr, f);
 
    fprintf(f, "\n\n");
-   free(debug_info_mapping);
-   free(instructions);
+   radv_free_binary_debug_info(&dbg);
 }
 
 static void
@@ -586,7 +455,8 @@ radv_dump_shader(struct radv_device *device, struct radv_pipeline *pipeline, str
       _mesa_blake3_compute(shader->dbg.spirv, shader->dbg.spirv_size, blake3);
       _mesa_blake3_format(blake3buf, blake3);
 
-      if (device->vk.enabled_features.deviceFaultVendorBinaryEXT) {
+      if (device->vk.enabled_features.deviceFaultVendorBinaryEXT ||
+          device->vk.enabled_features.deviceFaultVendorBinary) {
          spirv_print_asm(f, (const uint32_t *)shader->dbg.spirv, shader->dbg.spirv_size / 4);
       } else {
          fprintf(f, "SPIRV (see %s.spv)\n\n", blake3buf);
@@ -602,8 +472,12 @@ radv_dump_shader(struct radv_device *device, struct radv_pipeline *pipeline, str
       fprintf(f, "ARGS:\n%s\n", shader->dbg.args_string);
    }
 
-   fprintf(f, "%s IR:\n%s\n", pdev->use_llvm ? "LLVM" : "ACO", shader->dbg.ir_string);
-   fprintf(f, "DISASM:\n%s\n", shader->dbg.disasm_string);
+   struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+   fprintf(f, "%s IR:\n%s\n", pdev->use_llvm ? "LLVM" : "ACO", dbg.ir_string);
+   fprintf(f, "DISASM:\n");
+   radv_print_shader_disasm(&dbg, shader->code_size, NULL, 0, 0x00000000, f);
+   fprintf(f, "\n");
+   radv_free_binary_debug_info(&dbg);
 
    if (pipeline)
       radv_dump_shader_stats(device, pipeline, shader, f);
@@ -729,22 +603,22 @@ radv_dump_queue_state(struct radv_queue *queue, const char *dump_dir, const char
             while (stages) {
                int stage = u_bit_scan(&stages);
 
-               radv_dump_annotated_shader(graphics_pipeline->base.shaders[stage], stage, waves, num_waves, f);
+               radv_dump_annotated_shader(device, graphics_pipeline->base.shaders[stage], stage, waves, num_waves, f);
             }
          } else if (pipeline->type == RADV_PIPELINE_RAY_TRACING) {
             struct radv_ray_tracing_pipeline *rt_pipeline = radv_pipeline_to_ray_tracing(pipeline);
             for (unsigned i = 0; i < rt_pipeline->stage_count; i++) {
                struct radv_shader *shader = rt_pipeline->stages[i].shader;
                if (shader)
-                  radv_dump_annotated_shader(shader, shader->info.stage, waves, num_waves, f);
+                  radv_dump_annotated_shader(device, shader, shader->info.stage, waves, num_waves, f);
             }
-            radv_dump_annotated_shader(pipeline->shaders[MESA_SHADER_INTERSECTION], MESA_SHADER_INTERSECTION, waves,
-                                       num_waves, f);
+            radv_dump_annotated_shader(device, pipeline->shaders[MESA_SHADER_INTERSECTION], MESA_SHADER_INTERSECTION,
+                                       waves, num_waves, f);
          } else {
             struct radv_compute_pipeline *compute_pipeline = radv_pipeline_to_compute(pipeline);
 
-            radv_dump_annotated_shader(compute_pipeline->base.shaders[MESA_SHADER_COMPUTE], MESA_SHADER_COMPUTE, waves,
-                                       num_waves, f);
+            radv_dump_annotated_shader(device, compute_pipeline->base.shaders[MESA_SHADER_COMPUTE], MESA_SHADER_COMPUTE,
+                                       waves, num_waves, f);
          }
 
          /* Print waves executing shaders that are not currently bound. */
@@ -761,7 +635,7 @@ radv_dump_queue_state(struct radv_queue *queue, const char *dump_dir, const char
 
             struct radv_shader *shader = radv_find_shader(device, waves[0].pc);
             if (shader) {
-               radv_dump_annotated_shader(shader, shader->info.stage, waves, num_waves, f);
+               radv_dump_annotated_shader(device, shader, shader->info.stage, waves, num_waves, f);
                if (waves[i].matched)
                   continue;
             }
@@ -818,12 +692,11 @@ radv_dump_enabled_options(const struct radv_device *device, FILE *f)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    uint64_t mask;
 
-   if (instance->debug_flags) {
+   if (!BITSET_IS_EMPTY(instance->debug_flags)) {
       fprintf(f, "Enabled debug options: ");
 
-      mask = instance->debug_flags;
-      while (mask) {
-         int i = u_bit_scan64(&mask);
+      unsigned i;
+      BITSET_FOREACH_SET (i, instance->debug_flags, RADV_DEBUG_COUNT) {
          fprintf(f, "%s, ", radv_get_debug_option_name(i));
       }
       fprintf(f, "\n");
@@ -928,12 +801,15 @@ radv_gpu_hang_occurred(struct radv_queue *queue, enum amd_ip_type ring)
 bool
 radv_vm_fault_occurred(struct radv_device *device, struct radv_winsys_gpuvm_fault_info *fault_info)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (!pdev->info.has_gpuvm_fault_query)
-      return false;
-
    return device->ws->query_gpuvm_fault(device->ws, fault_info);
+}
+
+bool
+radv_shader_abort_occurred(struct radv_device *device)
+{
+   const uint32_t *data = device->shader_abort.buffer.map;
+   /* Check if something was written to the abort buffer. */
+   return data && data[0] != sizeof(uint32_t);
 }
 
 enum radv_device_fault_chunk {
@@ -997,7 +873,8 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
 #ifndef _WIN32
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   const bool save_hang_report = !device->vk.enabled_features.deviceFaultVendorBinaryEXT;
+   const bool save_hang_report =
+      !(device->vk.enabled_features.deviceFaultVendorBinaryEXT || device->vk.enabled_features.deviceFaultVendorBinary);
    struct radv_winsys_gpuvm_fault_info fault_info = {0};
 
    /* Query if a VM fault happened for this GPU hang. */
@@ -1027,7 +904,7 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
    };
 
    char *wave_dump = NULL;
-   if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+   if (!RADV_DEBUG(instance, NO_UMR))
       wave_dump = ac_get_umr_waves(&pdev->info, radv_queue_ring(queue));
 
    for (uint32_t i = 0; i < RADV_DEVICE_FAULT_CHUNK_COUNT; i++) {
@@ -1051,11 +928,11 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
          radv_dump_queue_state(queue, dump_dir, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_WAVES:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_waves(queue, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_RING:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_ring(queue, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_REGISTERS:
@@ -1141,10 +1018,9 @@ radv_trap_handler_init(struct radv_device *device)
    /* Compute the TMA BO size. */
    size = sizeof(desc) + sizeof(struct aco_trap_handler_layout);
 
-   result = radv_bo_create(
-      device, NULL, size, 256, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_32BIT,
-      RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
+   result = radv_bo_create(device, NULL, size, 256, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT,
+                           RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
    if (result != VK_SUCCESS)
       return false;
 
@@ -1221,7 +1097,9 @@ radv_dump_faulty_shader(const struct radv_device *device, const struct radv_shad
    struct radv_shader_inst *instructions = calloc(shader->code_size / 4, sizeof(struct radv_shader_inst));
 
    /* Split the disassembly string into instructions. */
-   radv_add_split_disasm(shader->dbg.disasm_string, start_addr, &num_inst, instructions);
+   struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+   radv_add_split_disasm(dbg.disasm_string, start_addr, &num_inst, instructions);
+   radv_free_binary_debug_info(&dbg);
 
    /* Print instructions with annotations. */
    for (unsigned i = 0; i < num_inst; i++) {

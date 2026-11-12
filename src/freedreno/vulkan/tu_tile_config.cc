@@ -196,10 +196,10 @@ tu_calc_frag_area(struct tu_cmd_buffer *cmd,
 static bool
 rects_intersect(VkRect2D a, VkRect2D b)
 {
-   return a.offset.x < b.offset.x + (int32_t)b.extent.width &&
-          b.offset.x < a.offset.x + (int32_t)a.extent.width &&
-          a.offset.y < b.offset.y + (int32_t)b.extent.height &&
-          b.offset.y < a.offset.y + (int32_t)a.extent.height;
+   return a.offset.x < b.offset.x + static_cast<int32_t>(b.extent.width) &&
+          b.offset.x < a.offset.x + static_cast<int32_t>(a.extent.width) &&
+          a.offset.y < b.offset.y + static_cast<int32_t>(b.extent.height) &&
+          b.offset.y < a.offset.y + static_cast<int32_t>(a.extent.height);
 }
 
 /* Use the render area(s) to figure out which views of the bin are visible.
@@ -254,14 +254,16 @@ try_merge_tiles(struct tu_tile_config *dst, struct tu_tile_config *src,
          return false;
    }
 
-   /* The tiles must be vertically or horizontally adjacent and have the
-    * compatible width/height.
+   /* The tiles must be vertically or horizontally adjacent, with matching
+    * extent across the merge axis so the combined tile stays rectangular:
+    * a same-column merge keeps dst's width, so the widths must be equal,
+    * and vice versa.
     */
    if (dst->pos.x == src->pos.x) {
-      if (dst->sysmem_extent.height != src->sysmem_extent.height)
+      if (dst->sysmem_extent.width != src->sysmem_extent.width)
          return false;
    } else if (dst->pos.y == src->pos.y) {
-      if (dst->sysmem_extent.width != src->sysmem_extent.width)
+      if (dst->sysmem_extent.height != src->sysmem_extent.height)
          return false;
    } else {
       return false;
@@ -396,11 +398,11 @@ get_default_tile_pos(const struct tu_physical_device *phys_dev,
    aligned_offset.y = offset.y / phys_dev->info->tile_align_h *
       phys_dev->info->tile_align_h;
    int32_t fb_start_x =
-      MAX2(tile->pos.x * (int32_t)tiling->tile0.width - offset.x, 0);
+      MAX2(tile->pos.x * static_cast<int32_t>(tiling->tile0.width) - offset.x, 0);
    int32_t fb_end_x =
       (tile->pos.x + tile->sysmem_extent.width) * tiling->tile0.width - offset.x;
    int32_t fb_start_y =
-      MAX2(tile->pos.y * (int32_t)tiling->tile0.height - offset.y, 0);
+      MAX2(tile->pos.y * static_cast<int32_t>(tiling->tile0.height) - offset.y, 0);
    int32_t fb_end_y =
       (tile->pos.y + tile->sysmem_extent.height) * tiling->tile0.height - offset.y;
 
@@ -526,7 +528,8 @@ tu_calc_subsampled(struct tu_tile_config *tiles,
                    const struct tu_tiling_config *tiling,
                    const struct tu_framebuffer *fb,
                    const struct tu_vsc_config *vsc,
-                   const VkOffset2D *fdm_offsets)
+                   const VkOffset2D *fdm_offsets,
+                   bool custom_resolve_subsampled)
 {
    u_worklist worklist;
    u_worklist_init(&worklist, vsc->tile_count.width * vsc->tile_count.height,
@@ -553,6 +556,7 @@ tu_calc_subsampled(struct tu_tile_config *tiles,
          }
 
          tile->subsampled = true;
+         tile->custom_resolve_subsampled = custom_resolve_subsampled;
          tile->worklist_idx = y * vsc->tile_count.width + x;
 
          u_worklist_push_tail(&worklist, tile, worklist_idx);
@@ -742,9 +746,9 @@ struct tu_tile_config *
 tu_calc_tile_config(struct tu_cmd_buffer *cmd, const struct tu_vsc_config *vsc,
                     const struct tu_image_view *fdm, const VkOffset2D *fdm_offsets)
 {
-   struct tu_tile_config *tiles = (struct tu_tile_config *)
+   struct tu_tile_config *tiles = static_cast<struct tu_tile_config *>(
       calloc(vsc->tile_count.width * vsc->tile_count.height,
-             sizeof(struct tu_tile_config));
+             sizeof(struct tu_tile_config)));
 
    for (uint32_t py = 0; py < vsc->pipe_count.height; py++) {
       uint32_t ty1 = py * vsc->pipe0.height;
@@ -788,11 +792,12 @@ tu_calc_tile_config(struct tu_cmd_buffer *cmd, const struct tu_vsc_config *vsc,
       }
    }
 
-   if (cmd->state.fdm_subsampled &&
+   if (cmd->state.fdm_any_subsampled &&
        vsc->tile_count.width * vsc->tile_count.height <= TU_SUBSAMPLED_MAX_BINS) {
       tu_calc_subsampled(tiles, cmd->device->physical_device,
                          cmd->state.tiling, cmd->state.framebuffer,
-                         vsc, fdm_offsets);
+                         vsc, cmd->state.rp.shared_viewport ? NULL : fdm_offsets,
+                         cmd->state.fdm_custom_resolve_subsampled);
    }
 
    return tiles;

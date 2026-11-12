@@ -26,12 +26,6 @@ struct libpan_draw_helper_index_min_max_result {
     uint32_t max;
 };
 
-struct libpan_draw_helper_varying_buf_info {
-    uint64_t address;
-    uint32_t size;
-    atomic_uint offset;
-};
-
 struct libpan_draw_helper_attrib_buf_info {
     uint32_t divisor;
     uint32_t stride;

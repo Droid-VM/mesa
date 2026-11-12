@@ -5,6 +5,31 @@
 
 #include "intel_hang_replay_lib.h"
 
+struct gem_bo *
+intel_hang_replay_find_bo(struct util_dynarray *buffers, uint64_t address)
+{
+   util_dynarray_foreach(buffers, struct gem_bo, bo) {
+      if (address >= bo->offset && address - bo->offset < bo->size)
+         return bo;
+   }
+
+   return NULL;
+}
+
+enum intel_hang_replay_address_status
+intel_hang_replay_address_status(struct util_dynarray *buffers, uint64_t address)
+{
+   const struct gem_bo *bo = intel_hang_replay_find_bo(buffers, address);
+
+   if (!bo)
+      return INTEL_HANG_REPLAY_ADDRESS_MISSING;
+
+   if (bo->file_offset == -1)
+      return INTEL_HANG_REPLAY_ADDRESS_MAPPED;
+
+   return INTEL_HANG_REPLAY_ADDRESS_CAPTURED;
+}
+
 int
 compare_bos(const void *b1, const void *b2)
 {

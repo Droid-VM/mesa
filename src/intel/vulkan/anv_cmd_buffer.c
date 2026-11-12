@@ -101,7 +101,7 @@ anv_cmd_buffer_ensure_rcs_companion(struct anv_cmd_buffer *cmd_buffer)
       return VK_SUCCESS;
 
    VkResult result = VK_SUCCESS;
-   pthread_mutex_lock(&cmd_buffer->device->mutex);
+   simple_mtx_lock(&cmd_buffer->device->mutex);
    VK_FROM_HANDLE(vk_command_pool, pool,
                   cmd_buffer->device->companion_rcs_cmd_pool);
    assert(pool != NULL);
@@ -118,7 +118,7 @@ anv_cmd_buffer_ensure_rcs_companion(struct anv_cmd_buffer *cmd_buffer)
       cmd_buffer->companion_rcs_cmd_buffer, cmd_buffer->vk.level);
 
 unlock_and_return:
-   pthread_mutex_unlock(&cmd_buffer->device->mutex);
+   simple_mtx_unlock(&cmd_buffer->device->mutex);
    return result;
 }
 
@@ -164,8 +164,6 @@ anv_create_cmd_buffer(struct vk_command_pool *pool,
                          anv_device_get_internal_surface_state_pool(device), 4096);
    anv_state_stream_init(&cmd_buffer->dynamic_state_stream,
                          anv_device_get_dynamic_state_pool(device), 16384);
-   anv_state_stream_init(&cmd_buffer->general_state_stream,
-                         anv_device_get_general_state_pool(device), 16384);
    anv_state_stream_init(&cmd_buffer->indirect_push_descriptor_stream,
                          anv_device_get_indirect_push_descriptor_pool(device), 4096);
    anv_state_stream_init(&cmd_buffer->push_descriptor_buffer_stream,
@@ -219,7 +217,6 @@ destroy_cmd_buffer(struct anv_cmd_buffer *cmd_buffer)
 
    anv_state_stream_finish(&cmd_buffer->surface_state_stream);
    anv_state_stream_finish(&cmd_buffer->dynamic_state_stream);
-   anv_state_stream_finish(&cmd_buffer->general_state_stream);
    anv_state_stream_finish(&cmd_buffer->indirect_push_descriptor_stream);
    anv_state_stream_finish(&cmd_buffer->push_descriptor_buffer_stream);
 
@@ -253,7 +250,7 @@ anv_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct anv_cmd_buffer, vk);
    struct anv_device *device = cmd_buffer->device;
 
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    if (cmd_buffer->companion_rcs_cmd_buffer) {
       destroy_cmd_buffer(cmd_buffer->companion_rcs_cmd_buffer);
       cmd_buffer->companion_rcs_cmd_buffer = NULL;
@@ -262,7 +259,7 @@ anv_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    ANV_RMV(cmd_buffer_destroy, cmd_buffer->device, cmd_buffer);
 
    destroy_cmd_buffer(cmd_buffer);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 }
 
 static void
@@ -290,10 +287,6 @@ reset_cmd_buffer(struct anv_cmd_buffer *cmd_buffer,
    anv_state_stream_finish(&cmd_buffer->dynamic_state_stream);
    anv_state_stream_init(&cmd_buffer->dynamic_state_stream,
                          anv_device_get_dynamic_state_pool(cmd_buffer->device), 16384);
-
-   anv_state_stream_finish(&cmd_buffer->general_state_stream);
-   anv_state_stream_init(&cmd_buffer->general_state_stream,
-                         anv_device_get_general_state_pool(cmd_buffer->device), 16384);
 
    anv_state_stream_finish(&cmd_buffer->indirect_push_descriptor_stream);
    anv_state_stream_init(&cmd_buffer->indirect_push_descriptor_stream,
@@ -398,26 +391,20 @@ anv_cmd_emit_conditional_render_predicate(struct anv_cmd_buffer *cmd_buffer)
 }
 
 static void
-clear_pending_query_bits(enum anv_query_bits *query_bits,
+clear_pending_query_bits(enum anv_pipe_bits *query_bits,
                          enum anv_pipe_bits flushed_bits)
 {
-   if (flushed_bits & ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT)
-      *query_bits &= ~ANV_QUERY_WRITES_RT_FLUSH;
+   /* Remove all the flushed bits except CS_STALL */
+   *query_bits &= ~flushed_bits | ANV_PIPE_CS_STALL_BIT;
 
-   if (flushed_bits & ANV_PIPE_TILE_CACHE_FLUSH_BIT)
-      *query_bits &= ~ANV_QUERY_WRITES_TILE_FLUSH;
-
-   if ((flushed_bits & ANV_PIPE_DATA_CACHE_FLUSH_BIT) &&
-       (flushed_bits & ANV_PIPE_HDC_PIPELINE_FLUSH_BIT) &&
-       (flushed_bits & ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT))
-      *query_bits &= ~ANV_QUERY_WRITES_TILE_FLUSH;
-
-   /* Once RT/TILE have been flushed, we can consider the CS_STALL flush */
-   if ((*query_bits & (ANV_QUERY_WRITES_TILE_FLUSH |
-                       ANV_QUERY_WRITES_RT_FLUSH |
-                       ANV_QUERY_WRITES_DATA_FLUSH)) == 0 &&
+   /* Only once there is no more flush bits consider the CS_STALL */
+   if ((*query_bits & (ANV_PIPE_TILE_CACHE_FLUSH_BIT |
+                       ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                       ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
+                       ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+                       ANV_PIPE_DATA_CACHE_FLUSH_BIT)) == 0 &&
        (flushed_bits & (ANV_PIPE_END_OF_PIPE_SYNC_BIT | ANV_PIPE_CS_STALL_BIT)))
-      *query_bits &= ~ANV_QUERY_WRITES_CS_STALL;
+      *query_bits &= ~ANV_PIPE_CS_STALL_BIT;
 }
 
 void
@@ -426,6 +413,7 @@ anv_cmd_buffer_update_pending_query_bits(struct anv_cmd_buffer *cmd_buffer,
 {
    clear_pending_query_bits(&cmd_buffer->state.queries.clear_bits, flushed_bits);
    clear_pending_query_bits(&cmd_buffer->state.queries.buffer_write_bits, flushed_bits);
+   clear_pending_query_bits(&cmd_buffer->state.queries.copy_bits, flushed_bits);
 }
 
 static bool
@@ -480,7 +468,7 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
    if (ray_shadow_size > 0 &&
        (!cmd_buffer->state.ray_query_shadow_bo ||
         cmd_buffer->state.ray_query_shadow_bo->size < ray_shadow_size)) {
-      unsigned shadow_size_log2 = MAX2(util_logbase2_ceil(ray_shadow_size), 16);
+      uint64_t shadow_size_log2 = MAX2(util_logbase2_ceil64(ray_shadow_size), 16ull);
       unsigned bucket = shadow_size_log2 - 16;
       assert(bucket < ARRAY_SIZE(device->ray_query_shadow_bos[0]));
 
@@ -488,7 +476,7 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
       if (bo == NULL) {
          struct anv_bo *new_bo;
          VkResult result = anv_device_alloc_bo(device, "RT queries shadow",
-                                               1 << shadow_size_log2,
+                                               1ull << shadow_size_log2,
                                                ANV_BO_ALLOC_INTERNAL, /* alloc_flags */
                                                0, /* explicit_address */
                                                &new_bo);
@@ -509,14 +497,12 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
       cmd_buffer->state.ray_query_shadow_bo = bo;
 
       /* Add the ray query buffers to the batch list. */
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            cmd_buffer->state.ray_query_shadow_bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, cmd_buffer->state.ray_query_shadow_bo);
    }
 
    /* Add the HW buffer to the list of BO used. */
    assert(device->ray_query_bo[idx]);
-   anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                         device->ray_query_bo[idx]);
+   anv_cmd_buffer_add_reloc_bo(cmd_buffer, device->ray_query_bo[idx]);
 
    /* Fill the push constants & mark them dirty. */
    struct anv_address ray_query_globals_addr =
@@ -649,10 +635,8 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
       }
 
       /* Always add a reference to the buffers */
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            set->desc_surface_addr.bo);
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            set->desc_sampler_addr.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, set->desc_surface_addr.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, set->desc_sampler_addr.bo);
 
       dirty_stages |= stages;
    }
@@ -750,11 +734,14 @@ void anv_CmdBindDescriptorBuffersEXT(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    struct anv_cmd_state *state = &cmd_buffer->state;
+   const struct anv_va_range *desc_va_range =
+      cmd_buffer->device->physical->uses_efficient_64bit ?
+      &cmd_buffer->device->physical->va.bindless_surface_state_pool :
+      &cmd_buffer->device->physical->va.dynamic_visible_pool;
 
    for (uint32_t i = 0; i < bufferCount; i++) {
-      assert(pBindingInfos[i].address >= anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->addr &&
-             pBindingInfos[i].address < (anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->addr +
-                                         anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->size));
+      assert(pBindingInfos[i].address >= desc_va_range->addr &&
+             pBindingInfos[i].address < (desc_va_range->addr + desc_va_range->size));
 
       if (state->descriptor_buffers.address[i] != pBindingInfos[i].address) {
          state->descriptor_buffers.address[i] = pBindingInfos[i].address;
@@ -786,6 +773,14 @@ anv_cmd_buffer_set_descriptor_buffer_offsets(struct anv_cmd_buffer *cmd_buffer,
 
    for (uint32_t i = 0; i < set_count; i++) {
       const uint32_t set_index = first_set + i;
+
+      /* With graphicsPipelineLibrary, pipeline layouts can have VK_NULL_HANDLE
+       * set layouts; there is nothing to set up for those (same as
+       * VK_NULL_HANDLE descriptor sets in vkCmdBindDescriptorSets).
+       */
+      if (layout->set_layouts[set_index] == NULL)
+         continue;
+
       const struct anv_descriptor_set_layout *set_layout =
          container_of(layout->set_layouts[set_index],
                       const struct anv_descriptor_set_layout, vk);
@@ -1118,16 +1113,10 @@ anv_cmd_buffer_cs_push_constants(struct anv_cmd_buffer *cmd_buffer)
    const unsigned push_constant_alignment = 64;
    const unsigned aligned_total_push_constants_size =
       align(total_push_constants_size, push_constant_alignment);
-   struct anv_state state;
-   if (devinfo->verx10 >= 125) {
-      state = anv_cmd_buffer_alloc_general_state(cmd_buffer,
-                                                 aligned_total_push_constants_size,
-                                                 push_constant_alignment);
-   } else {
-      state = anv_cmd_buffer_alloc_dynamic_state(cmd_buffer,
-                                                 aligned_total_push_constants_size,
-                                                 push_constant_alignment);
-   }
+   struct anv_state state =
+      anv_cmd_buffer_alloc_dynamic_state(cmd_buffer,
+                                         aligned_total_push_constants_size,
+                                         push_constant_alignment);
    if (state.map == NULL)
       return state;
 
@@ -1461,32 +1450,13 @@ anv_cmd_write_buffer_cp(VkCommandBuffer commandBuffer,
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 
-   /* Force pipeline selection to be GPGPU so that Blorp code path picks up
-    * compute path rather than fragment shader.
-    */
-   anv_genX(cmd_buffer->device->info, flush_pipeline_select_gpgpu)(cmd_buffer,
-                                                                   false);
-
-   anv_genX(cmd_buffer->device->info, cmd_write_buffer_cp)(cmd_buffer, dstAddr,
-                                                           data, size);
+   anv_cmd_buffer_update_addr(cmd_buffer, anv_address_from_u64(dstAddr), size, data);
 }
 
 void
 anv_cmd_flush_buffer_write_cp(VkCommandBuffer commandBuffer)
 {
-   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
-
-   /* IR header would get written using BLORP code path, so we need to flush
-    * RT, HDC and untyped dataport cache. We alway force batch to use compute
-    * shader so we don't need to flush out RT cache flush. See
-    * anv_cmd_write_buffer_cp().
-    */
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
-                             ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT,
-                             "Flush buffer write cp");
+   vk_bvh_build_barrier_transfer_to_compute(commandBuffer);
 }
 
 void

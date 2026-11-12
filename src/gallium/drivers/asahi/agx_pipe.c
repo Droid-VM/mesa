@@ -1815,6 +1815,7 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
 
    pctx->create_fence_fd = agx_create_fence_fd;
    pctx->fence_server_sync = agx_fence_server_sync;
+   pctx->fence_server_signal = agx_fence_server_signal;
 
    pctx->get_device_reset_status = asahi_get_device_reset_status;
 
@@ -2032,8 +2033,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->query_memory_info = true;
    caps->primitive_restart = true;
    caps->primitive_restart_fixed_index = true;
+   caps->polygon_stipple = true;
    caps->anisotropic_filter = true;
    caps->native_fence_fd = true;
+   caps->fence_signal = true;
    caps->texture_barrier = true;
 
    /* Timer resolution is the length of a single tick in nanos */
@@ -2099,6 +2102,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 460;
    caps->essl_feature_level = 320;
+   caps->fs_sample_variables = true;
 
    /* Settings from iris, may need tuning */
    caps->max_vertex_streams = 4;
@@ -2132,9 +2136,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_vertex_element_src_offset = 0xffff;
 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
-
    caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
 
    caps->shader_group_vote = true;
    caps->shader_ballot = true;
@@ -2483,6 +2485,7 @@ agx_screen_create(int fd, struct renderonly *ro,
    screen->fence_reference = agx_fence_reference;
    screen->fence_finish = agx_fence_finish;
    screen->fence_get_fd = agx_fence_get_fd;
+   screen->semaphore_create = agx_semaphore_create;
    screen->get_disk_shader_cache = agx_get_disk_shader_cache;
    screen->get_cl_cts_version = agx_get_cl_cts_version;
 

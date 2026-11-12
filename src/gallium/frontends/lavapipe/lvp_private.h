@@ -33,10 +33,13 @@
 
 #include "util/macros.h"
 #include "util/list.h"
+#include "util/u_call_once.h"
 #include "util/u_dynarray.h"
 #include "util/simple_mtx.h"
 #include "util/u_queue.h"
 #include "util/u_upload_mgr.h"
+#include "vk_texcompress_astc.h"
+#include "vk_texcompress_etc2.h"
 
 #include "compiler/shader_enums.h"
 #include "pipe/p_screen.h"
@@ -98,7 +101,7 @@ typedef uint32_t xcb_window_t;
 extern "C" {
 #endif
 
-#define LVP_NUM_QUEUES 1
+#define LVP_NUM_QUEUES 2
 #define MAX_SETS 8
 #define MAX_DESCRIPTORS ((1<<20) - (1<<15)) /* Required by VK_EXT_descriptor_heap */
 #define MAX_PUSH_CONSTANTS_SIZE 256
@@ -163,9 +166,9 @@ struct lvp_physical_device {
 
    struct pipe_loader_device *pld;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    const nir_shader_compiler_options *drv_options[LVP_SHADER_STAGES];
    uint32_t max_images;
-   bool snorm_blend;
 
    struct vk_sync_timeline_type sync_timeline_type;
    const struct vk_sync_type *sync_types[3];
@@ -175,6 +178,8 @@ struct lvp_physical_device {
 
 struct lvp_instance {
    struct vk_instance vk;
+
+   struct list_head link;
 
    struct lvp_drirc drirc;
 
@@ -197,8 +202,6 @@ struct lvp_queue {
    struct u_upload_mgr *uploader;
    struct pipe_fence_handle *last_fence;
    void *state;
-   struct util_dynarray pipeline_destroys;
-   simple_mtx_t lock;
 };
 
 static inline struct lvp_device *
@@ -215,8 +218,10 @@ struct lvp_pipeline_cache {
 struct lvp_device {
    struct vk_device vk;
 
-   struct lvp_queue queue;
+   struct lvp_queue queue[LVP_NUM_QUEUES];
+   uint32_t queue_count;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    void *noop_fs;
    simple_mtx_t bda_lock;
    struct hash_table bda;
@@ -232,9 +237,10 @@ struct lvp_device {
    uint32_t group_handle_alloc;
 
    struct vk_meta_device meta;
-   radix_sort_vk_t *radix_sort;
-   simple_mtx_t radix_sort_lock;
    struct vk_acceleration_structure_build_args accel_struct_args;
+
+   struct util_dynarray shader_destroys;
+   simple_mtx_t shader_destroys_lock;
 };
 
 static inline const struct lvp_physical_device *
@@ -299,7 +305,27 @@ struct lvp_image {
    bool disjoint;
    uint8_t plane_count;
    struct lvp_image_plane planes[3];
+   VkFormat emu_plane_format;
+   struct lvp_image_plane emu_plane;
 };
+
+static inline bool
+lvp_is_compressed_format_emulated(VkFormat format) {
+   const struct util_format_description *desc =
+      vk_format_description(format);
+
+   switch (desc->layout) {
+   case UTIL_FORMAT_LAYOUT_ASTC:
+      return vk_texcompress_astc_emulation_format(format) != VK_FORMAT_UNDEFINED;
+   case UTIL_FORMAT_LAYOUT_ETC:
+   case UTIL_FORMAT_LAYOUT_S3TC:
+   case UTIL_FORMAT_LAYOUT_RGTC:
+   case UTIL_FORMAT_LAYOUT_BPTC:
+      return true;
+   default:
+      return false;
+   }
+}
 
 struct lvp_image_view {
    struct vk_image_view vk;
@@ -461,9 +487,7 @@ struct lvp_shader {
    struct lp_sampler_descriptor *embedded_samplers_map;
    struct pipe_resource *embedded_samplers;
    struct lvp_pipeline_nir *pipeline_nir;
-   struct lvp_pipeline_nir *tess_ccw;
    void *shader_cso;
-   void *tess_ccw_cso;
    struct pipe_stream_output_info stream_output;
    struct blob blob; //preserved for GetShaderBinaryDataEXT
    uint32_t push_constant_size;
@@ -544,9 +568,8 @@ struct lvp_pipeline {
    bool disable_multisample;
    bool line_rectangular;
    bool library;
-   bool compiled;
-   bool used;
    bool heaps;
+   util_once_flag compile_once;
 
    struct {
       const char *name;
@@ -592,7 +615,7 @@ struct lvp_exec_graph_internal_data {
 };
 
 void
-lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked);
+lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline);
 
 struct lvp_event {
    struct vk_object_base base;
@@ -777,6 +800,48 @@ lvp_vk_format_to_pipe_format(VkFormat format)
    }
 }
 
+static inline VkFormat
+lvp_texcompress_bc_emulation_format(VkFormat format)
+{
+   const struct util_format_description *desc = vk_format_description(format);
+
+   /* BC6H needs float16 for HDR data. The other BC formats decompress to raw
+    * texel values, so sRGB formats use an SRGB emulation format and the sRGB
+    * decode happens at sampling.
+    */
+
+   if (format == VK_FORMAT_BC6H_UFLOAT_BLOCK ||
+       format == VK_FORMAT_BC6H_SFLOAT_BLOCK)
+      return VK_FORMAT_R16G16B16A16_SFLOAT;
+
+   if (desc->is_snorm)
+      return VK_FORMAT_R8G8B8A8_SNORM;
+
+   return vk_format_is_srgb(format) ? VK_FORMAT_R8G8B8A8_SRGB :
+                                      VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+static inline VkFormat
+lvp_texcompress_vk_format_to_emu_plane_format(VkFormat format)
+{
+   const struct util_format_description *desc =
+      vk_format_description(format);
+
+   switch (desc->layout) {
+   case UTIL_FORMAT_LAYOUT_ASTC:
+      return vk_texcompress_astc_emulation_format(format);
+   case UTIL_FORMAT_LAYOUT_ETC:
+      return vk_texcompress_etc2_emulation_format(format);
+   case UTIL_FORMAT_LAYOUT_S3TC:
+   case UTIL_FORMAT_LAYOUT_RGTC:
+   case UTIL_FORMAT_LAYOUT_BPTC:
+      return lvp_texcompress_bc_emulation_format(format);
+   default:
+      UNREACHABLE("Unsupported compressed texture format");
+      return VK_FORMAT_UNDEFINED;
+   }
+}
+
 void
 lvp_nir_lower_blend(nir_shader *nir, const nir_lower_blend_options *opts);
 
@@ -807,7 +872,10 @@ lvp_image_aspects_to_plane(ASSERTED const struct lvp_image *image,
 }
 
 void
-lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline, bool locked);
+lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline);
+
+void
+lvp_destroy_shaders(struct lvp_device *device, struct pipe_context *ctx);
 
 void
 queue_thread_noop(void *data, void *gdata, int thread_index);
@@ -823,7 +891,7 @@ void
 lvp_shader_optimize(nir_shader *nir);
 
 void *
-lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir, bool locked);
+lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir);
 
 enum vk_cmd_type
 lvp_nv_dgc_token_to_cmd_type(const VkIndirectCommandsLayoutTokenNV *token);
@@ -832,7 +900,7 @@ VkResult
 lvp_image_init(struct lvp_device *device, struct lvp_image *image,
                const VkImageCreateInfo *pCreateInfo);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 VkResult
 lvp_import_ahb_memory(struct lvp_device *device,
                       const VkMemoryAllocateInfo *alloc_info,
@@ -898,6 +966,14 @@ lvp_image_copy_depth_box(uint8_t *dst,
                enum pipe_format src_format,
                int src_stride, uint64_t src_slice_stride,
                unsigned src_x, unsigned src_y, unsigned src_z);
+
+void
+lvp_unpack_texcompress(uint8_t *dst_row,
+                       unsigned dst_stride,
+                       const uint8_t *src_row,
+                       unsigned src_stride,
+                       const VkExtent3D *extent,
+                       enum pipe_format format);
 
 #ifdef __cplusplus
 }

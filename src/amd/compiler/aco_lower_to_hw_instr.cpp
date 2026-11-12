@@ -1889,7 +1889,8 @@ handle_operands(std::map<PhysReg, copy_operation>& copy_map, lower_context* ctx,
                                                      other->second.op.physReg() == it->first);
             bool unused_hi = !other->second.is_used ||
                              (other->second.is_used == 0x0101 && it->second.op.physReg() == reg_hi);
-            if (unused_lo && unused_hi) {
+            if (unused_lo && unused_hi && it->second.op.physReg().byte() % 2 == 0 &&
+                other->second.op.physReg().byte() % 2 == 0) {
                Operand lo = it->second.op;
                Operand hi = other->second.op;
                do_pack_2x16(ctx, bld, Definition(it->first, v1), lo, hi);
@@ -2916,6 +2917,9 @@ lower_to_hw_instr(Program* program)
                break;
             }
             case aco_opcode::p_end_with_regs: {
+               if (!instr->operands[0].isUndefined())
+                  bld.sop1(Builder::s_mov, Definition(exec, bld.lm), instr->operands[0]);
+               bld.insert(std::move(instr));
                end_with_regs_block_index = block->index;
                break;
             }
@@ -3011,6 +3015,36 @@ lower_to_hw_instr(Program* program)
                            Operand(rsrc_dword1, s1), Operand::c32(0), Operand(scc, s1));
                }
             }
+         } else if (instr->opcode == aco_opcode::p_v_mad_u32_u32_u16 ||
+                    instr->opcode == aco_opcode::p_v_mad_u32) {
+            /* Decompose dst = src0 * src1 + src2
+             * as            = (src0.lo * src1.lo + src2) + (src0.hi * src1.lo) << 16
+             *                                            + (src0.lo * src1.hi) << 16
+             *
+             * For p_v_mad_u32_u32_u16 we know that src1.hi is 0, so we can skip the last step.
+             */
+            const Operand& op0 = instr->operands[0];
+            const Operand& op1 = instr->operands[1];
+            const Operand& op2 = instr->operands[2];
+            const Definition& def = instr->definitions[0];
+            Operand def_as_op = Operand(def.physReg(), v1);
+
+            Builder::Result mad_u32 = bld.vop3(aco_opcode::v_mad_u32_u16, def, op0, op1, op2);
+            mad_u32->valu().opsel[1] = instr->valu().opsel[1];
+
+            Builder::Result mad_u16 = bld.vop3(aco_opcode::v_mad_u16, def, op0, op1, def_as_op);
+            mad_u16->valu().opsel[0] = true;
+            mad_u16->valu().opsel[1] = instr->valu().opsel[1];
+            mad_u16->valu().opsel[2] = true;
+            mad_u16->valu().opsel[3] = true;
+
+            if (instr->opcode == aco_opcode::p_v_mad_u32) {
+               Builder::Result mad_u16_2 =
+                  bld.vop3(aco_opcode::v_mad_u16, def, op0, op1, def_as_op);
+               mad_u16_2->valu().opsel[1] = true;
+               mad_u16_2->valu().opsel[2] = true;
+               mad_u16_2->valu().opsel[3] = true;
+            }
          } else {
             ctx.instructions.emplace_back(std::move(instr));
          }
@@ -3038,14 +3072,12 @@ lower_to_hw_instr(Program* program)
       exit_block->linear_preds.push_back(end_with_regs_block->index);
       end_with_regs_block->linear_succs.push_back(exit_block->index);
 
+      assert(end_with_regs_block->instructions.back()->opcode == aco_opcode::p_end_with_regs);
+      exit_block->instructions.push_back(std::move(end_with_regs_block->instructions.back()));
+      end_with_regs_block->instructions.pop_back();
+
       Builder bld(program, end_with_regs_block);
       bld.sopp(aco_opcode::s_branch, exit_block->index);
-
-      /* For insert waitcnt pass to add waitcnt in exit block, otherwise waitcnt will be added
-       * after the s_branch which won't be executed.
-       */
-      end_with_regs_block->kind &= ~block_kind_end_with_regs;
-      exit_block->kind |= block_kind_end_with_regs;
    }
 
    program->progress = CompilationProgress::after_lower_to_hw;

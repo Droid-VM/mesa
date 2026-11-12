@@ -202,7 +202,26 @@ storage_flags_to_buffer_flags(GLbitfield storageFlags)
       flags |= PIPE_RESOURCE_FLAG_MAP_COHERENT;
    if (storageFlags & GL_SPARSE_STORAGE_BIT_ARB)
       flags |= PIPE_RESOURCE_FLAG_SPARSE;
+   if (storageFlags & GL_MAP_CLIENT_POINTER_BIT_MESA)
+      flags |= PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER;
    return flags;
+}
+
+
+static inline bool
+buffer_usage_client_pointer(GLenum usage)
+{
+   return usage >= GL_CLIENT_POINTER_STREAM_DRAW_MESA &&
+          usage <= GL_CLIENT_POINTER_DYNAMIC_COPY_MESA;
+}
+
+/* masks out CLIENT_POINTER */
+static inline GLenum
+buffer_arb_usage(GLenum usage)
+{
+   if (buffer_usage_client_pointer(usage))
+      usage -= GL_CLIENT_POINTER_STREAM_DRAW_MESA - GL_STREAM_DRAW;
+   return usage;
 }
 
 
@@ -237,7 +256,7 @@ buffer_usage(GLenum target, GLboolean immutable,
          return PIPE_USAGE_STAGING;
 
       /* BufferData */
-      switch (usage) {
+      switch (buffer_arb_usage(usage)) {
       case GL_DYNAMIC_DRAW:
       case GL_DYNAMIC_COPY:
          return PIPE_USAGE_DYNAMIC;
@@ -278,6 +297,7 @@ bufferobj_data(struct gl_context *ctx,
    struct pipe_context *pipe = ctx->pipe;
    struct pipe_screen *screen = pipe->screen;
    bool is_mapped = _mesa_bufferobj_mapped(obj, MAP_USER);
+   GLboolean success = GL_TRUE;
 
    if (size > UINT32_MAX || offset > UINT32_MAX) {
       /* pipe_resource.width0 is 32 bits only and increasing it
@@ -347,6 +367,10 @@ bufferobj_data(struct gl_context *ctx,
       buffer.depth0 = 1;
       buffer.array_size = 1;
 
+      if (buffer.flags & PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER) {
+         buffer.clientptr_heap = ctx->Shared->ClientPointerHeap;
+      }
+
       if (memObj) {
          obj->buffer = screen->resource_from_memobj(screen, &buffer,
                                                     memObj->memory,
@@ -368,7 +392,10 @@ bufferobj_data(struct gl_context *ctx,
       if (!obj->buffer) {
          /* out of memory */
          obj->Size = 0;
-         return GL_FALSE;
+         /* Keep going after allocation failure so bound buffer users are
+          * revalidated now that the old backing resource has been released.
+          */
+         success = GL_FALSE;
       }
    }
 
@@ -388,7 +415,7 @@ bufferobj_data(struct gl_context *ctx,
    if (obj->UsageHistory & USAGE_ATOMIC_COUNTER_BUFFER)
       ST_SET_STATES(ctx->NewDriverState, ctx->DriverFlags.NewAtomicBuffer);
 
-   return GL_TRUE;
+   return success;
 }
 
 /**
@@ -493,6 +520,10 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
       _mesa_access_flags_to_transfer_flags(access,
                                            offset == 0 && length == obj->Size);
 
+   if (index == MAP_CLIENT_POINTER) {
+      transfer_flags |= PIPE_MAP_CLIENT_POINTER;
+   }
+
    /* Sometimes games do silly things like MapBufferRange(UNSYNC|DISCARD_RANGE)
     * In this case, the the UNSYNC is a bit redundant, but the games rely
     * on the driver rebinding/replacing the backing storage rather than
@@ -502,6 +533,16 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
       if (transfer_flags & (PIPE_MAP_DISCARD_RANGE | PIPE_MAP_DISCARD_WHOLE_RESOURCE))
          transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
    }
+
+   /* Some games keep a large buffer, where they map the entire buffer with the
+    * GL_MAP_INVALIDATE_BUFFER_BIT or GL_MAP_INVALIDATE_RANGE_BIT (but specify
+    * the range as the whole buffer), and only write to a portion of the buffer
+    * each time - so each subsequent map/write will discard the data that was
+    * previously written. This option tells the driver to ignore
+    * invalidating the entire buffer and keep the existing data in the buffer.
+    */
+   if (unlikely(ctx->st_opts->ignore_map_invalidate_buffer))
+      transfer_flags &= ~PIPE_MAP_DISCARD_WHOLE_RESOURCE;
 
    if (ctx->Const.ForceMapBufferSynchronized)
       transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
@@ -533,6 +574,47 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
    }
 
    return obj->Mappings[index].Pointer;
+}
+
+/**
+ * Called via glMapBufferRange(access & GL_MAP_CLIENT_POINTER_BIT_MESA).
+ */
+static void *
+bufferobj_map_client_pointer(struct gl_context *ctx,
+                             struct gl_buffer_object *obj)
+{
+   struct pipe_context *pipe = ctx->pipe;
+
+   unsigned client_ptr_size = 0;
+   void *ptr = pipe->transfer_map_clientptr_range(pipe,
+                                 obj->transfer[MAP_CLIENT_POINTER],
+                                 NULL,
+                                 &client_ptr_size);
+
+   if (!ptr && client_ptr_size && client_ptr_size == ctx->AddClientPointerRange.size) {
+      ptr = pipe->transfer_map_clientptr_range(pipe,
+                                 obj->transfer[MAP_CLIENT_POINTER],
+                                 &ctx->AddClientPointerRange,
+                                 NULL);
+   }
+
+   if (ptr) {
+      assert(!obj->Mappings[MAP_USER].Pointer);
+      obj->Mappings[MAP_USER] = obj->Mappings[MAP_CLIENT_POINTER];
+      obj->Mappings[MAP_CLIENT_POINTER].Pointer = NULL;
+      obj->Mappings[MAP_CLIENT_POINTER].Offset = 0;
+      obj->Mappings[MAP_CLIENT_POINTER].Length = 0;
+      obj->Mappings[MAP_CLIENT_POINTER].AccessFlags = 0;
+
+      obj->transfer[MAP_USER] = obj->transfer[MAP_CLIENT_POINTER];
+      obj->transfer[MAP_CLIENT_POINTER] = NULL;
+
+      obj->Mappings[MAP_USER].Pointer = ptr;
+   } else {
+      obj->ClientPointerSize = client_ptr_size;
+   }
+
+   return ptr;
 }
 
 
@@ -568,8 +650,13 @@ _mesa_bufferobj_unmap(struct gl_context *ctx, struct gl_buffer_object *obj,
 {
    struct pipe_context *pipe = ctx->pipe;
 
-   if (obj->Mappings[index].Length)
+   if (obj->Mappings[index].Length) {
+      if (index != MAP_CLIENT_POINTER && (obj->transfer[index]->usage & PIPE_MAP_CLIENT_POINTER)) {
+         pipe->transfer_unmap_clientptr_range(pipe, obj->transfer[index]);
+      }
+
       pipe_buffer_unmap(pipe, obj->transfer[index]);
+   }
 
    obj->transfer[index] = NULL;
    obj->Mappings[index].Pointer = NULL;
@@ -1357,7 +1444,9 @@ bind_buffer_object(struct gl_context *ctx,
    if (unlikely(_mesa_is_same_buffer_object(oldBufObj, buffer)))
       return;   /* rebinding the same buffer object- no change */
 
-   newBufObj = _mesa_lookup_bufferobj(ctx, buffer);
+   newBufObj = (struct gl_buffer_object *)
+      _mesa_HashLookupMaybeLocked(&ctx->Shared->BufferObjects, buffer,
+                                  ctx->BufferObjectsLocked);
    /* Get a new buffer object if it hasn't been created. */
    if (unlikely(!handle_bind_buffer_gen(ctx, buffer, &newBufObj, "glBindBuffer",
                                         no_error)))
@@ -1500,8 +1589,22 @@ unbind(struct gl_context *ctx,
        struct gl_buffer_object *obj)
 {
    if (vao->BufferBinding[index].BufferObj == obj) {
+      const bool core_profile = _mesa_is_desktop_gl_core(ctx);
+
+      /* Core profiles don't support client arrays.  Clear the pointer state
+       * so that a buffer offset isn't interpreted as a user pointer if the
+       * array remains enabled after the buffer is deleted.
+       */
+      if (core_profile) {
+         GLbitfield mask = vao->BufferBinding[index]._BoundArrays;
+
+         while (mask)
+            vao->VertexAttrib[u_bit_scan(&mask)].Ptr = NULL;
+      }
+
       _mesa_bind_vertex_buffer(ctx, vao, index, NULL,
-                               vao->BufferBinding[index].Offset,
+                               core_profile ? 0 :
+                                  vao->BufferBinding[index].Offset,
                                vao->BufferBinding[index].Stride, true, false);
    }
 }
@@ -2094,6 +2197,9 @@ validate_buffer_storage(struct gl_context *ctx,
    if (ctx->Extensions.ARB_sparse_buffer)
       valid_flags |= GL_SPARSE_STORAGE_BIT_ARB;
 
+   if (ctx->Extensions.MESA_map_buffer_client_pointer)
+      valid_flags |= GL_MAP_CLIENT_POINTER_BIT_MESA;
+
    if (flags & ~valid_flags) {
       _mesa_error(ctx, GL_INVALID_VALUE, "%s(invalid flag bits set)", func);
       return false;
@@ -2346,7 +2452,7 @@ buffer_data(struct gl_context *ctx, struct gl_buffer_object *bufObj,
          return;
       }
 
-      switch (usage) {
+      switch (buffer_arb_usage(usage)) {
       case GL_STREAM_DRAW_ARB:
          valid_usage = (!_mesa_is_gles1(ctx));
          break;
@@ -2371,6 +2477,11 @@ buffer_data(struct gl_context *ctx, struct gl_buffer_object *bufObj,
          _mesa_error(ctx, GL_INVALID_ENUM, "%s(invalid usage: %s)", func,
                      _mesa_enum_to_string(usage));
          return;
+      }
+
+      if (!_mesa_has_MESA_map_buffer_client_pointer(ctx) && buffer_usage_client_pointer(usage)) {
+            _mesa_error(ctx, GL_INVALID_ENUM, "%s(invalid usage)", func);
+            return;
       }
 
       if (bufObj->Immutable || bufObj->HandleAllocated) {
@@ -2398,7 +2509,8 @@ buffer_data(struct gl_context *ctx, struct gl_buffer_object *bufObj,
    if (!_mesa_bufferobj_data(ctx, target, size, data, usage,
                              GL_MAP_READ_BIT |
                              GL_MAP_WRITE_BIT |
-                             GL_DYNAMIC_STORAGE_BIT,
+                             GL_DYNAMIC_STORAGE_BIT |
+                             (buffer_usage_client_pointer(usage) ? GL_MAP_CLIENT_POINTER_BIT_MESA : 0),
                              bufObj)) {
       if (target == GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD) {
          if (!no_error) {
@@ -3141,6 +3253,11 @@ get_buffer_parameter(struct gl_context *ctx,
          goto invalid_pname;
       *params = bufObj->StorageFlags;
       break;
+   case GL_BUFFER_CLIENT_POINTER_SIZE_MESA:
+      if (!ctx->Extensions.MESA_map_buffer_client_pointer)
+         goto invalid_pname;
+      *params = bufObj->ClientPointerSize;
+      break;
    default:
       goto invalid_pname;
    }
@@ -3586,6 +3703,10 @@ validate_map_buffer_range(struct gl_context *ctx,
                            GL_MAP_COHERENT_BIT;
    }
 
+   if (ctx->Extensions.MESA_map_buffer_client_pointer) {
+      allowed_access |= GL_MAP_CLIENT_POINTER_BIT_MESA;
+   }
+
    if (access & ~allowed_access) {
       /* generate an error if any bits other than those allowed are set */
       _mesa_error(ctx, GL_INVALID_VALUE,
@@ -3643,6 +3764,13 @@ validate_map_buffer_range(struct gl_context *ctx,
       return false;
    }
 
+   if ((access & GL_MAP_CLIENT_POINTER_BIT_MESA) !=
+       (bufObj->StorageFlags & GL_MAP_CLIENT_POINTER_BIT_MESA)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(buffer client-pointer access mismatch)", func);
+      return false;
+   }
+
    if (offset + length > bufObj->Size) {
       _mesa_error(ctx, GL_INVALID_VALUE,
                   "%s(offset %lu + length %lu > buffer_size %lu)", func,
@@ -3683,12 +3811,39 @@ map_buffer_range(struct gl_context *ctx, struct gl_buffer_object *bufObj,
       return NULL;
    }
 
-   void *map = _mesa_bufferobj_map_range(ctx, offset, length, access, bufObj,
-                                         MAP_USER);
-   if (!map) {
-      _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s(map failed)", func);
+   if ((access & GL_MAP_CLIENT_POINTER_BIT_MESA) &&
+         bufObj->Mappings[MAP_CLIENT_POINTER].Pointer) {
+      if (offset == bufObj->Mappings[MAP_CLIENT_POINTER].Offset &&
+          length == bufObj->Mappings[MAP_CLIENT_POINTER].Length &&
+          access == bufObj->Mappings[MAP_CLIENT_POINTER].AccessFlags) {
+         void *map = bufferobj_map_client_pointer(ctx, bufObj);
+         if (!map) {
+            _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s(map failed)", func);
+         }
+         return map;
+      } else {
+         _mesa_bufferobj_unmap(ctx, bufObj, MAP_CLIENT_POINTER);
+      }
    }
-   else {
+
+   gl_map_buffer_index index = access & GL_MAP_CLIENT_POINTER_BIT_MESA ?
+                                 MAP_CLIENT_POINTER :
+                                 MAP_USER;
+
+   void *map = _mesa_bufferobj_map_range(ctx, offset, length, access, bufObj,
+                                         index);
+
+   if (map == PIPE_TRANSFER_CLIENT_POINTER) {
+      map = bufferobj_map_client_pointer(ctx, bufObj);
+   }
+
+   if (!map) {
+      if ((access & GL_MAP_CLIENT_POINTER_BIT_MESA) && bufObj->ClientPointerSize) {
+         _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s(needs client pointer range: not an error)", func);
+      } else {
+         _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s(map failed)", func);
+      }
+   } else {
       /* The driver callback should have set all these fields.
        * This is important because other modules (like VBO) might call
        * the driver function directly.
@@ -5326,4 +5481,54 @@ _mesa_NamedBufferPageCommitmentEXT(GLuint buffer, GLintptr offset,
    }
    buffer_page_commitment(ctx, bufferObj, offset, size, commit,
                           "glNamedBufferPageCommitmentEXT");
+}
+
+void GLAPIENTRY
+_mesa_AddClientPointerRangeMESA(void *addr, GLsizeiptr size)
+{
+   GET_CURRENT_CONTEXT(ctx);
+
+   if (!addr) {
+      _mesa_error(ctx, GL_INVALID_OPERATION, "glAddClientPointerRangeMESA(addr = 0)");
+      return;
+   }
+
+   if (!size) {
+      _mesa_error(ctx, GL_INVALID_OPERATION, "glAddClientPointerRangeMESA(size = 0)");
+      return;
+   }
+
+   if (ctx->AddClientPointerRange.start) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glAddClientPointerRangeMESA(previous range must be consumed or released)");
+      return;
+   }
+
+   ctx->AddClientPointerRange.start = addr;
+   ctx->AddClientPointerRange.size = size;
+}
+
+void * GLAPIENTRY
+_mesa_ReleaseClientPointerRangeMESA(GLbitfield flags, GLsizeiptr *size)
+{
+   GET_CURRENT_CONTEXT(ctx);
+   struct pipe_screen *screen = ctx->pipe->screen;
+   struct pipe_clientptr_range ret;
+
+   if (ctx->AddClientPointerRange.start) {
+      ret = ctx->AddClientPointerRange;
+      ctx->AddClientPointerRange.start = NULL;
+      ctx->AddClientPointerRange.size = 0;
+
+      *size = ret.size;
+      return ret.start;
+   }
+
+   if (screen->clientptr_range_reclaim(screen, ctx->Shared->ClientPointerHeap,
+                                !!(flags & GL_CLIENT_POINTER_RELEASE_ALL_MESA),
+                                &ret)) {
+      *size = ret.size;
+      return ret.start;
+   }
+
+   return NULL;
 }

@@ -23,6 +23,8 @@ intel_compute_engine_async_threads_limit(const struct intel_device_info *devinfo
 
 int
 intel_compute_threads_group_dispatch_size(uint32_t hw_threads_in_wg);
+int
+intel_compute_threads_group_dispatch_size_walker_2(uint32_t hw_threads_in_wg);
 
 /**
  * Convert a number of GRF registers used (grf_used in prog_data) into a
@@ -39,6 +41,8 @@ intel_register_blocks(const struct intel_device_info *devinfo,
 bool
 intel_register_blocks_supported(const struct intel_device_info *devinfo,
                                 int num_regs);
+
+uint8_t intel_sampler_state_size(bool uses_efficient_64bit);
 
 #ifdef __cplusplus
 }

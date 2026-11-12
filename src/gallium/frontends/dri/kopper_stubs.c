@@ -1,16 +1,11 @@
 /*  SPDX-License-Identifier: MIT */
 
 #include "dri_drawable.h"
+#include "dri_screen.h"
 #include "dri_util.h"
 
 int64_t
-kopperSwapBuffers(struct dri_drawable *dPriv, uint32_t flush_flags)
-{
-   return 0;
-}
-
-int64_t
-kopperSwapBuffersWithDamage(struct dri_drawable *dPriv, uint32_t flush_flags, int nrects, const int *rects)
+kopperSwapBuffers(struct dri_drawable *dPriv, uint32_t flush_flags, int nrects, const int *rects)
 {
    return 0;
 }
@@ -39,25 +34,46 @@ kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t d
    return 0;
 }
 
-const struct dri_config **
-kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred);
-const struct dri_config **
+struct pipe_screen *
 kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 {
    return NULL;
 }
 
-struct dri_drawable;
-void
-kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits);
 void
 kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits)
 {
 }
 
 void
-kopper_destroy_drawable(struct dri_drawable *drawable);
-void
 kopper_destroy_drawable(struct dri_drawable *drawable)
+{
+}
+
+void
+kopper_allocate_textures(struct dri_context *ctx,
+                         struct dri_drawable *drawable,
+                         const enum st_attachment_type *statts,
+                         unsigned statts_count)
+{
+}
+
+void
+kopper_update_drawable_info(struct dri_drawable *drawable)
+{
+}
+
+bool
+kopper_flush_frontbuffer(struct dri_context *ctx,
+                         struct dri_drawable *drawable,
+                         enum st_attachment_type statt)
+{
+   return false;
+}
+
+void
+kopper_update_tex_buffer(struct dri_drawable *drawable,
+                         struct dri_context *ctx,
+                         struct pipe_resource *res)
 {
 }

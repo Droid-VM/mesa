@@ -1003,7 +1003,7 @@ static const uint32_t xe3p_3src_dpas_control_index_table[16] = {
 
 static const uint32_t xe3p_3src_source_index_table[16] = {
    /* BitRemap: 114,113:112,98,97:96,91,87:86,85:84,66,65:64,49,47,46,45:44,43,35 */
-   0b010110000000000000001,
+   0b101100000001000000001,
    0b101100000000000000001,
    0b100100000001000000000,
    0b100100000000000000001,
@@ -1987,6 +1987,13 @@ private:
    void
    precompact()
    {
+      /* The following reads and modifies fields specific to the one-
+       * and two-source instruction layout.
+       */
+      if (desc->format != GEN_FORMAT_BASIC_ONE_SRC &&
+          desc->format != GEN_FORMAT_BASIC_TWO_SRC)
+         return;
+
       /* In XeHP the compaction tables removed the entries for source regions
        * <8;8,1> giving preference to <1;1,0> as the way to indicate
        * sequential elements, so convert to those before compacting.
@@ -2093,6 +2100,10 @@ private:
    bool
    try_compact()
    {
+      /* TODO: implement sendg compact */
+      if (desc->gen_op == GEN_OP_SENDG || desc->gen_op == GEN_OP_SENDGC)
+         return false;
+
       memset(&c_raw, 0, sizeof(c_raw));
       precompact();
 

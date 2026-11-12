@@ -40,7 +40,7 @@ static void
 vl_drm_screen_destroy(struct vl_screen *vscreen);
 
 struct vl_screen *
-vl_drm_screen_create(int fd, bool honor_dri_prime)
+vl_drm_screen_create(int fd, bool honor_dri_prime, bool zink)
 {
    struct vl_screen *vscreen;
    int libva_owned_fd = -1;
@@ -58,7 +58,7 @@ vl_drm_screen_create(int fd, bool honor_dri_prime)
    if (!vscreen)
       return NULL;
 
-   if (pipe_loader_drm_probe_fd(&vscreen->dev, fd, false))
+   if (pipe_loader_drm_probe_fd(&vscreen->dev, fd, zink))
       vscreen->pscreen = pipe_loader_create_screen(vscreen->dev, false);
 
    if (libva_owned_fd >= 0 && libva_owned_fd != fd)

@@ -122,6 +122,7 @@ glapi_xml_py_deps = files(
   'glapi/gen/KHR_robustness.xml',
   'glapi/gen/KHR_shader_subgroup.xml',
   'glapi/gen/KHR_texture_compression_astc.xml',
+  'glapi/gen/MESA_map_buffer_client_pointer.xml',
   'glapi/gen/MESA_tile_raster_order.xml',
   'glapi/gen/NV_alpha_to_coverage_dither_control.xml',
   'glapi/gen/NV_conditional_render.xml',

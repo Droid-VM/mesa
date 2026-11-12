@@ -21,9 +21,12 @@
 static bool
 ok_dims(const struct pipe_resource *r, const struct pipe_box *b, int lvl)
 {
+   int last_layer =
+      r->target == PIPE_TEXTURE_3D ? u_minify(r->depth0, lvl) : r->array_size;
+
    return (b->x >= 0) && (b->x + b->width <= u_minify(r->width0, lvl)) &&
           (b->y >= 0) && (b->y + b->height <= u_minify(r->height0, lvl)) &&
-          (b->z >= 0) && (b->z + b->depth <= u_minify(r->depth0, lvl));
+          (b->z >= 0) && (b->z + b->depth <= last_layer);
 }
 
 /* Not sure if format restrictions differ for src and dst, or if
@@ -49,6 +52,7 @@ ok_format(enum pipe_format fmt)
    case PIPE_FORMAT_R10SG10SB10SA2U_NORM:
    case PIPE_FORMAT_B10G10R10A2_UINT:
    case PIPE_FORMAT_R10G10B10A2_UINT:
+   case PIPE_FORMAT_B10G10R10X2_UNORM:
       return false;
    default:
       break;
@@ -58,6 +62,119 @@ ok_format(enum pipe_format fmt)
       return false;
 
    return true;
+}
+
+/* The 2D blit converts a pixel by selecting channels, not by re-encoding
+ * them: it can drop channels, append ones the destination gains, and copy
+ * between differently sized pixels, but it cannot change how wide a channel
+ * is.  Measured against u_blitter over every pair of 21 renderable formats,
+ * with both surfaces linear and again with both tiled: every pair this
+ * accepts matches, and each rejected one differs.
+ */
+static bool
+ok_format_pair(enum pipe_format src, enum pipe_format dst)
+{
+   const struct util_format_description *sd = util_format_description(src);
+   const struct util_format_description *dd = util_format_description(dst);
+
+   if (src == dst)
+      return true;
+
+   if (sd->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
+       dd->layout != UTIL_FORMAT_LAYOUT_PLAIN)
+      return false;
+
+   if (sd->colorspace != dd->colorspace)
+      return false;
+
+   /* A channel the destination has but the source does not reads back as
+    * zero, which is what a colour channel would give anyway -- but alpha
+    * has to default to one, and the blit cannot invent it.
+    */
+   if (util_format_has_alpha(dst) && !util_format_has_alpha(src))
+      return false;
+
+   for (unsigned i = 0; i < 4; i++) {
+      const struct util_format_channel_description *sc = &sd->channel[i];
+      const struct util_format_channel_description *dc = &dd->channel[i];
+
+      if (!sc->size || !dc->size)
+         continue;   /* not carried by both, so nothing to re-encode */
+
+      if (sc->size != dc->size || sc->type != dc->type ||
+          sc->normalized != dc->normalized || sc->pure_integer != dc->pure_integer)
+         return false;
+
+      if (sd->swizzle[i] != dd->swizzle[i])
+         return false;
+   }
+
+   return true;
+}
+
+static enum adreno_2d_ifmt
+fd5_ifmt(enum a5xx_color_fmt fmt)
+{
+   switch (fmt) {
+   case RB5_A8_UNORM:
+   case RB5_R8_UNORM:
+   case RB5_R8_SNORM:
+   case RB5_R8G8_UNORM:
+   case RB5_R8G8_SNORM:
+   case RB5_R8G8B8_UNORM:
+   case RB5_R8G8B8A8_UNORM:
+   case RB5_R8G8B8A8_SNORM:
+   case RB5_R4G4B4A4_UNORM:
+   case RB5_R5G5B5A1_UNORM:
+   case RB5_R5G6B5_UNORM:
+   case RB5_R10G10B10A2_UNORM:
+      return R2D_UNORM8;
+
+   case RB5_R32_UINT:
+   case RB5_R32_SINT:
+   case RB5_R32G32_UINT:
+   case RB5_R32G32_SINT:
+   case RB5_R32G32B32A32_UINT:
+   case RB5_R32G32B32A32_SINT:
+      return R2D_INT32;
+
+   case RB5_R16_UINT:
+   case RB5_R16_SINT:
+   case RB5_R16G16_UINT:
+   case RB5_R16G16_SINT:
+   case RB5_R16G16B16A16_UINT:
+   case RB5_R16G16B16A16_SINT:
+   case RB5_R10G10B10A2_UINT:
+      return R2D_INT16;
+
+   case RB5_R8_UINT:
+   case RB5_R8_SINT:
+   case RB5_R8G8_UINT:
+   case RB5_R8G8_SINT:
+   case RB5_R8G8B8A8_UINT:
+   case RB5_R8G8B8A8_SINT:
+      return R2D_INT8;
+
+   case RB5_R16_UNORM:
+   case RB5_R16_SNORM:
+   case RB5_R16G16_UNORM:
+   case RB5_R16G16_SNORM:
+   case RB5_R16G16B16A16_UNORM:
+   case RB5_R16G16B16A16_SNORM:
+   case RB5_R32_FLOAT:
+   case RB5_R32G32_FLOAT:
+   case RB5_R32G32B32A32_FLOAT:
+      return R2D_FLOAT32;
+
+   case RB5_R16_FLOAT:
+   case RB5_R16G16_FLOAT:
+   case RB5_R16G16B16A16_FLOAT:
+   case RB5_R11G11B10_FLOAT:
+      return R2D_FLOAT16;
+
+   default:
+      return R2D_UNORM8;
+   }
 }
 
 static bool
@@ -75,14 +192,7 @@ can_do_blit(const struct pipe_blit_info *info)
    if (!ok_format(info->src.format))
       return false;
 
-   /* hw ignores {SRC,DST}_INFO.COLOR_SWAP if {SRC,DST}_INFO.TILE_MODE
-    * is set (not linear).  We can kind of get around that when tiling/
-    * untiling by setting both src and dst COLOR_SWAP=WZYX, but that
-    * means the formats must match:
-    */
-   if ((fd_resource(info->dst.resource)->layout.tile_mode ||
-        fd_resource(info->src.resource)->layout.tile_mode) &&
-       info->dst.format != info->src.format)
+   if (!ok_format_pair(info->src.format, info->dst.format))
       return false;
 
    /* until we figure out a few more registers: */
@@ -133,16 +243,21 @@ can_do_blit(const struct pipe_blit_info *info)
 }
 
 static void
-emit_setup(struct fd_ringbuffer *ring)
+emit_setup(struct fd_ringbuffer *ring, enum pipe_format dst_format)
 {
+   enum a5xx_color_fmt dfmt = fd5_pipe2color(dst_format);
+   uint32_t blit_cntl = A5XX_RB_2D_BLIT_CNTL_ROP(ROP_COPY) |
+                        A5XX_RB_2D_BLIT_CNTL_IFMT(fd5_ifmt(dfmt)) |
+                        A5XX_RB_2D_BLIT_CNTL_UNK31;
+
    OUT_PKT4(ring, REG_A5XX_RB_RENDER_CNTL, 1);
    OUT_RING(ring, 0x00000008);
 
    OUT_PKT4(ring, REG_A5XX_RB_2D_BLIT_CNTL, 1);
-   OUT_RING(ring, 0x86000000); /* RB_2D_BLIT_CNTL */
+   OUT_RING(ring, blit_cntl); /* RB_2D_BLIT_CNTL */
 
    OUT_PKT4(ring, REG_A5XX_GRAS_2D_BLIT_CNTL, 1);
-   OUT_RING(ring, 0x86000000); /* 2D_BLIT_CNTL */
+   OUT_RING(ring, blit_cntl); /* 2D_BLIT_CNTL */
 
    OUT_PKT4(ring, REG_A5XX_UNKNOWN_2184, 1);
    OUT_RING(ring, 0x00000009); /* UNKNOWN_2184 */
@@ -267,11 +382,24 @@ emit_blit_buffer(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       OUT_RING(ring, A5XX_GRAS_2D_DST_INFO_COLOR_FORMAT(RB5_R8_UNORM) |
                         A5XX_GRAS_2D_DST_INFO_COLOR_SWAP(WZYX));
 
+      OUT_PKT4(ring, REG_A5XX_TPL1_A2D_SRC_TEXTURE_INFO, 5);
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_FORMAT(RB5_R8_UNORM) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_INFO_TILE_MODE(TILE5_LINEAR) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_SWAP(WZYX));
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_SIZE_WIDTH(sshift + w) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_SIZE_HEIGHT(1));
+      OUT_RELOC(ring, src->bo, soff, 0, 0);
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_PITCH_PITCH(p));
+
+      OUT_PKT4(ring, REG_A5XX_SP_A2D_OUTPUT_INFO, 1);
+      OUT_RING(ring, A5XX_SP_A2D_OUTPUT_INFO_IFMT_TYPE(OUTPUT_IFMT_2D_FLOAT) |
+                        A5XX_SP_A2D_OUTPUT_INFO_COLOR_FORMAT(RB5_R8_UNORM));
+
       /*
        * Blit command:
        */
       OUT_PKT7(ring, CP_BLIT, 5);
-      OUT_RING(ring, CP_BLIT_0_OP(BLIT_OP_COPY));
+      OUT_RING(ring, CP_BLIT_0_OP(BLIT_OP_SCALE));
       OUT_RING(ring, CP_BLIT_1_SRC_X1(sshift) | CP_BLIT_1_SRC_Y1(0));
       OUT_RING(ring, CP_BLIT_2_SRC_X2(sshift + w - 1) | CP_BLIT_2_SRC_Y2(0));
       OUT_RING(ring, CP_BLIT_3_DST_X1(dshift) | CP_BLIT_3_DST_Y1(0));
@@ -293,6 +421,7 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
    enum a5xx_color_fmt sfmt, dfmt;
    enum a5xx_tile_mode stile, dtile;
    enum a3xx_color_swap sswap, dswap;
+   bool ssrgb, dsrgb;
    unsigned spitch, dpitch;
    unsigned sx1, sy1, sx2, sy2;
    unsigned dx1, dy1, dx2, dy2;
@@ -309,6 +438,11 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
    sswap = fd5_pipe2swap(info->src.format);
    dswap = fd5_pipe2swap(info->dst.format);
 
+   ssrgb = util_format_is_srgb(info->src.format);
+   dsrgb = util_format_is_srgb(info->dst.format);
+   if (ssrgb == dsrgb)
+      ssrgb = dsrgb = false;
+
    spitch = fd_resource_pitch(src, info->src.level);
    dpitch = fd_resource_pitch(dst, info->dst.level);
 
@@ -318,7 +452,7 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
     * dst swap mode (so we don't change component order)
     */
    if (stile || dtile) {
-      assert(info->src.format == info->dst.format);
+      assert(ok_format_pair(info->src.format, info->dst.format));
       sswap = dswap = WZYX;
    }
 
@@ -351,7 +485,8 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       OUT_PKT4(ring, REG_A5XX_RB_2D_SRC_INFO, 9);
       OUT_RING(ring, A5XX_RB_2D_SRC_INFO_COLOR_FORMAT(sfmt) |
                         A5XX_RB_2D_SRC_INFO_TILE_MODE(stile) |
-                        A5XX_RB_2D_SRC_INFO_COLOR_SWAP(sswap));
+                        A5XX_RB_2D_SRC_INFO_COLOR_SWAP(sswap) |
+                        COND(ssrgb, A5XX_RB_2D_SRC_INFO_SRGB));
       OUT_RELOC(ring, src->bo, soff, 0, 0); /* RB_2D_SRC_LO/HI */
       OUT_RING(ring, A5XX_RB_2D_SRC_SIZE_PITCH(spitch) |
                         A5XX_RB_2D_SRC_SIZE_ARRAY_PITCH(sarray_pitch));
@@ -364,7 +499,8 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       OUT_PKT4(ring, REG_A5XX_GRAS_2D_SRC_INFO, 1);
       OUT_RING(ring, A5XX_GRAS_2D_SRC_INFO_COLOR_FORMAT(sfmt) |
                         A5XX_GRAS_2D_SRC_INFO_TILE_MODE(stile) |
-                        A5XX_GRAS_2D_SRC_INFO_COLOR_SWAP(sswap));
+                        A5XX_GRAS_2D_SRC_INFO_COLOR_SWAP(sswap) |
+                        COND(ssrgb, A5XX_GRAS_2D_SRC_INFO_SRGB));
 
       /*
        * Emit destination:
@@ -372,7 +508,8 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       OUT_PKT4(ring, REG_A5XX_RB_2D_DST_INFO, 9);
       OUT_RING(ring, A5XX_RB_2D_DST_INFO_COLOR_FORMAT(dfmt) |
                         A5XX_RB_2D_DST_INFO_TILE_MODE(dtile) |
-                        A5XX_RB_2D_DST_INFO_COLOR_SWAP(dswap));
+                        A5XX_RB_2D_DST_INFO_COLOR_SWAP(dswap) |
+                        COND(dsrgb, A5XX_RB_2D_DST_INFO_SRGB));
       OUT_RELOC(ring, dst->bo, doff, 0, 0); /* RB_2D_DST_LO/HI */
       OUT_RING(ring, A5XX_RB_2D_DST_SIZE_PITCH(dpitch) |
                         A5XX_RB_2D_DST_SIZE_ARRAY_PITCH(darray_pitch));
@@ -385,13 +522,42 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       OUT_PKT4(ring, REG_A5XX_GRAS_2D_DST_INFO, 1);
       OUT_RING(ring, A5XX_GRAS_2D_DST_INFO_COLOR_FORMAT(dfmt) |
                         A5XX_GRAS_2D_DST_INFO_TILE_MODE(dtile) |
-                        A5XX_GRAS_2D_DST_INFO_COLOR_SWAP(dswap));
+                        A5XX_GRAS_2D_DST_INFO_COLOR_SWAP(dswap) |
+                        COND(dsrgb, A5XX_GRAS_2D_DST_INFO_SRGB));
+
+      OUT_PKT4(ring, REG_A5XX_TPL1_A2D_SRC_TEXTURE_INFO, 5);
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_FORMAT(sfmt) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_INFO_TILE_MODE(stile) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_SWAP(sswap) |
+                        COND(ssrgb, A5XX_TPL1_A2D_SRC_TEXTURE_INFO_SRGB));
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_SIZE_WIDTH(
+                        u_minify(src->b.b.width0, info->src.level)) |
+                        A5XX_TPL1_A2D_SRC_TEXTURE_SIZE_HEIGHT(
+                           u_minify(src->b.b.height0, info->src.level)));
+      OUT_RELOC(ring, src->bo, soff, 0, 0);
+      OUT_RING(ring, A5XX_TPL1_A2D_SRC_TEXTURE_PITCH_PITCH(spitch));
+
+      enum adreno_2d_output_ifmt_type ifmt_type = OUTPUT_IFMT_2D_FLOAT;
+      if (util_format_is_depth_or_stencil(info->dst.format))
+         ifmt_type = OUTPUT_IFMT_2D_FLOAT;
+      else if (util_format_is_pure_uint(info->dst.format))
+         ifmt_type = OUTPUT_IFMT_2D_UINT;
+      else if (util_format_is_pure_sint(info->dst.format))
+         ifmt_type = OUTPUT_IFMT_2D_SINT;
+
+      OUT_PKT4(ring, REG_A5XX_SP_A2D_OUTPUT_INFO, 1);
+      OUT_RING(ring, COND(util_format_is_float16(info->src.format) ||
+                             info->src.format == PIPE_FORMAT_R11G11B10_FLOAT,
+                          A5XX_SP_A2D_OUTPUT_INFO_HALF_PRECISION) |
+                        A5XX_SP_A2D_OUTPUT_INFO_IFMT_TYPE(ifmt_type) |
+                        A5XX_SP_A2D_OUTPUT_INFO_COLOR_FORMAT(dfmt) |
+                        COND(dsrgb, A5XX_SP_A2D_OUTPUT_INFO_SRGB));
 
       /*
        * Blit command:
        */
       OUT_PKT7(ring, CP_BLIT, 5);
-      OUT_RING(ring, CP_BLIT_0_OP(BLIT_OP_COPY));
+      OUT_RING(ring, CP_BLIT_0_OP(BLIT_OP_SCALE));
       OUT_RING(ring, CP_BLIT_1_SRC_X1(sx1) | CP_BLIT_1_SRC_Y1(sy1));
       OUT_RING(ring, CP_BLIT_2_SRC_X2(sx2) | CP_BLIT_2_SRC_Y2(sy2));
       OUT_RING(ring, CP_BLIT_3_DST_X1(dx1) | CP_BLIT_3_DST_Y1(dy1));
@@ -406,10 +572,20 @@ bool
 fd5_blitter_blit(struct fd_context *ctx,
                  const struct pipe_blit_info *info) assert_dt
 {
+   struct pipe_blit_info unorm_info;
    struct fd_batch *batch;
 
    if (!can_do_blit(info)) {
       return false;
+   }
+
+   /* An snorm blit would turn -128 into -127; copy the bits instead. */
+   if (info->src.format == info->dst.format &&
+       util_format_is_snorm(info->src.format)) {
+      unorm_info = *info;
+      unorm_info.src.format = unorm_info.dst.format =
+         util_format_snorm_to_unorm(info->src.format);
+      info = &unorm_info;
    }
 
    struct fd_resource *src = fd_resource(info->src.resource);
@@ -428,7 +604,7 @@ fd5_blitter_blit(struct fd_context *ctx,
 
    fd_batch_update_queries(batch);
 
-   emit_setup(batch->draw);
+   emit_setup(batch->draw, info->dst.format);
 
    if ((info->src.resource->target == PIPE_BUFFER) &&
        (info->dst.resource->target == PIPE_BUFFER)) {
@@ -440,6 +616,24 @@ fd5_blitter_blit(struct fd_context *ctx,
       assert(info->src.resource->target != PIPE_BUFFER);
       assert(info->dst.resource->target != PIPE_BUFFER);
       emit_blit(batch->draw, info);
+
+      /* a separate stencil is a resource of its own, so it needs its own blit */
+      if ((info->mask & PIPE_MASK_S) && src->stencil && dst->stencil) {
+         struct pipe_blit_info sinfo = *info;
+
+         sinfo.src.resource = &src->stencil->b.b;
+         sinfo.dst.resource = &dst->stencil->b.b;
+         sinfo.src.format = src->stencil->b.b.format;
+         sinfo.dst.format = dst->stencil->b.b.format;
+         sinfo.mask = util_format_get_mask(sinfo.src.format);
+
+         fd_screen_lock(ctx->screen);
+         fd_batch_resource_read(batch, src->stencil);
+         fd_batch_resource_write(batch, dst->stencil);
+         fd_screen_unlock(ctx->screen);
+
+         emit_blit(batch->draw, &sinfo);
+      }
    }
 
    fd_batch_needs_flush(batch);

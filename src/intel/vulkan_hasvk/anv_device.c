@@ -317,7 +317,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_transform_feedback                = true,
       .EXT_vertex_attribute_divisor          = true,
       .EXT_ycbcr_image_arrays                = true,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .ANDROID_external_memory_android_hardware_buffer = true,
       .ANDROID_native_buffer                 = true,
 #endif
@@ -417,7 +417,7 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderBufferInt64Atomics            = false,
       .shaderSharedInt64Atomics            = false,
       .shaderFloat16                       = pdevice->info.ver >= 8 && !pdevice->instance->drirc.performance.no_16bit,
-      .shaderInt8                          = pdevice->info.ver >= 8 && !pdevice->instance->drirc.performance.no_16bit,
+      .shaderInt8                          = pdevice->info.ver >= 8,
 
       .descriptorIndexing                                 = false,
       .shaderInputAttachmentArrayDynamicIndexing          = false,
@@ -973,12 +973,12 @@ get_properties(const struct anv_physical_device *pdevice,
       isl_device_get_sample_counts(&pdevice->isl_dev);
 
    *props = (struct vk_properties) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .apiVersion = ANV_API_VERSION,
 #else
       .apiVersion = (pdevice->use_softpin || pdevice->instance->drirc.performance.report_vk_1_3_version) ?
          ANV_API_VERSION_1_3 : ANV_API_VERSION_1_2,
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
       .driverVersion = vk_get_driver_version(),
       .vendorID = 0x8086,
       .deviceID = pdevice->info.pci_device_id,
@@ -1259,11 +1259,11 @@ get_properties(const struct anv_physical_device *pdevice,
    }
 
    /* VK_ANDROID_native_buffer */
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    {
       props->sharedImage = VK_FALSE;
    }
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
    /* VK_KHR_maintenance5 */
    {
@@ -1500,7 +1500,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count)
       } else if (strncmp(next, "c=", 2) == 0) {
          c_override = strtol(next + 2, NULL, 0);
       } else {
-         mesa_logw("Ignoring unsupported ANV_QUEUE_OVERRIDE token: %s", next);
+         mesa_logw("Ignoring unsupported HASVK_QUEUE_OVERRIDE token: %s", next);
       }
       next = strtok_r(NULL, ",", &save);
    }
@@ -1510,7 +1510,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count)
    if (g_override >= 0)
       *g_count = g_override;
    if (*g_count > 0 && *gc_count <= 0 && (gc_override >= 0 || g_override >= 0))
-      mesa_logw("ANV_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
+      mesa_logw("HASVK_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
                 "Vulkan specification");
    if (c_override >= 0)
       *c_count = c_override;
@@ -2042,8 +2042,8 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
          p->queueFamilyProperties.queueFlags = queue_family->queueFlags;
          p->queueFamilyProperties.queueCount = queue_family->queueCount;
 
-         vk_foreach_struct(ext, p->pNext) {
-            switch (ext->sType) {
+         vk_foreach_struct(sType, ext, p->pNext) {
+            switch (sType) {
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
                VkQueueFamilyGlobalPriorityPropertiesKHR *properties =
                   (VkQueueFamilyGlobalPriorityPropertiesKHR *)ext;
@@ -2069,7 +2069,7 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
             }
 
             default:
-               vk_debug_ignored_stype(ext->sType);
+               vk_debug_ignored_stype(sType);
             }
          }
       }
@@ -2165,13 +2165,13 @@ void anv_GetPhysicalDeviceMemoryProperties2(
    anv_GetPhysicalDeviceMemoryProperties(physicalDevice,
                                          &pMemoryProperties->memoryProperties);
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT:
-         anv_get_memory_budget(physicalDevice, (void*)ext);
+         anv_get_memory_budget(physicalDevice, ext);
          break;
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -2992,32 +2992,32 @@ VkResult anv_AllocateMemory(
    VkMemoryAllocateFlags vk_flags = 0;
    uint64_t client_address = 0;
 
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
-         export_info = (void *)ext;
+         export_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID:
-         ahw_import_info = (void *)ext;
+         ahw_import_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
-         fd_info = (void *)ext;
+         fd_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT:
-         host_ptr_info = (void *)ext;
+         host_ptr_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO: {
-         const VkMemoryAllocateFlagsInfo *flags_info = (void *)ext;
+         const VkMemoryAllocateFlagsInfo *flags_info = ext;
          vk_flags = flags_info->flags;
          break;
       }
 
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
-         dedicated_info = (void *)ext;
+         dedicated_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO: {
@@ -3028,11 +3028,11 @@ VkResult anv_AllocateMemory(
       }
 
       default:
-         if (ext->sType != VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA)
+         if (sType != VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA)
             /* this isn't a real enum value,
              * so use conditional to avoid compiler warn
              */
-            vk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -3279,7 +3279,7 @@ void anv_FreeMemory(
 
    anv_device_release_bo(device, mem->bo);
 
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26
    if (mem->ahw)
       AHardwareBuffer_release(mem->ahw);
 #endif
@@ -3492,7 +3492,7 @@ anv_bind_buffer_memory(const VkBindBufferMemoryInfo *pBindInfo)
    } else {
       buffer->address = ANV_NULL_ADDRESS;
    }
-   
+
    if (bind_status)
       *bind_status->pResult = VK_SUCCESS;
 }
@@ -3637,8 +3637,8 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits = memory_types;
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *requirements = (void *)ext;
          requirements->prefersDedicatedAllocation = false;
@@ -3647,7 +3647,7 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -3819,6 +3819,6 @@ void anv_GetPhysicalDeviceMultisamplePropertiesEXT(
    }
    pMultisampleProperties->maxSampleLocationGridSize = grid_size;
 
-   vk_foreach_struct(ext, pMultisampleProperties->pNext)
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(sType, ext, pMultisampleProperties->pNext)
+      vk_debug_ignored_stype(sType);
 }

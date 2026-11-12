@@ -305,6 +305,7 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->max_texture_cube_levels = vscreen->caps.caps.v2.max_texture_cube_size ?
       1 + util_logbase2(vscreen->caps.caps.v2.max_texture_cube_size) :
       13; /* 4K x 4K */
+   caps->polygon_stipple = true;
    caps->blend_equation_separate = true;
    caps->indep_blend_enable = vscreen->caps.caps.v1.bset.indep_blend_enable;
    caps->indep_blend_func = vscreen->caps.caps.v1.bset.indep_blend_func;
@@ -348,6 +349,7 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
       MIN2(vscreen->caps.caps.v1.glsl_level, 140) :
       vscreen->caps.caps.v1.glsl_level;
    caps->glsl_feature_level = vscreen->caps.caps.v1.glsl_level;
+   caps->fs_sample_variables = caps->glsl_feature_level >= 400;
    caps->quads_follow_provoking_vertex_convention = true;
    caps->depth_clip_disable_separate = false;
    caps->compute = vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_COMPUTE_SHADER;
@@ -377,7 +379,6 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->max_viewports = vscreen->caps.caps.v1.max_viewports;
    caps->max_texel_buffer_elements = vscreen->caps.caps.v1.max_tbo_size;
    caps->texture_border_color_quirk = 0;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->query_pipeline_statistics =
       !!(vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_PIPELINE_STATISTICS_QUERY);
    caps->mixed_framebuffer_sizes = true;
@@ -423,7 +424,8 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->fbfetch =
       (vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_FBFETCH) ? 1 : 0;
    caps->blend_equation_advanced =
-      vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION;
+      (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION) ?
+      PIPE_ADVANCED_BLEND_KHR_MODES_MASK : 0;
    caps->shader_clock = vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SHADER_CLOCK;
    caps->shader_array_components =
       vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_COMPONENTS;

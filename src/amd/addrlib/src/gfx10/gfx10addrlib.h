@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -37,7 +37,7 @@ struct Gfx10ChipSettings
         UINT_32 reserved1           : 32;
 
         // Misc configuration bits
-        UINT_32 isDcn20             : 1; // If using DCN2.0
+        UINT_32 isDcn20             : 1; //# If using DCN2.0
         UINT_32 supportRbPlus       : 1;
         UINT_32 dsMipmapHtileFix    : 1;
         UINT_32 dccUnsup3DSwDis     : 1;

@@ -31,15 +31,15 @@
 #include "etnaviv_compiler.h"
 
 void
-etna_disk_cache_init(struct etna_compiler *compiler, const char *renderer);
+etna_disk_cache_init(struct etna_screen *screen);
 
 void
-etna_disk_cache_init_shader_key(struct etna_compiler *compiler, struct etna_shader *shader);
+etna_disk_cache_init_shader_key(struct etna_screen *screen, struct etna_shader *shader);
 
 bool
-etna_disk_cache_retrieve(struct etna_compiler *compiler, struct etna_shader_variant *v);
+etna_disk_cache_retrieve(struct etna_screen *screen, struct etna_shader_variant *v);
 
 void
-etna_disk_cache_store(struct etna_compiler *compiler, struct etna_shader_variant *v);
+etna_disk_cache_store(struct etna_screen *screen, struct etna_shader_variant *v);
 
 #endif

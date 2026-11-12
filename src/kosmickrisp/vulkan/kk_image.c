@@ -21,12 +21,53 @@
 #include "vk_format.h"
 #include "wsi_common_private.h"
 
+static bool
+vk_format_is_bc(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+   case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+   case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+   case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+   case VK_FORMAT_BC2_SRGB_BLOCK:
+   case VK_FORMAT_BC2_UNORM_BLOCK:
+   case VK_FORMAT_BC3_UNORM_BLOCK:
+   case VK_FORMAT_BC3_SRGB_BLOCK:
+   case VK_FORMAT_BC4_UNORM_BLOCK:
+   case VK_FORMAT_BC4_SNORM_BLOCK:
+   case VK_FORMAT_BC5_UNORM_BLOCK:
+   case VK_FORMAT_BC5_SNORM_BLOCK:
+   case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+   case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+   case VK_FORMAT_BC7_UNORM_BLOCK:
+   case VK_FORMAT_BC7_SRGB_BLOCK:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+format_is_32bit_float(enum pipe_format p_format)
+{
+   const struct util_format_description *desc =
+      util_format_description(p_format);
+   int c = util_format_get_first_non_void_channel(p_format);
+
+   return c >= 0 && desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT &&
+          desc->channel[c].size == 32;
+}
+
 static VkFormatFeatureFlags2
 kk_get_image_plane_format_features(struct kk_physical_device *pdev,
                                    VkFormat vk_format, VkImageTiling tiling,
                                    uint64_t drm_format_mod)
 {
    VkFormatFeatureFlags2 features = 0;
+
+   if (!pdev->info.supports_bc_texture_compression &&
+       vk_format_is_bc(vk_format))
+      return 0;
 
    /* Metal does not support linear tiling for compressed formats */
    if (tiling == VK_IMAGE_TILING_LINEAR && vk_format_is_compressed(vk_format))
@@ -48,13 +89,12 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
    features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
    features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
 
-   if (va_format->filter) {
+   /* Not all GPUs support linear filtering of 32bit float formats (A chips) */
+   if (va_format->filter && (pdev->info.supports_32_bit_float_filtering ||
+                             !format_is_32bit_float(p_format))) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-      features |=
-         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT; // TODO_KOSMICKRISP
-                                                              // Understand if
-                                                              // we want to
-                                                              // expose this
+      if (pdev->vk.supported_extensions.EXT_sampler_filter_minmax)
+         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
    }
 
    /* TODO: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT */
@@ -169,9 +209,9 @@ kk_get_image_format_features(struct kk_physical_device *pdev,
 }
 
 static VkFormatFeatureFlags2
-vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
+vk_image_usage_to_format_features(VkImageUsageFlagBits2KHR usage_flag)
 {
-   assert(util_bitcount(usage_flag) == 1);
+   assert(util_bitcount64(usage_flag) == 1);
    switch (usage_flag) {
    case VK_IMAGE_USAGE_TRANSFER_SRC_BIT:
       return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
@@ -222,6 +262,10 @@ kk_GetPhysicalDeviceImageFormatProperties2(
    VkImageFormatProperties2 *pImageFormatProperties)
 {
    VK_FROM_HANDLE(kk_physical_device, pdev, physicalDevice);
+
+   const VkImageUsageFlags2KHR all_usage =
+      vk_image_format_info_2_usage(pImageFormatInfo) |
+      vk_image_format_info_2_stencil_usage(pImageFormatInfo);
 
    const VkPhysicalDeviceExternalImageFormatInfo *external_info =
       vk_find_struct_const(pImageFormatInfo->pNext,
@@ -280,9 +324,8 @@ kk_GetPhysicalDeviceImageFormatProperties2(
     * textures.
     */
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR &&
-       (pImageFormatInfo->usage &
-        (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+       (all_usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if (ycbcr_info && pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
@@ -367,7 +410,7 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                     VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
        !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
-       !(pImageFormatInfo->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+       !(all_usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
       sampleCounts = pdev->info.supported_sample_counts;
    }
 
@@ -382,14 +425,13 @@ kk_GetPhysicalDeviceImageFormatProperties2(
     * different usage than the image so we can't always filter on usage.
     * There is one exception to this below for storage.
     */
-   const VkImageUsageFlags image_usage = pImageFormatInfo->usage;
-   VkImageUsageFlags view_usage = image_usage;
+   VkImageUsageFlags2KHR view_usage = all_usage;
    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       view_usage = 0;
 
-   u_foreach_bit(b, view_usage) {
+   u_foreach_bit64(b, view_usage) {
       VkFormatFeatureFlags2 usage_features =
-         vk_image_usage_to_format_features(1 << b);
+         vk_image_usage_to_format_features(1ull << b);
       if (usage_features && !(features & usage_features))
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
@@ -458,7 +500,7 @@ kk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
-       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+       (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
@@ -469,10 +511,10 @@ kk_GetPhysicalDeviceImageFormatProperties2(
       .maxResourceSize = UINT32_MAX, /* TODO */
    };
 
-   vk_foreach_struct(s, pImageFormatProperties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, pImageFormatProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES: {
-         VkExternalImageFormatProperties *p = (void *)s;
+         VkExternalImageFormatProperties *p = s;
          /* From the Vulkan 1.3.256 spec:
           *
           *    "If handleType is 0, vkGetPhysicalDeviceImageFormatProperties2
@@ -487,19 +529,19 @@ kk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
-         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = (void *)s;
+         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = s;
          ycbcr_props->combinedImageSamplerDescriptorCount = plane_count;
          break;
       }
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
-         VkHostImageCopyDevicePerformanceQueryEXT *host_props = (void *)s;
+         VkHostImageCopyDevicePerformanceQueryEXT *host_props = s;
          /* Optimal device access and identical memory layout if optimization
           * is the same both with and without host transfer usage */
          bool with_host_transfer = kk_image_layout_can_optimize(
-            pdev, pImageFormatInfo->usage, pImageFormatInfo->tiling,
-            pImageFormatInfo->flags, p_format);
+            pdev, all_usage, pImageFormatInfo->tiling, pImageFormatInfo->flags,
+            p_format);
          bool without_host_transfer = kk_image_layout_can_optimize(
-            pdev, pImageFormatInfo->usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
+            pdev, all_usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
             pImageFormatInfo->tiling, pImageFormatInfo->flags, p_format);
          host_props->optimalDeviceAccess =
             with_host_transfer == without_host_transfer;
@@ -507,7 +549,7 @@ kk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -699,10 +741,10 @@ kk_get_image_memory_requirements(struct kk_device *dev, struct kk_image *image,
    pMemoryRequirements->memoryRequirements.alignment = align_B;
    pMemoryRequirements->memoryRequirements.size = size_B;
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          dedicated->prefersDedicatedAllocation =
             image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
          dedicated->requiresDedicatedAllocation =
@@ -710,7 +752,7 @@ kk_get_image_memory_requirements(struct kk_device *dev, struct kk_image *image,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -837,6 +879,8 @@ kk_image_plane_create_texture(struct kk_image_plane *plane,
                               struct kk_image_layout *layout, uint64_t offset_B)
 {
    uint64_t mem_offset_B = plane->mem_offset_B + offset_B;
+
+   /* Linear textures in Metal need to be allocated through a buffer... */
    if (plane->layout.linear)
       return mtl_new_texture_with_descriptor_linear(plane->mem->bo->map, layout,
                                                     mem_offset_B);
@@ -857,10 +901,15 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
 
    assert(plane->layout.linear || mem->bo->mtl_handle);
 
-   /* Linear textures in Metal need to be allocated through a buffer... */
    plane->mem = mem;
    plane->mem_offset_B = *offset_B;
    plane->mtl_handle = kk_image_plane_create_texture(plane, &plane->layout, 0u);
+   if (plane->mtl_handle == NULL)
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   if (image->vk.base.object_name)
+      mtl_resource_set_label(plane->mtl_handle, image->vk.base.object_name);
+
    plane->addr = mem->bo->gpu + *offset_B;
 
    /* Create auxiliary 2D array texture for 3D images so we can use 2D views of
@@ -875,6 +924,11 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
       array_layout.depth_px = 1u;
       plane->mtl_handle_array = mtl_new_texture_with_descriptor(
          mem->bo->mtl_handle, &array_layout, *offset_B);
+      if (plane->mtl_handle_array == NULL)
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      if (image->vk.base.object_name)
+         mtl_resource_set_label(plane->mtl_handle_array,
+                                image->vk.base.object_name);
    }
 
    *offset_B += plane_size_B;
@@ -955,7 +1009,7 @@ kk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
       const VkBindMemoryStatusKHR *status =
          vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);
       if (status != NULL && status->pResult != NULL)
-         *status->pResult = VK_SUCCESS;
+         *status->pResult = result;
 
       if (first_error_or_success == VK_SUCCESS)
          first_error_or_success = result;
@@ -1173,4 +1227,15 @@ kk_TransitionImageLayoutEXT(
 {
    /* We don't do anything with layouts so this should be a no-op */
    return VK_SUCCESS;
+}
+
+void
+kk_image_set_label(struct kk_image *image, const char *label)
+{
+   for (uint8_t i = 0; i < image->plane_count; i++) {
+      if (image->planes[i].mtl_handle)
+         mtl_resource_set_label(image->planes[i].mtl_handle, label);
+      if (image->planes[i].mtl_handle_array)
+         mtl_resource_set_label(image->planes[i].mtl_handle_array, label);
+   }
 }

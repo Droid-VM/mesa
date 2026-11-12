@@ -51,6 +51,15 @@ Additionally, the RADV team agreed on the following workflow for contributions:
 In case your MR needs to be merged immediately (should be rarely needed), feel
 free to ping the developers to get more approvals.
 
+If you find a bug or shortcoming in RADV and cannot address it yourself, file
+an issue on the tracker. LLM-assisted MRs require a good understanding of the
+codebase, and reviewing them has a real cost. Reviewers/maintainers may close
+such MRs at their discretion.
+
+LLM-written issues are discouraged: they tend to be verbose and hard to read.
+Please describe the issue in your own words. LLM-generated reproducers are
+fine as long as you have reviewed them and they demonstrate the bug.
+
 Supported hardware
 ~~~~~~~~~~~~~~~~~~
 
@@ -76,10 +85,18 @@ refreshes of the same chip, because they are functionally exactly the same.
 For more information about which GPU chip name corresponds to which GPU product,
 `see the src/amd/common/amd_family.h file <https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/amd/common/amd_family.h>`__.
 
-Note that for GFX6-7 (GCN 1-2) GPUs, the ``amdgpu`` kernel driver is currently not the default in Linux
-(by default the old ``radeon`` KMD is used for these old GPUs, which is not supported by RADV),
-so users need to manually enable ``amdgpu`` by adding the following to the kernel command line:
-``radeon.si_support=0 radeon.cik_support=0 amdgpu.si_support=1 amdgpu.cik_support=1``
+Notes about GFX6-7 (GCN 1-2) GPUs:
+
+* RADV should work out of the box on GFX6-7 dGPUs as of Linux 6.19
+  as the default kernel driver was changed to amdgpu.
+* RADV should work out of the box on GFX7 APUs as of Linux 7.1
+  as the default kernel driver was changed to amdgpu.
+* RADV is not supported by the older ``radeon`` kernel driver,
+  so it won't work out of the box on older kernels
+  where the default driver is ``radeon``.
+  On these kernel versions, users need to switch to ``amdgpu`` manually
+  by adding the following to the kernel command line:
+  ``radeon.si_support=0 radeon.cik_support=0 amdgpu.si_support=1 amdgpu.cik_support=1``
 
 Basics
 ~~~~~~

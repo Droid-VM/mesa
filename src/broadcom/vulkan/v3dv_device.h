@@ -90,6 +90,8 @@ struct v3dv_physical_device {
    struct v3d_device_info devinfo;
    struct v3d_perfcntrs *perfcntr;
 
+   bool has_tfu_ccol;
+
 #if USE_V3D_SIMULATOR
    struct v3d_simulator_file *sim_file;
 #endif
@@ -376,8 +378,8 @@ struct v3dv_device {
     */
    struct v3dv_bo *default_attribute_float;
 
-   /* When nullDescriptor is enabled, this BO provides valid zeroed memory
-    * for null descriptor paths.
+   /* Zeroed BO used for null descriptors (nullDescriptor) and as the
+    * backing for null index buffers (maintenance6).
     */
    struct v3dv_bo *null_bo;
 

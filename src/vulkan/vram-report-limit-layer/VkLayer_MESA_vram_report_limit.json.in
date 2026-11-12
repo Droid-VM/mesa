@@ -7,6 +7,12 @@
       "api_version": "1.4.303",
       "implementation_version": "1",
       "description": "Limit reported VRAM",
+      "enable_environment": {
+         "ENABLE_MESA_VRAM_REPORT_LIMIT": "1"
+      },
+      "disable_environment": {
+         "DISABLE_MESA_VRAM_REPORT_LIMIT": "1"
+      },
       "features": {
          "settings": [
             {

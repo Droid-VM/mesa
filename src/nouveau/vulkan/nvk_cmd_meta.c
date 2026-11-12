@@ -232,6 +232,7 @@ nvk_meta_end_compute(struct nvk_cmd_buffer *cmd,
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
    P_IMMD_WORD(p, NV90C0, SET_RENDER_ENABLE_OVERRIDE, MODE_USE_RENDER_ENABLE);
 
+   nvk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
    cmd->state.cs = save->state;
 }
 
@@ -308,7 +309,7 @@ nvk_meta_resolve_rendering(struct nvk_cmd_buffer *cmd,
 static bool
 nvk_meta_image_copy_gfx_supported(struct nvk_image *img)
 {
-   if (vk_format_is_depth_or_stencil(img->vk.format))
+   if (vk_format_has_stencil(img->vk.format))
       return false;
    if (vk_format_is_compressed(img->vk.format))
       return false;
@@ -355,11 +356,15 @@ nvk_meta_copy_get_image_properties(struct nvk_image *img,
 {
    struct vk_meta_copy_image_properties props = {};
 
-   assert(!vk_format_is_depth_or_stencil(img->vk.format));
    assert(!vk_format_get_ycbcr_info(img->vk.format));
 
    unsigned blk_sz = vk_format_get_blocksize(img->vk.format);
-   props.color.view_format = vk_meta_get_uint_format_for_blk_size(blk_sz);
+   if (vk_format_is_depth_or_stencil(img->vk.format)) {
+      props.depth.view_format = img->vk.format;
+      props.stencil.view_format = img->vk.format;
+   } else {
+      props.color.view_format = vk_meta_get_uint_format_for_blk_size(blk_sz);
+   }
 
    const struct nvk_image_plane *plane = &img->planes[0];
    const struct nil_image *nil_image = &plane->nil;
@@ -400,10 +405,10 @@ nvk_meta_copy_get_image_properties(struct nvk_image *img,
 }
 
 static void
-nvk_cmd_copy_image_to_buffer_meta(struct nvk_cmd_buffer *cmd,
-                                  const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+nvk_cmd_copy_image_to_memory_meta(struct nvk_cmd_buffer *cmd,
+                                  const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo)
 {
-   VK_FROM_HANDLE(nvk_image, src, pCopyImageToBufferInfo->srcImage);
+   VK_FROM_HANDLE(nvk_image, src, pCopyMemoryInfo->image);
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
 
    struct vk_meta_copy_image_properties src_img_props =
@@ -411,33 +416,33 @@ nvk_cmd_copy_image_to_buffer_meta(struct nvk_cmd_buffer *cmd,
 
    struct nvk_meta_save_compute save;
    nvk_meta_begin_compute(cmd, &save);
-   vk_meta_copy_image_to_buffer(&cmd->vk, &dev->meta, pCopyImageToBufferInfo,
+   vk_meta_copy_image_to_memory(&cmd->vk, &dev->meta, pCopyMemoryInfo,
                                 &src_img_props);
    nvk_meta_end_compute(cmd, &save);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
-                          const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+nvk_CmdCopyImageToMemoryKHR(VkCommandBuffer commandBuffer,
+                            const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
-   VK_FROM_HANDLE(nvk_image, src, pCopyImageToBufferInfo->srcImage);
+   VK_FROM_HANDLE(nvk_image, src, pCopyMemoryInfo->image);
 
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
    if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&
        nvk_meta_image_copy_compute_supported(src)) {
-      nvk_cmd_copy_image_to_buffer_meta(cmd, pCopyImageToBufferInfo);
+      nvk_cmd_copy_image_to_memory_meta(cmd, pCopyMemoryInfo);
    } else {
-      nvk_cmd_copy_image_to_buffer_ce(cmd, pCopyImageToBufferInfo);
+      nvk_cmd_copy_image_to_memory_ce(cmd, pCopyMemoryInfo);
    }
 }
 
 static void
-nvk_cmd_copy_buffer_to_image_meta(struct nvk_cmd_buffer *cmd,
-                                  const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo,
+nvk_cmd_copy_memory_to_image_meta(struct nvk_cmd_buffer *cmd,
+                                  const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo,
                                   VkPipelineBindPoint engine)
 {
-   VK_FROM_HANDLE(nvk_image, dst, pCopyBufferToImageInfo->dstImage);
+   VK_FROM_HANDLE(nvk_image, dst, pCopyMemoryInfo->image);
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
 
    struct vk_meta_copy_image_properties dst_img_props =
@@ -445,25 +450,29 @@ nvk_cmd_copy_buffer_to_image_meta(struct nvk_cmd_buffer *cmd,
 
    union nvk_meta_save_generic save;
    nvk_meta_begin_generic(cmd, &save, engine);
-   vk_meta_copy_buffer_to_image(&cmd->vk, &dev->meta, pCopyBufferToImageInfo,
+   vk_meta_copy_memory_to_image(&cmd->vk, &dev->meta, pCopyMemoryInfo,
                                 &dst_img_props, engine);
    nvk_meta_end_generic(cmd, &save, engine);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
-                          const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+nvk_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer,
+                            const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
-   VK_FROM_HANDLE(nvk_image, dst, pCopyBufferToImageInfo->dstImage);
+   VK_FROM_HANDLE(nvk_image, dst, pCopyMemoryInfo->image);
 
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
-   if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&
+   if ((queue_flags & VK_QUEUE_GRAPHICS_BIT) &&
+       nvk_meta_image_copy_gfx_supported(dst)) {
+      nvk_cmd_copy_memory_to_image_meta(cmd, pCopyMemoryInfo,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS);
+   } else if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&
        nvk_meta_image_copy_compute_supported(dst)) {
-      nvk_cmd_copy_buffer_to_image_meta(cmd, pCopyBufferToImageInfo,
-                              VK_PIPELINE_BIND_POINT_COMPUTE);
+      nvk_cmd_copy_memory_to_image_meta(cmd, pCopyMemoryInfo,
+                                        VK_PIPELINE_BIND_POINT_COMPUTE);
    } else {
-      nvk_cmd_copy_buffer_to_image_ce(cmd, pCopyBufferToImageInfo);
+      nvk_cmd_copy_memory_to_image_ce(cmd, pCopyMemoryInfo);
    }
 }
 
@@ -482,6 +491,17 @@ nvk_cmd_copy_image_meta(struct nvk_cmd_buffer *cmd,
    struct vk_meta_copy_image_properties dst_img_props =
       nvk_meta_copy_get_image_properties(dst, true);
 
+   if (!vk_format_is_depth_or_stencil(src->vk.format)) {
+      if (dst->vk.format == VK_FORMAT_X8_D24_UNORM_PACK32)
+         src_img_props.color.view_format = VK_FORMAT_R32_UINT;
+      else if (dst->vk.format == VK_FORMAT_D32_SFLOAT)
+         src_img_props.color.view_format = VK_FORMAT_R32_UINT;
+      else if (dst->vk.format == VK_FORMAT_D16_UNORM)
+         src_img_props.color.view_format = VK_FORMAT_R16_UNORM;
+      else
+         assert(!vk_format_is_depth_or_stencil(dst->vk.format));
+   }
+
    union nvk_meta_save_generic save;
    nvk_meta_begin_generic(cmd, &save, engine);
    vk_meta_copy_image(&cmd->vk, &dev->meta, pCopyImageInfo,
@@ -497,10 +517,12 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_image, src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(nvk_image, dst, pCopyImageInfo->dstImage);
 
+   bool is_depth_to_color = !vk_format_is_depth_or_stencil(dst->vk.format) &&
+                            vk_format_is_depth_or_stencil(src->vk.format);
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
    if ((queue_flags & VK_QUEUE_GRAPHICS_BIT) &&
        nvk_meta_image_copy_gfx_supported(src) &&
-       nvk_meta_image_copy_gfx_supported(dst)) {
+       nvk_meta_image_copy_gfx_supported(dst) && !is_depth_to_color) {
       nvk_cmd_copy_image_meta(cmd, pCopyImageInfo,
                               VK_PIPELINE_BIND_POINT_GRAPHICS);
    } else if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&
@@ -514,64 +536,57 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
 }
 
 static void
-nvk_cmd_copy_buffer_meta(struct nvk_cmd_buffer *cmd,
-                         const VkCopyBufferInfo2 *pCopyBufferInfo)
+nvk_cmd_copy_memory_meta(struct nvk_cmd_buffer *cmd,
+                         const VkCopyDeviceMemoryInfoKHR *pCopyMemoryInfo)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
 
    struct nvk_meta_save_compute save;
    nvk_meta_begin_compute(cmd, &save);
-   vk_meta_copy_buffer(&cmd->vk, &dev->meta, pCopyBufferInfo);
+   vk_meta_copy_memory(&cmd->vk, &dev->meta, pCopyMemoryInfo);
    nvk_meta_end_compute(cmd, &save);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
-                   const VkCopyBufferInfo2 *pCopyBufferInfo)
+nvk_CmdCopyMemoryKHR(VkCommandBuffer commandBuffer,
+                     const VkCopyDeviceMemoryInfoKHR *pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
    if (queue_flags & VK_QUEUE_COMPUTE_BIT) {
-      nvk_cmd_copy_buffer_meta(cmd, pCopyBufferInfo);
+      nvk_cmd_copy_memory_meta(cmd, pCopyMemoryInfo);
    } else {
-      nvk_cmd_copy_buffer_ce(cmd, pCopyBufferInfo);
+      nvk_cmd_copy_memory_ce(cmd, pCopyMemoryInfo);
    }
 }
 
 static void
-nvk_cmd_fill_buffer_meta(struct nvk_cmd_buffer *cmd,
-                         VkBuffer dstBuffer,
-                         VkDeviceSize dstOffset,
-                         VkDeviceSize size,
+nvk_cmd_fill_memory_meta(struct nvk_cmd_buffer *cmd,
+                         const VkDeviceAddressRangeKHR* pDstRange,
+                         VkAddressCommandFlagsKHR dstFlags,
                          uint32_t data)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
 
    struct nvk_meta_save_compute save;
    nvk_meta_begin_compute(cmd, &save);
-   vk_meta_fill_buffer(&cmd->vk, &dev->meta, dstBuffer, dstOffset, size, data);
+   vk_meta_fill_memory(&cmd->vk, &dev->meta, pDstRange, dstFlags, data);
    nvk_meta_end_compute(cmd, &save);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdFillBuffer(VkCommandBuffer commandBuffer,
-                  VkBuffer dstBuffer,
-                  VkDeviceSize dstOffset,
-                  VkDeviceSize size,
-                  uint32_t data)
+nvk_CmdFillMemoryKHR(VkCommandBuffer commandBuffer,
+                     const VkDeviceAddressRangeKHR* pDstRange,
+                     VkAddressCommandFlagsKHR dstFlags,
+                     uint32_t data)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
    if (queue_flags & VK_QUEUE_COMPUTE_BIT) {
-      nvk_cmd_fill_buffer_meta(cmd, dstBuffer, dstOffset, size, data);
+      nvk_cmd_fill_memory_meta(cmd, pDstRange, dstFlags, data);
    } else {
-      VK_FROM_HANDLE(nvk_buffer, dst_buffer, dstBuffer);
-
-      uint64_t dst_addr = vk_buffer_address(&dst_buffer->vk, dstOffset);
-      size = vk_buffer_range(&dst_buffer->vk, dstOffset, size);
-
-      nvk_cmd_fill_memory_ce(cmd, dst_addr, size, data);
+      nvk_cmd_fill_memory_ce(cmd, pDstRange->address, pDstRange->size, data);
    }
 }

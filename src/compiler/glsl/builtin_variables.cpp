@@ -847,7 +847,7 @@ builtin_variable_generator::generate_constants()
        * for compatibility-mode uniforms) all the way up through GLSL 4.30, so
        * this seems like it was probably an oversight.
        */
-      add_const("gl_MaxLights", state->Const.MaxLights);
+      add_const("gl_MaxLights", MAX_LIGHTS);
 
       add_const("gl_MaxClipPlanes", state->Const.MaxClipPlanes);
 
@@ -1000,8 +1000,8 @@ builtin_variable_generator::generate_constants()
    }
 
    if (state->has_tessellation_shader()) {
-      add_const("gl_MaxPatchVertices", state->Const.MaxPatchVertices);
-      add_const("gl_MaxTessGenLevel", state->Const.MaxTessGenLevel);
+      add_const("gl_MaxPatchVertices", MAX_PATCH_VERTICES);
+      add_const("gl_MaxTessGenLevel", MAX_TESS_GEN_LEVEL);
       add_const("gl_MaxTessControlInputComponents", state->Const.MaxTessControlInputComponents);
       add_const("gl_MaxTessControlOutputComponents", state->Const.MaxTessControlOutputComponents);
       add_const("gl_MaxTessControlTextureImageUnits", state->Const.MaxTessControlTextureImageUnits);
@@ -1009,7 +1009,7 @@ builtin_variable_generator::generate_constants()
       add_const("gl_MaxTessEvaluationOutputComponents", state->Const.MaxTessEvaluationOutputComponents);
       add_const("gl_MaxTessEvaluationTextureImageUnits", state->Const.MaxTessEvaluationTextureImageUnits);
       add_const("gl_MaxTessPatchComponents", state->Const.MaxTessPatchComponents);
-      add_const("gl_MaxTessControlTotalOutputComponents", state->Const.MaxTessControlTotalOutputComponents);
+      add_const("gl_MaxTessControlTotalOutputComponents", MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS);
       add_const("gl_MaxTessControlUniformComponents", state->Const.MaxTessControlUniformComponents);
       add_const("gl_MaxTessEvaluationUniformComponents", state->Const.MaxTessEvaluationUniformComponents);
    }
@@ -1074,7 +1074,7 @@ builtin_variable_generator::generate_uniforms()
       add_uniform(material_parameters_type, "gl_BackMaterial");
 
       add_uniform(array(type("gl_LightSourceParameters"),
-                        state->Const.MaxLights),
+                        MAX_LIGHTS),
                   "gl_LightSource");
 
       const glsl_type *const light_model_products_type =
@@ -1083,7 +1083,7 @@ builtin_variable_generator::generate_uniforms()
       add_uniform(light_model_products_type, "gl_BackLightModelProduct");
 
       const glsl_type *const light_products_type =
-         array(type("gl_LightProducts"), state->Const.MaxLights);
+         array(type("gl_LightProducts"), MAX_LIGHTS);
       add_uniform(light_products_type, "gl_FrontLightProduct");
       add_uniform(light_products_type, "gl_BackLightProduct");
 
@@ -1209,8 +1209,7 @@ builtin_variable_generator::generate_tcs_special_vars()
    add_output(VARYING_SLOT_TESS_LEVEL_INNER, array(float_t, 2),
               GLSL_PRECISION_HIGH, "gl_TessLevelInner")->data.patch = 1;
    /* XXX What to do if multiple are flipped on? */
-   int bbox_slot = state->consts->NoPrimitiveBoundingBoxOutput ? -1 :
-      VARYING_SLOT_BOUNDING_BOX0;
+   int bbox_slot = -1;
    if (state->EXT_primitive_bounding_box_enable)
       add_output(bbox_slot, array(vec4_t, 2), "gl_BoundingBoxEXT")
          ->data.patch = 1;
@@ -1660,7 +1659,7 @@ builtin_variable_generator::generate_varyings()
        state->stage == MESA_SHADER_TESS_EVAL) {
       const glsl_type *per_vertex_in_type =
          this->per_vertex_in.construct_interface_instance();
-      add_variable("gl_in", array(per_vertex_in_type, state->Const.MaxPatchVertices),
+      add_variable("gl_in", array(per_vertex_in_type, MAX_PATCH_VERTICES),
                    GLSL_PRECISION_NONE, ir_var_shader_in, -1);
    }
    if (state->stage == MESA_SHADER_GEOMETRY) {

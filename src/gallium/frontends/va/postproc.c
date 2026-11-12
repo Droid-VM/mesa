@@ -43,6 +43,27 @@ static VAProcColorStandardType vpp_color_standards[] = {
    VAProcColorStandardExplicit
 };
 
+static const struct {
+   enum pipe_video_vpp_filter filter;
+   VAProcColorBalanceType type;
+} color_balance_filters[] = {
+   { PIPE_VIDEO_VPP_FILTER_BRIGHTNESS, VAProcColorBalanceBrightness },
+   { PIPE_VIDEO_VPP_FILTER_CONTRAST, VAProcColorBalanceContrast },
+   { PIPE_VIDEO_VPP_FILTER_HUE, VAProcColorBalanceHue },
+   { PIPE_VIDEO_VPP_FILTER_SATURATION, VAProcColorBalanceSaturation },
+};
+
+static VAProcFilterValueRange
+vlVaVideoFilterRange(const struct pipe_video_vpp_filter_range *range)
+{
+   return (VAProcFilterValueRange) {
+      .min_value = range->min_value,
+      .max_value = range->max_value,
+      .default_value = range->default_value,
+      .step = range->step,
+   };
+}
+
 VAStatus
 vlVaQueryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID context,
                                VABufferID *filters, unsigned int num_filters,
@@ -131,6 +152,8 @@ vlVaQueryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID context,
       pipeline_cap->blend_flags |= VA_BLEND_GLOBAL_ALPHA;
    if (!media_only || pipe_blend_modes & PIPE_VIDEO_VPP_BLEND_MODE_PREMULTIPLIED_ALPHA)
       pipeline_cap->blend_flags |= VA_BLEND_PREMULTIPLIED_ALPHA;
+   if (pipe_blend_modes & PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY)
+      pipeline_cap->blend_flags |= VA_BLEND_LUMA_KEY;
 
    vlVaDriver *drv = VL_VA_DRIVER(ctx);
 
@@ -154,6 +177,10 @@ vlVaQueryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID context,
          }
          break;
       }
+      case VAProcFilterSharpening:
+      case VAProcFilterColorBalance:
+      case VAProcFilterHighDynamicRangeToneMapping:
+         break;
       default:
          mtx_unlock(&drv->mutex);
          return VA_STATUS_ERROR_UNIMPLEMENTED;
@@ -178,6 +205,7 @@ vlVaQueryVideoProcFilters(VADriverContextP ctx, VAContextID context_id,
    if (!num_filters || !filters)
       return VA_STATUS_ERROR_INVALID_PARAMETER;
 
+   struct pipe_screen *pscreen = VL_VA_PSCREEN(ctx);
    drv = VL_VA_DRIVER(ctx);
 
    mtx_lock(&drv->mutex);
@@ -190,6 +218,13 @@ vlVaQueryVideoProcFilters(VADriverContextP ctx, VAContextID context_id,
    if (context->templat.entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE &&
        context->templat.entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
       filters[num++] = VAProcFilterDeinterlacing;
+
+   if (pscreen->video_caps.vpp.hdr_tone_mapping_modes)
+      filters[num++] = VAProcFilterHighDynamicRangeToneMapping;
+   if (pscreen->video_caps.vpp.color_balance)
+      filters[num++] = VAProcFilterColorBalance;
+   if (pscreen->video_caps.vpp.sharpening)
+      filters[num++] = VAProcFilterSharpening;
 
    mtx_unlock(&drv->mutex);
 
@@ -228,6 +263,7 @@ vlVaQueryVideoProcFilterCaps(VADriverContextP ctx, VAContextID context_id,
 
    mtx_unlock(&drv->mutex);
 
+   struct pipe_screen *pscreen = VL_VA_PSCREEN(ctx);
    i = 0;
 
    switch (type) {
@@ -249,10 +285,71 @@ vlVaQueryVideoProcFilterCaps(VADriverContextP ctx, VAContextID context_id,
       deint[i++].type = VAProcDeinterlacingMotionAdaptive;
       break;
    }
+   case VAProcFilterHighDynamicRangeToneMapping: {
+      VAProcFilterCapHighDynamicRange *tm = filter_caps;
+      unsigned hdrtm_support_mode = pscreen->video_caps.vpp.hdr_tone_mapping_modes;
 
+      if (!supports_filters)
+         return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+      if (*num_filter_caps < 1) {
+         *num_filter_caps = 1;
+         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+      }
+
+      if (!hdrtm_support_mode)
+         return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+      tm[i].metadata_type = VAProcHighDynamicRangeMetadataHDR10;
+      tm[i].caps_flag = 0;
+      if (hdrtm_support_mode & PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_HDR)
+         tm[i].caps_flag |= VA_TONE_MAPPING_HDR_TO_HDR;
+      if (hdrtm_support_mode & PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_SDR)
+         tm[i].caps_flag |= VA_TONE_MAPPING_HDR_TO_SDR;
+      if (hdrtm_support_mode & PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_EDR)
+         tm[i].caps_flag |= VA_TONE_MAPPING_HDR_TO_EDR;
+      if (hdrtm_support_mode & PIPE_VIDEO_VPP_TONE_MAPPING_SDR_TO_HDR)
+         tm[i].caps_flag |= VA_TONE_MAPPING_SDR_TO_HDR;
+      i++;
+      break;
+   }
+   case VAProcFilterSharpening: {
+      VAProcFilterCap *sharpening = filter_caps;
+
+      if (!supports_filters || !pscreen->video_caps.vpp.sharpening)
+         return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+      if (*num_filter_caps < 1) {
+         *num_filter_caps = 1;
+         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+      }
+
+      sharpening[i].range = vlVaVideoFilterRange(
+         &pscreen->video_caps.vpp.filter_range[PIPE_VIDEO_VPP_FILTER_SHARPENING]);
+      i++;
+      break;
+   }
+   case VAProcFilterColorBalance: {
+      VAProcFilterCapColorBalance *color_balance_caps = filter_caps;
+
+      if (!supports_filters || !pscreen->video_caps.vpp.color_balance)
+         return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+      unsigned int num = ARRAY_SIZE(color_balance_filters);
+      if (*num_filter_caps < num) {
+         *num_filter_caps = num;
+         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+      }
+
+      for (unsigned int j = 0; j < ARRAY_SIZE(color_balance_filters); j++) {
+         color_balance_caps[i].type = color_balance_filters[j].type;
+         color_balance_caps[i].range = vlVaVideoFilterRange(
+            &pscreen->video_caps.vpp.filter_range[color_balance_filters[j].filter]);
+         i++;
+      }
+      break;
+   }
    case VAProcFilterNoiseReduction:
-   case VAProcFilterSharpening:
-   case VAProcFilterColorBalance:
    case VAProcFilterSkinToneEnhancement:
       return VA_STATUS_ERROR_UNIMPLEMENTED;
    default:
@@ -295,24 +392,14 @@ vlVaPostProc(vlVaDriver *drv, vlVaContext *context, struct pipe_video_buffer *sr
             .entrypoint = PIPE_VIDEO_ENTRYPOINT_PROCESSING,
          };
          drv->proc = vl_create_proc(drv->pipe, &templat);
+         if (drv->proc)
+            pipe_reference_init(&drv->proc->reference, 1);
       }
       proc = drv->proc;
    }
 
    if (!proc)
       return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
-
-   if (!drv->pipe->screen->is_video_format_supported(drv->pipe->screen,
-                                                     src->buffer_format,
-                                                     PIPE_VIDEO_PROFILE_UNKNOWN,
-                                                     PIPE_VIDEO_ENTRYPOINT_PROCESSING))
-      return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
-
-   if (!drv->pipe->screen->is_video_format_supported(drv->pipe->screen,
-                                                     dst->buffer_format,
-                                                     PIPE_VIDEO_PROFILE_UNKNOWN,
-                                                     PIPE_VIDEO_ENTRYPOINT_PROCESSING))
-      return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
    if (!context || context->needs_begin_frame) {
       proc->begin_frame(proc, dst, &param->base);
@@ -478,6 +565,103 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
          break;
       }
 
+      case VAProcFilterSharpening: {
+         VAProcFilterParameterBuffer *sharpening = buf->data;
+
+         if (VAProcFilterSharpening != sharpening->type)
+            return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+         vpp.sharpening.valid = true;
+         vpp.sharpening.strength = sharpening->value;
+         break;
+      }
+
+      case VAProcFilterColorBalance: {
+         unsigned j;
+         VAProcFilterParameterBufferColorBalance *color_balance = buf->data;
+
+         for (j = 0; j < buf->num_elements; j++, color_balance++) {
+            if (VAProcFilterColorBalance != color_balance->type)
+               return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+            switch (color_balance->attrib) {
+            case VAProcColorBalanceBrightness:
+               vpp.color_balance_brightness.valid = true;
+               vpp.color_balance_brightness.strength = color_balance->value;
+               break;
+            case VAProcColorBalanceContrast:
+               vpp.color_balance_contrast.valid = true;
+               vpp.color_balance_contrast.strength = color_balance->value;
+               break;
+            case VAProcColorBalanceHue:
+               vpp.color_balance_hue.valid = true;
+               vpp.color_balance_hue.strength = color_balance->value;
+               break;
+            case VAProcColorBalanceSaturation:
+               vpp.color_balance_saturation.valid = true;
+               vpp.color_balance_saturation.strength = color_balance->value;
+               break;
+            default:
+               return VA_STATUS_ERROR_UNIMPLEMENTED;
+            }
+         }
+         break;
+      }
+
+      case VAProcFilterHighDynamicRangeToneMapping: {
+         VAProcFilterParameterBufferHDRToneMapping *tm = buf->data;
+
+         if (VAProcFilterHighDynamicRangeToneMapping != tm->type)
+            return VA_STATUS_ERROR_UNIMPLEMENTED;
+
+         switch (tm->data.metadata_type) {
+         case VAProcHighDynamicRangeMetadataHDR10: {
+            if (!tm->data.metadata)
+               return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+            VAHdrMetaDataHDR10 *in_hdr10_metadata = tm->data.metadata;
+            vpp.in_hdr10metadata.valid = true;
+            vpp.in_hdr10metadata.display_primaries_x[0] = in_hdr10_metadata->display_primaries_x[0];
+            vpp.in_hdr10metadata.display_primaries_x[1] = in_hdr10_metadata->display_primaries_x[1];
+            vpp.in_hdr10metadata.display_primaries_x[2] = in_hdr10_metadata->display_primaries_x[2];
+            vpp.in_hdr10metadata.display_primaries_y[0] = in_hdr10_metadata->display_primaries_y[0];
+            vpp.in_hdr10metadata.display_primaries_y[1] = in_hdr10_metadata->display_primaries_y[1];
+            vpp.in_hdr10metadata.display_primaries_y[2] = in_hdr10_metadata->display_primaries_y[2];
+            vpp.in_hdr10metadata.white_point_x = in_hdr10_metadata->white_point_x;
+            vpp.in_hdr10metadata.white_point_y = in_hdr10_metadata->white_point_y;
+            vpp.in_hdr10metadata.max_display_mastering_luminance = in_hdr10_metadata->max_display_mastering_luminance;
+            vpp.in_hdr10metadata.min_display_mastering_luminance = in_hdr10_metadata->min_display_mastering_luminance;
+            vpp.in_hdr10metadata.max_content_light_level = in_hdr10_metadata->max_content_light_level;
+            vpp.in_hdr10metadata.max_pic_average_light_level = in_hdr10_metadata->max_pic_average_light_level;
+
+            /* Output surface hdr metadata */
+            if (param->output_hdr_metadata && param->output_hdr_metadata->metadata_type == VAProcHighDynamicRangeMetadataHDR10) {
+               if (!param->output_hdr_metadata->metadata)
+                  return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+               VAHdrMetaDataHDR10 *out_hdr10_metadata = param->output_hdr_metadata->metadata;
+               vpp.out_hdr10metadata.valid = true;
+               vpp.out_hdr10metadata.display_primaries_x[0] = out_hdr10_metadata->display_primaries_x[0];
+               vpp.out_hdr10metadata.display_primaries_x[1] = out_hdr10_metadata->display_primaries_x[1];
+               vpp.out_hdr10metadata.display_primaries_x[2] = out_hdr10_metadata->display_primaries_x[2];
+               vpp.out_hdr10metadata.display_primaries_y[0] = out_hdr10_metadata->display_primaries_y[0];
+               vpp.out_hdr10metadata.display_primaries_y[1] = out_hdr10_metadata->display_primaries_y[1];
+               vpp.out_hdr10metadata.display_primaries_y[2] = out_hdr10_metadata->display_primaries_y[2];
+               vpp.out_hdr10metadata.white_point_x = out_hdr10_metadata->white_point_x;
+               vpp.out_hdr10metadata.white_point_y = out_hdr10_metadata->white_point_y;
+               vpp.out_hdr10metadata.max_display_mastering_luminance = out_hdr10_metadata->max_display_mastering_luminance;
+               vpp.out_hdr10metadata.min_display_mastering_luminance = out_hdr10_metadata->min_display_mastering_luminance;
+               vpp.out_hdr10metadata.max_content_light_level = out_hdr10_metadata->max_content_light_level;
+               vpp.out_hdr10metadata.max_pic_average_light_level = out_hdr10_metadata->max_pic_average_light_level;
+            }
+            break;
+         }
+         default:
+            return VA_STATUS_ERROR_UNIMPLEMENTED;
+         }
+         break;
+      }
+
       default:
          return VA_STATUS_ERROR_UNIMPLEMENTED;
       }
@@ -526,6 +710,11 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
          vpp.blend.mode |= PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA;
       if (param->blend_state->flags & VA_BLEND_PREMULTIPLIED_ALPHA)
          vpp.blend.mode |= PIPE_VIDEO_VPP_BLEND_MODE_PREMULTIPLIED_ALPHA;
+      if (param->blend_state->flags & VA_BLEND_LUMA_KEY) {
+         vpp.blend.mode |= PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY;
+         vpp.blend.min_luma = param->blend_state->min_luma;
+         vpp.blend.max_luma = param->blend_state->max_luma;
+      }
    }
 
    /* Output background color */
@@ -641,7 +830,8 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
       vpp.base.out_fence = &dst_surface->fence;
       context->proc.vpp = vpp;
       context->proc.dst_surface = dst_surface;
-      vlVaSetSurfaceContext(drv, dst_surface, context);
+      dst_surface->entrypoint = context->templat.entrypoint;
+      pipe_video_codec_reference(&dst_surface->codec, context->decoder);
       return VA_STATUS_SUCCESS;
    }
 

@@ -217,7 +217,7 @@ bool ToneMapGenerator_ContentEqualsContainer(
     const struct ToneMapHdrMetaData* containerPrimaries)
 {
 
-    if (abs(contentMetaData->bluePrimaryX  - containerPrimaries->redPrimaryX)   < 2 &&
+    if (abs(contentMetaData->redPrimaryX   - containerPrimaries->redPrimaryX)   < 2 &&
         abs(contentMetaData->redPrimaryY   - containerPrimaries->redPrimaryY)   < 2 &&
         abs(contentMetaData->greenPrimaryX - containerPrimaries->greenPrimaryX) < 2 &&
         abs(contentMetaData->greenPrimaryY - containerPrimaries->greenPrimaryY) < 2 &&

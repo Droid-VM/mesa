@@ -162,7 +162,10 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    NIR_PASS(_, nir, nir_opt_if, 0);
    NIR_PASS(_, nir, nir_opt_idiv_const, 16);
 
-   msl_lower_textures(nir);
+   /* LOD bias is lowered unconditionally, we won't know until runtime if it
+    * is natively supported. This is safe as we can just pass in 0.0 for the
+    * bias lowering on natively supported hardware. */
+   msl_lower_textures(nir, true);
 
    optimize(nir);
 
@@ -311,7 +314,10 @@ main(int argc, char **argv)
          } while (progress);
 
          nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
-         struct nir_to_msl_options options = {};
+         /* KK_WORKAROUND_19 No precompiled shader will be dispatched with the
+          * buggy Metal entry point. */
+         struct nir_to_msl_options options = {.disabled_workarounds =
+                                                 BITFIELD64_BIT(19)};
          const char *msl = nir_to_msl(s, &options);
          print_shader(fp_c, libfunc->name, target, v, msl, s);
          ralloc_free((void *)msl);

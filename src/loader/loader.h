@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <stddef.h>
 #include "mesa_interface.h"
+#include "util/libdrm.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,11 +76,22 @@ loader_open_driver_lib(const char *driver_name,
 char *
 loader_get_device_name_for_fd(int fd);
 
+bool
+loader_drm_devices_match(drmDevicePtr dev1, drmDevicePtr dev2);
+
 /* For dri prime gpu offloading this function will take current render fd and possibly
  * update it with new prime gpu offloading fd. For dri prime gpu offloading optionally
  * this function can return the original fd. Also this function returns true/false based
  * on render gpu is different from display gpu.
  */
+
+/* For dri prime offloading this function will take a default device and possibly set
+ * the user preferred device for prime gpu offloading. This function returns true/false
+ * based on if the default device is different from the preferred one.
+ */
+
+bool
+loader_get_user_preferred_device(drmDevicePtr default_dev, drmDevicePtr *preferred_dev);
 
 bool
 loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd);

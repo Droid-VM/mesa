@@ -10,7 +10,7 @@ freedreno-a750 = { sysmem = 8000 }
 [[traces]]
 path = "angle/angle_trace_tests/among_us"
 [traces.devices]
-freedreno-a660 = { checksum = "76c6a3606ca690d78bb545a2a4e6d736a518bcc6c5653738b9d22fd144fcf4e8" }
+freedreno-a660 = { checksum = "83cda3407a9ab6b6b8a5a1e75146339ecbb91c747e2b1f221ba54f286d0a2ad4" }
 
 [[traces]]
 path = "angle/angle_trace_tests/asphalt_9"
@@ -50,7 +50,7 @@ freedreno-a660 = { checksum = "0edcd91ca6ac74124b077701b494becf054e5f3ec3803417f
 [[traces]]
 path = "angle/angle_trace_tests/pubg_mobile_battle_royale"
 [traces.devices]
-freedreno-a660 = { checksum = "2ee6d64c931869d7d83c5507d73ebcac877d7c6bbc2099f63d029a27dbc172f4" }
+freedreno-a660 = { checksum = "e835b118fe3fdb3074389b3d01c803fe71555c6c8929083baa4d3b90daca3595" }
 
 [[traces]]
 path = "angle/angle_trace_tests/temple_run_300"
@@ -750,7 +750,7 @@ freedreno-a750 = { checksum = "4a74817ec7271b26251a1f0a678cae95b6e3cf140b1bf7b0e
 [[traces]]
 path = "steam-d3d9/starcraft2_unknown_dx9_unknown_unknown_none.trace"
 [traces.devices]
-freedreno-a660 = { checksum = "43dfeef2a17b9bb31eb96c817d8f53137708ac8777e38b3eec49ac13cc9e8842" }
+freedreno-a660 = { checksum = "f87dbb232ec3993b0c892c23df3e198ee2b9eb7c6b34e1e8ea44deef73de0f2d" }
 freedreno-a750 = { checksum = "43dfeef2a17b9bb31eb96c817d8f53137708ac8777e38b3eec49ac13cc9e8842" }
 
 # steam-d3d9/Star Wars Empire At War_unknown_dx9_unknown_unknown_none.trace: Crashes Xwayland:
@@ -854,19 +854,19 @@ freedreno-a660 = { checksum = "cb4a43398b1b8cf5a50fbb24121a2bd8ef1d220c94995daae
 path = "steam-d3d11/anno5-high-2.rdc"
 sysmem = 900
 [traces.devices]
-freedreno-a660 = { checksum = "7ee7a8dcf70c430aad12aa223da8f5177423ae479a811951830f26dca8b56d93" }
+freedreno-a660 = { checksum = "340c801f405f6ab79a96644c5bf5901cfc901730760d874505b671d7b60aaeed" }
 
 [[traces]]
 path = "steam-d3d11/anno5-low.rdc"
 sysmem = 600
 [traces.devices]
-freedreno-a660 = { checksum = "4ed664f5d05fec922678f14af4be7ba6f499b991a1d66ce123a6f808ec85e3d6" }
+freedreno-a660 = { checksum = "2c3516a88705b9ca1d6af59a8a6a9f7136452912f42d54b09c1f27a00ce8756b" }
 
 [[traces]]
 path = "steam-d3d11/anno-medium.rdc"
 sysmem = 600
 [traces.devices]
-freedreno-a660 = { checksum = "b15e76f9d42e8653cd913677d990ca39ac18b773420e67a521f9a13c925ecddc" }
+freedreno-a660 = { checksum = "d8b7d958665c2e104ad2a2c14147284dac1b9414b5e596137aae7a0d62dcf75b" }
 
 [[traces]]
 path = "steam-d3d11/arma-low.rdc"

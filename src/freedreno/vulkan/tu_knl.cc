@@ -32,6 +32,7 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
                              struct vk_object_base *base,
                              struct tu_bo **out_bo,
                              uint64_t size,
+                             uint64_t align,
                              uint64_t client_iova,
                              VkMemoryPropertyFlags mem_property,
                              enum tu_bo_alloc_flags flags,
@@ -64,7 +65,7 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
    }
 
    VkResult result =
-      dev->instance->knl->bo_init(dev, base, out_bo, size, client_iova,
+      dev->instance->knl->bo_init(dev, base, out_bo, size, align, client_iova,
                                   mem_property, flags, lazy_vma, name);
    if (result != VK_SUCCESS)
       return result;
@@ -89,12 +90,13 @@ VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,
                   struct tu_bo **bo,
                   uint64_t size,
+                  uint64_t align,
                   enum tu_bo_alloc_flags flags,
                   int fd)
 {
    assert(!(flags & ~TU_BO_ALLOC_REPLAYABLE));
    size = align64(size, os_page_size);
-   VkResult result = dev->instance->knl->bo_init_dmabuf(dev, bo, size, flags, fd);
+   VkResult result = dev->instance->knl->bo_init_dmabuf(dev, bo, size, align, flags, fd);
    if (result != VK_SUCCESS)
       return result;
 
@@ -173,7 +175,7 @@ tu_bo_sync_cache(struct tu_device *dev,
                  VkDeviceSize size,
                  enum tu_mem_sync_op op)
 {
-   char *start = (char *) bo->map + offset;
+   char *start = static_cast<char *>(bo->map) + offset;
 
    size = size == VK_WHOLE_SIZE ? (bo->size - offset) : size;
    if (op == TU_MEM_SYNC_CACHE_TO_GPU) {
@@ -205,13 +207,13 @@ tu_sparse_vma_init(struct tu_device *dev,
                    struct tu_sparse_vma *out_vma,
                    uint64_t *out_iova,
                    enum tu_sparse_vma_flags flags,
-                   uint64_t size, uint64_t client_iova)
+                   uint64_t size, uint64_t align, uint64_t client_iova)
 {
    size = align64(size, os_page_size);
 
    out_vma->flags = flags;
    return dev->instance->knl->sparse_vma_init(dev, base, out_vma, out_iova,
-                                              flags, size, client_iova);
+                                              flags, size, align, client_iova);
 
 }
 
@@ -248,6 +250,19 @@ tu_device_get_gpu_timestamp(struct tu_device *dev,
                             uint64_t *ts)
 {
    return dev->instance->knl->device_get_gpu_timestamp(dev, ts);
+}
+
+VkResult
+tu_device_get_calibrated_timestamps(struct tu_device *dev,
+                                    uint32_t count,
+                                    const VkCalibratedTimestampInfoKHR *infos,
+                                    uint64_t *ts,
+                                    uint64_t *max_deviation)
+{
+   if (!dev->instance->knl->device_get_calibrated_timestamps)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   return dev->instance->knl->device_get_calibrated_timestamps(dev, count, infos, ts, max_deviation);
 }
 
 int

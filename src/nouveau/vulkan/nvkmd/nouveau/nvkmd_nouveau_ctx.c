@@ -62,6 +62,7 @@ nvkmd_nouveau_create_exec_ctx(struct nvkmd_dev *_dev,
    STATIC_ASSERT(NVKMD_ENGINE_3D       == (int)NOUVEAU_WS_ENGINE_3D);
    STATIC_ASSERT(NVKMD_ENGINE_M2MF     == (int)NOUVEAU_WS_ENGINE_M2MF);
    STATIC_ASSERT(NVKMD_ENGINE_COMPUTE  == (int)NOUVEAU_WS_ENGINE_COMPUTE);
+   STATIC_ASSERT(NVKMD_ENGINE_VDEC     == (int)NOUVEAU_WS_ENGINE_VDEC);
 
    err = nouveau_ws_context_create(dev->ws_dev, (int)engines, &ctx->ws_ctx);
    if (err != 0) {
@@ -76,7 +77,7 @@ nvkmd_nouveau_create_exec_ctx(struct nvkmd_dev *_dev,
    if (err < 0) {
       nouveau_ws_context_destroy(ctx->ws_ctx);
       FREE(ctx);
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
    ctx->max_push = dev->ws_dev->max_push;
@@ -167,6 +168,9 @@ nvkmd_nouveau_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                             uint32_t exec_count,
                             const struct nvkmd_ctx_exec *execs)
 {
+   if (exec_count == 0)
+      return VK_SUCCESS;
+
    struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
    const uint32_t size_needed = MIN2(
       ctx->req_push.size + exec_count * sizeof(struct drm_nouveau_exec_push),

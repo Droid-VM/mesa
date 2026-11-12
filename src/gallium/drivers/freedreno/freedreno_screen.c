@@ -125,7 +125,7 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
    if (screen->has_timestamp) {
       uint64_t n;
       fd_pipe_get_param(screen->pipe, FD_TIMESTAMP, &n);
-      return ticks_to_ns(n);
+      return fd_ticks_to_ns(n);
    } else {
       int64_t cpu_time = os_time_get_nano();
       return cpu_time + screen->cpu_gpu_time_delta;
@@ -135,7 +135,7 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
 static uint64_t
 fd_screen_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
 {
-   return ticks_to_ns(raw_timestamp);
+   return fd_ticks_to_ns(raw_timestamp);
 }
 
 static void
@@ -298,12 +298,18 @@ fd_init_shader_caps(struct fd_screen *screen)
          caps->max_shader_buffers = IR3_BINDLESS_SSBO_COUNT;
          caps->max_shader_images = IR3_BINDLESS_IMAGE_COUNT;
       } else if (is_a4xx(screen) || is_a5xx(screen)) {
-         /* a5xx (and a4xx for that matter) has one state-block
-          * for compute-shader SSBO's and another that is shared
-          * by VS/HS/DS/GS/FS..  so to simplify things for now
-          * just advertise SSBOs for FS and CS.  We could possibly
-          * do what blob does, and partition the space for
-          * VS/HS/DS/GS/FS.  The blob advertises:
+         /* a5xx (and a4xx for that matter) has one state-block for
+          * compute-shader SSBO's and another that is shared by VS/HS/DS/GS/FS.
+          *
+          * The SB4_CS_SSBO/ST4_UBO (base addresses) and
+          * SB4_CS_SSBO/ST4_CONSTANTS (dimensions for robustness and resinfo)
+          * are both 64 long and wrap past that, and those are shared between
+          * storage buffers and images.
+          *
+          * SB4_CS_SSBO/ST4_SHADER (constants loaded at c448) can also only fit
+          * 64 due to constant file addressing.
+          *
+          * The blob advertises:
           *
           *   GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS: 4
           *   GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS: 4
@@ -313,16 +319,37 @@ fd_init_shader_caps(struct fd_screen *screen)
           *   GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS: 24
           *   GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS: 24
           *
-          * I think that way we could avoid having to patch shaders
-          * for actual SSBO indexes by using a static partitioning.
+          * a530 VK v415:
           *
-          * Note same state block is used for images and buffers,
-          * but images also need texture state for read access
-          * (isam/isam.3d)
+          * maxPerStageDescriptorSamplers                   = 16
+          * maxPerStageDescriptorUniformBuffers             = 14
+          * maxPerStageDescriptorStorageBuffers             = 24
+          * maxPerStageDescriptorSampledImages              = 128
+          * maxPerStageDescriptorStorageImages              = 4
+          * maxPerStageDescriptorInputAttachments           = 8
+          * maxPerStageResources                            = 158
+          * maxDescriptorSetSamplers                        = 96
+          * maxDescriptorSetUniformBuffers                  = 84
+          * maxDescriptorSetUniformBuffersDynamic           = 8
+          * maxDescriptorSetStorageBuffers                  = 24
+          * maxDescriptorSetStorageBuffersDynamic           = 4
+          * maxDescriptorSetSampledImages                   = 768
+          * maxDescriptorSetStorageImages                   = 24
+          * maxDescriptorSetInputAttachments                = 8
+          *
+          * For now we just support the same 24 images and 24 ssbos in the FS
+          * and CS as the blob does, and don't support them for the VS.  To add
+          * VS, we'd have to statically allocate the 64 descriptor slots between
+          * the two.
+          *
+          * However, readonly images also need texture state for read access
+          * (isam/isam.3d) so we have to limit to at most the number of textures
+          * supported (though we'll have trouble if you have texturing plus max
+          * images).
           */
          if (i == MESA_SHADER_FRAGMENT || i == MESA_SHADER_COMPUTE) {
-            caps->max_shader_buffers =
-            caps->max_shader_images = 24;
+            caps->max_shader_images = MIN2(24, caps->max_sampler_views);
+            caps->max_shader_buffers = 24;
          }
       }
    }
@@ -351,11 +378,11 @@ fd_init_compute_caps(struct fd_screen *screen)
    caps->max_grid_size[1] = options->max_workgroup_count[1];
    caps->max_grid_size[2] = options->max_workgroup_count[2];
 
-   caps->max_block_size[0] = 1024;
-   caps->max_block_size[1] = 1024;
-   caps->max_block_size[2] = 64;
-
    caps->max_threads_per_block = options->max_workgroup_invocations;
+
+   caps->max_block_size[0] =
+   caps->max_block_size[1] =
+   caps->max_block_size[2] = MIN2(1024, caps->max_threads_per_block);
 
    caps->max_global_size = os_get_gpu_heap_size(1.0f, NULL);
 
@@ -413,6 +440,8 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->has_const_bw = true;
 
    caps->copy_between_compressed_and_plain_formats =
+      is_a5xx(screen) || is_a6xx(screen);
+
    caps->multi_draw_indirect =
    caps->draw_parameters =
    caps->multi_draw_indirect_params =
@@ -468,11 +497,11 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->surface_sample_count = is_a6xx(screen);
 
-   caps->depth_clip_disable = is_a3xx(screen) || is_a4xx(screen) || is_a6xx(screen);
+   caps->depth_clip_disable = !is_a2xx(screen);
 
    caps->post_depth_coverage =
-   caps->depth_clip_disable_separate =
-   caps->demote_to_helper_invocation = is_a6xx(screen);
+   caps->depth_clip_disable_separate = is_a6xx(screen);
+   caps->demote_to_helper_invocation = is_a5xx(screen) || is_a6xx(screen);
 
    caps->sampler_reduction_minmax =
    caps->sampler_reduction_minmax_arb =
@@ -541,6 +570,13 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->glsl_feature_level_compatibility = caps->glsl_feature_level;
 
+   /* a702 could report this too, but exposing the OES sample extensions on
+    * it is left for a follow-up.
+    */
+   caps->fs_sample_variables =
+      is_a4xx(screen) || is_a5xx(screen) ||
+      (is_a6xx(screen) && !screen->info->props.is_a702);
+
    caps->shader_buffer_offset_alignment =
       is_a6xx(screen) ? 64 : (is_a5xx(screen) || is_a4xx(screen) ? 4 : 0);
 
@@ -559,7 +595,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->fbfetch =
       fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE && is_a6xx(screen) ?
       screen->max_rts : 0;
-   caps->sample_shading = is_a6xx(screen);
+   caps->sample_shading = is_a5xx(screen) || is_a6xx(screen);
 
    caps->context_priority_mask = screen->priority_mask;
 
@@ -625,9 +661,7 @@ fd_init_screen_caps(struct fd_screen *screen)
       (is_a5xx(screen) ? 0 : 1);
 
    /* Stream output. */
-   caps->max_vertex_streams =
-      (is_a6xx(screen) && !screen->info->props.is_a702) ?  /* has SO + GS */
-         PIPE_MAX_SO_BUFFERS : 0;
+   caps->max_vertex_streams = screen->info->props.num_xfb_streams;
    caps->max_stream_output_buffers = is_ir3(screen) ? PIPE_MAX_SO_BUFFERS : 0;
    caps->stream_output_pause_resume =
    caps->stream_output_interleave_buffers =
@@ -657,7 +691,8 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    /* Render targets. */
    caps->max_render_targets = screen->max_rts;
-   caps->max_dual_source_render_targets = (is_a3xx(screen) || is_a6xx(screen)) ? 1 : 0;
+   caps->max_dual_source_render_targets =
+      (is_a3xx(screen) || is_a5xx(screen) || is_a6xx(screen)) ? 1 : 0;
 
    /* Queries. */
    caps->occlusion_query =
@@ -666,7 +701,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->query_time_elapsed =
       /* only a4xx, requires new enough kernel so we know max_freq: */
       (screen->max_freq > 0) && (is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen));
-   caps->timer_resolution = ticks_to_ns(1);
+   caps->timer_resolution = fd_ticks_to_ns(1);
    caps->query_buffer_object =
    caps->query_so_overflow =
    caps->query_pipeline_statistics_single = is_a6xx(screen);
@@ -734,6 +769,21 @@ fd_init_screen_caps(struct fd_screen *screen)
 
       /* Up to 16 bytes are accelerated */
       caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
+   }
+
+   /* All of the varying outputs go into the VPC, which counts towards our
+    * max_outputs cap.  We do skip this on 5xx, where the HW actually supports
+    * 128 (https://vulkan.gpuinfo.org/displayreport.php?id=2037#properties) but
+    * we only claim 64.
+    *
+    * MESA_SHADER_TESS_CTRL is left as default, because that mask is the
+    * per-patch built-ins rather than fixed-function outputs.
+    */
+   if (!is_a5xx(screen)) {
+      caps->ignored_output_varyings[MESA_SHADER_VERTEX] =
+         caps->ignored_output_varyings[MESA_SHADER_TESS_EVAL] =
+            caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
+               caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
    }
 }
 

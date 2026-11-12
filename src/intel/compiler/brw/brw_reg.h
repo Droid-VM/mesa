@@ -936,6 +936,12 @@ brw_null_reg(void)
    return brw_vec8_reg(ARF, BRW_ARF_NULL, 0);
 }
 
+static inline bool
+brw_reg_is_null(struct brw_reg reg)
+{
+   return reg.file == ARF && reg.nr == BRW_ARF_NULL;
+}
+
 static inline struct brw_reg
 brw_null_vec(unsigned width)
 {
@@ -1471,6 +1477,15 @@ regions_overlap(const brw_reg &r, unsigned dr, const brw_reg &s, unsigned ds)
    if (r.file == VGRF) {
       return r.nr == s.nr &&
              !(r.offset + dr <= s.offset || s.offset + ds <= r.offset);
+   } else if (r.is_accumulator() || s.is_accumulator()) {
+      /* Prevent false positives with other ARFs. */
+      if (!r.is_accumulator() || !s.is_accumulator())
+         return false;
+
+      unsigned r_base = ((r.nr - BRW_ARF_ACCUMULATOR) * REG_SIZE) + r.subnr;
+      unsigned s_base = ((s.nr - BRW_ARF_ACCUMULATOR) * REG_SIZE) + s.subnr;
+
+      return !(r_base + dr <= s_base || s_base + ds <= r_base);
    } else {
       return !(reg_offset(r) + dr <= reg_offset(s) ||
                reg_offset(s) + ds <= reg_offset(r));
@@ -1581,5 +1596,16 @@ byte_stride(const brw_reg &reg)
       UNREACHABLE("Invalid register file");
    }
 }
+
+/**
+ * Determine which SIMD8 parts of the accumulator register space are accessed.
+ *
+ * SIMD8 parts are used regardless of platform. A mask of 0x02 on DG2 means
+ * all SIMD8 of acc1, and a mask of 0x0c on BMG means all SIMD16 of acc1.
+ */
+unsigned brw_explicit_accumulator_bits(unsigned exec_size, const brw_reg &);
+
+unsigned brw_implicit_accumulator_bits(unsigned exec_size, unsigned group,
+                                       brw_reg_type);
 
 #endif /* __cplusplus */

@@ -36,6 +36,7 @@ shader-db:
     - .use-debian/x86_64_build
   rules:
     - !reference [.never-post-merge-rules, rules]
+    - !reference [.no_downstream_pipeline-rules, rules]
     - !reference [.core-rules, rules]
     # Keep this list in sync with the drivers tested in run-shader-db.sh
     - !reference [.etnaviv-rules, rules]
@@ -64,14 +65,13 @@ shader-db:
       - shader-db
   timeout: 15m
 
-yaml-toml-shell-py-test:
+lint-test:
   extends:
     - .use-debian/arm64_build
     - .no-auto-retry  # this job can't be flaky
   stage: code-validation
   script:
     - uncollapsed_section_start tomllint "tomllint"
-    - echo "If your change looks right but this script rejects it, contact @eric (GitLab) / eric_engestrom (IRC)."
     - python3 bin/toml_lint.py
     - uncollapsed_section_switch yamllint "yamllint"
     - .gitlab-ci/run-yamllint.sh
@@ -82,6 +82,8 @@ yaml-toml-shell-py-test:
   rules:
     - !reference [.never-post-merge-rules, rules]
     - !reference [.no_scheduled_pipelines-rules, rules]
+    - !reference [.no_downstream_pipeline-rules, rules]
+    - !reference [.common-rules, rules]
     # merge pipeline
     - if: $GITLAB_USER_LOGIN == "marge-bot" && $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: &lint_files

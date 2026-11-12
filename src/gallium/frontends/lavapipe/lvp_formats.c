@@ -77,6 +77,19 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
      return;
    }
 
+   if (lvp_is_compressed_format_emulated(format)) {
+      features |= (VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+                   VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                   VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                   VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+                   VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                   VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT);
+      out_properties->linearTilingFeatures = features;
+      out_properties->optimalTilingFeatures = features;
+      out_properties->bufferFeatures = buffer_features;
+      return;
+   }
+
    if (pscreen->is_format_supported(pscreen, pformat, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_DEPTH_STENCIL)) {
       out_properties->linearTilingFeatures = 0;
@@ -165,8 +178,7 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
    if (pscreen->is_format_supported(pscreen, pformat, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_RENDER_TARGET)) {
       features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-      if (!util_format_is_pure_integer(pformat) &&
-          !(util_format_is_snorm(pformat) && !physical_device->snorm_blend))
+      if (!util_format_is_pure_integer(pformat))
          features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
    }
 
@@ -253,10 +265,10 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceFormatProperties2(
       perf->optimal = VK_FALSE;
 
 #if DETECT_OS_LINUX
-   vk_foreach_struct(ext, pFormatProperties->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct(sType, ext, pFormatProperties->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
-         struct VkDrmFormatModifierPropertiesListEXT *modlist = (void *)ext;
+         struct VkDrmFormatModifierPropertiesListEXT *modlist = ext;
          modlist->drmFormatModifierCount = 0;
          if (pFormatProperties->formatProperties.optimalTilingFeatures) {
             modlist->drmFormatModifierCount = 1;
@@ -270,7 +282,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceFormatProperties2(
          break;
       }
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT: {
-         struct VkDrmFormatModifierPropertiesList2EXT *modlist = (void *)ext;
+         struct VkDrmFormatModifierPropertiesList2EXT *modlist = ext;
          modlist->drmFormatModifierCount = 0;
          if (format_props.optimalTilingFeatures) {
             modlist->drmFormatModifierCount = 1;
@@ -363,6 +375,19 @@ static VkResult lvp_get_image_format_properties(struct lvp_physical_device *phys
       break;
    }
 
+   /* We don't want emulated formats to gain unexpected usage (storage in
+    * particular) from its compatible view formats.
+    */
+   bool storage_not_supported =
+      ((info->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+       !(format_feature_flags & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT));
+
+   if (((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
+        (info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) &&
+       storage_not_supported &&
+       (lvp_is_compressed_format_emulated(info->format)))
+      goto unsupported;
+
    if (info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       goto skip_checks;
 
@@ -450,10 +475,10 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_GetPhysicalDeviceImageFormatProperties2(
    if (result != VK_SUCCESS)
       return result;
 
-   vk_foreach_struct_const(s, base_info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const(sType, s, base_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *) s;
+         external_info = s;
          break;
       default:
          break;
@@ -461,16 +486,16 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_GetPhysicalDeviceImageFormatProperties2(
    }
 
    /* Extract output structs */
-   vk_foreach_struct(s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *) s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *) s;
+         ycbcr_props = s;
          break;
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT:
-         hic = (void*)s;
+         hic = s;
          hic->optimalDeviceAccess = VK_TRUE;
          hic->identicalMemoryLayout = VK_TRUE;
          break;

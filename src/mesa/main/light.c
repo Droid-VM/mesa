@@ -160,7 +160,7 @@ do_light(struct gl_context *ctx, GLuint lnum, GLenum pname, const GLfloat *param
       break;
    case GL_SPOT_EXPONENT:
       assert(params[0] >= 0.0F);
-      assert(params[0] <= ctx->Const.MaxSpotExponent);
+      assert(params[0] <= MAX_SPOT_EXPONENT);
       if (lu->SpotExponent == params[0])
 	 return;
       FLUSH_VERTICES(ctx, _NEW_LIGHT_CONSTANTS, GL_LIGHTING_BIT);
@@ -261,7 +261,7 @@ _mesa_Lightfv( GLenum light, GLenum pname, const GLfloat *params )
    GLint i = (GLint) (light - GL_LIGHT0);
    GLfloat temp[4];
 
-   if (i < 0 || i >= (GLint) ctx->Const.MaxLights) {
+   if (i < 0 || i >= MAX_LIGHTS) {
       _mesa_error( ctx, GL_INVALID_ENUM, "glLight(light=0x%x)", light );
       return;
    }
@@ -287,7 +287,7 @@ _mesa_Lightfv( GLenum light, GLenum pname, const GLfloat *params )
       params = temp;
       break;
    case GL_SPOT_EXPONENT:
-      if (params[0] < 0.0F || params[0] > ctx->Const.MaxSpotExponent) {
+      if (params[0] < 0.0F || params[0] > MAX_SPOT_EXPONENT) {
 	 _mesa_error(ctx, GL_INVALID_VALUE, "glLight");
 	 return;
       }
@@ -373,7 +373,7 @@ _mesa_GetLightfv( GLenum light, GLenum pname, GLfloat *params )
    GET_CURRENT_CONTEXT(ctx);
    GLint l = (GLint) (light - GL_LIGHT0);
 
-   if (l < 0 || l >= (GLint) ctx->Const.MaxLights) {
+   if (l < 0 || l >= MAX_LIGHTS) {
       _mesa_error( ctx, GL_INVALID_ENUM, "glGetLightfv" );
       return;
    }
@@ -422,7 +422,7 @@ _mesa_GetLightiv( GLenum light, GLenum pname, GLint *params )
    GET_CURRENT_CONTEXT(ctx);
    GLint l = (GLint) (light - GL_LIGHT0);
 
-   if (l < 0 || l >= (GLint) ctx->Const.MaxLights) {
+   if (l < 0 || l >= MAX_LIGHTS) {
       _mesa_error( ctx, GL_INVALID_ENUM, "glGetLightiv" );
       return;
    }

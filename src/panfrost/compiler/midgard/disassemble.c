@@ -1806,8 +1806,8 @@ print_texture_word(disassemble_context *ctx, FILE *fp, const uint32_t *word,
 }
 
 void
-disassemble_midgard(FILE *fp, const void *code, size_t size, uint64_t gpu_id,
-                    bool verbose)
+disassemble_midgard(FILE *fp, const void *code, size_t size,
+                    unsigned quirks, bool verbose)
 {
    const uint32_t *words = (const uint32_t *)code;
    unsigned num_words = size / 4;
@@ -1880,7 +1880,7 @@ disassemble_midgard(FILE *fp, const void *code, size_t size, uint64_t gpu_id,
       switch (tag) {
       case TAG_TEXTURE_4_VTX ... TAG_TEXTURE_4_BARRIER: {
          bool interpipe_aliasing =
-            midgard_get_quirks(gpu_id) & MIDGARD_INTERPIPE_REG_ALIASING;
+            quirks & MIDGARD_INTERPIPE_REG_ALIASING;
 
          print_texture_word(
             &ctx, fp, &words[i], tabs, interpipe_aliasing ? 0 : REG_TEX_BASE,

@@ -61,11 +61,15 @@ enum radv_video_enc_hw_ver {
  *
  * - full: Disable HiZ/HiS at draw time when required to prevent the issue to happen. This solution
  *   should be completely safe but it might decrease performance in some cases.
+ *
+ * - full_rez: Disable HiZ/HiS like full and force the fragment Z-order to early-Z-then-ReZ to recover
+ *   some of the early-Z rejection lost by disabling HiZ.
  */
 enum radv_gfx12_hiz_wa {
    RADV_GFX12_HIZ_WA_DISABLED,
    RADV_GFX12_HIZ_WA_PARTIAL,
    RADV_GFX12_HIZ_WA_FULL,
+   RADV_GFX12_HIZ_WA_FULL_REZ,
 };
 
 enum radv_drm_device_type {
@@ -152,6 +156,9 @@ struct radv_physical_device {
    /* Bitmask of memory types that are protected. */
    uint32_t memory_types_protected;
 
+   /* Bitmask of memory types that are device coherent. */
+   uint32_t memory_types_device_coherent;
+
 #ifndef _WIN32
    int available_nodes;
    drmPciBusInfo bus_info;
@@ -226,8 +233,7 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
     * VK_DEVICE_TIMELINE_MODE_EMULATED. */
-   return pdev->info.has_timeline_syncobj &&
-          radv_sparse_enabled(pdev);
+   return pdev->info.has_timeline_syncobj && radv_sparse_enabled(pdev);
 }
 
 static inline bool

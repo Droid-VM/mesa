@@ -27,9 +27,11 @@
 #include "pvr_rt_dataset.h"
 #include "pvr_spm.h"
 
-static VkResult
-pvr_render_state_create_ppp_state(struct pvr_device *device,
-                                  struct pvr_render_state *rstate)
+VkResult PVR_PER_ARCH(ppp_state_create)(struct pvr_device *device,
+                                        uint32_t width,
+                                        uint32_t height,
+                                        struct pvr_suballoc_bo **const bo_out,
+                                        size_t *const size_out)
 {
    const uint32_t cache_line_size =
       pvr_get_slc_cache_line_size(&device->pdevice->dev_info);
@@ -43,12 +45,12 @@ pvr_render_state_create_ppp_state(struct pvr_device *device,
    pvr_csb_pack (&ppp_state[1], TA_STATE_TERMINATE0, term0) {
       term0.clip_right =
          DIV_ROUND_UP(
-            rstate->width,
+            width,
             ROGUE_TA_STATE_TERMINATE0_CLIP_RIGHT_BLOCK_SIZE_IN_PIXELS) -
          1;
       term0.clip_bottom =
          DIV_ROUND_UP(
-            rstate->height,
+            height,
             ROGUE_TA_STATE_TERMINATE0_CLIP_BOTTOM_BLOCK_SIZE_IN_PIXELS) -
          1;
    }
@@ -63,12 +65,12 @@ pvr_render_state_create_ppp_state(struct pvr_device *device,
                            ppp_state,
                            sizeof(ppp_state),
                            cache_line_size,
-                           &rstate->ppp_state_bo);
+                           bo_out);
    if (result != VK_SUCCESS)
       return result;
 
    /* Calculate the size of PPP state in dwords. */
-   rstate->ppp_state_size = sizeof(ppp_state) / sizeof(uint32_t);
+   *size_out = sizeof(ppp_state) / sizeof(uint32_t);
 
    return VK_SUCCESS;
 }
@@ -143,7 +145,11 @@ pvr_arch_render_state_setup(struct pvr_device *device,
    if (result != VK_SUCCESS)
       goto err_finish_render_targets;
 
-   result = pvr_render_state_create_ppp_state(device, rstate);
+   result = pvr_arch_ppp_state_create(device,
+                                      rstate->width,
+                                      rstate->height,
+                                      &rstate->ppp_state_bo,
+                                      &rstate->ppp_state_size);
    if (result != VK_SUCCESS)
       goto err_release_scratch_buffer;
 

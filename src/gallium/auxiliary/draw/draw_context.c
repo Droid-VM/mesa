@@ -1296,3 +1296,9 @@ draw_set_constant_buffer_stride(struct draw_context *draw, unsigned num_bytes)
 {
    draw->constant_buffer_stride = num_bytes;
 }
+
+void
+draw_set_tess_ccw_flip(struct draw_context *draw, bool enable)
+{
+   draw->tess_ccw_flip = enable;
+}

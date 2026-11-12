@@ -44,6 +44,7 @@
 #define ETNA_MAX_UNIFORMS (256)
 #define ETNA_MAX_CONST_BUF 16
 #define ETNA_MAX_PIXELPIPES 2
+#define ETNA_MAX_SAMPLES 4
 
 /* 128-bit color emulation reserves the upper half of the render targets for
  * companion targets, so at most this many color RTs can be bound (and be
@@ -72,38 +73,24 @@
 
 /* GPU chip 3D specs */
 struct etna_specs {
-   /* supports SUPERTILE (64x64) tiling? */
-   unsigned can_supertile : 1;
    /* needs z=(z+w)/2, for older GCxxx */
    unsigned vs_need_z_div : 1;
    /* can use VS_RANGE, PS_RANGE registers*/
    unsigned has_unified_instmem : 1;
-   /* has the new sin/cos/log functions */
-   unsigned has_new_transcendentals : 1;
-   /* has no limit on the number of constant sources per instruction */
-   unsigned has_no_oneconst_limit : 1;
-   /* has V4_COMPRESSION */
-   unsigned v4_compression : 1;
-   /* supports single-buffer rendering with multiple pixel pipes */
-   unsigned single_buffer : 1;
    /* needs multitiled format for PE usage */
    unsigned pe_multitiled : 1;
    /* has unified uniforms memory */
    unsigned has_unified_uniforms : 1;
    /* can load shader instructions from memory */
    unsigned has_icache : 1;
-   /* ASTC texture support (and has associated states) */
-   unsigned tex_astc : 1;
-   /* has BLT engine instead of RS */
-   unsigned use_blt : 1;
    /* has correct stencil 0 valuemask */
    unsigned correct_stencil_valuemask : 1;
+   /* fragment and vertex samplers share one dynamically partitioned array */
+   unsigned unified_samplers : 1;
    /* number of bits per TS tile */
    unsigned bits_per_tile;
    /* clear value for TS (dependent on bits_per_tile) */
    uint32_t ts_clear_value;
-   /* fragment and vertex samplers share one dynamically partitioned array */
-   unsigned unified_samplers : 1;
    /* base of vertex texture units */
    unsigned vertex_sampler_offset;
    /* number of fragment sampler units */
@@ -124,6 +111,8 @@ struct etna_specs {
    uint32_t max_instructions;
    /* maximum number of VS outputs */
    unsigned max_vs_outputs;
+   /* KB of the shader cache available for vertex shader results, HALTI5 only */
+   unsigned vs_usc_budget;
    /* maximum number of varyings */
    unsigned max_varyings;
    /* maximum vertex uniforms */
@@ -217,6 +206,7 @@ struct compiled_framebuffer_state {
 /* Compiled context->create_vertex_elements_state */
 struct compiled_vertex_elements_state {
    unsigned num_elements;
+   bool dummy_element;
    uint32_t FE_VERTEX_ELEMENT_CONFIG[VIVS_FE_VERTEX_ELEMENT_CONFIG__LEN];
    uint32_t NFE_GENERIC_ATTRIB_CONFIG0[VIVS_NFE_GENERIC_ATTRIB__LEN];
    uint32_t NFE_GENERIC_ATTRIB_SCALE[VIVS_NFE_GENERIC_ATTRIB__LEN];
@@ -241,10 +231,12 @@ struct compiled_shader_state {
    uint32_t VS_END_PC;
    uint32_t VS_OUTPUT_COUNT; /* number of outputs if point size per vertex disabled */
    uint32_t VS_OUTPUT_COUNT_PSIZE; /* number of outputs of point size per vertex enabled */
+   uint32_t VS_HALTI5_OUTPUT_COUNT;
+   uint32_t VS_VERTEX_CACHE_CONFIG;
    uint32_t VS_INPUT_COUNT;
    uint32_t VS_TEMP_REGISTER_CONTROL;
    uint32_t VS_OUTPUT[8];
-   uint32_t VS_INPUT[4];
+   uint32_t VS_INPUT[8];
    uint32_t VS_LOAD_BALANCING;
    uint32_t VS_START_PC;
    uint32_t PS_END_PC;
@@ -267,6 +259,7 @@ struct compiled_shader_state {
    uint32_t *PS_INST_MEM;
    struct etna_reloc PS_INST_ADDR;
    struct etna_reloc VS_INST_ADDR;
+   int8_t vs_output_slot[VARYING_SLOT_MAX];
    unsigned writes_z:1;
    unsigned uses_discard:1;
 };

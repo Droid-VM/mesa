@@ -26,19 +26,27 @@
 #define BIFROST_LIMITED_CLPER (1 << 1)
 
 static inline unsigned
-bifrost_get_quirks(uint64_t gpu_id)
+bifrost_get_quirks(unsigned arch, const struct pan_model *model)
 {
-   unsigned arch_maj_min =
-      (PAN_ARCH_MAJOR(gpu_id) << 4) | PAN_ARCH_MINOR(gpu_id);
-   switch (arch_maj_min) {
-   case 0x60: /* G71 */
-      return BIFROST_NO_FP32_TRANSCENDENTALS | BIFROST_LIMITED_CLPER;
-   case 0x62: /* G72 */
-   case 0x70: /* G31 */
-      return BIFROST_LIMITED_CLPER;
-   default:
-      return 0;
-   }
+   /* If we don't know the model, be conservative and use arch_minor = 0.
+    *
+    * All Bifrost quirks are really just features added in subarchitecture
+    * versions.
+    */
+   unsigned arch_minor = 0;
+   if (model)
+      arch_minor = (model->gpu_prod_id >> 8) & 0xff;
+
+   /* Applies to archs before 6.2 */
+   unsigned quirks = 0;
+   if (arch < 7 && arch_minor < 2)
+      quirks |= BIFROST_NO_FP32_TRANSCENDENTALS;
+
+   /* Applies to archs before 7.2 */
+   if (arch < 7 || (arch == 7 && arch_minor < 2))
+      quirks |= BIFROST_LIMITED_CLPER;
+
+   return quirks;
 }
 
 #endif

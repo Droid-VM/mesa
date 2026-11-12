@@ -12,6 +12,7 @@
 #include "util/macros.h"
 #include "util/u_math.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -491,7 +492,7 @@ struct IDSet {
       return std::make_pair(Iterator{this, it, id}, true);
    }
 
-   bool insert(const IDSet other)
+   bool insert(const IDSet& other)
    {
       bool inserted = false;
 

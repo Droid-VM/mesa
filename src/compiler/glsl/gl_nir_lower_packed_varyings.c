@@ -414,7 +414,9 @@ bitwise_assign_pack(struct lower_packed_varyings_state *state,
 
             store_state->is_64bit = true;
             store_state->deref = packed_deref;
-            store_state->values[0] = nir_unpack_64_2x32(&state->b, swizzle);
+            store_state->values[0] =
+               nir_64_2x32_memory_order(&state->b,
+                                        nir_unpack_64_2x32(&state->b, swizzle));
             store_state->writemasks[0] = writemask;
 
             unsigned swiz_y = 1;
@@ -422,11 +424,14 @@ bitwise_assign_pack(struct lower_packed_varyings_state *state,
             swizzle = nir_swizzle(&state->b, value, &swiz_y, 1);
 
             store_state->deref = packed_deref;
-            store_state->values[1] = nir_unpack_64_2x32(&state->b, swizzle);
+            store_state->values[1] =
+               nir_64_2x32_memory_order(&state->b,
+                                        nir_unpack_64_2x32(&state->b, swizzle));
             store_state->writemasks[1] = writemask;
             return store_state;
          } else {
-            value = nir_unpack_64_2x32(&state->b, value);
+            value = nir_64_2x32_memory_order(&state->b,
+                                             nir_unpack_64_2x32(&state->b, value));
          }
          break;
       case GLSL_TYPE_SAMPLER:
@@ -491,7 +496,8 @@ bitwise_assign_unpack(struct lower_packed_varyings_state *state,
             store_state->deref = unpacked_deref;
             store_state->values[0] =
                nir_pack_64_2x32(&state->b,
-                                nir_swizzle(&state->b, value, swiz_xy, 2));
+                                nir_64_2x32_memory_order(&state->b,
+                                   nir_swizzle(&state->b, value, swiz_xy, 2)));
             store_state->writemasks[0] = writemask;
 
             unsigned swiz_zw[2] = {2, 3};
@@ -500,12 +506,14 @@ bitwise_assign_unpack(struct lower_packed_varyings_state *state,
             store_state->deref = unpacked_deref;
             store_state->values[1] =
                nir_pack_64_2x32(&state->b,
-                                nir_swizzle(&state->b, value, swiz_zw, 2));
+                                nir_64_2x32_memory_order(&state->b,
+                                   nir_swizzle(&state->b, value, swiz_zw, 2)));
             store_state->writemasks[1] = writemask;
 
             return store_state;
          } else {
-            value = nir_pack_64_2x32(&state->b, value);
+            value = nir_pack_64_2x32(&state->b,
+                                     nir_64_2x32_memory_order(&state->b, value));
          }
          break;
       case GLSL_TYPE_SAMPLER:

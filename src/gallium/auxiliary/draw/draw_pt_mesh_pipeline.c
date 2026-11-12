@@ -70,14 +70,16 @@ mesh_middle_end_prepare(struct draw_pt_middle_end *middle,
    struct mesh_pipeline_middle_end *mpme = mesh_pipeline_middle_end(middle);
    struct draw_context *draw = mpme->draw;
    enum mesa_prim out_prim = draw->ms.mesh_shader->output_primitive;
-   unsigned point_clip = draw->rasterizer->fill_front == PIPE_POLYGON_MODE_POINT ||
-                         out_prim == MESA_PRIM_POINTS;
+   unsigned point_line_clip = draw->rasterizer->fill_front == PIPE_POLYGON_MODE_POINT ||
+                              draw->rasterizer->fill_front == PIPE_POLYGON_MODE_LINE ||
+                              out_prim == MESA_PRIM_POINTS ||
+                              out_prim == MESA_PRIM_LINES;
    draw_pt_post_vs_prepare(mpme->post_vs,
                            draw->clip_xy,
                            draw->clip_z,
                            draw->clip_user,
-                           point_clip ? draw->guard_band_points_lines_xy :
-                                        draw->guard_band_xy,
+                           point_line_clip ? draw->guard_band_points_lines_xy :
+                                             draw->guard_band_xy,
                            draw->bypass_viewport,
                            draw->rasterizer->clip_halfz,
                            false);

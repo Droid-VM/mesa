@@ -151,6 +151,30 @@ struct iris_address {
    enum iris_domain access;
 };
 
+/**
+ * A shared scratch buffer used when efficient 64-bit addressing mode is
+ * enabled.
+ * All shader stages share a single scratch buffer and its address is baked
+ * directly into each compiled shader's instructions as a relocation
+ * (see BRW_SHADER_RELOC_SCRATCH64_SURFACE_LOW/HIGH in iris_upload_shader()).
+ *
+ * Because the address is fixed at compile time, a given iris_scratch_buffer
+ * must stay alive for as long as any shader compiled against it might still
+ * run.
+ * It is therefore reference counted: iris_screen keeps a reference to
+ * the current (largest allocated so far) buffer, and every compiled shader
+ * that referenced it when it was uploaded holds its own reference too.
+ * When a larger buffer is required, the screen simply points at a new, bigger
+ * allocation and drops its own reference to the old one, any shaders still
+ * using the old buffer keep it alive until they are destroyed.
+ */
+struct iris_scratch_buffer {
+   struct iris_bo *bo;
+   struct iris_bo *surf_bo;
+   struct pipe_reference ref;
+   unsigned per_thread_scratch;
+};
+
 struct iris_screen {
    struct pipe_screen base;
 
@@ -194,6 +218,7 @@ struct iris_screen {
       bool disable_threaded_context;
       bool force_sampler_prefetch;
       bool force_compute_surface_prefetch;
+      uint8_t sample_d_performance;
    } driconf;
 
    /** Does the kernel support various features (KERNEL_HAS_* bitfield)? */
@@ -243,6 +268,9 @@ struct iris_screen {
    int id;
 
    struct iris_bo *breakpoint_bo;
+
+   struct iris_scratch_buffer *scratch_buffer;
+   simple_mtx_t scratch_buffer_mutex;
 };
 
 struct pipe_screen *

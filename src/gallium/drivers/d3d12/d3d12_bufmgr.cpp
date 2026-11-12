@@ -144,16 +144,12 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
       d3d12_evicted : d3d12_resident;
 
    D3D12_HEAP_PROPERTIES heap_pris = GetCustomHeapProperties(dev, heap_type);
-   d3d12_screen_reclaim_completed(screen);
-   HRESULT hres;
-   do {
-      hres = dev->CreateCommittedResource(&heap_pris,
-                                          heap_flags,
-                                          &res_desc,
-                                          D3D12_RESOURCE_STATE_COMMON,
-                                          NULL,
-                                          IID_PPV_ARGS(&res));
-   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
+   HRESULT hres = dev->CreateCommittedResource(&heap_pris,
+                                              heap_flags,
+                                              &res_desc,
+                                              D3D12_RESOURCE_STATE_COMMON,
+                                              NULL,
+                                              IID_PPV_ARGS(&res));
 
    if (FAILED(hres))
       return NULL;
@@ -269,8 +265,11 @@ d3d12_screen_reclaim_one(struct d3d12_screen *screen)
    if (!have_target)
       return false;
 
-   if (screen->fence->GetCompletedValue() < target)
-      screen->fence->SetEventOnCompletion(target, nullptr);
+   if (screen->fence->GetCompletedValue() < target &&
+       FAILED(screen->fence->SetEventOnCompletion(target, nullptr))) {
+      debug_printf("D3D12: failed to wait for pending resource reclamation\n");
+      return false;
+   }
 
    d3d12_screen_reclaim_completed(screen);
    return true;

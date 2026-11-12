@@ -74,15 +74,77 @@ ir3_const_imm_index_to_reg(const struct ir3_const_state *const_state,
    return i + (4 * const_state->allocs.max_const_offset_vec4);
 }
 
+int32_t
+ir3_evaluate_src_mods(int32_t val, unsigned flags)
+{
+   /* Note that src mods apply after CONSTANT_DEMOTION_ENABLE (f2f16/u2u16). */
+
+   if (flags & IR3_REG_SABS) {
+      if (flags & IR3_REG_HALF)
+         val = abs((int16_t)val);
+      else
+         val = abs(val);
+   }
+   /* Note: Being careful to not flush float denorms and to preserve NaNs --
+    * source modifiers don't flush for mov and sel, even on a7xx where denorm
+    * float ALU input and outputs flush.
+    */
+   if (flags & IR3_REG_FABS)
+      val &= 0x7fffffff;
+   if (flags & IR3_REG_SNEG)
+      val = -val;
+   if (flags & IR3_REG_FNEG)
+      val ^= 0x80000000;
+   if (flags & IR3_REG_BNOT)
+      val = ~val;
+
+   /* Truncate down to 16 bits for ints */
+   if ((flags & IR3_REG_HALF) &&
+       (flags & (IR3_REG_SABS | IR3_REG_SNEG | IR3_REG_BNOT)))
+      val = val & 0xffff;
+
+   return val;
+}
+
+/**
+ * Tries to find an existing value in the const file immediates list that we can
+ * reuse, given the set of source modifiers that are valid for the instruction.
+ */
 uint16_t
-ir3_const_find_imm(struct ir3_shader_variant *v, uint32_t imm)
+ir3_const_find_imm(struct ir3_shader_variant *v, struct ir3_instruction *instr,
+                   unsigned n, int32_t iim_val, unsigned *new_flags)
 {
    const struct ir3_const_state *const_state = ir3_const_state(v);
    const struct ir3_imm_const_state *imm_state = &v->imm_state;
+   /* The caller should already have resolved these. */
+   assert(!(*new_flags & IR3_REG_SRC_MODS));
 
-   for (unsigned i = 0; i < imm_state->count; i++) {
-      if (imm_state->values[i] == imm)
-         return ir3_const_imm_index_to_reg(const_state, i);
+   /* Note that we don't need to test for abs -- either the existing constant
+    * will give us what we're looking for when negated, or not.
+    */
+   static const unsigned float_mods[] = {
+      0,
+      IR3_REG_FNEG,
+   };
+   static const unsigned int_mods[] = {
+      0, IR3_REG_SNEG, IR3_REG_BNOT,
+   };
+
+   bool f_opcode = is_cat2_float(instr->opc) || is_cat3_float(instr->opc);
+
+   const unsigned *mods = f_opcode ? float_mods : int_mods;
+   unsigned num_mods = f_opcode ? ARRAY_SIZE(float_mods) : ARRAY_SIZE(int_mods);
+
+   for (unsigned i = 0; i < num_mods; i++) {
+      if (!ir3_valid_flags(instr, n, *new_flags | mods[i]))
+         continue;
+
+      for (unsigned j = 0; j < imm_state->count; j++) {
+         if (ir3_evaluate_src_mods(imm_state->values[j], mods[i]) == iim_val) {
+            *new_flags |= mods[i];
+            return ir3_const_imm_index_to_reg(const_state, j);
+         }
+      }
    }
 
    return INVALID_CONST_REG;
@@ -267,15 +329,15 @@ disasm_collect(struct ir3_shader_variant *v, uint8_t *mismatch_array,
    return stream_data;
 }
 
-static uint16_t
+static uint32_t
 variant_unpadded_binary_size(struct ir3_shader_variant *v)
 {
    /* This helper returns the size (in dwords) of variant's binary after
     * the padding nops at the end are ignored.
     */
-   uint16_t size = v->info.sizedwords;
+   uint32_t size = v->info.sizedwords;
 
-   for (uint16_t i = 0; i < v->info.sizedwords; i += 2) {
+   for (uint32_t i = 0; i < v->info.sizedwords; i += 2) {
       uint32_t *dword = &v->bin[v->info.sizedwords - 2 - i];
       if (!!dword[0] || !!dword[1])
          break;
@@ -302,8 +364,8 @@ validate_roundtrip_variant_binary(struct ir3_shader_variant *rt_v, struct ir3_sh
     * If there's a mismatch, print both disassemblies with highlighted
     * points of difference.
     */
-   uint16_t v_sizedwords = variant_unpadded_binary_size(v);
-   uint16_t rt_v_sizedwords = variant_unpadded_binary_size(rt_v);
+   uint32_t v_sizedwords = variant_unpadded_binary_size(v);
+   uint32_t rt_v_sizedwords = variant_unpadded_binary_size(rt_v);
    if (v_sizedwords == rt_v_sizedwords &&
        !memcmp(v->bin, rt_v->bin, v_sizedwords * 4))
       return true;
@@ -530,6 +592,7 @@ alloc_variant(struct ir3_shader *shader, const struct ir3_shader_key *key,
       v->fs.color_is_dual_source = info->fs.color_is_dual_source;
       v->fs.uses_fbfetch_output  = info->fs.uses_fbfetch_output;
       v->fs.fbfetch_coherent     = info->fs.fbfetch_coherent;
+      v->fs.yuv_color            = info->fs.yuv_color;
       break;
 
    case MESA_SHADER_COMPUTE:
@@ -788,6 +851,7 @@ ir3_setup_used_key(struct ir3_shader *shader)
        */
       key->msaa = shader->compiler->gen < 6 &&
                   (info->fs.uses_sample_qualifier ||
+                   info->fs.uses_sample_shading ||
                    (BITSET_TEST(info->system_values_read,
                                 SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID) ||
                     BITSET_TEST(info->system_values_read,

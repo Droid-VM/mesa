@@ -640,6 +640,23 @@ static bool legalize_pseudo_post_ra(pco_instr *instr)
    case PCO_OP_OP_ATOMIC_OFFSET:
       return legalize_atomic_offset(instr);
 
+   case PCO_OP_FLUSH_DMA: {
+      pco_builder b =
+         pco_builder_create(instr->parent_func, pco_cursor_before_instr(instr));
+
+      pco_ref dest = instr->dest[0];
+      pco_ref addr = instr->src[0];
+
+      unsigned chans = pco_ref_get_chans(dest);
+      assert(chans == 1);
+
+      pco_ld(&b, dest, pco_ref_drc(PCO_DRC_0), pco_ref_imm8(chans), addr);
+      pco_wdf(&b, pco_ref_drc(PCO_DRC_0));
+
+      pco_instr_delete(instr);
+      return true;
+   }
+
    default:
       break;
    }
@@ -816,7 +833,45 @@ static bool try_legalize_large_hwreg_offsets(pco_instr *instr,
 }
 
 /**
+ * \brief Check whether a DITR/DITRP instruction requires a pre-fence.
+ *
+ * Reverse-iterates from the DITR/DITRP back to the previous fence pseudo-op
+ * (or the start of the function) and returns true if any instruction in that
+ * range uses a register that is also used by the DITR/DITRP destination.
+ *
+ * \param[in] instr DITR or DITRP PCO instr.
+ * \return True if a pre-fence must be inserted before the DITR/DITRP.
+ */
+static bool ditr_needs_pre_fence(pco_instr *instr)
+{
+   pco_ref ditr_dest = instr->dest[0];
+
+   pco_foreach_instr_in_func_from_rev (prev, instr) {
+      if (prev->op == PCO_OP_FENCE)
+         break;
+
+      pco_foreach_instr_dest (pprev_dest, prev) {
+         if (pco_ref_is_reg(*pprev_dest) || pco_ref_is_idx_reg(*pprev_dest))
+            if (pco_refs_are_overlapping_regs(*pprev_dest, ditr_dest))
+               return true;
+      }
+
+      pco_foreach_instr_src (pprev_src, prev) {
+         if (pco_ref_is_reg(*pprev_src) || pco_ref_is_idx_reg(*pprev_src))
+            if (pco_refs_are_overlapping_regs(*pprev_src, ditr_dest))
+               return true;
+      }
+   }
+
+   return false;
+}
+
+/**
  * \brief Insert pseudo fences around DITR and DITRP instructions.
+ *
+ * The pre-fence is only inserted when necessary and
+ * ensures no registers are shared with the DITR/DITRP destination.
+ * A post-fence is always inserted.
  *
  * \param[in,out] instr PCO instr.
  * \return True if progress was made.
@@ -827,11 +882,15 @@ static bool try_legalize_ditr_fence(pco_instr *instr)
       return false;
 
    pco_builder b =
-      pco_builder_create(instr->parent_func, pco_cursor_before_instr(instr));
+      pco_builder_create(instr->parent_func, pco_cursor_after_instr(instr));
+
+   /* Always insert a post-fence to enforce WDF ordering. */
    pco_fence(&b);
 
-   b.cursor = pco_cursor_after_instr(instr);
-   pco_fence(&b);
+   if (ditr_needs_pre_fence(instr)) {
+      b.cursor = pco_cursor_before_instr(instr);
+      pco_fence(&b);
+   }
 
    return true;
 }

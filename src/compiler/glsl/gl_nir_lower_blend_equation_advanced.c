@@ -366,7 +366,8 @@ load_output(nir_builder *b, nir_variable *var)
 }
 
 bool
-gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent)
+gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent,
+                                     unsigned modes)
 {
    assert(sh->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -374,7 +375,7 @@ gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent)
    assert(exec_list_length(&sh->functions) == 1);
    nir_function_impl *impl = nir_shader_get_entrypoint(sh);
 
-   if (sh->info.fs.advanced_blend_modes == 0) {
+   if (modes == 0) {
       return nir_no_progress(impl);
    }
 
@@ -444,8 +445,7 @@ gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent)
    }
 
    nir_variable *result_dest =
-      calc_blend_result(&b, mode, fb, blend_source,
-                        sh->info.fs.advanced_blend_modes);
+      calc_blend_result(&b, mode, fb, blend_source, modes);
 
    /* Copy the result back to the original values. */
    for (int i = 0; i < 4; i++) {

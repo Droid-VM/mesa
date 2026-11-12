@@ -45,28 +45,11 @@
 #include "stw_tls.h"
 #include "stw_framebuffer.h"
 #include "stw_st.h"
+#include "stw_context.h"
+#include "hud/hud_context.h"
 
 
 struct stw_device *stw_dev = NULL;
-
-static int
-stw_get_param(struct pipe_frontend_screen *fscreen,
-              enum st_manager_param param)
-{
-   switch (param) {
-   case ST_MANAGER_BROKEN_INVALIDATE:
-      /*
-       * Force framebuffer validation on glViewport.
-       *
-       * Certain applications, like Rhinoceros 4, uses glReadPixels
-       * exclusively (never uses SwapBuffers), so framebuffers never get
-       * resized unless we check on glViewport.
-       */
-      return 1;
-   default:
-      return 0;
-   }
-}
 
 
 /** Get the refresh rate for the monitor, in Hz */
@@ -87,6 +70,15 @@ get_refresh_rate(void)
 #else
    return 60;
 #endif /* _GAMING_XBOX */
+}
+
+static void
+stw_set_background_context(struct st_context *st, struct util_queue_monitoring *queue_info)
+{
+   struct stw_context *ctx = (struct stw_context *)st->frontend_context;
+
+   if (ctx->hud)
+      hud_add_queue_for_monitoring(ctx->hud, queue_info);
 }
 
 static bool
@@ -121,7 +113,21 @@ static void
 init_options()
 {
    const char *driver_name = stw_dev->stw_winsys->get_name ? stw_dev->stw_winsys->get_name() : NULL;
-   driParseOptionInfo(&stw_dev->option_info, gallium_driconf, ARRAY_SIZE(gallium_driconf));
+   unsigned driver_count = 0;
+   const driOptionDescription *driver_driconf =
+      stw_dev->stw_winsys->get_driconf ? stw_dev->stw_winsys->get_driconf(&driver_count) : NULL;
+
+   /* driver options come last so their defaults win, like in the pipe loader */
+   if (driver_count) {
+      unsigned count = ARRAY_SIZE(gallium_driconf) + driver_count;
+      driOptionDescription *merged = malloc(count * sizeof(*merged));
+      memcpy(merged, gallium_driconf, sizeof(gallium_driconf));
+      memcpy(&merged[ARRAY_SIZE(gallium_driconf)], driver_driconf, driver_count * sizeof(*merged));
+      driParseOptionInfo(&stw_dev->option_info, merged, count);
+      free(merged);
+   } else {
+      driParseOptionInfo(&stw_dev->option_info, gallium_driconf, ARRAY_SIZE(gallium_driconf));
+   }
    driParseConfigFiles(&stw_dev->option_cache, &stw_dev->option_info,
                        &(driConfigFileParseParams) {
                           .driverName = driver_name ? driver_name : "",
@@ -159,7 +165,15 @@ stw_init(const struct stw_winsys *stw_winsys)
    if (!stw_dev->fscreen)
       goto error1;
 
-   stw_dev->fscreen->get_param = stw_get_param;
+   /*
+    * Force framebuffer validation on glViewport.
+    *
+    * Certain applications, like Rhinoceros 4, uses glReadPixels
+    * exclusively (never uses SwapBuffers), so framebuffers never get
+    * resized unless we check on glViewport.
+    */
+   stw_dev->fscreen->broken_invalidate = true;
+   stw_dev->fscreen->set_background_context = stw_set_background_context;
 
    InitializeCriticalSection(&stw_dev->screen_mutex);
    InitializeCriticalSection(&stw_dev->ctx_mutex);

@@ -6,6 +6,7 @@
 #include "perf/xe/intel_perf.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 
 #include "perf/intel_perf.h"
@@ -266,15 +267,23 @@ xe_perf_stream_open(struct intel_perf_config *perf_config, int drm_fd,
    uint32_t i = 0;
    int fd, flags;
 
-   if (exec_id)
+   /* exec_id 0 opens the global OAG unit; EXEC_QUEUE_ID and NO_PREEMPT are
+    * context-scoped and must be omitted (the kernel rejects EXEC_QUEUE_ID 0).
+    */
+   if (exec_id) {
       oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_EXEC_QUEUE_ID, exec_id);
+   } else {
+      /* Bump up from the 16 MiB default, nothing drains a mapped stream. */
+      oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_OA_BUFFER_SIZE,
+                  (perf_config->devinfo->ver < 20 ? 64u : 128u) << 20);
+   }
    oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_OA_DISABLED, !enable);
    oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_SAMPLE_OA, true);
    oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_OA_METRIC_SET, metrics_set_id);
    oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_OA_FORMAT, report_format);
    oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_OA_PERIOD_EXPONENT, period_exponent);
-   if (hold_preemption)
-      oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_NO_PREEMPT, hold_preemption);
+   if (exec_id && hold_preemption)
+      oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_NO_PREEMPT, true);
 
    if (timeline && intel_bind_timeline_get_syncobj(timeline)) {
       oa_prop_set(props, &i, DRM_XE_OA_PROPERTY_NUM_SYNCS, 1);
@@ -308,6 +317,30 @@ xe_perf_stream_set_state(int perf_stream_fd, bool enable)
                                  DRM_XE_OBSERVATION_IOCTL_DISABLE;
 
    return intel_ioctl(perf_stream_fd, uapi, 0);
+}
+
+/* The kernel only accepts a read-only private mapping of the whole buffer at
+ * offset 0, gated by the same paranoid check as opening a global stream, and
+ * marks it VM_DONTCOPY (see xe_oa_mmap()).
+ */
+void *
+xe_perf_stream_map_oa_buffer(int perf_stream_fd, uint64_t *size)
+{
+   struct drm_xe_oa_stream_info info = {};
+   void *map;
+
+   if (intel_ioctl(perf_stream_fd, DRM_XE_OBSERVATION_IOCTL_INFO, &info) < 0)
+      return NULL;
+
+   if (info.oa_buf_size == 0 || info.oa_buf_size > SIZE_MAX)
+      return NULL;
+
+   map = mmap(NULL, info.oa_buf_size, PROT_READ, MAP_PRIVATE, perf_stream_fd, 0);
+   if (map == MAP_FAILED)
+      return NULL;
+
+   *size = info.oa_buf_size;
+   return map;
 }
 
 int

@@ -649,7 +649,9 @@ static uint32_t r300_get_border_color(enum pipe_format format,
                                       const float border[4],
                                       bool is_r500)
 {
-    const struct util_format_description *desc = util_format_description(format);
+    struct util_format_description storage;
+    const struct util_format_description *desc =
+        r300_get_sampler_format_desc(format, &storage);
     float border_swizzled[4] = {0};
     union util_color uc = {0};
 
@@ -692,15 +694,15 @@ static uint32_t r300_get_border_color(enum pipe_format format,
             /* The Y component is used for the border color. */
             border_swizzled[1] = border_swizzled[0] + 1.0f/32;
             util_pack_color(border_swizzled, PIPE_FORMAT_B4G4R4A4_UNORM, &uc);
-            return uc.ui[0];
+            return uc.us;
         case PIPE_FORMAT_RGTC2_SNORM:
         case PIPE_FORMAT_LATC2_SNORM:
             util_pack_color(border_swizzled, PIPE_FORMAT_R8G8B8A8_SNORM, &uc);
-            return uc.ui[0];
+            return util_cpu_to_le32(uc.ui[0]);
         case PIPE_FORMAT_RGTC2_UNORM:
         case PIPE_FORMAT_LATC2_UNORM:
             util_pack_color(border_swizzled, PIPE_FORMAT_R8G8B8A8_UNORM, &uc);
-            return uc.ui[0];
+            return util_cpu_to_le32(uc.ui[0]);
         case PIPE_FORMAT_DXT1_SRGB:
             /* The sampler doesn't apply the implicit alpha=1 to borders. */
             border_swizzled[3] = 1.0f;
@@ -709,14 +711,14 @@ static uint32_t r300_get_border_color(enum pipe_format format,
         case PIPE_FORMAT_DXT3_SRGBA:
         case PIPE_FORMAT_DXT5_SRGBA:
             util_pack_color(border_swizzled, PIPE_FORMAT_B8G8R8A8_SRGB, &uc);
-            return uc.ui[0];
+            return util_cpu_to_le32(uc.ui[0]);
         case PIPE_FORMAT_DXT1_RGB:
             /* The sampler doesn't apply the implicit alpha=1 to borders. */
             border_swizzled[3] = 1.0f;
             FALLTHROUGH;
         default:
             util_pack_color(border_swizzled, PIPE_FORMAT_B8G8R8A8_UNORM, &uc);
-            return uc.ui[0];
+            return util_cpu_to_le32(uc.ui[0]);
         }
     }
 
@@ -724,12 +726,12 @@ static uint32_t r300_get_border_color(enum pipe_format format,
         case 2:
             rgba_to_bgra(border_swizzled);
             util_pack_color(border_swizzled, PIPE_FORMAT_B2G3R3_UNORM, &uc);
-            break;
+            return uc.ub;
 
         case 4:
             rgba_to_bgra(border_swizzled);
             util_pack_color(border_swizzled, PIPE_FORMAT_B4G4R4A4_UNORM, &uc);
-            break;
+            return uc.us;
 
         case 5:
             rgba_to_bgra(border_swizzled);
@@ -740,7 +742,7 @@ static uint32_t r300_get_border_color(enum pipe_format format,
             } else {
                 assert(0);
             }
-            break;
+            return uc.us;
 
         default:
         case 8:
@@ -760,7 +762,7 @@ static uint32_t r300_get_border_color(enum pipe_format format,
 
         case 10:
             util_pack_color(border_swizzled, PIPE_FORMAT_R10G10B10A2_UNORM, &uc);
-            break;
+            return uc.ui[0];
 
         case 16:
             if (desc->nr_channels <= 2) {
@@ -771,6 +773,7 @@ static uint32_t r300_get_border_color(enum pipe_format format,
                 } else {
                     util_pack_color(border_swizzled, PIPE_FORMAT_R16G16_UNORM, &uc);
                 }
+                return uc.h[0] | ((uint32_t)uc.h[1] << 16);
             } else {
                 if (desc->channel[0].type == UTIL_FORMAT_TYPE_SIGNED) {
                     util_pack_color(border_swizzled, PIPE_FORMAT_R8G8B8A8_SNORM, &uc);
@@ -783,13 +786,14 @@ static uint32_t r300_get_border_color(enum pipe_format format,
         case 32:
             if (desc->nr_channels == 1) {
                 util_pack_color(border_swizzled, PIPE_FORMAT_R32_FLOAT, &uc);
+                return uc.ui[0];
             } else {
                 util_pack_color(border_swizzled, PIPE_FORMAT_R8G8B8A8_UNORM, &uc);
             }
             break;
     }
 
-    return uc.ui[0];
+    return util_cpu_to_le32(uc.ui[0]);
 }
 
 static void r300_merge_textures_and_samplers(struct r300_context* r300)
@@ -922,6 +926,10 @@ static void r300_merge_textures_and_samplers(struct r300_context* r300)
                 if (texstate->filter0 & R300_TX_WRAP_T(R300_TX_MIRRORED)) {
                     texstate->filter0 &= ~R300_TX_WRAP_T(R300_TX_MIRRORED);
                 }
+                if (tex->b.target == PIPE_TEXTURE_3D &&
+                    (texstate->filter0 & R300_TX_WRAP_R(R300_TX_MIRRORED))) {
+                    texstate->filter0 &= ~R300_TX_WRAP_R(R300_TX_MIRRORED);
+                }
 
                 /* Change repeat to clamp-to-edge.
                  * (the repeat bit has a value of 0, no masking needed). */
@@ -932,6 +940,11 @@ static void r300_merge_textures_and_samplers(struct r300_context* r300)
                 if ((texstate->filter0 & R300_TX_WRAP_T_MASK) ==
                     R300_TX_WRAP_T(R300_TX_REPEAT)) {
                     texstate->filter0 |= R300_TX_WRAP_T(R300_TX_CLAMP_TO_EDGE);
+                }
+                if (tex->b.target == PIPE_TEXTURE_3D &&
+                    (texstate->filter0 & R300_TX_WRAP_R_MASK) ==
+                    R300_TX_WRAP_R(R300_TX_REPEAT)) {
+                    texstate->filter0 |= R300_TX_WRAP_R(R300_TX_CLAMP_TO_EDGE);
                 }
             } else {
                 /* the MAX_MIP level is the largest (finest) one */

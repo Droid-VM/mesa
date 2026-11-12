@@ -60,7 +60,6 @@ enum tu_debug_flags : uint64_t
    TU_DEBUG_BOS                      = BITFIELD64_BIT(20),
    TU_DEBUG_3D_LOAD                  = BITFIELD64_BIT(21),
    TU_DEBUG_FDM                      = BITFIELD64_BIT(22),
-   TU_DEBUG_NOCONFORM                = BITFIELD64_BIT(23),
    TU_DEBUG_RD                       = BITFIELD64_BIT(24),
    TU_DEBUG_HIPRIO                   = BITFIELD64_BIT(25),
    TU_DEBUG_NO_CONCURRENT_RESOLVES   = BITFIELD64_BIT(26),
@@ -75,6 +74,7 @@ enum tu_debug_flags : uint64_t
    TU_DEBUG_NO_CONCURRENT_BINNING    = BITFIELD64_BIT(35),
    TU_DEBUG_FORCE_CONCURRENT_BINNING = BITFIELD64_BIT(36),
    TU_DEBUG_COMPUTE_ROUND_ROBIN      = BITFIELD64_BIT(37),
+   TU_DEBUG_GMEM_WARMUP              = BITFIELD64_BIT(38),
 };
 
 struct tu_env {

@@ -568,7 +568,7 @@ nouveau_ws_device_new(drmDevicePtr drm_device)
    device->info.tpc_count = (value >> 8) & 0x0000ffff;
 
    struct nouveau_ws_context *tmp_ctx;
-   if (nouveau_ws_context_create(device, ~0, &tmp_ctx))
+   if (nouveau_ws_context_create(device, NOUVEAU_WS_ALL_3D_ENGINES, &tmp_ctx))
       goto out_err;
 
    device->info.sm = sm_for_chipset(device->info.chipset);
@@ -577,6 +577,13 @@ nouveau_ws_device_new(drmDevicePtr drm_device)
    device->info.cls_eng3d = tmp_ctx->eng3d.cls;
    device->info.cls_m2mf = tmp_ctx->m2mf.cls;
    device->info.cls_compute = tmp_ctx->compute.cls;
+
+   nouveau_ws_context_destroy(tmp_ctx);
+
+   if (!nouveau_ws_context_create(device, NOUVEAU_WS_ENGINE_VDEC, &tmp_ctx)) {
+      device->info.cls_vdec = tmp_ctx->vdec.cls;
+      nouveau_ws_context_destroy(tmp_ctx);
+   }
 
    // for now we hardcode those values, but in the future Nouveau could provide that information to
    // us instead.
@@ -596,9 +603,15 @@ nouveau_ws_device_new(drmDevicePtr drm_device)
    device->info.has_transfer_queue = device->nouveau_version >= 0x01000401 &&
                                      device->info.cls_eng3d >= TURING_A;
 
-   init_shared_mem_sizes(&device->info);
+   /* Video decode runs on its own NVDEC channel. nouveau only allows
+    * allocating those from 1.4.3 ("VDEC contexts can be created") on, and the
+    * chip has to have the engine in the first place: cls_vdec is left at zero
+    * above when no VDEC context can be created.
+    */
+   device->info.has_video = device->nouveau_version >= 0x01000403 &&
+                            device->info.cls_vdec != 0;
 
-   nouveau_ws_context_destroy(tmp_ctx);
+   init_shared_mem_sizes(&device->info);
 
    simple_mtx_init(&device->bos_lock, mtx_plain);
    device->bos = _mesa_pointer_hash_table_create(NULL);

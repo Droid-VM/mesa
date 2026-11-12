@@ -116,7 +116,9 @@ apply_view_usage_for_format(struct zink_screen *screen, struct pipe_resource *pr
                                 zink_get_format_props(screen, format)->linearTilingFeatures :
                                 zink_get_format_props(screen, format)->optimalTilingFeatures;
    uint64_t attachment = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
-   usage_info->usage = res->obj->vkusage & ~attachment;
+   uint64_t video = (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR);
+   bool is_video_plane = (res->obj->vkusage & video) && util_format_get_num_planes(format) == 1;
+   usage_info->usage = res->obj->vkusage;
    if (res->obj->modifier_aspect) {
       feats = res->obj->vkfeats;
       /* intersect format features for current modifier */
@@ -126,12 +128,13 @@ apply_view_usage_for_format(struct zink_screen *screen, struct pipe_resource *pr
       }
    }
    /* if the format features don't support framebuffer attachment, use VkImageViewUsageCreateInfo to remove it */
-   if ((res->obj->vkusage & attachment) &&
-       !(feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))) {
-      ivci->pNext = usage_info;
-   } else {
-      ivci->pNext = NULL;
-   }
+   bool no_attachment = (res->obj->vkusage & attachment) &&
+                        !(feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT));
+   if (no_attachment)
+      usage_info->usage &= ~attachment;
+   if (is_video_plane)
+      usage_info->usage &= ~video;
+   ivci->pNext = no_attachment || is_video_plane ? usage_info : NULL;
 }
 
 static struct zink_surface *
@@ -239,7 +242,7 @@ zink_get_surface(struct zink_context *ctx,
    struct zink_resource *res = zink_resource(templ->texture);
 
    /* not acquired */
-   if (res->obj->dt && res->obj->dt_idx == UINT32_MAX)
+   if (res->obj->dt && zink_kopper_get_dt_idx(res) == UINT32_MAX)
       return NULL;
    if (!res->obj->dt && zink_format_needs_mutable(res->base.b.format, templ->format, (res->obj->vkflags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) > 0))
       /* mutable not set by default */
@@ -294,11 +297,22 @@ zink_create_transient_surface(struct zink_context *ctx, const struct pipe_surfac
 {
    struct zink_resource *res = zink_resource(psurf->texture);
    struct zink_resource *transient = res->transient;
-   if (!res->transient || res->transient->base.b.nr_samples != nr_samples) {
+   /* multisampled images have a single level, so they only cover the attached one */
+   bool one_level = nr_samples > 1;
+   unsigned width = u_minify(psurf->texture->width0, psurf->level);
+   unsigned height = u_minify(psurf->texture->height0, psurf->level);
+   if (!res->transient || res->transient->base.b.nr_samples != nr_samples ||
+       (one_level && (res->transient->base.b.width0 != width ||
+                      res->transient->base.b.height0 != height))) {
       /* transient fb attachment: not cached */
       struct pipe_resource rtempl = *psurf->texture;
       rtempl.next = NULL;
       rtempl.nr_samples = nr_samples;
+      if (one_level) {
+         rtempl.width0 = width;
+         rtempl.height0 = height;
+         rtempl.last_level = 0;
+      }
       rtempl.bind &= ~(PIPE_BIND_LINEAR | ZINK_BIND_DMABUF);
       rtempl.bind |= ZINK_BIND_TRANSIENT;
       if (zink_format_needs_mutable(rtempl.format, psurf->format, true))
@@ -312,10 +326,12 @@ zink_create_transient_surface(struct zink_context *ctx, const struct pipe_surfac
       }
    }
 
-   VkImageViewCreateInfo ivci = create_fb_ivci(zink_screen(ctx->base.screen), res, psurf);
-   ivci.image = transient->obj->image;
-   ivci.pNext = NULL;
    struct pipe_surface templ = *psurf;
    templ.texture = &transient->base.b;
+   if (one_level)
+      templ.level = 0;
+   VkImageViewCreateInfo ivci = create_fb_ivci(zink_screen(ctx->base.screen), res, &templ);
+   ivci.image = transient->obj->image;
+   ivci.pNext = NULL;
    return zink_get_surface(ctx, &templ, &ivci);
 }

@@ -60,6 +60,10 @@
 #include "clcd97.h"
 #include "clce97.h"
 
+#include "clc5b0.h"
+#include "clc6b0.h"
+#include "clc9b0.h"
+
 #include "cla0b5.h"
 #include "clb0b5.h"
 #include "clc0b5.h"
@@ -504,6 +508,25 @@ nouveau_ioctl_nvif(int fd, unsigned long request, void *arg)
          break;
       default:
          sclass->sclass.oclass[idx].oclass = FERMI_COMPUTE_A;
+         break;
+      }
+      sclass->sclass.oclass[idx].minver = -1;
+      sclass->sclass.oclass[idx].maxver = -1;
+      idx++;
+      switch (device_info.chip_id & ~0xf) {
+      case 0x1b0:
+      case 0x1a0:
+      case 0x190:
+      case 0x180:
+         sclass->sclass.oclass[idx].oclass = NVC9B0_VIDEO_DECODER;
+         break;
+      case 0x170:
+         sclass->sclass.oclass[idx].oclass = NVC6B0_VIDEO_DECODER;
+         break;
+      case 0x160:
+         sclass->sclass.oclass[idx].oclass = NVC5B0_VIDEO_DECODER;
+         break;
+      default:
          break;
       }
       sclass->sclass.oclass[idx].minver = -1;

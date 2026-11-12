@@ -10,11 +10,8 @@ spec@!opengl 3.2@gl-3.2-adj-prims cull-front pv-last,Fail
 spec@!opengl 3.2@gl-3.2-adj-prims line cull-back pv-last,Fail
 spec@!opengl 3.2@gl-3.2-adj-prims line cull-front pv-last,Fail
 spec@!opengl 3.2@gl-3.2-adj-prims pv-last,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_chromium_sync_control@conformance,Fail
 spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_msc_and_sbc_test,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
-spec@egl_mesa_configless_context@basic,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y210,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y212,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y216,Fail
@@ -45,12 +42,6 @@ program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float1,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float16,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float2,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float4,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float8,Fail
 program@execute@vector-conversion,Fail
 
 # piglit bug, pigligt checks the global limits, but radeonsi advertises
@@ -60,4 +51,5 @@ program@run kernel with max work item sizes,Fail
 # uprev Piglit in Mesa
 spec@ext_external_objects@vk-semaphores,Crash
 spec@ext_external_objects@vk-semaphores-2,Crash
-spec@ext_yuv_target@execution@rgb_2_yuv,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
+

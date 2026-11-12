@@ -41,11 +41,6 @@ void
 st_serialise_nir_program(struct gl_context *ctx, struct gl_program *prog);
 
 void
-st_serialise_nir_program_binary(struct gl_context *ctx,
-                                struct gl_shader_program *shProg,
-                                struct gl_program *prog);
-
-void
 st_deserialise_nir_program(struct gl_context *ctx,
                            struct gl_shader_program *shProg,
                            struct gl_program *prog);

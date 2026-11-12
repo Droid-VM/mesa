@@ -40,6 +40,9 @@ LutAddresser::LutAddresser()
     m_sLutMask(0),
     m_blockBits(0),
     m_blockSize(),
+    m_microBlockSize(),
+    m_microBlockBits(0),
+    m_maxExpandX(1),
     m_bpeLog2(0),
     m_bit(),
     m_lutData()
@@ -58,10 +61,56 @@ void LutAddresser::Init(
     const ADDR_BIT_SETTING* pEq,
     UINT_32                 eqSize,
     ADDR_EXTENT3D           blockSize,
-    UINT_8                  blockBits)
+    UINT_32                 blockBits)
 {
     ADDR_ASSERT(eqSize <= ADDR_MAX_EQUATION_BIT);
     memcpy(&m_bit[0], pEq, sizeof(ADDR_BIT_SETTING) * eqSize);
+    m_blockSize = blockSize;
+    m_blockBits = blockBits;
+
+    InitSwizzleProps();
+    InitLuts();
+}
+
+/**
+****************************************************************************************************
+*   LutAddresser::InitFromEquation
+*
+*   @brief
+*       Calculates general properties about the swizzle from an ADDR_EQUATION
+****************************************************************************************************
+*/
+void LutAddresser::InitFromEquation(
+    const ADDR_EQUATION* pEq,
+    ADDR_EXTENT3D        blockSize,
+    UINT_8               blockBits,
+    UINT_8               bpeLog2)
+{
+    for (UINT_32 bit = bpeLog2; bit < ADDR_MAX_EQUATION_BIT; bit++)
+    {
+        for (UINT_32 comp = 0; comp < ADDR_MAX_EQUATION_COMP; comp++)
+        {
+            if (pEq->comps[comp][bit].valid)
+            {
+                UINT_32 channel = pEq->comps[comp][bit].channel;
+                UINT_32 index = pEq->comps[comp][bit].index;
+
+                // Bits beneath bpeLog2 should be empty, since they are inside of elements
+                if (channel == 0 && index >= bpeLog2)
+                {
+                    index -= bpeLog2;
+                }
+                else if (channel == 0 && index < bpeLog2)
+                {
+                    continue;
+                }
+
+                UINT_32 srcChShift = 16 * channel;
+                m_bit[bit].value |= (1ULL << (srcChShift + index));
+            }
+        }
+    }
+
     m_blockSize = blockSize;
     m_blockBits = blockBits;
 
@@ -101,6 +150,7 @@ void LutAddresser::InitSwizzleProps()
     }
 
     // Derive the microblock size from the swizzle equation.
+    // Note that Navi1x 1BPE sometimes has a 128B microblock, not 256B.
     UINT_32 xMbMask = 0;
     UINT_32 yMbMask = 0;
     UINT_32 zMbMask = 0;
@@ -110,12 +160,24 @@ void LutAddresser::InitSwizzleProps()
         yMbMask |= m_bit[i].y;
         zMbMask |= m_bit[i].z;
     }
-    m_microBlockSize.width  = xMbMask + 1;
-    m_microBlockSize.height = yMbMask + 1;
-    m_microBlockSize.depth  = zMbMask + 1;
-    ADDR_ASSERT(IsPow2(m_microBlockSize.width));
-    ADDR_ASSERT(IsPow2(m_microBlockSize.height));
-    ADDR_ASSERT(IsPow2(m_microBlockSize.depth));
+    // This magic bit fiddling only takes the lowest contiguous set of bits.
+    xMbMask = ((xMbMask + 1) & ~xMbMask) - 1;
+    yMbMask = ((yMbMask + 1) & ~yMbMask) - 1;
+    zMbMask = ((zMbMask + 1) & ~zMbMask) - 1;
+    // Then, mask off any bits that are also present in the upper part of the equation.
+    // If the bit is in there, it's not really contiguous.
+    for (UINT_32 i = 8; i < ADDR_MAX_EQUATION_BIT; i++)
+    {
+        xMbMask &= ~m_bit[i].x;
+        yMbMask &= ~m_bit[i].y;
+        zMbMask &= ~m_bit[i].z;
+    }
+    // Finally, repeat the 'take lowest bits' and store it as a size
+    m_microBlockSize.width  = ((xMbMask + 1) & ~xMbMask);
+    m_microBlockSize.height = ((yMbMask + 1) & ~yMbMask);
+    m_microBlockSize.depth  = ((zMbMask + 1) & ~zMbMask);
+    m_microBlockBits = Log2(m_microBlockSize.width * m_microBlockSize.height * m_microBlockSize.depth);
+    m_microBlockBits += m_bpeLog2;
 
     // An expandX of 1 is a no-op
     m_maxExpandX = 1;
@@ -308,7 +370,7 @@ void CopyRowUnaligned(
 
     // Most swizzles pack 2-4 pixels horizontally. Take advantage of this even in non-microblock-aligned
     // regions to commonly do 2-4x less work. This is still way less good than copying by whole microblocks though.
-    if (ExpandX > 1)
+    if constexpr (ExpandX > 1)
     {
         // Unaligned left edge
         for (; x < Min(xEnd, PowTwoAlign(xStart, ExpandX)); x++)
@@ -373,8 +435,8 @@ template <int BPELog2, int ExpandX, bool ImgIsDest>
 void CopyImgUnaligned(
     void*               pImgBlockStart, // Block corresponding to beginning of image
     void*               pBuf,           // Pointer to data starting from the copy origin.
-    size_t              bufStrideY,     // Stride of each row in pBuf
-    size_t              bufStrideZ,     // Stride of each slice in pBuf
+    UINT_64             bufStrideY,     // Stride of each row in pBuf
+    UINT_64             bufStrideZ,     // Stride of each slice in pBuf
     UINT_32             imageBlocksY,   // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,   // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D        origin,         // Absolute origin, in elements
@@ -432,8 +494,8 @@ template <int BPELog2, int ExpandX>
 void HandleUnalignedRegions(
     void*               pImgBlockStart, // Block corresponding to beginning of image
     void**              ppBuf,          // Pointer to pointer to data starting from the copy origin.
-    size_t              bufStrideY,     // Stride of each row in pBuf
-    size_t              bufStrideZ,     // Stride of each slice in pBuf
+    UINT_64             bufStrideY,     // Stride of each row in pBuf
+    UINT_64             bufStrideZ,     // Stride of each slice in pBuf
     UINT_32             imageBlocksY,   // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,   // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D*       pOrigin,        // Absolute origin, in elements
@@ -575,8 +637,8 @@ template <class MicroSw>
 AVX2_FUNC NEON_FUNC void CopyMemImgHybrid(
     void*               pImgBlockStart, // Block corresponding to beginning of image
     void*               pBuf,           // Pointer to data starting from the copy origin.
-    size_t              bufStrideY,     // Stride of each row in pBuf
-    size_t              bufStrideZ,     // Stride of each slice in pBuf
+    UINT_64             bufStrideY,     // Stride of each row in pBuf
+    UINT_64             bufStrideZ,     // Stride of each slice in pBuf
     UINT_32             imageBlocksY,   // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,   // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D        origin,         // Absolute origin, in elements
@@ -648,12 +710,12 @@ AVX2_FUNC NEON_FUNC void CopyMemImgHybrid(
 *       Copies the microblocks of a 3D pixel region to/from a surface.
 ****************************************************************************************************
 */
-template <bool ImgIsDest, bool NonTemporal>
+template <UINT_32 MicroBlockBits, bool ImgIsDest, bool NonTemporal>
 AVX2_FUNC NEON_FUNC void CopyMemImgMicroblocks(
     void*               pImgBlockStart, // Block corresponding to beginning of image
     void*               pBuf,           // Pointer to data starting from the copy origin.
-    size_t              bufStrideY,     // Stride of each row in pBuf, ignored.
-    size_t              bufStrideZ,     // Stride of each slice in pBuf, ignored.
+    UINT_64             bufStrideY,     // Stride of each row in pBuf, ignored.
+    UINT_64             bufStrideZ,     // Stride of each slice in pBuf, ignored.
     UINT_32             imageBlocksY,   // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,   // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D        origin,         // Absolute origin, in elements
@@ -688,14 +750,14 @@ AVX2_FUNC NEON_FUNC void CopyMemImgMicroblocks(
                 offset ^= addresser.GetAddressX(x);
 
                 void* pPix = VoidPtrInc(pImgBlockStart, offset);
-                constexpr UINT_32 CopySize = 1 << 8;
+                constexpr UINT_32 CopySize = 1 << MicroBlockBits;
 
 #if ADDR_HAS_AVX2
-                if (NonTemporal && ImgIsDest)
+                if constexpr (NonTemporal && ImgIsDest)
                 {
                     StreamCopyToImgAligned(pPix, pBuf, CopySize);
                 }
-                else if (NonTemporal)
+                else if constexpr (NonTemporal)
                 {
                     StreamCopyFromImgAligned(pBuf, pPix, CopySize);
                 }
@@ -723,12 +785,12 @@ AVX2_FUNC NEON_FUNC void CopyMemImgMicroblocks(
 *       Copies the blocks of a 3D pixel region to/from a surface.
 ****************************************************************************************************
 */
-template <bool ImgIsDest, bool NonTemporal>
+template <UINT_32 MicroBlockBits, bool ImgIsDest, bool NonTemporal>
 AVX2_FUNC NEON_FUNC void CopyMemImgBlocks(
     void*               pImgBlockStart, // Block corresponding to beginning of image
     void*               pBuf,           // Pointer to data starting from the copy origin.
-    size_t              bufStrideY,     // Stride of each row in pBuf, ignored.
-    size_t              bufStrideZ,     // Stride of each slice in pBuf, ignored.
+    UINT_64             bufStrideY,     // Stride of each row in pBuf, ignored.
+    UINT_64             bufStrideZ,     // Stride of each slice in pBuf, ignored.
     UINT_32             imageBlocksY,   // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,   // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D        origin,         // Absolute origin, in elements
@@ -739,7 +801,7 @@ AVX2_FUNC NEON_FUNC void CopyMemImgBlocks(
 {
     if (isInMipTail)
     {
-        return CopyMemImgMicroblocks<ImgIsDest, NonTemporal>(
+        return CopyMemImgMicroblocks<MicroBlockBits, ImgIsDest, NonTemporal>(
             pImgBlockStart,
             pBuf,
             bufStrideY,
@@ -777,17 +839,17 @@ AVX2_FUNC NEON_FUNC void CopyMemImgBlocks(
             UINT_32 copySize = numXBlk << addresser.GetBlockBits();
 
 #if ADDR_HAS_AVX2
-            if (NonTemporal && ImgIsDest)
+            if constexpr (NonTemporal && ImgIsDest)
             {
                 StreamCopyToImgAligned(pPix, pBuf, copySize);
             }
-            else if (NonTemporal)
+            else if constexpr (NonTemporal)
             {
                 StreamCopyFromImgAligned(pBuf, pPix, copySize);
             }
             else
 #endif
-            if (ImgIsDest)
+            if constexpr (ImgIsDest)
             {
                 memcpy(pPix, pBuf, copySize);
             }
@@ -813,35 +875,43 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyMemImgFunc(
     ) const
 {
     UnalignedCopyMemImgFunc pfnRet = nullptr;
-    // This key encodes how the bottom 8 bits (256B) are formed, so we can match to the correct optimized
+    // This key encodes how the bottom 7-8 bits (256B) are formed, so we can match to the correct optimized
     // swizzle function (they are all swizzle-agnostic beyond those 256B).
-    UINT_64 microSwKey = GetMicroSwKey(reinterpret_cast<const UINT_64*>(&m_bit[0]));
-
-    if (flags.blockMemcpy)
-    {
-#if ADDR_HAS_AVX2
-        if (CpuSupportsAvx2())
-        {
-            pfnRet = CopyMemImgBlocks<true, true>;
-        }
-        else
+#if ADDR_HAS_AVX2 || ADDR_HAS_NEON
+    UINT_64 microSwKey = GetMicroSwKey(reinterpret_cast<const UINT_64*>(&m_bit[0]), m_microBlockBits);
 #endif
-        {
-            pfnRet = CopyMemImgBlocks<true, false>;
-        }
-    }
 
-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
+    if (flags.blockMemcpy || flags.hybridMemcpy)
     {
+        static constexpr struct {
+            UINT_64                 blockCopyKey;
+            UnalignedCopyMemImgFunc pfn;
+        } BlockCopyFuncs[] = {
 #if ADDR_HAS_AVX2
-        if (CpuSupportsAvx2())
-        {
-            pfnRet = CopyMemImgMicroblocks<true, true>;
-        }
-        else
+            { GetBlockCopyKey(7, true, true, false),  CopyMemImgBlocks<7, true, true>},
+            { GetBlockCopyKey(7, true, false, true),  CopyMemImgMicroblocks<7, true, true>},
+            { GetBlockCopyKey(8, true, true, false),  CopyMemImgBlocks<8, true, true>},
+            { GetBlockCopyKey(8, true, false, true),  CopyMemImgMicroblocks<8, true, true>},
 #endif
+            { GetBlockCopyKey(7, false, true, false), CopyMemImgBlocks<7, true, false>},
+            { GetBlockCopyKey(7, false, false, true), CopyMemImgMicroblocks<7, true, false>},
+            { GetBlockCopyKey(8, false, true, false), CopyMemImgBlocks<8, true, false>},
+            { GetBlockCopyKey(8, false, false, true), CopyMemImgMicroblocks<8, true, false>},
+        };
+#if ADDR_HAS_AVX2
+        bool useNonTemporal = CpuSupportsAvx2();
+#else
+        bool useNonTemporal = false;
+#endif
+
+        UINT_64 blockCopyKey = GetBlockCopyKey(m_microBlockBits, useNonTemporal, flags.blockMemcpy, flags.hybridMemcpy);
+        for (const auto& func : BlockCopyFuncs)
         {
-            pfnRet = CopyMemImgMicroblocks<true, false>;
+            if (func.blockCopyKey == blockCopyKey)
+            {
+                pfnRet = func.pfn;
+                break;
+            }
         }
     }
 
@@ -949,33 +1019,40 @@ UnalignedCopyMemImgFunc LutAddresser::GetCopyImgMemFunc(
     ) const
 {
     UnalignedCopyMemImgFunc pfnRet = nullptr;
-    if (flags.blockMemcpy)
+    if (flags.blockMemcpy || flags.hybridMemcpy)
     {
+        static constexpr struct {
+            UINT_64                 blockCopyKey;
+            UnalignedCopyMemImgFunc pfn;
+        } BlockCopyFuncs[] = {
 #if ADDR_HAS_AVX2
-        if (CpuSupportsAvx2())
-        {
-            pfnRet = CopyMemImgBlocks<false, true>;
-        }
-        else
+            { GetBlockCopyKey(7, true, true, false),  CopyMemImgBlocks<7, false, true>},
+            { GetBlockCopyKey(7, true, false, true),  CopyMemImgMicroblocks<7, false, true>},
+            { GetBlockCopyKey(8, true, true, false),  CopyMemImgBlocks<8, false, true>},
+            { GetBlockCopyKey(8, true, false, true),  CopyMemImgMicroblocks<8, false, true>},
 #endif
+            { GetBlockCopyKey(7, false, true, false), CopyMemImgBlocks<7, false, false>},
+            { GetBlockCopyKey(7, false, false, true), CopyMemImgMicroblocks<7, false, false>},
+            { GetBlockCopyKey(8, false, true, false), CopyMemImgBlocks<8, false, false>},
+            { GetBlockCopyKey(8, false, false, true), CopyMemImgMicroblocks<8, false, false>},
+        };
+#if ADDR_HAS_AVX2
+        bool useNonTemporal = CpuSupportsAvx2();
+#else
+        bool useNonTemporal = false;
+#endif
+
+        UINT_64 blockCopyKey = GetBlockCopyKey(m_microBlockBits, useNonTemporal, flags.blockMemcpy, flags.hybridMemcpy);
+        for (const auto& func : BlockCopyFuncs)
         {
-            pfnRet = CopyMemImgBlocks<false, false>;
+            if (func.blockCopyKey == blockCopyKey)
+            {
+                pfnRet = func.pfn;
+                break;
+            }
         }
     }
 
-    if ((pfnRet == nullptr) && flags.hybridMemcpy)
-    {
-#if ADDR_HAS_AVX2
-        if (CpuSupportsAvx2())
-        {
-            pfnRet = CopyMemImgMicroblocks<false, true>;
-        }
-        else
-#endif
-        {
-            pfnRet = CopyMemImgMicroblocks<false, false>;
-        }
-    }
     // While these are all the same function, the codegen gets really bad if the size of each pixel
     // is not known at compile time. Hence, templates.
     const UnalignedCopyMemImgFunc Funcs[MaxElementBytesLog2][3] =

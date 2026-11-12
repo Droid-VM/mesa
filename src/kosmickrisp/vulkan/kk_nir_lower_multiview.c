@@ -9,7 +9,6 @@
 #include "nir.h"
 #include "nir_builder.h"
 
-/* View index maps to layer id in Metal */
 static bool
 replace_view_index_with_zero(nir_builder *b, nir_intrinsic_instr *instr,
                              void *data)
@@ -18,8 +17,7 @@ replace_view_index_with_zero(nir_builder *b, nir_intrinsic_instr *instr,
       return false;
 
    b->cursor = nir_before_instr(&instr->instr);
-   nir_def *layer_id = nir_load_layer_id(b);
-   nir_def_replace(&instr->def, layer_id);
+   nir_def_replace(&instr->def, nir_imm_int(b, 0u));
    return true;
 }
 

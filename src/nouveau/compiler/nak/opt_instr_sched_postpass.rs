@@ -137,6 +137,20 @@ fn generate_dep_graph(sm: &ShaderModelInfo, instrs: &[Instr]) -> DepGraph {
     g
 }
 
+fn new_future_ready_instr<E>(
+    g: &graph::Graph<NodeLabel, E>,
+    i: usize,
+) -> FutureReadyInstr {
+    let label = &g.nodes[i].label;
+    // NodeLabel::ready_cycle is the earliest beginning cycle for the
+    // instruction, but we need the earliest end cycle for the instruction.
+    let ready_cycle = label.ready_cycle.saturating_sub(label.exec_latency);
+    FutureReadyInstr {
+        ready_cycle: Reverse(ready_cycle),
+        index: i,
+    }
+}
+
 fn generate_order(
     g: &mut DepGraph,
     init_ready_list: Vec<usize>,
@@ -144,7 +158,7 @@ fn generate_order(
     let mut ready_instrs: BinaryHeap<ReadyInstr> = BinaryHeap::new();
     let mut future_ready_instrs: BinaryHeap<FutureReadyInstr> = init_ready_list
         .into_iter()
-        .map(|i| FutureReadyInstr::new(g, i))
+        .map(|i| new_future_ready_instr(g, i))
         .collect();
 
     let mut current_cycle = 0u32;
@@ -192,7 +206,7 @@ fn generate_order(
             dep_instr.num_uses -= 1;
             if dep_instr.num_uses == 0 {
                 future_ready_instrs
-                    .push(FutureReadyInstr::new(g, edge.head_idx));
+                    .push(new_future_ready_instr(g, edge.head_idx));
             }
         }
     }

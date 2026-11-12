@@ -80,7 +80,7 @@ To build everything on Linux invoke meson as:
 
    mkdir build
    cd build
-   meson -D glx=xlib -D gallium-drivers=llvmpipe
+   meson -D gallium-drivers=llvmpipe
    ninja
 
 Building for Android
@@ -215,12 +215,6 @@ Linux
 
 On Linux, building will create a drop-in alternative for ``libGL.so``
 into
-
-::
-
-   build/foo/gallium/targets/libgl-xlib/libGL.so
-
-or
 
 ::
 

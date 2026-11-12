@@ -211,7 +211,6 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->max_texture_gather_components = (class_3d >= NVA3_3D_CLASS) ? 4 : 0;
    caps->max_window_rectangles = NV50_MAX_WINDOW_RECTANGLES;
    caps->max_texture_upload_memory_budget = 16 * 1024 * 1024;
@@ -278,6 +277,7 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->framebuffer_no_attachment = true;
    caps->compute = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
 
    /* nvc0 has fixed function alpha test support, but nv50 doesn't.  If we
     * don't have it, then the frontend will lower it for us.
@@ -931,7 +931,7 @@ nv50_screen_tic_alloc(struct nv50_screen *screen, void *entry)
 {
    int i = screen->tic.next;
 
-   while (screen->tic.lock[i / 32] & (1 << (i % 32)))
+   while (screen->tic.lock[i / 32] & (1u << (i % 32)))
       i = (i + 1) & (NV50_TIC_MAX_ENTRIES - 1);
 
    screen->tic.next = (i + 1) & (NV50_TIC_MAX_ENTRIES - 1);
@@ -948,7 +948,7 @@ nv50_screen_tsc_alloc(struct nv50_screen *screen, void *entry)
 {
    int i = screen->tsc.next;
 
-   while (screen->tsc.lock[i / 32] & (1 << (i % 32)))
+   while (screen->tsc.lock[i / 32] & (1u << (i % 32)))
       i = (i + 1) & (NV50_TSC_MAX_ENTRIES - 1);
 
    screen->tsc.next = (i + 1) & (NV50_TSC_MAX_ENTRIES - 1);

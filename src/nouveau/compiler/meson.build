@@ -45,6 +45,7 @@ _nak_bindings_rs = rust.bindgen(
   output : 'nak_bindings.rs',
   c_args : [
     pre_args,
+    bindgen_c_args,
   ],
   args : [
     bindgen_output_args,
@@ -62,6 +63,7 @@ _nak_bindings_rs = rust.bindgen(
     # provided through compiler::bindings::*
     '--blocklist-type', 'glsl_.*',
     '--blocklist-type', 'pipe_format.*',
+    '--blocklist-type', 'gl_frag_depth_layout',
     '--no-prepend-enum-name',
     '--with-derive-default',
   ],
@@ -102,8 +104,8 @@ _libnak_rs = static_library(
   dependencies : [
     dep_paste,
     dep_rustc_hash,
-    idep_bitview_rs,
     idep_compiler_rs,
+    idep_mesa_util_rs,
     idep_nvidia_headers_rs,
   ],
   link_with : [
@@ -115,7 +117,7 @@ _libnak_rs = static_library(
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely
 # with the sanitizers because meson doesn't know to pass -fsanitize to the
-# Rust linker.  See also https://github.com/mesonbuild/meson/issues/11741
+# Rust linker.  See also https://github.com/mesonbuild/meson/issues/15222
 #
 # Also, don't build on Android because we do cross-builds and, unlike most
 # tests, these depend on libdrm and that confuses the build system.

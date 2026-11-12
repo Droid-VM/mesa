@@ -272,7 +272,6 @@ mme_tu104_sim_runner::run_macro(const std::vector<uint32_t>& macro,
       .size = DATA_BO_SIZE,
    };
    const uint32_t* p_params = params.size() ? &params[0] : NULL;
-   mme_tu104_sim(insts.size(), &insts[0],
-                 params.size(), p_params,
-                 1, &sim_mem);
+   mme_tu104_sim(insts.size(), &insts[0], params.size(), p_params, 1, &sim_mem,
+                 devinfo->cls_eng3d);
 }

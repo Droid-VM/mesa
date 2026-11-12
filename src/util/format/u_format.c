@@ -578,7 +578,8 @@ util_is_format_compatible(const struct util_format_description *src_desc,
 
    if (src_desc->block.bits != dst_desc->block.bits ||
        src_desc->nr_channels != dst_desc->nr_channels ||
-       src_desc->colorspace != dst_desc->colorspace) {
+       src_desc->colorspace != dst_desc->colorspace ||
+       src_desc->is_byte_swapped != dst_desc->is_byte_swapped) {
       return false;
    }
 
@@ -684,6 +685,62 @@ util_format_fits_8unorm(const struct util_format_description *format_desc)
 
       default:
          return false;
+      }
+   }
+}
+
+
+/**
+ * Copy a rect of pixels between a format with is_byte_swapped set and its
+ * host-endian counterpart, in either direction. \p dst and \p src have the
+ * same stride and may be the same.
+ */
+void
+util_format_byte_swap_rect(enum pipe_format format,
+                           void *dst, const void *src, unsigned stride,
+                           unsigned width, unsigned height)
+{
+   const struct util_format_description *desc = util_format_description(format);
+   const unsigned pixel_size = desc->block.bits / 8;
+   unsigned unit_size = pixel_size;
+
+   assert(desc->layout == UTIL_FORMAT_LAYOUT_PLAIN);
+
+   if (desc->is_array) {
+      const int chan = util_format_get_first_non_void_channel(format);
+      unit_size = desc->channel[chan].size / 8;
+   }
+
+   for (unsigned y = 0; y < height; y++) {
+      const uint8_t *s = (const uint8_t *)src + (size_t)y * stride;
+      uint8_t *d = (uint8_t *)dst + (size_t)y * stride;
+
+      for (unsigned i = 0; i < width * pixel_size; i += unit_size) {
+         switch (unit_size) {
+         case 2: {
+            uint16_t v;
+            memcpy(&v, s + i, sizeof v);
+            v = util_bswap16(v);
+            memcpy(d + i, &v, sizeof v);
+            break;
+         }
+         case 4: {
+            uint32_t v;
+            memcpy(&v, s + i, sizeof v);
+            v = util_bswap32(v);
+            memcpy(d + i, &v, sizeof v);
+            break;
+         }
+         case 8: {
+            uint64_t v;
+            memcpy(&v, s + i, sizeof v);
+            v = util_bswap64(v);
+            memcpy(d + i, &v, sizeof v);
+            break;
+         }
+         default:
+            UNREACHABLE("unexpected byte-swapped unit size");
+         }
       }
    }
 }
@@ -1397,4 +1454,12 @@ util_format_get_tilesize(enum pipe_format format, uint32_t dimensions, uint32_t 
 
    uint32_t block_size_log2 = util_logbase2_ceil(util_format_get_blocksize(format));
    return blocksizes_64kb[block_size_log2][kind][axis];
+}
+
+bool
+util_format_is_stencil_only(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+
+   return util_format_has_stencil(desc) && !util_format_has_depth(desc);
 }

@@ -143,26 +143,23 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const uint32_t copy_count = pCopyMemoryIndirectInfo->copyCount;
    VkPipelineLayout layout;
-   uint32_t alloc_offset;
+   uint64_t va;
    VkPipeline pipeline;
    VkResult result;
 
-   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, NULL)) {
+   if (!radv_cmd_buffer_vram_suballoc(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4, &va)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
-   const uint64_t upload_addr = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + alloc_offset;
-
-   result = radv_compute_copy_memory_indirect_preprocess(cmd_buffer, pCopyMemoryIndirectInfo, upload_addr);
+   result = radv_compute_copy_memory_indirect_preprocess(cmd_buffer, pCopyMemoryIndirectInfo, va);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, result);
       return;
    }
 
    /* Synchronize the preprocess dispatch. */
-   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_PFP_SYNC_ME |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL);
 
@@ -181,7 +178,7 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
       radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_addr), &copy_addr);
 
       const struct radv_dispatch_info info = {
-         .indirect_va = upload_addr + i * sizeof(VkDispatchIndirectCommand),
+         .indirect_va = va + i * sizeof(VkDispatchIndirectCommand),
          .unaligned = true,
       };
 
@@ -380,27 +377,23 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    uint32_t texel_scale = 1;
    VkPipelineLayout layout;
-   uint32_t alloc_offset;
+   uint64_t va;
    VkPipeline pipeline;
    VkResult result;
 
-   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, NULL)) {
+   if (!radv_cmd_buffer_vram_suballoc(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4, &va)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
-   const uint64_t upload_addr = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + alloc_offset;
-
-   result =
-      radv_compute_copy_memory_to_image_indirect_preprocess(cmd_buffer, pCopyMemoryToImageIndirectInfo, upload_addr);
+   result = radv_compute_copy_memory_to_image_indirect_preprocess(cmd_buffer, pCopyMemoryToImageIndirectInfo, va);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, result);
       return;
    }
 
    /* Synchronize the preprocess dispatch. */
-   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_PFP_SYNC_ME |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL);
 
@@ -437,29 +430,39 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
 
       struct radv_meta_blit2d_surf img_bsurf = radv_blit_surf_for_image_level_layer(
          dst_image, pCopyMemoryToImageIndirectInfo->dstImageLayout, imageSubresource);
+      const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
+      bool decompress = false;
 
       if (!radv_is_buffer_format_supported(img_bsurf.format, NULL)) {
-         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf, cmd_buffer->qf);
          const VkFormat raw_format = vk_format_for_size(vk_format_get_blocksize(img_bsurf.format));
 
-         if (!radv_dcc_formats_compatible(pdev->info.gfx_level, img_bsurf.format, raw_format, NULL) &&
-             radv_layout_dcc_compressed(device, dst_image, imageSubresource->mipLevel, dst_image_layout, queue_mask)) {
-            radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
-
-            radv_decompress_dcc(cmd_buffer, dst_image,
-                                &(VkImageSubresourceRange){
-                                   .aspectMask = imageSubresource->aspectMask,
-                                   .baseMipLevel = imageSubresource->mipLevel,
-                                   .levelCount = 1,
-                                   .baseArrayLayer = imageSubresource->baseArrayLayer,
-                                   .layerCount = vk_image_subresource_layer_count(&dst_image->vk, imageSubresource),
-                                });
-            img_bsurf.disable_compression = true;
-
-            radv_describe_barrier_end(cmd_buffer);
-         }
+         /* If raw_format is incompatible with DCC, we must decompress. */
+         if (radv_layout_dcc_compressed(device, dst_image, imageSubresource->mipLevel, dst_image_layout, queue_mask) &&
+             !radv_dcc_formats_compatible(pdev->info.gfx_level, img_bsurf.format, raw_format, NULL))
+            decompress = true;
 
          img_bsurf.format = raw_format;
+      }
+
+      /* If image stores don't support DCC, we must decompress. */
+      if (radv_layout_dcc_compressed(device, dst_image, imageSubresource->mipLevel, dst_image_layout, queue_mask) &&
+          !radv_image_compress_dcc_on_image_stores(device, dst_image))
+         decompress = true;
+
+      if (decompress) {
+         radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
+
+         radv_decompress_dcc(cmd_buffer, dst_image,
+                             &(VkImageSubresourceRange){
+                                .aspectMask = imageSubresource->aspectMask,
+                                .baseMipLevel = imageSubresource->mipLevel,
+                                .levelCount = 1,
+                                .baseArrayLayer = imageSubresource->baseArrayLayer,
+                                .layerCount = vk_image_subresource_layer_count(&dst_image->vk, imageSubresource),
+                             });
+         img_bsurf.disable_compression = true;
+
+         radv_describe_barrier_end(cmd_buffer);
       }
 
       radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
@@ -483,7 +486,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
                                  .pNext = &iview_usage_info,
                                  .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                                  .image = radv_image_to_handle(dst_image),
-                                 .viewType = radv_meta_get_view_type(dst_image),
+                                 .viewType = radv_meta_get_view_type(dst_image, false),
                                  .format = img_bsurf.format,
                                  .subresourceRange =
                                     {
@@ -531,7 +534,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
          radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
 
          const struct radv_dispatch_info info = {
-            .indirect_va = upload_addr + i * sizeof(VkDispatchIndirectCommand),
+            .indirect_va = va + i * sizeof(VkDispatchIndirectCommand),
             .unaligned = true,
          };
 

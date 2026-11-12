@@ -22,6 +22,8 @@
 #include "pvr_hw_pass.h"
 #include "pvr_types.h"
 
+#include "util/perf/u_trace.h"
+
 struct pvr_pds_upload;
 struct pvr_private_compute_pipeline;
 struct pvr_query_info;
@@ -211,6 +213,11 @@ struct pvr_sub_cmd_gfx {
 
    bool has_query;
 
+   /* True if this is a geometry-only kick (e.g., for XFB queries outside render
+    * pass).
+    */
+   bool geom_only;
+
    bool wait_on_previous_transfer;
 
    bool has_depth_feedback;
@@ -386,6 +393,12 @@ struct pvr_ppp_state {
    uint32_t varying_word[2];
 
    uint32_t ppp_control;
+
+   struct {
+      uint32_t so0;
+      uint32_t so1;
+      uint32_t so2;
+   } stream_out;
 };
 
 /* Represents a control stream related command that is deferred for execution in
@@ -421,6 +434,41 @@ struct pvr_push_constants {
    unsigned bytes_updated;
    pvr_dev_addr_t dev_addr;
    bool dirty;
+};
+
+struct pvr_xfb_binding {
+   pvr_dev_addr_t buffer_addr;
+   pvr_dev_addr_t buffer_limit;
+   pvr_dev_addr_t counter_buffer_addr;
+   pvr_dev_addr_t last_counter_buffer_addr;
+   VkDeviceSize buffer_size;
+};
+
+struct pvr_program_info {
+   uint32_t temp_size;
+   struct pvr_pds_upload pds_program;
+};
+
+struct pvr_cmd_buffer_xfb_state {
+   /* Whether transform feedback is currently active for the cmd_buffer. */
+   bool is_active;
+
+   /* Cached output primitive vertex count used for active XFB programs. */
+   uint32_t output_primitive_vertex_count;
+
+   struct pvr_xfb_binding bindings[PVR_XFB_MAX_BUFFERS];
+
+   uint32_t counter_buffer_count;
+
+   /* XFB programs */
+   struct pvr_program_info pds_streamout_program;
+   struct pvr_program_info pds_init_program;
+   struct pvr_program_info pds_end_program;
+   struct pvr_program_info pds_draw_program;
+   struct pvr_program_info pds_query_begin_program;
+   struct pvr_program_info pds_query_end_program;
+
+   struct pvr_query_pool *pool;
 };
 
 struct pvr_cmd_buffer_state {
@@ -491,6 +539,11 @@ struct pvr_cmd_buffer_state {
    } pds_shader;
 
    const struct pvr_query_pool *query_pool;
+   struct pvr_cmd_buffer_xfb_state xfb_state;
+
+   /* Query pool pointers indexed by query type */
+   const struct pvr_query_pool *query_pools[PVR_QUERY_POOL_INDEX_COUNT];
+   uint32_t query_pool_indices[PVR_QUERY_POOL_INDEX_COUNT];
    bool vis_test_enabled;
    uint32_t vis_reg;
 
@@ -555,6 +608,9 @@ struct pvr_cmd_buffer {
    struct list_head bo_list;
 
    struct list_head sub_cmds;
+
+   /* U-trace integration */
+   struct u_trace trace;
 };
 
 VK_DEFINE_HANDLE_CASTS(pvr_cmd_buffer,
@@ -586,6 +642,11 @@ static inline bool pvr_sub_cmd_gfx_requires_split_submit(
    return sub_cmd->job.run_frag && sub_cmd->rstate->layers > 1;
 }
 
+VkResult
+pvr_cmd_buffer_insert_mid_frag_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
+                                             uint32_t src_stage_mask,
+                                             uint32_t dst_stage_mask);
+
 #define PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer)                  \
    do {                                                                      \
       struct pvr_cmd_buffer *const _cmd_buffer = (cmd_buffer);               \
@@ -605,6 +666,16 @@ static inline bool pvr_sub_cmd_gfx_requires_split_submit(
          return;                                                             \
       }                                                                      \
    } while (0)
+
+static inline
+struct pvr_descriptor_state *
+pvr_get_descriptors_state(struct pvr_cmd_buffer *cmd_buffer,
+                         VkPipelineBindPoint bind_point)
+{
+   if (bind_point == VK_PIPELINE_BIND_POINT_COMPUTE)
+      return &cmd_buffer->state.compute_desc_state;
+   return &cmd_buffer->state.gfx_desc_state;
+}
 
 #ifdef PVR_PER_ARCH
 
@@ -762,6 +833,22 @@ struct pvr_renderpass_hwsetup_render *PVR_PER_ARCH(pass_info_get_hw_render)(
 
 #   define pvr_arch_pass_info_get_hw_render \
       PVR_PER_ARCH(pass_info_get_hw_render)
+
+void PVR_PER_ARCH(set_xfb_main_program_ppp_state)(
+   struct pvr_cmd_buffer *cmd_buffer);
+
+#   define pvr_arch_set_xfb_main_program_ppp_state \
+      PVR_PER_ARCH(set_xfb_main_program_ppp_state)
+
+VkResult PVR_PER_ARCH(emit_xfb_sync_state)(
+   struct pvr_cmd_buffer *const cmd_buffer,
+   const struct pvr_program_info *pds_program_info);
+
+#   define pvr_arch_emit_xfb_sync_state PVR_PER_ARCH(emit_xfb_sync_state)
+
+VkResult PVR_PER_ARCH(validate_xfb_state)(struct pvr_cmd_buffer *cmd_buffer);
+
+#   define pvr_arch_validate_xfb_state PVR_PER_ARCH(validate_xfb_state)
 
 #endif /* PVR_PER_ARCH */
 

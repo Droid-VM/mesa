@@ -13,27 +13,27 @@ path = "unigine/tropics-d3d9.trace-dxgi"
 [[traces]]
 path = "unigine/heaven-scene1-low-d3d9.trace-dxgi"
 nonloopable = true
-devices = { lvp = { checksum = "555efa5bcc89a638ed58df874aa13d0727bc7e798bfd9b42b2aa1854e3447688" } }
+devices = { lvp = { checksum = "5516a96c5c2d80d807221e1724e6cc8e0adac1418df5ba53cdc6395fd40590df" } }
 
 [[traces]]
 path = "unigine/heaven-scene1-low-d3d11.trace-dxgi"
 nonloopable = true
-devices = { lvp = { checksum = "9ab7ad92594c3ec45ebdea32c28f21c3b5f05518d56468be53ecd31fb4c2e2e8" } }
+devices = { lvp = { checksum = "f682f9037b9ced196aa284c83bb43574b5fa1b3c929423e7587cf1a52f7e85a9" } }
 
 [[traces]]
 path = "unigine/heaven-scene1-ultra-d3d11.trace-dxgi"
 nonloopable = true
-devices = { lvp = { checksum = "aa114d950a0f32ea729e71c772b704f5b2d4b5063c7ab3a44c7a919b32d52066" } }
+devices = { lvp = { checksum = "31a99f77ad46271f3c7e8853a81571065eccb6f8825a058220b4def0cbb19ce0" } }
 
 [[traces]]
 path = "unigine/heaven-scene12-low-d3d9.trace-dxgi"
 nonloopable = true
-devices = { lvp = { checksum = "9f6586cd18b7add22d8d17b283b03e0e669b5cbcb3199d2cc655f5dde0d753df" } }
+devices = { lvp = { checksum = "54e7cf604b25b21595a0fb279393f0e0e3052761e27fb6fdbc0af366b83717bf" } }
 
 [[traces]]
 path = "unigine/heaven-scene12-ultra-d3d11.trace-dxgi"
 nonloopable = true
-devices = { lvp = { checksum = "e742c05cdabcbaa634fe2607b642fbd16edc944e820009271fd70edd7ace46dd" } }
+devices = { lvp = { checksum = "7108b7e7120e1fc5021714851e035d15e13c52bc5d1069eb0da09f8aca20586c" } }
 
 [[traces]]
 path = "./LunarG-VulkanSamples/amd/polaris10/Hologram:-w:640:-h:480.gfxr"

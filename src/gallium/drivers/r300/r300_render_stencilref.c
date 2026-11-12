@@ -15,6 +15,7 @@
 
 #include "r300_context.h"
 #include "r300_reg.h"
+#include "util/u_draw.h"
 
 struct r300_stencilref_context {
     pipe_draw_func draw_vbo;
@@ -112,4 +113,5 @@ void r300_plug_in_stencil_ref_fallback(struct r300_context *r300)
 
     /* Override the draw function. */
     r300->context.draw_vbo = r300_stencilref_draw_vbo;
+    r300->context.draw_vbo_buffers = util_draw_vbo_buffers;
 }

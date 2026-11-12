@@ -386,4 +386,83 @@ typedef struct {
    uint64_t value;
 } p_atomic_uint64_t;
 
+static inline bool
+p_atomic_dec_not_one_8(uint8_t *counter)
+{
+   uint8_t old, val;
+
+   val = p_atomic_read(counter);
+   while (1) {
+      if (val == 1)
+         return false;
+
+      old = (uint8_t)p_atomic_cmpxchg(counter, val, val - 1);
+      if (old == val)
+         return true;
+
+      val = old;
+   }
+}
+
+static inline bool
+p_atomic_dec_not_one_16(uint16_t *counter)
+{
+   uint16_t old, val;
+
+   val = p_atomic_read(counter);
+   while (1) {
+      if (val == 1)
+         return false;
+
+      old = (uint16_t)p_atomic_cmpxchg(counter, val, val - 1);
+      if (old == val)
+         return true;
+
+      val = old;
+   }
+}
+
+static inline bool
+p_atomic_dec_not_one_32(uint32_t *counter)
+{
+   uint32_t old, val;
+
+   val = p_atomic_read(counter);
+   while (1) {
+      if (val == 1)
+         return false;
+
+      old = (uint32_t)p_atomic_cmpxchg(counter, val, val - 1);
+      if (old == val)
+         return true;
+
+      val = old;
+   }
+}
+
+static inline bool
+p_atomic_dec_not_one_64(uint64_t *counter)
+{
+   uint64_t old, val;
+
+   val = p_atomic_read(counter);
+   while (1) {
+      if (val == 1)
+         return false;
+
+      old = (uint64_t)p_atomic_cmpxchg(counter, val, val - 1);
+      if (old == val)
+         return true;
+
+      val = old;
+   }
+}
+
+#define p_atomic_dec_not_one(v) (\
+   sizeof(*(v)) == sizeof(uint8_t)  ? p_atomic_dec_not_one_8 ((uint8_t  *)(v)) : \
+   sizeof(*(v)) == sizeof(uint16_t) ? p_atomic_dec_not_one_16((uint16_t *)(v)) : \
+   sizeof(*(v)) == sizeof(uint32_t) ? p_atomic_dec_not_one_32((uint32_t *)(v)) : \
+   sizeof(*(v)) == sizeof(uint64_t) ? p_atomic_dec_not_one_64((uint64_t *)(v)) : \
+                                      (assert(!"should not get here"), 0))
+
 #endif /* U_ATOMIC_H */

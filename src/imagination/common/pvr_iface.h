@@ -42,6 +42,12 @@ enum pvr_query_copy_data {
 
    PVR_QUERY_COPY_DATA_FLAGS,
 
+   /** Stride in bytes between elements in the result buffer. */
+   PVR_QUERY_COPY_DATA_RESULT_STRIDE,
+
+   /** Number of 32-bit reports per query result. */
+   PVR_QUERY_COPY_DATA_REPORT_COUNT,
+
    _PVR_QUERY_COPY_DATA_COUNT,
 };
 
@@ -54,6 +60,12 @@ enum pvr_query_reset_data {
 
    PVR_QUERY_RESET_DATA_AVAILABILITY_BO_LO,
    PVR_QUERY_RESET_DATA_AVAILABILITY_BO_HI,
+
+   /** Stride in bytes between elements in the result buffer. */
+   PVR_QUERY_RESET_DATA_RESULT_STRIDE,
+
+   /** Number of 32-bit reports per query result. */
+   PVR_QUERY_RESET_DATA_REPORT_COUNT,
 
    _PVR_QUERY_RESET_DATA_COUNT,
 };
@@ -146,11 +158,207 @@ enum pvr_idfwdf_sr_data {
 #define PVR_FS_META_COLOR_WRITE_ENABLE_OFFSET 1U
 #define PVR_FS_META_SAMPLE_MASK_OFFSET 9U
 #define PVR_FS_META_ALPHA_TO_COVERAGE_OFFSET 25U
+#define PVR_FS_META_SAMPLE_SHADING 26U
 
 /** Fragment shader metadata lengths */
 #define PVR_FS_META_ALPHA_TO_ONE_LENGTH 1U
 #define PVR_FS_META_COLOR_WRITE_ENABLE_LENGTH 8U
 #define PVR_FS_META_SAMPLE_MASK_LENGTH 16U
 #define PVR_FS_META_ALPHA_TO_COVERAGE_LENGTH 1U
+#define PVR_FS_META_SAMPLE_SHADING_LENGTH 1U
+
+/** Sliced view of 3d helpers. */
+#define PVR_SLICED_VIEW_OFFSET_OFFSET 0U
+#define PVR_SLICED_VIEW_OFFSET_LENGTH 16U
+#define PVR_SLICED_VIEW_COUNT_OFFSET 16U
+#define PVR_SLICED_VIEW_COUNT_LENGTH 16U
+
+/* PDSC XFB main patch IDs */
+
+enum pvr_xfb_main_patch_id {
+   /** Patch ID for first STM instruction source 2 constant */
+   PVR_XFB_MAIN_PATCH_ID_STM_SRC2_CONST_0 = 0,
+};
+
+/* PDSC XFB init patch IDs */
+
+enum pvr_xfb_init_patch_id {
+   /** Patch ID for transform feedback persistent count */
+   PVR_XFB_INIT_PATCH_ID_PTEMP_LD_COUNT,
+
+   /** Patch IDs for first varying STM instruction ptemp load */
+   PVR_XFB_INIT_PATCH_ID_PTEMP_LD_SRC0_0,
+
+   /** Patch IDs for second varying STM instruction ptemp load */
+   PVR_XFB_INIT_PATCH_ID_PTEMP_LD_SRC0_1,
+
+   /** Patch IDs for third varying STM instruction ptemp load */
+   PVR_XFB_INIT_PATCH_ID_PTEMP_LD_SRC0_2,
+
+   /** Patch IDs for fourth varying STM instruction ptemp load */
+   PVR_XFB_INIT_PATCH_ID_PTEMP_LD_SRC0_3,
+
+   /** Patch ID for transform feedback counter buffer load */
+   PVR_XFB_INIT_PATCH_ID_COUNTER_BUFFER_LD_SRC0,
+
+   /** Patch ID for transform feedback counter buffer store */
+   PVR_XFB_INIT_PATCH_ID_COUNTER_BUFFER_ST_SRC0,
+
+   /** Patch ID for transform feedback counter buffer alignment dword select */
+   PVR_XFB_INIT_PATCH_ID_COUNTER_BUFFER_DWORD_SELECT,
+
+   /** Patch ID for transform feedback counter buffer count */
+   PVR_XFB_INIT_PATCH_ID_COUNTER_BUFFER_COUNT,
+};
+
+/* PDSC XFB init reference IDs */
+
+enum pvr_xfb_init_ref_id {
+   /** Ref ID for first ptemp destination */
+   PVR_XFB_INIT_REF_ID_PTEMPS_LD_DEST_0,
+
+   /** Ref ID for second ptemp destination */
+   PVR_XFB_INIT_REF_ID_PTEMPS_LD_DEST_1,
+
+   /** Ref ID for third ptemp destination */
+   PVR_XFB_INIT_REF_ID_PTEMPS_LD_DEST_2,
+
+   /** Ref ID for fourth ptemp destination */
+   PVR_XFB_INIT_REF_ID_PTEMPS_LD_DEST_3,
+
+   /** Ref ID for transform feedback counter buffer load */
+   PVR_XFB_INIT_REF_ID_COUNTER_BUFFER_LD_DEST,
+
+   /** Ref ID for transform feedback counter buffer store */
+   PVR_XFB_INIT_REF_ID_COUNTER_BUFFER_ST_SRC0,
+};
+
+/* PDSC XFB end patch IDs */
+enum pvr_xfb_end_patch_id {
+   /** Patch ID for end transform feedback counter buffer count */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_COUNT,
+
+   /** Patch ID for end transform feedback counter buffer stride 0 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_STRIDE_0,
+
+   /** Patch ID for end transform feedback counter buffer stride 1 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_STRIDE_1,
+
+   /** Patch ID for end transform feedback counter buffer stride 2 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_STRIDE_2,
+
+   /** Patch ID for end transform feedback counter buffer stride 3 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_STRIDE_3,
+
+   /** Patch ID for end transform feedback counter buffer load source 0 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_LD_SRC0,
+
+   /** Patch ID for end transform feedback counter buffer store source 0 */
+   PVR_XFB_END_PATCH_ID_COUNTER_BUFFER_ST_SRC0,
+
+   /** Patch ID for stream query result load source 0 */
+   PVR_XFB_END_PATCH_ID_QUERY_RESULT_LD_SRC0,
+
+   /** Patch ID for stream query result store source 0 */
+   PVR_XFB_END_PATCH_ID_QUERY_RESULT_ST_SRC0,
+};
+
+/* PDSC XFB end reference IDs */
+enum pvr_xfb_end_ref_id {
+   /** Ref ID for end transform feedback counter buffer load destination */
+   PVR_XFB_END_REF_ID_COUNTER_BUFFER_LD_DEST,
+
+   /** Ref ID for end transform feedback counter buffer store source 0 */
+   PVR_XFB_END_REF_ID_COUNTER_BUFFER_ST_SRC0,
+
+   /** Ref ID for stream query result load destination */
+   PVR_XFB_END_REF_ID_QUERY_RESULT_LD_DEST,
+
+   /** Ref ID for stream query result store source 0 */
+   PVR_XFB_END_REF_ID_QUERY_RESULT_ST_SRC0,
+};
+
+/* PDSC XFB vertex count patch IDs */
+enum pvr_xfb_vertex_count_patch_id {
+   /** Patch ID for vertex count negative counter offset */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_NEGATIVE_COUNTER_OFFSET,
+
+   /** Patch ID for vertex count vertex stride reciprocal */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_VERTEX_STRIDE_RECIP,
+
+   /** Patch ID for instance count */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_INSTANCE_COUNT,
+
+   /** Patch ID for first instance */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_FIRST_INSTANCE,
+
+   /** Patch ID for counter buffer load source 0 */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_COUNTER_BUFFER_LD_SRC0,
+
+   /** Patch ID for output count buffer store source 0 */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_OUTPUT_COUNT_BUFFER_ST_SRC0,
+
+   /** Patch ID for counter dword select within the 16-byte aligned load */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_COUNTER_DWORD_SELECT,
+
+   /** Patch ID for divide enable (0 when vertex stride == 1) */
+   PVR_XFB_VERTEX_COUNT_PATCH_ID_DIVIDE_ENABLE,
+};
+
+/* PDSC XFB vertex count reference IDs */
+enum pvr_xfb_vertex_count_ref_id {
+   /** Ref ID for counter buffer load destination */
+   PVR_XFB_VERTEX_COUNT_REF_ID_COUNTER_BUFFER_LD_DEST,
+
+   /** Ref ID for output count buffer store source 0 */
+   PVR_XFB_VERTEX_COUNT_REF_ID_OUTPUT_COUNT_BUFFER_ST_SRC0,
+};
+
+/* PDSC XFB query begin patch IDs */
+enum pvr_xfb_query_begin_patch_id {
+   /** Patch ID for query availability store source 0 */
+   PVR_XFB_QUERY_BEGIN_PATCH_ID_AVAILABILITY_ST_SRC0,
+
+   /** Patch ID for query result store source 0 */
+   PVR_XFB_QUERY_BEGIN_PATCH_ID_RESULT_ST_SRC0,
+
+   /** Patch ID for the open segment scale: -1 if transform feedback is
+    * active, 0 otherwise.
+    */
+   PVR_XFB_QUERY_BEGIN_PATCH_ID_OPEN_SEGMENT_SCALE,
+};
+
+/* PDSC XFB query begin reference IDs */
+enum pvr_xfb_query_begin_ref_id {
+   /** Ref ID for query availability store source 0 */
+   PVR_XFB_QUERY_BEGIN_REF_ID_AVAILABILITY_ST_SRC0,
+
+   /** Ref ID for query result store source 0 */
+   PVR_XFB_QUERY_BEGIN_REF_ID_RESULT_ST_SRC0,
+};
+
+/* PDSC XFB query end patch IDs */
+enum pvr_xfb_query_end_patch_id {
+   /** Patch ID for query count load source 0 */
+   PVR_XFB_QUERY_END_PATCH_ID_QUERY_COUNT_LD_SRC0,
+
+   /** Patch ID for query result written store source 0 */
+   PVR_XFB_QUERY_END_PATCH_ID_RESULT_WRITTEN_ST_SRC0,
+
+   /** Patch ID for query availability store source 0 */
+   PVR_XFB_QUERY_END_PATCH_ID_AVAILABILITY_ST_SRC0,
+};
+
+/* PDSC XFB query end reference IDs */
+enum pvr_xfb_query_end_ref_id {
+   /** Ref ID for query count load destination */
+   PVR_XFB_QUERY_END_REF_ID_QUERY_COUNT_LD_DEST,
+
+   /** Ref ID for query result written store source 0 */
+   PVR_XFB_QUERY_END_REF_ID_RESULT_WRITTEN_ST_SRC0,
+
+   /** Ref ID for query availability store source 0 */
+   PVR_XFB_QUERY_END_REF_ID_AVAILABILITY_ST_SRC0,
+};
 
 #endif /* PVR_IFACE_H */

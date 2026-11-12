@@ -81,7 +81,7 @@ if with_tests and not with_platform_android
     _name,
     input : [gen_pack_header_py, gentest_xml],
     output : _name,
-    command : [prog_python, '@INPUT@'],
+    command : [prog_python, '@INPUT@', '--pack'],
     capture : true,
     depend_files: gen_pack_header_deps
   )

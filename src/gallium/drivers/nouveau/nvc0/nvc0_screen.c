@@ -204,6 +204,7 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->max_texel_buffer_elements = 128 * 1024 * 1024;
    caps->glsl_feature_level = 430;
    caps->glsl_feature_level_compatibility = 430;
+   caps->fs_sample_variables = true;
    caps->max_render_targets = 8;
    caps->max_dual_source_render_targets = 1;
    caps->viewport_subpixel_bits =
@@ -229,7 +230,6 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->max_shader_patch_varyings = 30;
    caps->max_window_rectangles = NVC0_MAX_WINDOW_RECTANGLES;
    caps->max_conservative_raster_subpixel_precision_bias = class_3d >= GM200_3D_CLASS ? 8 : 0;
@@ -332,6 +332,7 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->clear_scissored = true;
    caps->image_store_formatted = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
    caps->texture_transfer_modes =
       screen->base.vram_domain & NOUVEAU_BO_VRAM ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
    caps->fbfetch = class_3d >= NVE4_3D_CLASS ? 1 : 0; /* needs testing on fermi */

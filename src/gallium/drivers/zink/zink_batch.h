@@ -48,6 +48,9 @@ void
 zink_batch_reset_all(struct zink_context *ctx);
 
 void
+zink_batch_reset_completed(struct zink_context *ctx);
+
+void
 zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs);
 
 void
@@ -110,7 +113,7 @@ zink_batch_usage_matches(const struct zink_batch_usage *u, const struct zink_bat
 static ALWAYS_INLINE bool
 zink_batch_usage_exists(const struct zink_batch_usage *u)
 {
-   return u && (u->usage || u->unflushed);
+   return u && (p_atomic_read(&u->unflushed) || p_atomic_read(&u->usage));
 }
 
 static ALWAYS_INLINE unsigned

@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "panfrost/lib/pan_props.h"
-
 #include "bi_debug.h"
 #include "bi_builder.h"
 #include "va_compiler.h"
@@ -434,11 +432,11 @@ va_insert_flow_control_nops(bi_context *ctx)
             if (ctx->inputs->is_blend)
                break;
 
-            assert(!I->wait_resource || pan_arch(ctx->inputs->gpu_id) >= 10);
+            assert(!I->wait_resource || ctx->arch >= 10);
             bi_flow(ctx, bi_before_instr(I),
                     I->wait_resource ? VA_FLOW_WAIT_RESOURCE : VA_FLOW_WAIT);
             break;
-	 }
+         }
 
          case BI_OPCODE_ATEST:
             bi_flow(ctx, bi_before_instr(I), VA_FLOW_WAIT0126);

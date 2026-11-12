@@ -124,13 +124,13 @@ run_gs(brw_shader &s)
 
 extern "C" const unsigned *
 brw_compile_gs(const struct brw_compiler *compiler,
-               struct brw_compile_gs_params *params)
+               struct brw_compile_params *params)
 {
-   nir_shader *nir = params->base.nir;
+   nir_shader *nir = params->nir;
    const struct brw_gs_prog_key *key =
-      (const struct brw_gs_prog_key *)params->base.key;
+      (const struct brw_gs_prog_key *)params->key;
    struct brw_gs_prog_data *prog_data =
-      (struct brw_gs_prog_data *)params->base.prog_data;
+      (struct brw_gs_prog_data *)params->prog_data;
    const unsigned dispatch_width = brw_geometry_stage_dispatch_width(compiler->devinfo);
 
    struct intel_vue_map input_vue_map = {0};
@@ -146,12 +146,12 @@ brw_compile_gs(const struct brw_compiler *compiler,
       .dispatch_width = dispatch_width,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
 
-   brw_prog_data_init(&prog_data->base.base, &params->base);
+   brw_prog_data_init(&prog_data->base.base, params);
 
    /* The GLSL linker will have already matched up GS inputs and the outputs
     * of prior stages.  The driver does extend VS outputs in some cases, but
@@ -362,15 +362,11 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
    const brw_shader_params shader_params = {
       .compiler                = compiler,
-      .mem_ctx                 = params->base.mem_ctx,
+      .compile_params          = params,
       .nir                     = nir,
-      .key                     = &key->base,
-      .prog_data               = &prog_data->base.base,
       .dispatch_width          = dispatch_width,
-      .needs_register_pressure = params->base.stats != NULL,
-      .log_data                = params->base.log_data,
+      .needs_register_pressure = params->stats != NULL,
       .debug_enabled           = debug_enabled,
-      .archiver                = params->base.archiver,
    };
    brw_shader v(&shader_params);
    v.gs.control_data_bits_per_vertex = control_data_bits_per_vertex;
@@ -385,14 +381,14 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
       const brw_to_binary_params to_binary_params = {
          .compiler = compiler,
-         .params = &params->base,
+         .params = params,
          .prog_data = &prog_data->base.base,
          .shaders = { &v },
       };
       return brw_to_binary(&to_binary_params);
    }
 
-   params->base.error_str = ralloc_strdup(params->base.mem_ctx, v.fail_msg);
+   params->error_str = ralloc_strdup(params->mem_ctx, v.fail_msg);
 
    return NULL;
 }

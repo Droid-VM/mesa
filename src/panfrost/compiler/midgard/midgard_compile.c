@@ -363,7 +363,7 @@ lower_vec816_alu(const nir_instr *instr, const void *cb_data)
 }
 
 void
-midgard_preprocess_nir(nir_shader *nir, UNUSED uint64_t gpu_id)
+midgard_preprocess_nir(nir_shader *nir)
 {
    /* Ensure that halt are translated to returns and get ride of them */
    NIR_PASS(_, nir, nir_lower_halt_to_return);
@@ -388,9 +388,9 @@ midgard_preprocess_nir(nir_shader *nir, UNUSED uint64_t gpu_id)
 }
 
 void
-midgard_postprocess_nir(nir_shader *nir, UNUSED uint64_t gpu_id)
+midgard_postprocess_nir(nir_shader *nir, unsigned arch)
 {
-   midgard_lower_texture_nir(nir, gpu_id);
+   midgard_lower_texture_nir(nir, arch);
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, nir_lower_viewport_transform);
@@ -432,14 +432,14 @@ midgard_postprocess_nir(nir_shader *nir, UNUSED uint64_t gpu_id)
 }
 
 void
-midgard_lower_texture_nir(nir_shader *nir, uint64_t gpu_id)
+midgard_lower_texture_nir(nir_shader *nir, unsigned arch)
 {
    NIR_PASS(_, nir, nir_lower_image_atomics_to_global, NULL, NULL);
 
    /* TEX_GRAD fails to apply sampler descriptor settings on some
     * implementations, requiring a lowering.
     */
-   if (midgard_get_quirks(gpu_id) & MIDGARD_BROKEN_LOD)
+   if (arch < 5)
       NIR_PASS(_, nir, midgard_nir_lod_errata);
 
    /* lower MSAA image operations to 3D load before coordinate lowering */
@@ -1752,7 +1752,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
          ld.src_types[1] = nir_type_int32;
       }
 
-      if (ctx->quirks & MIDGARD_OLD_BLEND) {
+      if (ctx->inputs->arch < 5) {
          ld.op = midgard_op_ld_special_32u;
          ld.load_store.signed_offset = PACK_LDST_SELECTOR_OFS(16);
          ld.load_store.index_reg = REGISTER_LDST_ZERO;
@@ -1780,7 +1780,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
       for (unsigned c = 4; c < 16; ++c)
          ld.swizzle[0][c] = 0;
 
-      if (ctx->quirks & MIDGARD_OLD_BLEND) {
+      if (ctx->inputs->arch < 5) {
          if (bits == 16)
             ld.op = midgard_op_ld_special_16f;
          else
@@ -2972,11 +2972,13 @@ midgard_compile_shader_nir(nir_shader *nir,
    ctx->stage = nir->info.stage;
    ctx->blend_input = ~0;
    ctx->blend_src1 = ~0;
-   ctx->quirks = midgard_get_quirks(inputs->gpu_id);
+   ctx->quirks = midgard_get_quirks(inputs->model->gpu_prod_id);
 
    /* Initialize at a global (not block) level hash tables */
 
    ctx->ssa_constants = _mesa_hash_table_u64_create(ctx);
+
+   unsigned arch = inputs->arch;
 
    /* Collect varyings after lowering I/O */
    if (nir->info.stage == MESA_SHADER_VERTEX) {
@@ -2984,7 +2986,7 @@ midgard_compile_shader_nir(nir_shader *nir,
       memcpy(&info->varyings.formats, inputs->varying_layout,
              sizeof(*inputs->varying_layout));
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      pan_varying_collect_formats(&info->varyings.formats, nir, inputs->gpu_id);
+      pan_varying_collect_formats(&info->varyings.formats, nir, arch);
       info->varyings.noperspective =
          pan_nir_collect_noperspective_varyings_fs(nir);
    }
@@ -2992,7 +2994,7 @@ midgard_compile_shader_nir(nir_shader *nir,
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, pan_nir_resize_varying_io, &info->varyings.formats,
                &info->varyings.formats);
-      NIR_PASS(_, nir, pan_nir_lower_vs_outputs, inputs->gpu_id,
+      NIR_PASS(_, nir, pan_nir_lower_vs_outputs, arch,
                inputs->varying_layout, false /* has_idvs */,
                NULL /* needs_extended_fifo */);
    }
@@ -3132,7 +3134,7 @@ midgard_compile_shader_nir(nir_shader *nir,
    info->ubo_mask = ctx->ubo_mask & ((1 << ctx->nir->info.num_ubos) - 1);
 
    if (midgard_debug & MIDGARD_DBG_SHADERS && !skip_internal) {
-      disassemble_midgard(stdout, binary->data, binary->size, inputs->gpu_id,
+      disassemble_midgard(stdout, binary->data, binary->size, ctx->quirks,
                           midgard_debug & MIDGARD_DBG_VERBOSE);
       fflush(stdout);
    }
@@ -3141,7 +3143,7 @@ midgard_compile_shader_nir(nir_shader *nir,
     * workaround by adding some padding to the end of the shader. (The
     * kernel makes sure shader BOs can't cross 16MB boundaries.) */
    if (binary->size)
-      memset(util_dynarray_grow(binary, uint8_t, 16), 0, 16);
+      util_dynarray_grow_zero(binary, uint8_t, 16);
 
    struct midgard_stats stats = {
       .quadwords = ctx->quadword_count,

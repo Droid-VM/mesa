@@ -61,7 +61,7 @@ struct sched_block {
 
 struct sched_ctx {
    /* Compilation phase. This induces a scheduler mode. */
-   enum { EARLY, POSTSPILL, POSTRA } phase;
+   enum { EARLY, POSTSPILL, POSTRA, POSTACC } phase;
 
    /* Function we are currently scheduling */
    jay_function *func;
@@ -95,6 +95,8 @@ struct sched_ctx {
    unsigned aggression;
 
    /* Pooled allocations used for DAG construction */
+   struct util_dynarray helper_reads;
+
    union {
       struct {
          uint32_t *def;
@@ -121,11 +123,44 @@ liveness_update(struct u_sparse_bitset *live, jay_inst *I)
 }
 
 static void
-add_edge(struct sched_ctx *ctx, uint32_t edge, uint32_t first_node)
+add_edge(struct sched_ctx *ctx, uint32_t edge, uint32_t first_node, bool strong)
 {
    if (edge && edge >= first_node) {
-      jay_dag_add_edge(&ctx->dag, edge);
+      jay_dag_add_edge(&ctx->dag, edge, strong);
    }
+}
+
+static void
+add_reader(struct sched_ctx *ctx,
+           uint32_t writer,
+           struct util_dynarray *readers,
+           uint32_t first_node)
+{
+   /* Read-after-write */
+   add_edge(ctx, writer, first_node, true);
+
+   /* Track for write-after-read but do not add a dependency, we
+    * want to reorder readers freely.
+    */
+   util_dynarray_append(readers, ctx->dag.node);
+}
+
+static void
+add_writer(struct sched_ctx *ctx,
+           uint32_t *writer,
+           struct util_dynarray *readers,
+           uint32_t first_node)
+{
+   /* Write-after-write */
+   add_edge(ctx, *writer, first_node, true);
+   *writer = ctx->dag.node;
+
+   /* Write-after-read, this is a weak edge */
+   util_dynarray_foreach(readers, uint32_t, it) {
+      add_edge(ctx, *it, first_node, false);
+   }
+
+   util_dynarray_clear(readers);
 }
 
 static void
@@ -135,6 +170,7 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
 
    /* TODO: Reorder memory instructions */
    uint32_t sidefx = 0, address = 0;
+   uint32_t helper = 0;
 
    jay_foreach_inst_in_block(block, I) {
       if (jay_op_starts_block(I->op)) {
@@ -146,7 +182,7 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
       if (ctx->phase < POSTRA) {
          /* Uses depend on definitions. SSA form forbids WaR and WaW hazards */
          jay_foreach_src_index(I, s, c, index) {
-            add_edge(ctx, ctx->prera.def[index], first_node);
+            add_edge(ctx, ctx->prera.def[index], first_node, true);
          }
 
          jay_foreach_dst_index(I, d, index) {
@@ -155,55 +191,41 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
       } else {
          jay_def dsts[3] = { I->dst, I->cond_flag };
 
-         /* MUL_32 is a macro implicitly clobbering acc0/acc1. TODO: Duplicate.
-          */
+         /* MUL_32 is a macro implicitly clobbering integer acc0 */
          if (I->op == JAY_OPCODE_MUL_32) {
-            unsigned n = ctx->func->shader->dispatch_width < 32 ? 2 : 1;
-            dsts[2] = jay_bare_regs(ACCUM, 0, n);
+            dsts[2] = jay_bare_reg(ACCUM, 0);
          }
 
          for (unsigned d = 0; d < ARRAY_SIZE(dsts); ++d) {
-            struct jay_range key = jay_def_to_range(ctx->func, I, dsts[d]);
-            for (unsigned i = 0; i < key.width; ++i) {
-               /* Write-after-write */
-               add_edge(ctx, ctx->postra.writer[key.base + i], first_node);
-               ctx->postra.writer[key.base + i] = ctx->dag.node;
+            struct jay_footprint fp =
+               jay_def_to_footprint(ctx->func, I, dsts[d], I->type);
 
-               /* Write-after-read */
-               util_dynarray_foreach(&ctx->postra.readers[key.base + i],
-                                     uint32_t, it) {
-                  add_edge(ctx, *it, first_node);
-               }
-
-               util_dynarray_clear(&ctx->postra.readers[key.base + i]);
+            jay_foreach_in_footprint(fp, key) {
+               add_writer(ctx, &ctx->postra.writer[key],
+                          &ctx->postra.readers[key], first_node);
             }
          }
 
          jay_foreach_src(I, s) {
-            struct jay_range key = jay_def_to_range(ctx->func, I, I->src[s]);
-            for (unsigned i = 0; i < key.width; ++i) {
-               /* Read-after-write */
-               add_edge(ctx, ctx->postra.writer[key.base + i], first_node);
+            struct jay_footprint fp =
+               jay_def_to_footprint(ctx->func, I, I->src[s],
+                                    jay_src_type(I, s));
 
-               /* Track for write-after-read but do not add a dependency, we
-                * want to reorder readers freely.
-                */
-               util_dynarray_append(&ctx->postra.readers[key.base + i],
-                                    ctx->dag.node);
+            jay_foreach_in_footprint(fp, key) {
+               add_reader(ctx, ctx->postra.writer[key],
+                          &ctx->postra.readers[key], first_node);
             }
          }
       }
 
       /* Serialize address register access until we have an address RA */
-      bool use_a0 = I->dst.file == J_ADDRESS ||
-                    I->op == JAY_OPCODE_SHUFFLE ||
-                    I->op == JAY_OPCODE_VECTOR_EXTRACT;
+      bool use_a0 = I->dst.file == J_ADDRESS || I->op == JAY_OPCODE_SHUFFLE;
       jay_foreach_src(I, s) {
          use_a0 |= I->src[s].file == J_ADDRESS;
       }
 
       if (use_a0) {
-         jay_dag_add_edge(&ctx->dag, address);
+         jay_dag_add_edge(&ctx->dag, address, false);
          address = ctx->dag.node;
       }
 
@@ -213,17 +235,23 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
       if ((I->op == JAY_OPCODE_SEND && !jay_send_pure(I)) ||
           I->op == JAY_OPCODE_SCHEDULE_BARRIER ||
           I->op == JAY_OPCODE_CHECK_TDR ||
-          I->op == JAY_OPCODE_DEMOTE ||
-          I->op == JAY_OPCODE_IS_HELPER ||
-          (I->op == JAY_OPCODE_SEND &&
-           ctx->func->shader->helpers_tracked &&
-           jay_send_skip_helpers(I)) ||
           (I->op == JAY_OPCODE_MOV &&
            I->src[0].file == J_ARF &&
            jay_base_index(I->src[0]) == GEN_ARF_TIMESTAMP)) {
 
-         jay_dag_add_edge(&ctx->dag, sidefx);
+         jay_dag_add_edge(&ctx->dag, sidefx, true);
          sidefx = ctx->dag.node;
+      }
+
+      /* The "is helper?" flag is a hidden register, track as if post-RA */
+      if (I->op == JAY_OPCODE_IS_HELPER ||
+          (I->op == JAY_OPCODE_SEND &&
+           ctx->func->shader->helpers_tracked &&
+           jay_send_skip_helpers(I))) {
+
+         add_reader(ctx, helper, &ctx->helper_reads, first_node);
+      } else if (I->op == JAY_OPCODE_DEMOTE) {
+         add_writer(ctx, &helper, &ctx->helper_reads, first_node);
       }
 
       ctx->insts[ctx->dag.node] = I;
@@ -293,12 +321,15 @@ static inline unsigned
 ready_cycle(struct sched_ctx *s, bool backward, uint32_t node)
 {
    unsigned cycle = s->cycle;
-   uint32_t lat =
-      backward ? jay_latency(s->func->shader, s->insts[node], true) : 0;
+   uint32_t lat = backward ? jay_latency(s->func->shader, s->insts[node],
+                                         s->phase < POSTACC) :
+                             0;
    struct jay_dag *dag = backward ? &s->dag_t : &s->dag;
 
    jay_dag_foreach_edge(dag, node, it) {
-      cycle = MAX2(cycle, s->cycle_ready[*it] + lat);
+      if (it->strong) {
+         cycle = MAX2(cycle, s->cycle_ready[it->node] + lat);
+      }
    }
 
    return cycle;
@@ -354,12 +385,22 @@ choose_inst(struct sched_ctx *s, enum sched_mode mode)
       }
 
       if (latency_weight) {
-         score += latency_weight * ready_cycle(s, mode & BACKWARD, *head);
+         score += latency_weight *
+                  (ready_cycle(s, mode & BACKWARD, *head) - s->cycle);
       }
 
-      if (score <= min_score) {
+      if (score < min_score) {
          best = *head;
          min_score = score;
+      } else if (score == min_score) {
+         if (s->phase != EARLY) {
+            if ((mode & BACKWARD && *head > best) ||
+                (!(mode & BACKWARD) && *head < best)) {
+               best = *head;
+            }
+         } else {
+            best = *head;
+         }
       }
    }
 
@@ -491,7 +532,8 @@ schedule_block(jay_block *block,
          s->cycle_ready[node] =
             s->cycle + ((mode & BACKWARD) ?
                            0 :
-                           jay_latency(s->func->shader, s->insts[node], true));
+                           jay_latency(s->func->shader, s->insts[node],
+                                       s->phase < POSTACC));
          s->cycle++;
       }
    }
@@ -549,7 +591,8 @@ pass(jay_function *f)
    }
 
    struct sched_ctx sctx = { .func = f };
-   sctx.phase = f->shader->post_ra                ? POSTRA :
+   sctx.phase = f->shader->post_acc               ? POSTACC :
+                f->shader->post_ra                ? POSTRA :
                 f->shader->partition.units_x16[0] ? POSTSPILL :
                                                     EARLY;
 
@@ -562,7 +605,7 @@ pass(jay_function *f)
    }
 
    if (sctx.phase >= POSTRA) {
-      uint32_t keys = jay_range_base(f->shader, ~0);
+      uint32_t keys = jay_footprint_base(f->shader, ~0);
       sctx.postra.writer = linear_zalloc_array(linctx, uint32_t, keys);
       sctx.postra.readers =
          linear_zalloc_array(linctx, struct util_dynarray, keys);
@@ -577,6 +620,8 @@ pass(jay_function *f)
       sctx.seen = BITSET_LINEAR_ZALLOC(linctx, f->ssa_alloc);
       sctx.prera.def = linear_zalloc_array(linctx, uint32_t, f->ssa_alloc);
    }
+
+   util_dynarray_init(&sctx.helper_reads, memctx);
 
    sctx.insts = linear_alloc_array(linctx, jay_inst *, nr_inst);
    sctx.cycle_ready = linear_zalloc_array(linctx, uint32_t, nr_inst);
@@ -593,7 +638,7 @@ pass(jay_function *f)
 
    if (sctx.phase == POSTSPILL) {
       jay_foreach_ssa_file(file) {
-         sctx.demand_limit[file] = jay_num_regs(f->shader, file);
+         sctx.demand_limit[file] = f->shader->num_regs[file];
       }
 
       for (unsigned i = 0; i < f->shader->partition.nr_blocks[UGPR]; ++i) {
@@ -621,9 +666,15 @@ pass(jay_function *f)
             block->demand_max[UGPR] + block->demand_max[FLAG];
          unsigned demand_gpr = block->demand_max[GPR];
 
-         if (((demand_gpr * jay_ugpr_per_gpr(f->shader)) + demand_ugpr) >=
-             (120 * jay_ugpr_per_grf(f->shader))) {
-            f->prioritize_pressure = true;
+         unsigned sched_at = f->shader->devinfo->ver >= 30 ? 64 : 120;
+         unsigned prioritize_at = f->shader->devinfo->ver >= 30 ? 90 : 120;
+
+         unsigned demand =
+            (demand_gpr * jay_ugpr_per_gpr(f->shader)) + demand_ugpr;
+
+         if (demand >= sched_at * jay_ugpr_per_grf(f->shader)) {
+            f->prioritize_pressure =
+               demand >= prioritize_at * jay_ugpr_per_grf(f->shader);
             schedule_block(block, &sctx, memctx, BACKWARD | PRESSURE);
          }
       } else if (sctx.phase == POSTSPILL) {

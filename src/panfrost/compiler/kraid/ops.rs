@@ -120,6 +120,57 @@ impl DisplayOp for OpACmpXchg {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpAdr {
+    #[dst_type(I32)]
+    pub dst: Dst,
+
+    pub label: Label,
+}
+
+impl DisplayOp for OpAdr {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ADR")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, " {}", self.label)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpATest {
+    #[dst_type(I32)]
+    pub dst: Dst,
+
+    #[src_type(I32)]
+    pub coverage: Src,
+
+    #[src_type(F32)]
+    pub alpha: Src,
+
+    #[src_type(I32)]
+    pub datum: Src,
+}
+
+impl DisplayOp for OpATest {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ATEST")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            " {} {} {}",
+            self.fmt_src(&self.coverage),
+            self.fmt_src(&self.alpha),
+            self.fmt_src(&self.datum),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AtomOp {
     // TODO: Model 64-bit atomics with 32-bit data
@@ -302,6 +353,124 @@ impl Foldable for OpBitRev {
     }
 }
 
+/// Performs blending
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(color_type in [V4F16, V4F32, V4S16, V4S32, V4U16, V4U32, V4A32])]
+pub struct OpBlend {
+    pub color_type: DataType,
+
+    #[src_type(I64)]
+    pub descr: Src,
+
+    #[src_type(I32)]
+    pub coverage: Src,
+
+    /// Color, pinned to r0
+    pub color: Src,
+
+    /// N. of bytes to jump if no blend call is needed
+    /// Must be set by lower_blend_call.rs or be set to 0 if no blend calls are
+    /// expected.
+    pub offset: u32,
+
+    /// What render target is this blending?
+    pub render_target_idx: u8,
+}
+
+impl DisplayOp for OpBlend {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BLEND.{}", self.color_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            " {} {} {}",
+            self.fmt_src(&self.descr),
+            self.fmt_src(&self.coverage),
+            self.fmt_src(&self.color)
+        )?;
+
+        if self.offset != 0 {
+            write!(f, " {}", self.offset)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Represents a call to a Blend shader (BLEND + jump call)
+/// treated as a separate instruction for easier RA handling
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(color_type in [V4F16, V4F32, V4S16, V4S32, V4U16, V4U32, V4A32])]
+pub struct OpBlendCall {
+    pub color_type: DataType,
+
+    #[src_type(I64)]
+    pub descr: Src,
+
+    #[src_type(I32)]
+    pub coverage: Src,
+
+    /// This might be used by blend shaders so the preloaded register must be
+    /// kept clean
+    #[src_type(I32)]
+    pub sample_id: Src,
+
+    /// Color, pinned to r0
+    #[src_type(SR)]
+    pub color: Src,
+
+    /// Optional secondary color, pinned to r4
+    /// only present when has_second_color is true
+    #[src_type(SR)]
+    pub second_color: Src,
+
+    /// What render target is this blending?
+    pub render_target_idx: u8,
+    /// Is second_color present? (otherwise it's SrcRef::Zero)
+    pub has_second_color: bool,
+}
+
+impl DisplayOp for OpBlendCall {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BLEND_CALL.{}", self.color_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            " {} {} {}",
+            self.fmt_src(&self.descr),
+            self.fmt_src(&self.coverage),
+            self.fmt_src(&self.color)
+        )?;
+
+        if self.has_second_color {
+            write!(f, " {}", self.fmt_src(&self.second_color))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl VirtualOpcode for OpBlendCall {
+    fn is_message(&self) -> bool {
+        true
+    }
+
+    fn src_is_staging_reg(&self, src: &Src) -> bool {
+        std::ptr::eq(src, &self.color) || std::ptr::eq(src, &self.second_color)
+    }
+
+    fn src_is_64bit(&self, src: &Src) -> bool {
+        std::ptr::eq(src, &self.descr)
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub enum BranchCombineOp {
     /// Branch if != 0
@@ -378,6 +547,7 @@ impl fmt::Display for SubgroupSize {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum ClperLaneOp {
     #[default]
@@ -406,6 +576,7 @@ impl fmt::Display for ClperLaneOp {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum ClperInactiveResult {
     Zero,
@@ -427,6 +598,7 @@ pub enum ClperInactiveResult {
 }
 
 impl ClperInactiveResult {
+    #[allow(dead_code)]
     fn to_bits(self) -> u32 {
         let v2i16 = |u: u16| {
             let u = u32::from(u);
@@ -558,6 +730,70 @@ impl PerCompFoldable for OpClz {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(src_type in [
+    S8, U8, V2S8, V2U8, V4S8, V4U8,
+    F16, S16, U16, V2F16, V2S16, V2U16,
+    F32, S32, U32
+])]
+pub struct OpCmp {
+    pub dst: Dst,
+
+    pub src_type: DataType,
+    pub res_type: CmpResultType,
+    pub cmp_op: CmpOp,
+
+    pub srcs: [Src; 2],
+
+    #[src_type(VNIN)]
+    pub accum: Src,
+    pub accum_op: CmpAccumOp,
+}
+
+impl DisplayOp for OpCmp {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CMP{}.{}", self.accum_op, self.src_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {}",
+            self.res_type,
+            self.cmp_op,
+            self.fmt_src(&self.srcs[0]),
+            self.fmt_src(&self.srcs[1]),
+        )?;
+
+        if self.accum_op != CmpAccumOp::None {
+            write!(f, " {}", self.fmt_src(&self.accum))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl PerCompFoldable for OpCmp {
+    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        let ca = f.get_src(&self.srcs[0]);
+        let cb = f.get_src(&self.srcs[1]);
+        let accum = f.get_src(&self.accum);
+
+        let c = self.cmp_op.fold_data(self.src_type.scalar_type(), ca, cb);
+        let c = self.accum_op.fold(c, accum != 0);
+        let c = self.res_type.fold(c, self.src_type.bits());
+
+        f.set_dst(&self.dst, c as u64);
+    }
+}
+
+/// Copy is a virtual Op to copy directly bytes
+///
+/// It does not support any swizzle except for the "basic" ones, those are
+/// NONE for 32-64 bits and byte-half replications for smaller ones.  If you
+/// need to copy 2 16-bit lanes use a I32 copy with NONE swizzle, if you need
+/// swizzles use a OpSwz instead.
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [I8, V2I8, V4I8, I16, V2I16, I32, I64])]
@@ -799,6 +1035,31 @@ impl DisplayOp for OpCubeSel {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+pub struct OpDiscard {
+    pub cmp_op: CmpOp,
+
+    #[src_type(F32)]
+    pub srcs: [Src; 2],
+}
+
+impl DisplayOp for OpDiscard {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DISCARD.f32")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.cmp_op,
+            self.fmt_src(&self.srcs[0]),
+            self.fmt_src(&self.srcs[1]),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
 pub struct OpF16ToF32 {
     #[dst_type(F32)]
     pub dst: Dst,
@@ -931,48 +1192,30 @@ impl fmt::Display for FClamp {
     }
 }
 
+/// Only available on arch <= 10
 #[repr(C)]
 #[derive(Clone, Opcode)]
-pub struct OpF32ToF16 {
-    #[dst_type(F16)]
+#[variants(dst_type in [S32, U32])]
+pub struct OpF16ToI32 {
     pub dst: Dst,
-    #[src_type(F32)]
+    pub dst_type: DataType,
+    #[src_type(F16)]
     pub src: Src,
     pub round: FRound,
-    pub clamp: FClamp,
 }
 
-impl DisplayOp for OpF32ToF16 {
+impl DisplayOp for OpF16ToI32 {
     fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "F32_TO_F16")
+        let n = match self.dst_type {
+            DataType::S32 => "S32",
+            DataType::U32 => "U32",
+            _ => panic!("Invalid variant"),
+        };
+        write!(f, "F16_TO_{n}")
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{} {}",
-            self.round,
-            self.clamp,
-            self.fmt_src(&self.src)
-        )
-    }
-}
-
-impl Foldable for OpF32ToF16 {
-    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
-        let c = f.get_src(&self.src);
-        let c = f32::from_bits(c as u32);
-        let c = self.clamp.fold(c);
-
-        let c = match self.round {
-            FRound::NearestEven => F16::from_f32_rtne(c),
-            FRound::Up => F16::from_f32_ru(c),
-            FRound::Down => F16::from_f32_rd(c),
-            FRound::TowardsZero => F16::from_f32_rtz(c),
-            FRound::NearestValue => panic!("Invalid for float conv"),
-        };
-
-        f.set_dst(&self.dst, c.to_bits() as u64);
+        write!(f, "{} {}", self.round, self.fmt_src(&self.src))
     }
 }
 
@@ -998,7 +1241,7 @@ impl DisplayOp for OpF32ToI32 {
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, " {}", self.fmt_src(&self.src))
+        write!(f, "{} {}", self.round, self.fmt_src(&self.src))
     }
 }
 
@@ -1109,6 +1352,7 @@ impl Foldable for OpFAddLScale {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum CmpAccumOp {
     None,
@@ -1136,6 +1380,7 @@ impl CmpAccumOp {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum CmpResultType {
     I1,
@@ -1163,16 +1408,30 @@ impl CmpResultType {
         match (self, dst_bits) {
             (CmpResultType::I1, _) => 1,
             (CmpResultType::F1, 32) => (1.0_f32).to_bits(),
-            (CmpResultType::F1, 16) => {
-                F16::from_f32_rtne(1.0_f32).to_bits() as u32
-            }
+            (CmpResultType::F1, 16) => F16::ONE.to_bits() as u32,
             (CmpResultType::F1, _) => panic!("Invalid float length"),
             (CmpResultType::M1, _) => 0xFFFF_FFFF,
             (CmpResultType::C, _) => panic!("Not a boolean result type"),
         }
     }
+
+    pub fn from_true_bits(data: u32, bits: u8) -> Option<Self> {
+        const F16: u32 = F16::ONE.to_bits() as u32;
+        const F32: u32 = (1.0_f32).to_bits();
+
+        match (data, bits) {
+            (1, _) => Some(CmpResultType::I1),
+            (0xFF, 8) => Some(CmpResultType::M1),
+            (0xFFFF, 16) => Some(CmpResultType::M1),
+            (0xFFFFFFFF, 32) => Some(CmpResultType::M1),
+            (F16, 16) => Some(CmpResultType::F1),
+            (F32, 32) => Some(CmpResultType::F1),
+            _ => None,
+        }
+    }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum CmpOp {
     Eq,
@@ -1263,59 +1522,6 @@ impl CmpOp {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
-#[variants(src_type in [F16, V2F16, F32])]
-pub struct OpFCmp {
-    pub dst: Dst,
-
-    pub src_type: DataType,
-    pub res_type: CmpResultType,
-    pub cmp_op: CmpOp,
-
-    pub srcs: [Src; 2],
-
-    #[src_type(VNIN)]
-    pub accum: Src,
-    pub accum_op: CmpAccumOp,
-}
-
-impl DisplayOp for OpFCmp {
-    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FCMP{}.{}", self.accum_op, self.src_type)
-    }
-
-    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{} {} {}",
-            self.res_type,
-            self.cmp_op,
-            self.fmt_src(&self.srcs[0]),
-            self.fmt_src(&self.srcs[1]),
-        )?;
-
-        if self.accum_op != CmpAccumOp::None {
-            write!(f, " {}", self.fmt_src(&self.accum))?;
-        }
-        Ok(())
-    }
-}
-
-impl PerCompFoldable for OpFCmp {
-    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
-        let ca = f.get_src(&self.srcs[0]);
-        let cb = f.get_src(&self.srcs[1]);
-        let accum = f.get_src(&self.accum);
-
-        let c = self.cmp_op.fold_data(self.src_type.scalar_type(), ca, cb);
-        let c = self.accum_op.fold(c, accum != 0);
-        let c = self.res_type.fold(c, self.src_type.bits());
-
-        f.set_dst(&self.dst, c as u64);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Opcode)]
 pub struct OpFCosTable {
     #[dst_type(F32)]
     pub dst: Dst,
@@ -1339,6 +1545,40 @@ impl DisplayOp for OpFCosTable {
             bool_as_mod_str!(self.offset),
             self.fmt_src(&self.src),
         )
+    }
+}
+
+fn fold_cases_fsincos(bits: u32, table_lookup: impl FnOnce(u8) -> f32) -> f32 {
+    let x = f32::from_bits(bits);
+    let sign = bits >> 31;
+    let exponent = (bits >> 23) & 0xff;
+    let exp_bias = 127;
+
+    if x.is_nan() {
+        x
+    } else if x.is_infinite() {
+        f32::NAN
+    } else if (sign, exponent) != (0, exp_bias + 19) {
+        // Only lookup numbers with 2**19 as exp
+        -0.0
+    } else {
+        table_lookup((bits & 0x3F) as u8)
+    }
+}
+
+impl Foldable for OpFCosTable {
+    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        let bits = f.get_src(&self.src) as u32;
+        assert!(!self.offset); // TODO: reverse-engineer
+
+        // Use f64 precision to not think about rounding, handle edge-cases
+        let dst = fold_cases_fsincos(bits, |x| match x {
+            16 => 0.0,
+            48 => -0.0,
+            _ => ((x as f64) * std::f64::consts::PI / 32.0).cos() as f32,
+        });
+
+        f.set_dst(&self.dst, dst.to_bits().into());
     }
 }
 
@@ -1435,6 +1675,7 @@ impl DisplayOp for OpFLogD {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub enum FlushNanMode {
     #[default]
@@ -1706,39 +1947,6 @@ impl PerCompFoldable for OpFMin {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
-#[variants(dst_type in [F16, V2F16, F32])]
-pub struct OpFMul {
-    pub dst: Dst,
-    pub dst_type: DataType,
-    pub srcs: [Src; 2],
-}
-
-impl DisplayOp for OpFMul {
-    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FMUL.{}", self.dst_type)
-    }
-
-    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            " {} {}",
-            self.fmt_src(&self.srcs[0]),
-            self.fmt_src(&self.srcs[1]),
-        )
-    }
-}
-
-impl PerCompFoldable for OpFMul {
-    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
-        let ca = f.get_f32(&self.srcs[0]);
-        let cb = f.get_f32(&self.srcs[1]);
-
-        f.set_f32(&self.dst, ca * cb);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Opcode)]
 #[variants(dst_type in [F16, F32])]
 pub struct OpFRcp {
     pub dst: Dst,
@@ -1766,6 +1974,7 @@ impl PerCompFoldable for OpFRcp {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub enum FrexpMode {
     /// Normal operation F -> (M, E) s.t. F = M * 2^E with abs(M) in [0.5, 1.0)
@@ -1789,10 +1998,11 @@ impl fmt::Display for FrexpMode {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+#[variants(src_type in [F16, V2F16, F32])]
 pub struct OpFrexpE {
-    #[dst_type(I32)]
+    #[dst_type(VNIN)]
     pub dst: Dst,
-    #[src_type(F32)]
+    pub src_type: DataType,
     pub src: Src,
     pub mode: FrexpMode,
     pub neg_result: bool,
@@ -1800,7 +2010,7 @@ pub struct OpFrexpE {
 
 impl DisplayOp for OpFrexpE {
     fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FREXPE.f32")
+        write!(f, "FREXPE.{}", self.src_type)
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1816,17 +2026,18 @@ impl DisplayOp for OpFrexpE {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+#[variants(src_type in [F16, V2F16, F32])]
 pub struct OpFrexpM {
-    #[dst_type(I32)]
+    #[dst_type(VNIN)]
     pub dst: Dst,
-    #[src_type(F32)]
+    pub src_type: DataType,
     pub src: Src,
     pub mode: FrexpMode,
 }
 
 impl DisplayOp for OpFrexpM {
     fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FREXPM.f32")
+        write!(f, "FREXPM.{}", self.src_type)
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1834,19 +2045,20 @@ impl DisplayOp for OpFrexpM {
     }
 }
 
+/// F16 only available in arch <= 10
 #[repr(C)]
 #[derive(Clone, Opcode)]
+#[variants(src_type in [F16, V2F16, F32])]
 pub struct OpFRound {
-    #[dst_type(F32)]
     pub dst: Dst,
-    #[src_type(F32)]
+    pub src_type: DataType,
     pub src: Src,
     pub round: FRound,
 }
 
 impl DisplayOp for OpFRound {
     fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FROUND.f32")
+        write!(f, "FROUND.{}", self.src_type)
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1854,8 +2066,8 @@ impl DisplayOp for OpFRound {
     }
 }
 
-impl Foldable for OpFRound {
-    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+impl PerCompFoldable for OpFRound {
+    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
         let s = f.get_f32(&self.src);
         let c = self.round.fold(s);
 
@@ -1917,9 +2129,82 @@ impl DisplayOp for OpFSinTable {
     }
 }
 
+impl Foldable for OpFSinTable {
+    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        let bits = f.get_src(&self.src) as u32;
+        assert!(!self.offset); // TODO: reverse-engineer
+
+        // Use f64 precision to not think about rounding, handle edge-cases
+        let dst = fold_cases_fsincos(bits, |x| match x {
+            0 => -0.0,
+            32 => 0.0,
+            _ => ((x as f64) * std::f64::consts::PI / 32.0).sin() as f32,
+        });
+
+        f.set_dst(&self.dst, dst.to_bits().into());
+    }
+}
+
+/// Halfing add, aka (A + B) / 2 (only arch <= 10)
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [
+    S8, U8, V2S8, V2U8, V4S8, V4U8,
+    S16, U16, V2S16, V2U16,
+    S32, U32
+])]
+pub struct OpHAdd {
+    pub dst: Dst,
+    pub dst_type: DataType,
+    pub round_up: bool,
+    pub srcs: [Src; 2],
+}
+
+impl DisplayOp for OpHAdd {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HADD.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let round = if self.round_up {
+            ".round_up"
+        } else {
+            ".round_down"
+        };
+        write!(
+            f,
+            "{round} {} {}",
+            self.fmt_src(&self.srcs[0]),
+            self.fmt_src(&self.srcs[1]),
+        )
+    }
+}
+
+impl PerCompFoldable for OpHAdd {
+    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        let a = f.get_src(&self.srcs[0]);
+        let b = f.get_src(&self.srcs[1]);
+
+        let bits = self.dst_type.bits();
+        let is_signed = self.dst_type.num_type() == NumericType::SignedInteger;
+        let sext = |x: u64| (x << (64 - bits)) as i64 >> (64 - bits);
+
+        // get_src zero-extends. the sum cannot overflow i64
+        let (a, b) = if is_signed {
+            (sext(a), sext(b))
+        } else {
+            (a as i64, b as i64)
+        };
+
+        let sum = a + b + i64::from(self.round_up);
+        f.set_dst(&self.dst, (sum >> 1) as u64);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    S8, V2S8, V4S8,
     S16, V2S16, S32
 ])]
 pub struct OpIAbs {
@@ -1943,8 +2228,9 @@ impl PerCompFoldable for OpIAbs {
         let src = f.get_src(&self.src);
 
         let res = match self.dst_type.bits() {
-            32 => ((src as u32) as i32).abs() as u64,
-            16 => ((src as u16) as i16).abs() as u64,
+            32 => ((src as u32) as i32).unsigned_abs() as u64,
+            16 => ((src as u16) as i16).unsigned_abs() as u64,
+            8 => ((src as u8) as i8).unsigned_abs() as u64,
             _ => panic!("Unsupported width"),
         };
 
@@ -1952,9 +2238,11 @@ impl PerCompFoldable for OpIAbs {
     }
 }
 
+/// 8-bit versions are only available for arch <= v10
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [
+    I8, S8, U8, V2I8, V2S8, V2U8, V4I8, V4S8, V4U8,
     I16, S16, U16, V2I16, V2S16, V2U16,
     I32, S32, U32, I64, S64, U64
 ])]
@@ -1997,6 +2285,7 @@ impl PerCompFoldable for OpIAdd {
         let c = match (self.saturate, is_signed, bits) {
             (false, _, _) => a.wrapping_add(b),
             (true, false, _) => a.saturating_add(b).min((1 << bits) - 1),
+            (true, true, 8) => (a as i8).saturating_add(b as i8) as u64,
             (true, true, 16) => (a as i16).saturating_add(b as i16) as u64,
             (true, true, 32) => (a as i32).saturating_add(b as i32) as u64,
             (true, true, 64) => (a as i64).saturating_add(b as i64) as u64,
@@ -2004,57 +2293,6 @@ impl PerCompFoldable for OpIAdd {
         };
 
         f.set_dst(&self.dst, c);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Opcode)]
-#[variants(src_type in [
-    S8, U8, V2S8, V2U8, V4S8, V4U8,
-    S16, U16, V2S16, V2U16, S32, U32
-])]
-pub struct OpICmp {
-    pub dst: Dst,
-
-    pub src_type: DataType,
-    pub res_type: CmpResultType,
-    pub cmp_op: CmpOp,
-
-    pub srcs: [Src; 2],
-
-    #[src_type(VNIN)]
-    pub accum: Src,
-    pub accum_op: CmpAccumOp,
-}
-
-impl DisplayOp for OpICmp {
-    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ICMP{}.{}", self.accum_op, self.src_type)
-    }
-
-    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{} {} {}",
-            self.res_type,
-            self.cmp_op,
-            self.fmt_src(&self.srcs[0]),
-            self.fmt_src(&self.srcs[1]),
-        )
-    }
-}
-
-impl PerCompFoldable for OpICmp {
-    fn fold_comp(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
-        let ca = f.get_src(&self.srcs[0]);
-        let cb = f.get_src(&self.srcs[1]);
-        let accum = f.get_src(&self.accum);
-
-        let c = self.cmp_op.fold_data(self.src_type.scalar_type(), ca, cb);
-        let c = self.accum_op.fold(c, accum != 0);
-        let c = self.res_type.fold(c, self.src_type.bits());
-
-        f.set_dst(&self.dst, c as u64);
     }
 }
 
@@ -2246,6 +2484,7 @@ impl PerCompFoldable for OpIMul {
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [
+    I8, S8, U8, V2I8, V2S8, V2U8, V4I8, V4S8, V4U8,
     I16, S16, U16, V2I16, V2S16, V2U16,
     I32, S32, U32, I64, S64, U64
 ])]
@@ -2288,6 +2527,7 @@ impl PerCompFoldable for OpISub {
         let c = match (self.saturate, is_signed, bits) {
             (false, _, _) => a.wrapping_sub(b),
             (true, false, _) => a.saturating_sub(b).min((1 << bits) - 1),
+            (true, true, 8) => (a as i8).saturating_sub(b as i8) as u64,
             (true, true, 16) => (a as i16).saturating_sub(b as i16) as u64,
             (true, true, 32) => (a as i32).saturating_sub(b as i32) as u64,
             (true, true, 64) => (a as i64).saturating_sub(b as i64) as u64,
@@ -2298,9 +2538,39 @@ impl PerCompFoldable for OpISub {
     }
 }
 
+/// Only available on arch <= v10
 #[repr(C)]
 #[derive(Clone, Opcode)]
-#[variants(src_type in [S32, U32])]
+#[variants(src_type in [
+    S8, U8, V2S8, V2U8,
+    S16, U16, V2S16, V2U16
+])]
+pub struct OpIToF16 {
+    #[dst_type(VNF16)]
+    pub dst: Dst,
+    pub src_type: DataType,
+    pub src: Src,
+    pub round: FRound,
+}
+
+impl DisplayOp for OpIToF16 {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}_TO_{}",
+            self.src_type.to_string().to_uppercase(),
+            self.dst_type(&self.dst).to_string().to_uppercase()
+        )
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.round, self.fmt_src(&self.src))
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(src_type in [S8, U8, S16, U16, S32, U32])]
 pub struct OpIToF32 {
     #[dst_type(F32)]
     pub dst: Dst,
@@ -2312,8 +2582,12 @@ pub struct OpIToF32 {
 impl DisplayOp for OpIToF32 {
     fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let n = match self.src_type {
-            DataType::U32 => "U32",
+            DataType::S8 => "S8",
+            DataType::U8 => "U8",
+            DataType::S16 => "S16",
+            DataType::U16 => "U16",
             DataType::S32 => "S32",
+            DataType::U32 => "U32",
             _ => unreachable!("Invalid variant"),
         };
         write!(f, "{n}_TO_F32")
@@ -2324,9 +2598,44 @@ impl DisplayOp for OpIToF32 {
     }
 }
 
+/// Jump to address in register
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpJump {
+    pub not: bool,
+    #[src_type(I32)]
+    pub cond: Src,
+    #[src_type(S32)]
+    pub address: Src,
+
+    pub combine_op: BranchCombineOp,
+}
+
+impl DisplayOp for OpJump {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "JUMP")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {}",
+            bool_as_mod_str!(self.not),
+            self.combine_op,
+            self.fmt_src(&self.cond),
+            self.fmt_src(&self.address),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum MemAccess {
     None,
+    /// Hint that the memory being accessed is constant for the duration of
+    /// this shader invocation.  Constant memory will get cached normally but
+    /// constant loads may be reordered with respect to other memory loads and
+    /// stores.
+    Const,
     IStream,
     EStream,
     Force,
@@ -2336,6 +2645,7 @@ impl fmt::Display for MemAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MemAccess::None => Ok(()),
+            MemAccess::Const => write!(f, ".const"),
             MemAccess::IStream => write!(f, ".istream"),
             MemAccess::EStream => write!(f, ".estream"),
             MemAccess::Force => write!(f, ".force"),
@@ -2374,7 +2684,7 @@ impl DisplayOp for OpLdAttr {
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} {} {}",
+            " {} {} {}",
             self.fmt_src(&self.vertex_index),
             self.fmt_src(&self.instance_index),
             self.fmt_handle_src(&self.handle),
@@ -2554,6 +2864,299 @@ impl DisplayOp for OpLdTex {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    F16, V2F16, V3F16, V4F16,
+    S16, V2S16, V3S16, V4S16,
+    U16, V2U16, V3U16, V4U16,
+    F32, V2F32, V3F32, V4F32,
+    A32, V2A32, V3A32, V4A32,
+    S32, V2S32, V3S32, V4S32,
+    U32, V2U32, V3U32, V4U32,
+])]
+pub struct OpLdTile {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    #[src_type(I32)]
+    pub pixel: Src,
+    #[src_type(I32)]
+    pub coverage: Src,
+
+    /// Ignored if z_stencil
+    #[src_type(I32)]
+    pub conversion: Src,
+
+    pub is_resource: bool,
+    pub z_stencil: bool,
+    pub z_last_read: bool,
+}
+
+impl DisplayOp for OpLdTile {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_TILE.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {} {}",
+            bool_as_mod_str!(self.z_stencil),
+            bool_as_mod_str!(self.z_last_read),
+            self.fmt_src(&self.pixel),
+            self.fmt_src(&self.coverage),
+            self.fmt_handle_src(&self.conversion),
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SamplePosition {
+    Center,
+    Centroid,
+    Sample,
+    Explicit,
+    None,
+}
+
+impl fmt::Display for SamplePosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Center => write!(f, ".center"),
+            Self::Centroid => write!(f, ".centroid"),
+            Self::Sample => write!(f, ".sample"),
+            Self::Explicit => write!(f, ".explicit"),
+            Self::None => Ok(()),
+        }
+    }
+}
+
+/// The LdVar* family of instructions updates a hidden register in hardware with
+/// computations about the interpolated position.  If a preceding LdVar instr
+/// used the same interpolated position we can skip the computation and load
+/// the old value (acting as a cache).  This enum describes how the instruction
+/// uses the hidden register
+#[derive(Clone, Copy, PartialEq)]
+pub enum VaryingUpdateMode {
+    /// Compute varying-calculations and store it to a hidden register
+    Store,
+    /// Retrieve varying-data from the hidden register (less compute used)
+    Retrieve,
+    /// Overwrites the hidden register with undefined data
+    Clobber,
+    /// Ignore hidden register (neither read nor written)
+    None,
+}
+
+impl fmt::Display for VaryingUpdateMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store => write!(f, ".store"),
+            Self::Retrieve => write!(f, ".retrieve"),
+            Self::Clobber => write!(f, ".clobber"),
+            Self::None => write!(f, ".none"),
+        }
+    }
+}
+
+/// Loads an interpolated varying through the descriptor (loaded by `handle`)
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    F16, V2F16, V3F16, V4F16,
+    F32, V2F32, V3F32, V4F32,
+    A32, V2A32, V3A32, V4A32,
+])]
+pub struct OpLdVar {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+
+    /// This field depends on sample_position and update
+    #[src_type(I32)]
+    pub src: Src,
+    #[src_type(I32)]
+    pub handle: Src,
+}
+
+impl DisplayOp for OpLdVar {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_VAR.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {}",
+            self.sample_position,
+            self.update,
+            self.fmt_src(&self.src),
+            self.fmt_handle_src(&self.handle),
+        )
+    }
+}
+
+/// Loads an interpolated varying without reading descriptors, it needs both
+/// a dst_type and a mem_type to handle conversions.  Only usable when we know
+/// the layout of varyings in memory.
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    F16, V2F16, V3F16, V4F16,
+    F32, V2F32, V3F32, V4F32,
+])]
+pub struct OpLdVarBuf {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    /// Type stored in memory (either f32 of f16)
+    pub mem_type: DataType,
+    pub sample_position: SamplePosition,
+    /// Ignored for flat shading
+    pub update: VaryingUpdateMode,
+
+    /// This field depends on sample_position and update
+    #[src_type(I32)]
+    pub src: Src,
+    #[src_type(I32)]
+    pub offset: Src,
+}
+
+impl DisplayOp for OpLdVarBuf {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_VAR_BUF.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".src_{}{}", self.mem_type, self.sample_position)?;
+
+        write!(
+            f,
+            " {} {}",
+            self.fmt_src(&self.src),
+            self.fmt_src(&self.offset),
+        )
+    }
+}
+
+/// Loads a flat varying without reading descriptors, cannot perform conversion.
+///
+/// On v14+, this maps directly to the hardware LD_VAR_BUF_FLAT instruction.
+/// On v13 and earlier, it maps to LD_VAR_BUF.fN.src_fN.
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    I16, V2I16, V3I16, V4I16,
+    I32, V2I32, V3I32, V4I32,
+])]
+pub struct OpLdVarBufFlat {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    // TODO: .explicit_vertex
+    #[src_type(I32)]
+    pub offset: Src,
+}
+
+impl DisplayOp for OpLdVarBufFlat {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_VAR_BUF_FLAT.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, " {}", self.fmt_src(&self.offset))
+    }
+}
+
+/// Loads a flat varying through the descriptor (loaded by `handle`), cannot
+/// perform conversion.
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    F16, V2F16, V3F16, V4F16,
+    F32, V2F32, V3F32, V4F32,
+    A32, V2A32, V3A32, V4A32,
+    S32, V2S32, V3S32, V4S32,
+    U32, V2U32, V3U32, V4U32,
+])]
+pub struct OpLdVarFlat {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    #[src_type(I32)]
+    pub handle: Src,
+}
+
+impl DisplayOp for OpLdVarFlat {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_VAR_FLAT.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, " {}", self.fmt_handle_src(&self.handle))
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum VarSpecialName {
+    /// Point coordinate (x,y from 0.0 to 1.0)
+    Point,
+    /// Barycentric coords
+    Bary,
+    /// Fragment W (fixed function)
+    FragW,
+    /// Fragment Z (fixed function, doesn't support "explicit" position type)
+    FragZ,
+}
+
+impl fmt::Display for VarSpecialName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Point => write!(f, ".point"),
+            Self::Bary => write!(f, ".bary"),
+            Self::FragW => write!(f, ".frag_w"),
+            Self::FragZ => write!(f, ".frag_z"),
+        }
+    }
+}
+
+/// Loads a special varying
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [F32, V2F32])]
+pub struct OpLdVarSpecial {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    #[src_type(I32)]
+    pub src: Src,
+
+    pub name: VarSpecialName,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+}
+
+impl DisplayOp for OpLdVarSpecial {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LD_VAR_SPECIAL.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{} {}",
+            self.name,
+            self.sample_position,
+            self.update,
+            self.fmt_src(&self.src)
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
 pub struct OpLeaBuf {
     #[dst_type(I64)]
     pub dst: Dst,
@@ -2656,7 +3259,7 @@ impl DisplayOp for OpLoad {
         write!(
             f,
             "{}{} {} #{}",
-            bool_as_mod_str!(self.is_tls, "tls"),
+            bool_as_mod_str!(self.is_tls, ".tls"),
             self.access,
             self.fmt_src(&self.addr),
             self.offset,
@@ -2802,6 +3405,7 @@ impl VirtualOpcode for OpMkVecV4I8 {
 /// sub-matrix.  Similarly, MMUL.f16 is a 4x4*4x8 matrix multiply where the A
 /// matrix is a 4x4 sub-matrix of the 4x8 input matrix.  This enum selects
 /// which of the two 4x4 sub-matrices in the 4x8 matrix gets read.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum F16SubMat {
     /// No submatrix operation.  This is used for F32 4x4 source matrices.
@@ -2963,6 +3567,7 @@ impl DisplayOp for OpMov {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum MuxOp {
     Neg,
@@ -3155,6 +3760,39 @@ impl Foldable for OpPopCount {
     }
 }
 
+/// Preload description for pretty-printing
+#[derive(Clone, Copy)]
+pub struct PreloadInfo {
+    pub set: PreloadRegSet,
+    pub comp: u8,
+}
+
+impl fmt::Display for PreloadInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        assert!(!self.set.is_empty());
+        if self.set.len() == 1 {
+            let reg = self.set.iter().next().unwrap();
+            write!(f, "{reg}")?;
+            if reg.reg_size() != 1 {
+                debug_assert!(reg.reg_size() <= 4, "need more swizzle names");
+                let swiz = ['x', 'y', 'z', 'w'];
+
+                write!(f, ".{}", swiz[self.comp as usize])?;
+            }
+        } else {
+            // Components are only for single-register preloads.
+            assert!(self.comp == 0);
+            for (i, reg) in self.set.iter().enumerate() {
+                if i != 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{reg}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [I8, I16, I32, I64])]
@@ -3162,6 +3800,7 @@ pub struct OpRegIn {
     pub dst: Dst,
     pub dst_type: DataType,
     pub reg: RegRef,
+    pub preload: Option<PreloadInfo>,
 }
 
 impl DisplayOp for OpRegIn {
@@ -3170,7 +3809,12 @@ impl DisplayOp for OpRegIn {
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, " {}", &self.reg)
+        write!(f, " {}", &self.reg)?;
+
+        if let Some(info) = self.preload {
+            write!(f, " ({info})")?;
+        }
+        Ok(())
     }
 }
 
@@ -3210,6 +3854,25 @@ impl VirtualOpcode for OpRegOut {
     }
 }
 
+// Virtual operation to mark scheduling barriers, message instructions are not
+// allowed to move across the barrier and must finish by it. This op is not
+// encoded and must be removed at the end of the compiliation pipeline.
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpScheduleBarrier {}
+
+impl DisplayOp for OpScheduleBarrier {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SCHEDULE_BARRIER")
+    }
+
+    fn fmt_body(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl VirtualOpcode for OpScheduleBarrier {}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum ShiftOp {
     #[default]
@@ -3238,6 +3901,10 @@ impl ShiftOp {
     pub fn is_none(&self) -> bool {
         matches!(self, ShiftOp::None)
     }
+
+    pub fn is_some(&self) -> bool {
+        !self.is_none()
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -3263,6 +3930,10 @@ impl fmt::Display for LogicOp {
 impl LogicOp {
     pub fn is_none(&self) -> bool {
         matches!(self, LogicOp::None)
+    }
+
+    pub fn is_some(&self) -> bool {
+        !self.is_none()
     }
 }
 
@@ -3295,13 +3966,14 @@ impl DisplayOp for OpShiftLop {
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            " {} {} {}",
-            self.fmt_src(&self.src0),
-            self.fmt_src(&self.shift),
-            self.fmt_src(&self.src2),
-        )
+        write!(f, " {}", self.fmt_src(&self.src0))?;
+        if self.shift_op.is_some() {
+            write!(f, " {}", self.fmt_src(&self.shift))?;
+        }
+        if self.logic_op.is_some() {
+            write!(f, " {}", self.fmt_src(&self.src2))?;
+        }
+        Ok(())
     }
 }
 
@@ -3421,12 +4093,53 @@ impl DisplayOp for OpStore {
         write!(
             f,
             "{}{}{} {} {} #{}",
-            bool_as_mod_str!(self.is_tls, "tls"),
-            bool_as_mod_str!(self.is_psiz, "psiz"),
+            bool_as_mod_str!(self.is_tls, ".tls"),
+            bool_as_mod_str!(self.is_psiz, ".psiz"),
             self.access,
             self.fmt_src(&self.data),
             self.fmt_src(&self.addr),
             self.offset,
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(src_type in [
+    F16, V2F16, V3F16, V4F16,
+    S16, V2S16, V3S16, V4S16,
+    U16, V2U16, V3U16, V4U16,
+    F32, V2F32, V3F32, V4F32,
+    A32, V2A32, V3A32, V4A32,
+    S32, V2S32, V3S32, V4S32,
+    U32, V2U32, V3U32, V4U32,
+])]
+pub struct OpStTile {
+    pub src_type: DataType,
+
+    pub data: Src,
+
+    #[src_type(I32)]
+    pub pixel: Src,
+    #[src_type(I32)]
+    pub coverage: Src,
+    #[src_type(I32)]
+    pub conversion: Src,
+}
+
+impl DisplayOp for OpStTile {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ST_TILE.{}", self.src_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            " {} {} {} {}",
+            self.fmt_src(&self.data),
+            self.fmt_src(&self.pixel),
+            self.fmt_src(&self.coverage),
+            self.fmt_handle_src(&self.conversion),
         )
     }
 }
@@ -3465,9 +4178,11 @@ impl VirtualOpcode for OpSwz {
         } else if swizzle.is_none() {
             true
         } else if swizzle.is_word_swizzle() {
+            // Word swizzles only exist for 64-bit sources
             self.src_type.bits() == 64
         } else {
-            self.src_type.bits() <= 32
+            // A byte swizzle applies to the low word and extends from there
+            true
         }
     }
 
@@ -3480,12 +4195,30 @@ impl VirtualOpcode for OpSwz {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+impl Foldable for OpSwz {
+    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        // get_src() already applies the swizzle
+        f.set_dst(&self.dst, f.get_src(&self.src));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TexDim {
     Cube,
     Tex1D,
     Tex2D,
     Tex3D,
+}
+
+impl TexDim {
+    pub fn coord_comps(&self) -> u8 {
+        match self {
+            TexDim::Cube => 3,
+            TexDim::Tex1D => 1,
+            TexDim::Tex2D => 2,
+            TexDim::Tex3D => 3,
+        }
+    }
 }
 
 impl fmt::Display for TexDim {
@@ -3499,6 +4232,7 @@ impl fmt::Display for TexDim {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum TexCoordMode {
     F32,
@@ -3533,6 +4267,7 @@ impl fmt::Display for TexGatherComp {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum TexLodMode {
     #[default]
@@ -3543,17 +4278,6 @@ pub enum TexLodMode {
     ComputedBias,
     ComputedBiasForceDelta,
     GradientDesc,
-}
-
-impl TexLodMode {
-    pub fn force_delta(self) -> TexLodMode {
-        use TexLodMode::*;
-        match self {
-            Computed | ComputedForceDelta => ComputedForceDelta,
-            ComputedBias | ComputedBiasForceDelta => ComputedBiasForceDelta,
-            _ => panic!("No force_delta enum"),
-        }
-    }
 }
 
 impl fmt::Display for TexLodMode {
@@ -3583,6 +4307,10 @@ impl TexWriteMask {
         TexWriteMask(mask)
     }
 
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
     pub fn comps(self) -> u8 {
         self.0.count_ones() as u8
     }
@@ -3599,12 +4327,59 @@ impl TexWriteMask {
 
 impl fmt::Display for TexWriteMask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".")?;
         for (i, c) in "rgba".chars().enumerate() {
             if (self.0 & (1 << i)) != 0 {
                 write!(f, "{c}")?;
             }
         }
         Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpTexDual {
+    #[dst_type(SR)]
+    pub dst: Dst,
+    pub dst_types: [DataType; 2],
+
+    pub skip: bool,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_masks: [TexWriteMask; 2],
+    pub array_enable: bool,
+    pub texel_offset: bool,
+    pub compare_enable: bool,
+    pub lod_mode: TexLodMode,
+
+    #[src_type(SR)]
+    pub data: Src,
+    #[src_type(I64)]
+    pub handle: Src,
+}
+
+impl DisplayOp for OpTexDual {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TEX_DUAL.{}.{}", self.dst_types[0], self.dst_types[1])
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_masks[0],
+            self.write_masks[1],
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.texel_offset),
+            bool_as_mod_str!(self.compare_enable),
+            self.lod_mode,
+            self.fmt_src(&self.data),
+            self.fmt_src(&self.handle),
+        )
     }
 }
 
@@ -3704,7 +4479,7 @@ impl DisplayOp for OpTexGather {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TexGradientCoordMode {
     #[default]
     Coords,
@@ -3818,6 +4593,496 @@ impl DisplayOp for OpTexSingle {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+pub struct OpV2F32ToV2F16 {
+    #[dst_type(V2F16)]
+    pub dst: Dst,
+    #[src_type(F32)]
+    pub srcs: [Src; 2],
+    pub round: FRound,
+    pub clamp: FClamp,
+}
+
+impl DisplayOp for OpV2F32ToV2F16 {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "V2F32_TO_V2F16")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {}",
+            self.round,
+            self.clamp,
+            self.fmt_src(&self.srcs[0]),
+            self.fmt_src(&self.srcs[1]),
+        )
+    }
+}
+
+impl Foldable for OpV2F32ToV2F16 {
+    fn fold(&self, _model: &dyn Model, f: &mut impl FoldDataView) {
+        let srcs = [f.get_src(&self.srcs[0]), f.get_src(&self.srcs[1])];
+        let mut dst = 0_u64;
+
+        for i in 0..2 {
+            let c = f32::from_bits(srcs[i] as u32);
+            let c = self.clamp.fold(c);
+
+            let c = match self.round {
+                FRound::NearestEven => F16::from_f32_rtne(c),
+                FRound::Up => F16::from_f32_ru(c),
+                FRound::Down => F16::from_f32_rd(c),
+                FRound::TowardsZero => F16::from_f32_rtz(c),
+                FRound::NearestValue => panic!("Invalid for float conv"),
+            };
+
+            dst |= u64::from(c.to_bits()) << (i * 16);
+        }
+
+        f.set_dst(&self.dst, dst);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpVarTexBufDual {
+    #[dst_type(SR)]
+    pub dst: Dst,
+    pub dst_types: [DataType; 2],
+
+    pub skip: bool,
+    pub var_mem_type: DataType,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_masks: [TexWriteMask; 2],
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub lod_mode: TexLodMode,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_buf_offset: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexBufDual {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "VAR_TEX_BUF_DUAL.{}.{}",
+            self.dst_types[0], self.dst_types[1]
+        )
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.src_{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.var_mem_type,
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_masks[0],
+            self.write_masks[1],
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.lod_mode,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_buf_offset),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    A16, V2A16, V3A16, V4A16,
+    A32, V2A32, V3A32, V4A32,
+])]
+pub struct OpVarTexBufGather {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub var_mem_type: DataType,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub gather_comp: TexGatherComp,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_buf_offset: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexBufGather {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_BUF_GATHER.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.src_{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.var_mem_type,
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.gather_comp,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_buf_offset),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [A16, V2A16, V3A16, V4A16, A32, V2A32])]
+pub struct OpVarTexBufGradient {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub var_mem_type: DataType,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub lod_bias_disable: bool,
+    pub lod_clamp_disable: bool,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_buf_offset: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexBufGradient {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_BUF_GRADIENT.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.src_{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.var_mem_type,
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.lod_bias_disable),
+            bool_as_mod_str!(self.lod_clamp_disable),
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_buf_offset),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    A16, V2A16, V3A16, V4A16,
+    A32, V2A32, V3A32, V4A32,
+])]
+pub struct OpVarTexBufSingle {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub var_mem_type: DataType,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub lod_mode: TexLodMode,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_buf_offset: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexBufSingle {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_BUF_SINGLE.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.src_{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.var_mem_type,
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.lod_mode,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_buf_offset),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpVarTexDual {
+    #[dst_type(SR)]
+    pub dst: Dst,
+    pub dst_types: [DataType; 2],
+
+    pub skip: bool,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_masks: [TexWriteMask; 2],
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub lod_mode: TexLodMode,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_handle: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexDual {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "VAR_TEX_DUAL.{}.{}",
+            self.dst_types[0], self.dst_types[1]
+        )
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_masks[0],
+            self.write_masks[1],
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.lod_mode,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_handle),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    A16, V2A16, V3A16, V4A16,
+    A32, V2A32, V3A32, V4A32,
+])]
+pub struct OpVarTexGather {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub gather_comp: TexGatherComp,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_handle: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexGather {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_GATHER.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.gather_comp,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_handle),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [A16, V2A16, V3A16, V4A16, A32, V2A32])]
+pub struct OpVarTexGradient {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub lod_bias_disable: bool,
+    pub lod_clamp_disable: bool,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_handle: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexGradient {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_GRADIENT.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.lod_bias_disable),
+            bool_as_mod_str!(self.lod_clamp_disable),
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_handle),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(dst_type in [
+    A16, V2A16, V3A16, V4A16,
+    A32, V2A32, V3A32, V4A32,
+])]
+pub struct OpVarTexSingle {
+    pub dst: Dst,
+    pub dst_type: DataType,
+
+    pub skip: bool,
+    pub sample_position: SamplePosition,
+    pub update: VaryingUpdateMode,
+    pub dim: TexDim,
+    pub projection_enable: bool,
+    pub write_mask: TexWriteMask,
+    pub wide_indices: bool,
+    pub array_enable: bool,
+    pub compare_enable: bool,
+    pub lod_mode: TexLodMode,
+
+    #[src_type(I64)]
+    pub tex_handle: Src,
+    #[src_type(I32)]
+    pub var_handle: Src,
+    #[src_type(I32)]
+    pub sample: Src,
+}
+
+impl DisplayOp for OpVarTexSingle {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VAR_TEX_SINGLE.{}", self.dst_type)
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{}{} {} {} {}",
+            bool_as_mod_str!(self.skip),
+            self.sample_position,
+            self.update,
+            self.dim,
+            bool_as_mod_str!(self.projection_enable),
+            self.write_mask,
+            bool_as_mod_str!(self.wide_indices),
+            bool_as_mod_str!(self.array_enable),
+            bool_as_mod_str!(self.compare_enable),
+            self.lod_mode,
+            self.fmt_src(&self.tex_handle),
+            self.fmt_src(&self.var_handle),
+            self.fmt_src(&self.sample),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
 pub struct OpWMask {
     #[dst_type(I32)]
     pub dst: Dst,
@@ -3836,27 +5101,75 @@ impl DisplayOp for OpWMask {
     }
 }
 
+/// Emit Z and/or stencil values for the current thread
+/// MUST be executed after DISCARD and ATEST
+/// Highly recommended to always wait on slot 0 after this, preceding instr must
+/// wait on slot 6
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpZSEmit {
+    #[dst_type(I32)]
+    pub dst: Dst,
+
+    #[src_type(I32)]
+    pub depth: Src,
+
+    #[src_type(I32)]
+    pub stencil: Src,
+
+    #[src_type(I32)]
+    pub coverage: Src,
+
+    /// Use depth from this instruction (otherwise fixed-function Z is used)
+    pub use_depth: bool,
+    /// Use stencil from this instruction (otherwise fixed-function is used)
+    pub use_stencil: bool,
+}
+
+impl DisplayOp for OpZSEmit {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ZS_EMIT")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{} {} {} {}",
+            bool_as_mod_str!(self.use_depth, ".depth"),
+            bool_as_mod_str!(self.use_stencil, ".stencil"),
+            self.fmt_src(&self.depth),
+            self.fmt_src(&self.stencil),
+            self.fmt_src(&self.coverage),
+        )
+    }
+}
+
 #[derive(Clone, FromVariants, Opcode)]
 pub enum Op {
     ACmpXchg(Box<OpACmpXchg>),
+    Adr(Box<OpAdr>),
+    ATest(Box<OpATest>),
     Atom(Box<OpAtom>),
     Atom1(Box<OpAtom1>),
     Barrier(OpBarrier),
     BitRev(Box<OpBitRev>),
+    Blend(Box<OpBlend>),
+    BlendCall(Box<OpBlendCall>),
     Branch(Box<OpBranch>),
     Clper(Box<OpClper>),
     Clz(Box<OpClz>),
+    Cmp(Box<OpCmp>),
     Copy(Box<OpCopy>),
     CSel(Box<OpCSel>),
     CubeFaceIdx(Box<OpCubeFaceIdx>),
     CubeFaceMax(Box<OpCubeFaceMax>),
     CubeSel(Box<OpCubeSel>),
+    Discard(Box<OpDiscard>),
     F16ToF32(Box<OpF16ToF32>),
-    F32ToF16(Box<OpF32ToF16>),
+    F16ToI32(Box<OpF16ToI32>),
     F32ToI32(Box<OpF32ToI32>),
     FAdd(Box<OpFAdd>),
     FAddLScale(Box<OpFAddLScale>),
-    FCmp(Box<OpFCmp>),
     FCosTable(Box<OpFCosTable>),
     FExp16(Box<OpFExp16>),
     FExp32(Box<OpFExp32>),
@@ -3867,27 +5180,34 @@ pub enum Op {
     FmaRScale(Box<OpFmaRScale>),
     FMax(Box<OpFMax>),
     FMin(Box<OpFMin>),
-    FMul(Box<OpFMul>),
     FRcp(Box<OpFRcp>),
     FrexpE(Box<OpFrexpE>),
     FrexpM(Box<OpFrexpM>),
     FRound(Box<OpFRound>),
     FRsq(Box<OpFRsq>),
     FSinTable(Box<OpFSinTable>),
+    HAdd(Box<OpHAdd>),
     IAbs(Box<OpIAbs>),
     IAdd(Box<OpIAdd>),
-    ICmp(Box<OpICmp>),
     ICmpMulti(Box<OpICmpMulti>),
     IDpAdd(Box<OpIDpAdd>),
     IMul(Box<OpIMul>),
     ISub(Box<OpISub>),
+    IToF16(Box<OpIToF16>),
     IToF32(Box<OpIToF32>),
+    Jump(Box<OpJump>),
     LdAttr(Box<OpLdAttr>),
     LdCvt(Box<OpLdCvt>),
     LdExp(Box<OpLdExp>),
     LdGClk(Box<OpLdGClk>),
     LdPka(Box<OpLdPka>),
     LdTex(Box<OpLdTex>),
+    LdTile(Box<OpLdTile>),
+    LdVar(Box<OpLdVar>),
+    LdVarBuf(Box<OpLdVarBuf>),
+    LdVarBufFlat(Box<OpLdVarBufFlat>),
+    LdVarFlat(Box<OpLdVarFlat>),
+    LdVarSpecial(Box<OpLdVarSpecial>),
     LeaBuf(Box<OpLeaBuf>),
     LeaPka(Box<OpLeaPka>),
     LeaTex(Box<OpLeaTex>),
@@ -3907,15 +5227,28 @@ pub enum Op {
     PopCount(Box<OpPopCount>),
     RegIn(Box<OpRegIn>),
     RegOut(Box<OpRegOut>),
+    ScheduleBarrier(OpScheduleBarrier),
     ShiftLop(Box<OpShiftLop>),
     StCvt(Box<OpStCvt>),
     Store(Box<OpStore>),
+    StTile(Box<OpStTile>),
     Swz(Box<OpSwz>),
+    TexDual(Box<OpTexDual>),
     TexFetch(Box<OpTexFetch>),
     TexGather(Box<OpTexGather>),
     TexGradient(Box<OpTexGradient>),
     TexSingle(Box<OpTexSingle>),
+    V2F32ToV2F16(Box<OpV2F32ToV2F16>),
+    VarTexBufDual(Box<OpVarTexBufDual>),
+    VarTexBufGather(Box<OpVarTexBufGather>),
+    VarTexBufGradient(Box<OpVarTexBufGradient>),
+    VarTexBufSingle(Box<OpVarTexBufSingle>),
+    VarTexDual(Box<OpVarTexDual>),
+    VarTexGather(Box<OpVarTexGather>),
+    VarTexGradient(Box<OpVarTexGradient>),
+    VarTexSingle(Box<OpVarTexSingle>),
     WMask(Box<OpWMask>),
+    ZSEmit(Box<OpZSEmit>),
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -3923,9 +5256,19 @@ const _: () = {
     assert!(size_of::<Op>() == 16);
 };
 
+#[derive(PartialEq)]
+pub enum MemoryEffect {
+    None,
+    ConstRead,
+    Read,
+    Write,
+    ReadWrite,
+}
+
 impl Op {
     pub fn as_virtual(&self) -> Option<&dyn VirtualOpcode> {
         match self {
+            Op::BlendCall(op) => Some(op.as_ref()),
             Op::Copy(op) => Some(op.as_ref()),
             Op::MkVecV2I8(op) => Some(op.as_ref()),
             Op::MkVecV4I8(op) => Some(op.as_ref()),
@@ -3933,6 +5276,7 @@ impl Op {
             Op::PhiSrc(op) => Some(op.as_ref()),
             Op::RegIn(op) => Some(op.as_ref()),
             Op::RegOut(op) => Some(op.as_ref()),
+            Op::ScheduleBarrier(op) => Some(op),
             Op::Swz(op) => Some(op.as_ref()),
             _ => None,
         }
@@ -3942,14 +5286,125 @@ impl Op {
         !matches!(
             self,
             Op::ACmpXchg(_)
+                | Op::ATest(_)
                 | Op::Atom(_)
                 | Op::Atom1(_)
                 | Op::Barrier(_)
+                | Op::Blend(_)
+                | Op::BlendCall(_)
                 | Op::Branch(_)
+                | Op::Discard(_)
+                | Op::Jump(_)
                 | Op::RegOut(_)
+                | Op::ScheduleBarrier(_)
                 | Op::Store(_)
                 | Op::StCvt(_)
+                | Op::StTile(_)
+                | Op::ZSEmit(_)
         )
+    }
+
+    pub fn memory_effect(&self) -> MemoryEffect {
+        let read_with_access = |access: MemAccess| {
+            if access == MemAccess::Const {
+                MemoryEffect::ConstRead
+            } else {
+                MemoryEffect::Read
+            }
+        };
+        match self {
+            Op::LdAttr(_) => MemoryEffect::ConstRead,
+            Op::LdCvt(op) => read_with_access(op.access),
+            Op::LdPka(op) => read_with_access(op.access),
+            Op::Load(op) => read_with_access(op.access),
+            Op::LdTex(_) | Op::LdTile(_) => MemoryEffect::Read,
+            Op::LdVar(_)
+            | Op::LdVarBuf(_)
+            | Op::LdVarBufFlat(_)
+            | Op::LdVarFlat(_)
+            | Op::TexDual(_)
+            | Op::TexFetch(_)
+            | Op::TexGather(_)
+            | Op::TexGradient(_)
+            | Op::TexSingle(_)
+            | Op::VarTexBufDual(_)
+            | Op::VarTexBufGather(_)
+            | Op::VarTexBufGradient(_)
+            | Op::VarTexBufSingle(_)
+            | Op::VarTexDual(_)
+            | Op::VarTexGather(_)
+            | Op::VarTexGradient(_)
+            | Op::VarTexSingle(_) => MemoryEffect::ConstRead,
+            Op::Blend(_)
+            | Op::BlendCall(_)
+            | Op::StCvt(_)
+            | Op::Store(_)
+            | Op::StTile(_)
+            | Op::ZSEmit(_) => MemoryEffect::Write,
+            Op::ACmpXchg(_) | Op::Atom(_) | Op::Atom1(_) => {
+                MemoryEffect::ReadWrite
+            }
+            _ => MemoryEffect::None,
+        }
+    }
+
+    pub fn var_update_mode(&self) -> VaryingUpdateMode {
+        match self {
+            Op::LdVar(op) => op.update,
+            Op::LdVarBuf(op) => op.update,
+            Op::LdVarSpecial(op) => op.update,
+            Op::VarTexBufDual(op) => op.update,
+            Op::VarTexBufGather(op) => op.update,
+            Op::VarTexBufGradient(op) => op.update,
+            Op::VarTexBufSingle(op) => op.update,
+            Op::VarTexDual(op) => op.update,
+            Op::VarTexGather(op) => op.update,
+            Op::VarTexGradient(op) => op.update,
+            Op::VarTexSingle(op) => op.update,
+            _ => VaryingUpdateMode::None,
+        }
+    }
+
+    pub fn writes_discard(&self) -> bool {
+        // ATEST and ZS_EMIT can both modify the discard state and terminate
+        // discarded threads.
+        matches!(self, Op::ATest(_) | Op::Discard(_) | Op::ZSEmit(_))
+    }
+
+    pub fn reads_discard(&self) -> bool {
+        match self {
+            Op::ACmpXchg(_) | Op::Atom(_) | Op::Atom1(_) => {
+                // Atomics no-op and return zero in discarded lanes
+                true
+            }
+            Op::ATest(_) | Op::Blend(_) | Op::BlendCall(_) | Op::ZSEmit(_) => {
+                // ATEST, BLEND, and ZS_EMIT all take discarded lanes into
+                // account, separate from the coverage mask
+                true
+            }
+
+            // Texture ops have a .skip modifier which tells them to return
+            // zero in helper lanes as an optimization
+            Op::TexDual(op) => op.skip,
+            Op::TexFetch(op) => op.skip,
+            Op::TexGather(op) => op.skip,
+            Op::TexGradient(op) => op.skip,
+            Op::TexSingle(op) => op.skip,
+            Op::VarTexBufDual(op) => op.skip,
+            Op::VarTexBufGather(op) => op.skip,
+            Op::VarTexBufGradient(op) => op.skip,
+            Op::VarTexBufSingle(op) => op.skip,
+            Op::VarTexDual(op) => op.skip,
+            Op::VarTexGather(op) => op.skip,
+            Op::VarTexGradient(op) => op.skip,
+            Op::VarTexSingle(op) => op.skip,
+
+            // Stores are ignored in discarded lanes
+            Op::StTile(_) => true,
+            Op::Store(op) => op.access != MemAccess::Force,
+            Op::StCvt(op) => op.access != MemAccess::Force,
+            _ => false,
+        }
     }
 }
 

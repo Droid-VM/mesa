@@ -219,3 +219,60 @@ TEST_F(u_printf_test, util_printf_mixed_multiple)
 
    EXPECT_EQ(parse(), "ABCED\n-5 6\n%%mesa 10 3.000000 1.0,2.0,3.0,4.0 ");
 }
+
+TEST_F(u_printf_test, util_printf_vector_hl_modifier)
+{
+   add_format("%#v2hlx", { 8 });
+
+   uint32_t uints[2] = { 0x12345678, 0x87654321 };
+   use_format(0);
+   add_arg<uint32_t, 2>(uints);
+
+   EXPECT_EQ(parse(), "0x12345678,0x87654321");
+}
+
+TEST_F(u_printf_test, util_printf_vector_hh_modifier)
+{
+   add_format("%+v4hhi", { 4 });
+
+   int8_t chars[4] = { 1, -2, 3, -4 };
+   use_format(0);
+   add_arg<int8_t, 4>(chars);
+
+   EXPECT_EQ(parse(), "+1,-2,+3,-4");
+}
+
+TEST_F(u_printf_test, util_printf_vector_h_modifier)
+{
+   add_format("%v2hd", { 4 });
+
+   int16_t shorts[2] = { -1000, 2000 };
+   use_format(0);
+   add_arg<int16_t, 2>(shorts);
+
+   EXPECT_EQ(parse(), "-1000,2000");
+}
+
+TEST_F(u_printf_test, util_printf_vector_l_modifier)
+{
+   add_format("%v2lu", { 16 });
+
+   uint64_t longs[2] = { 4294967296ULL, 12345678901ULL };
+   use_format(0);
+   add_arg<uint64_t, 2>(longs);
+
+   EXPECT_EQ(parse(), "4294967296,12345678901");
+}
+
+TEST_F(u_printf_test, util_printf_scalar_l_modifier)
+{
+   add_format("%ld %lu %lx %+li", { 8, 8, 8, 8 });
+
+   use_format(0);
+   add_arg<int64_t>(-10000000000LL);
+   add_arg<uint64_t>(UINT64_MAX);
+   add_arg<uint64_t>(0x123456789ULL);
+   add_arg<int64_t>(5000000000LL);
+
+   EXPECT_EQ(parse(), "-10000000000 18446744073709551615 123456789 +5000000000");
+}

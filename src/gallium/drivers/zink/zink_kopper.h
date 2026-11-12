@@ -49,6 +49,7 @@ struct kopper_swapchain_image {
    struct zink_resource *acquired;
    struct pipe_resource *readback;
    VkSemaphore acquire;
+   VkSemaphore present; // waited on by the last present, free once the image is acquired again
    VkImageLayout layout;
 
    struct set surface_cache;
@@ -58,10 +59,11 @@ struct kopper_swapchain {
    struct kopper_swapchain *next;
    VkSwapchainKHR swapchain;
 
+   simple_mtx_t lock;
+
    unsigned last_present;
    unsigned num_images;
-   uint32_t last_present_prune;
-   struct hash_table_u64 *presents;
+   uint32_t present_batch; // wait for this batch before destroying the swapchain
    VkSwapchainCreateInfoKHR scci;
    unsigned num_acquires;
    unsigned max_acquires;
@@ -90,6 +92,7 @@ struct kopper_displaytarget
    uint32_t present_modes; //VkPresentModeKHR bitmask
    struct kopper_swapchain *swapchain;
    struct kopper_swapchain *old_swapchain;
+   uint32_t swapchain_serial;
 
    struct kopper_loader_info info;
 
@@ -99,10 +102,12 @@ struct kopper_displaytarget
    VkImageFormatListCreateInfo format_list;
    enum kopper_type type;
    bool is_kill;
+   unsigned present_count; // presents queued
    VkPresentModeKHR present_mode;
    unsigned readback_counter;
 
    bool age_locked; //disables buffer age during readback
+   bool frontend_tracks_front; //the frontend reports the front buffer, else last_dt_idx is used
 };
 
 struct zink_kopper_present_info {
@@ -166,6 +171,10 @@ VkSemaphore
 zink_kopper_present(struct zink_screen *screen, struct zink_resource *res); 
 void
 zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res, unsigned nrects, struct pipe_box *boxes);
+void
+zink_kopper_sync_idx(struct zink_resource *res);
+uint32_t
+zink_kopper_get_dt_idx(struct zink_resource *res);
 bool
 zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res, struct zink_resource **readback);
 bool
@@ -183,7 +192,11 @@ zink_kopper_fixup_depth_buffer(struct zink_context *ctx);
 bool
 zink_kopper_check(struct pipe_resource *pres);
 void
-zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource *pres, int interval);
+zink_kopper_set_front(struct pipe_resource *pres, bool front);
+bool
+zink_kopper_reads_next_image(struct zink_resource *res);
+void
+zink_kopper_set_swap_interval(struct pipe_context *pctx, struct pipe_resource *pres, int interval);
 int
 zink_kopper_query_buffer_age(struct pipe_context *pctx, struct pipe_resource *pres);
 void

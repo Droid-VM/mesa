@@ -68,6 +68,24 @@ public:
       return bld;
    }
 
+   /**
+    * Construct a builder that inserts instructions at the start of the
+    * shader.
+    * Unlike at_start(), this can also be used before the CFG has been created,
+    * while instructions still live in brw_shader::instructions.
+    */
+   brw_builder
+   at_shader_start() const
+   {
+      if (shader->cfg && shader->cfg->num_blocks > 0)
+         return at_start(shader->cfg->first_block());
+
+      brw_builder bld = *this;
+      bld.block = NULL;
+      bld.cursor = shader->instructions.head_sentinel.next;
+      return bld;
+   }
+
    brw_builder
    at_end(bblock_t *block) const
    {
@@ -327,10 +345,17 @@ public:
       switch (opcode) {
       case BRW_OPCODE_BFE:
       case BRW_OPCODE_BFI2:
-      case BRW_OPCODE_MAD:
       case BRW_OPCODE_LRP:
          for (unsigned i = 0; i < 3; i++)
             inst->src[i] = fix_3src_operand(inst->src[i]);
+         break;
+
+      case BRW_OPCODE_MAD:
+         for (unsigned i = 0; i < 3; i++) {
+            if (shader->devinfo->ver >= 35 && inst->src[i].is_accumulator())
+               continue;
+            inst->src[i] = fix_3src_operand(inst->src[i]);
+         }
          break;
 
       default:
@@ -605,6 +630,7 @@ public:
    VIRT2(INT_REMAINDER)
    VIRT1(SIN)
    VIRT1(COS)
+   VIRT1(TANH)
 
 #undef ALU3
 #undef ALU2_ACC
@@ -661,6 +687,16 @@ public:
          return src0;
 
       return alu2(BRW_OPCODE_ADD, src0, src1, out);
+   }
+
+   brw_inst *
+   MULLH(const brw_reg &dst, const brw_reg &src0, const brw_reg &src1) const
+   {
+      brw_inst *inst = alu2(BRW_OPCODE_MULLH, dst, src0, src1);
+      assert(brw_type_size_bytes(dst.type) == 4);
+      const unsigned channels = (inst->exec_size + 15) & ~0xf;
+      inst->size_written = 2 * channels * brw_type_size_bytes(dst.type);
+      return inst;
    }
 
    brw_inst *

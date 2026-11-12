@@ -397,8 +397,19 @@ lp_build_blend_aos(struct gallivm_state *gallivm,
                               rgb_alpha_same,
                               false);
 
-      if (state->rgb_func != state->alpha_func && nr_channels > 1 &&
-          alpha_swizzle != PIPE_SWIZZLE_NONE) {
+      /*
+       * Compute the alpha channel as a separate pass whenever snorm
+       * blending needs it, same as when the blend funcs themselves differ.
+       */
+      bool snorm_alpha_mismatch =
+         lp_build_blend_snorm_needs_alpha_split(bld.base.type,
+                                                state->rgb_src_factor,
+                                                state->rgb_dst_factor,
+                                                state->alpha_src_factor,
+                                                state->alpha_dst_factor);
+
+      if ((state->rgb_func != state->alpha_func || snorm_alpha_mismatch) &&
+          nr_channels > 1 && alpha_swizzle != PIPE_SWIZZLE_NONE) {
          LLVMValueRef alpha;
 
          alpha = lp_build_blend(&bld.base,

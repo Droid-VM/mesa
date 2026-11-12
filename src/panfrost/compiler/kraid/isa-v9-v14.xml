@@ -83,7 +83,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="imm1w" pos="8" width="32" type="pc_rel_label_signed"/>
   </instruction>
-  <instruction name="AND" variant="i32" alias="LSHIFT_AND" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="AND" variant="i32" alias="LSHIFT_AND" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="and"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" exact="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" exact="192"/>
+  </instruction>
+  <instruction name="AND" variant="i32" alias="LSHIFT_AND" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -372,7 +406,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="imm1w" pos="8" width="32" type="uint"/>
   </instruction>
-  <instruction name="ARSHIFT" variant="i32" alias="ARSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="ARSHIFT" variant="i32" alias="ARSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" exact="192"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="arshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" exact="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="ARSHIFT" variant="i32" alias="ARSHIFT_OR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -640,7 +708,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="ARSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="ARSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="and"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="arshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="ARSHIFT_AND" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -932,7 +1037,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="ARSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="ARSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="arshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="ARSHIFT_OR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -1224,7 +1366,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="ARSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="ARSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="xor"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="arshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="ARSHIFT_XOR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -2002,7 +2181,40 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="offset" pos="8" width="27" type="pc_rel_label_signed" modifier="shr(3)"/>
   </instruction>
-  <instruction name="CLPER" exec_unit="sfu" since="9" until="14">
+  <instruction name="CLPER" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="subgroup"/>
+        <modifier name="lane_op"/>
+        <modifier name="inactive_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0"/>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="opcode2" pos="16" width="4" type="R2_opcode2_t" exact="CLPER"/>
+    <reserved pos="20" width="2" type="zero"/>
+    <field name="inactive_result" pos="22" width="4" type="clper_inactive_result_m" default="zero"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <reserved pos="30" width="2" type="zero"/>
+    <field name="lane_op" pos="32" width="4" type="clper_lane_op_m"/>
+    <field name="subgroup" pos="36" width="4" type="clper_subgroup_size_m"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="datatype" pos="48" width="4" type="data_type_t" exact="u32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R2"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="CLPER" exec_unit="cvt" exec_time="2" since="11" until="14">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -5056,7 +5268,7 @@
     <reserved pos="63" width="1" type="zero"/>
     <reserved pos="8" width="8" type="zero"/>
   </instruction>
-  <instruction name="FROUND" variant="f32" exec_unit="fma" since="11" until="13">
+  <instruction name="FROUND" variant="f32" exec_unit="fma" exec_time="2" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -5087,7 +5299,7 @@
     <reserved pos="63" width="1" type="zero"/>
     <reserved pos="8" width="8" type="zero"/>
   </instruction>
-  <instruction name="FROUND" variant="f32" exec_unit="fma" since="14" until="14">
+  <instruction name="FROUND" variant="f32" exec_unit="fma" exec_time="2" since="14" until="14">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -12741,7 +12953,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="LSHIFT" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="LSHIFT" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" exact="192"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" exact="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="LSHIFT" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -13009,7 +13255,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="LSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="LSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="and"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="LSHIFT_AND" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -13301,7 +13584,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="LSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="LSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="LSHIFT_OR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -13593,7 +13913,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="LSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="LSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="xor"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="LSHIFT_XOR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -14327,7 +14684,37 @@
     <field name="flow" pos="59" width="4" type="flow_control_m"/>
     <reserved pos="63" width="1" type="zero"/>
   </instruction>
-  <instruction name="NOT" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="NOT" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" exact="192"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="xor"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" exact="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" exact="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" exact="not"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" exact="192"/>
+  </instruction>
+  <instruction name="NOT" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -14605,7 +14992,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <reserved pos="8" width="8" type="zero"/>
   </instruction>
-  <instruction name="OR" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="OR" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" exact="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" exact="192"/>
+  </instruction>
+  <instruction name="OR" variant="i32" alias="LSHIFT_OR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -16060,7 +16481,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="RSHIFT" variant="i32" alias="RSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="RSHIFT" variant="i32" alias="RSHIFT_OR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" exact="192"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="rshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" exact="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="RSHIFT" variant="i32" alias="RSHIFT_OR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -16328,7 +16783,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="RSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="RSHIFT_AND" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="and"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="rshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="RSHIFT_AND" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -16620,7 +17112,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="RSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="RSHIFT_OR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="or"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="rshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="RSHIFT_OR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -16912,7 +17441,44 @@
     <reserved pos="63" width="1" type="zero"/>
     <field name="src1" pos="8" width="8" type="SourceEncoding"/>
   </instruction>
-  <instruction name="RSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="RSHIFT_XOR" variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src1">
+        <modifier name="lanes1"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="xor"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" default="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="rshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" type="SourceEncoding"/>
+  </instruction>
+  <instruction name="RSHIFT_XOR" variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -23608,7 +24174,41 @@
     <reserved pos="63" width="1" type="zero"/>
     <reserved pos="8" width="8" type="zero"/>
   </instruction>
-  <instruction name="XOR" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="sfu" since="9" until="13">
+  <instruction name="XOR" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="sfu" since="9" until="10">
+    <syntax>
+      <name>
+        <modifier name="flow"/>
+        <modifier name="not_result"/>
+      </name>
+      <dest>
+        <modifier name="dest_width"/>
+      </dest>
+      <src name="src0">
+        <modifier name="widen0"/>
+      </src>
+      <src name="src2">
+        <modifier name="not2"/>
+      </src>
+    </syntax>
+    <field name="src0" pos="0" width="8" type="SourceEncoding"/>
+    <field name="src2" pos="16" width="8" type="SourceEncoding"/>
+    <field name="bitwise_operation" pos="24" width="2" type="bitwise_operation_t" exact="xor"/>
+    <field name="lanes1" pos="26" width="4" type="shift_bitwise_i32_lanes_m" exact="b0"/>
+    <field name="not_result" pos="30" width="1" type="not_m" default="none"/>
+    <reserved pos="31" width="1" type="zero"/>
+    <field name="shift_operation" pos="32" width="3" type="shift_operation_t" exact="lshift"/>
+    <field name="not2" pos="35" width="1" type="not_m" default="none"/>
+    <field name="widen0" pos="36" width="4" type="widen_int_m" default="none" restrict="none h0 h1 b0 b1 b2 b3"/>
+    <field name="dest_register_index" pos="40" width="6" type="uint"/>
+    <field name="dest_width" pos="46" width="2" type="dest_width_m"/>
+    <field name="opcode1" pos="48" width="4" type="R3_opcode1_t" exact="SHIFT_BITWISE_I32"/>
+    <field name="instruction_class" pos="52" width="5" type="instruction_class_t" exact="R3"/>
+    <field name="fau_page_index" pos="57" width="2" type="uint"/>
+    <field name="flow" pos="59" width="4" type="flow_control_m"/>
+    <reserved pos="63" width="1" type="zero"/>
+    <field name="src1" pos="8" width="8" exact="192"/>
+  </instruction>
+  <instruction name="XOR" variant="i32" alias="LSHIFT_XOR" alias_variant="i32" exec_unit="cvt" since="11" until="13">
     <syntax>
       <name>
         <modifier name="flow"/>

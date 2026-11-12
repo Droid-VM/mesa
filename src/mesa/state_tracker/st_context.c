@@ -35,6 +35,7 @@
 #include "main/shaderobj.h"
 #include "main/state.h"
 #include "main/version.h"
+#include "main/varray.h"
 #include "main/hash.h"
 #include "program/prog_cache.h"
 #include "vbo/vbo.h"
@@ -119,8 +120,12 @@ st_invalidate_state(struct gl_context *ctx)
       ST_SET_STATE(ctx->NewDriverState, ST_NEW_RASTERIZER);
 
    if ((new_state & _NEW_LIGHT_STATE) &&
-       (!st->screen->caps.flatshade || !st->screen->caps.two_sided_color))
-      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_STATE);
+       (!st->screen->caps.flatshade || !st->screen->caps.two_sided_color)) {
+      /* materials, light parameters, and enables are not in the fs key */
+      if (st_fp_lower_flatshade(st) != st->fp_lower_flatshade ||
+          st_fp_lower_two_sided_color(st) != st->fp_lower_two_sided_color)
+         ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_STATE);
+   }
 
    if (new_state & _NEW_PROJECTION &&
        st_user_clip_planes_enabled(ctx))
@@ -137,9 +142,17 @@ st_invalidate_state(struct gl_context *ctx)
 
    /* Update the vertex shader if ctx->Light._ClampVertexColor was changed. */
    if (st->clamp_vert_color_in_shader && (new_state & _NEW_LIGHT_STATE)) {
-      ST_SET_STATE(ctx->NewDriverState, ST_NEW_VS_STATE);
+      const bool clamp = ctx->Light._ClampVertexColor;
+
+      if (st->vert_color_clamped[MESA_SHADER_VERTEX] != clamp)
+         ST_SET_STATE(ctx->NewDriverState, ST_NEW_VS_STATE);
+
       if (_mesa_is_desktop_gl_compat(st->ctx) && ctx->Version >= 32) {
-         ST_SET_STATE2(ctx->NewDriverState, ST_NEW_GS_STATE, ST_NEW_TES_STATE);
+         if (st->vert_color_clamped[MESA_SHADER_GEOMETRY] != clamp)
+            ST_SET_STATE(ctx->NewDriverState, ST_NEW_GS_STATE);
+
+         if (st->vert_color_clamped[MESA_SHADER_TESS_EVAL] != clamp)
+            ST_SET_STATE(ctx->NewDriverState, ST_NEW_TES_STATE);
       }
    }
 
@@ -352,6 +365,7 @@ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
    st_destroy_drawpix(st);
    st_destroy_drawtex(st);
    st_destroy_pbo_helpers(st);
+   st_destroy_egl_image_read(st);
 
    if (_mesa_has_compute_shaders(st->ctx) && st->transcode_astc)
       st_destroy_texcompress_compute(st);
@@ -434,6 +448,17 @@ st_init_driver_flags(struct st_context *st)
    if (st->screen->shader_caps[MESA_SHADER_FRAGMENT].max_hw_atomic_counters == 0
        && st->ctx->Const.ShaderStorageBufferOffsetAlignment > 4)
       ST_SET_SHADER_STATES(f->NewAtomicBuffer, CONSTANTS);
+
+   /* When we emulate polygon stipple, its enable/mode and the input primitive
+    * select the fragment shader variant and its stipple texture/sampler.  The
+    * input primitive feeds st_update_stipple_emulate() (ST_NEW_STIPPLE_EMULATE) which the
+    * FS atom reads.  Toggling the enable also has to (re)create the stipple
+    * texture (ST_NEW_POLY_STIPPLE).  These stay empty (no-op) otherwise.
+    */
+   if (st->emulate_polygon_stipple) {
+      ST_SET_STATE4(f->NewStippleEmulate, ST_NEW_STIPPLE_EMULATE, ST_NEW_FS_STATE,
+                    ST_NEW_FS_SAMPLER_VIEWS, ST_NEW_FS_SAMPLERS);
+   }
 }
 
 static bool
@@ -489,6 +514,13 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 
    st->cso_context = cso_create_context(pipe, cso_flags);
    ctx->cso_context = st->cso_context;
+
+   for (unsigned i = 0; i < PIPE_FORMAT_COUNT; i++) {
+      if (cso_vertex_format_needs_vbuf(st->cso_context, (enum pipe_format)i))
+         BITSET_SET(ctx->Array.VertexFormatFallbacks, i);
+   }
+   _mesa_update_vao_format_fallbacks(ctx, &ctx->Array.DefaultVAOState);
+   _mesa_update_vao_format_fallbacks(ctx, ctx->Array.DefaultVAO);
 
 #define ST_STATE(FLAG, st_update) st->update_functions[FLAG] = st_update;
 #include "st_atom_list.h"
@@ -605,9 +637,15 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
                       screen->caps.max_texture_upload_memory_budget);
 
    /* GL limits and extensions */
-   st_init_limits(screen, &ctx->Const, &ctx->Extensions, ctx->API);
+   st_init_limits(screen, &ctx->Const, &ctx->Extensions, &st->options, ctx->API);
    st_init_extensions(screen, &ctx->Const,
                       &ctx->Extensions, &st->options, ctx->API);
+
+   /* GLES 2/3 doesn't expose alpha test, user clip planes, polygon stipple, or
+    * two-sided color, so those lowers shouldn't disable the one-variant fast
+    * path.
+    */
+   const bool is_gles2 = _mesa_is_gles2(ctx);
 
    if (st_have_perfquery(st)) {
       ctx->Extensions.INTEL_performance_query = GL_TRUE;
@@ -634,6 +672,11 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       }
    }
 
+   st->fp_stipple_sampler = -1;
+   st->fp_stipple_polygon = false;
+   st->state.stipple_input_prim = MESA_PRIM_COUNT;
+   st->emulate_polygon_stipple = !screen->caps.polygon_stipple && !is_gles2;
+
    /* called after _mesa_create_context/_mesa_init_point, fix default user
     * settable max point size up
     */
@@ -649,11 +692,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 
    ctx->Const.TESPositionAlwaysPrecise = options->vs_position_always_precise;
 
-   /* GLES 2/3 doesn't expose alpha test, user clip planes, or two-sided
-    * color, so those lowers shouldn't disable the one-variant fast path.
-    */
-   const bool is_gles2 = _mesa_is_gles2(ctx);
-
    /* Set which shader types can be compiled at link time. */
    st->shader_has_one_variant[MESA_SHADER_VERTEX] =
          st->screen->caps.shareable_shaders &&
@@ -665,6 +703,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
          st->screen->caps.shareable_shaders &&
          st->screen->caps.flatshade &&
          (is_gles2 || st->screen->caps.alpha_test) &&
+         !st->emulate_polygon_stipple &&
          !st->clamp_frag_color_in_shader &&
          !st->force_persample_in_shader &&
          (is_gles2 || st->screen->caps.two_sided_color);
@@ -699,6 +738,11 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       st_destroy_context_priv(st, false);
       return NULL;
    }
+
+   if (st->pipe->set_context_param &&
+       !_mesa_is_gles3(ctx) && ctx->Version < 31)
+      st->pipe->set_context_param(st->pipe,
+                                  PIPE_CONTEXT_PARAM_MAG_SWITCHOVER_HALF, 1);
 
    if (_mesa_has_compute_shaders(ctx) &&
        st->transcode_astc && !st_init_texcompress_compute(st)) {
@@ -756,14 +800,7 @@ st_init_driver_functions(struct pipe_screen *screen,
    st_init_draw_functions(screen, functions);
 
    functions->NewProgram = _mesa_new_program;
-   st_init_flush_functions(screen, functions);
-
-   /* GL_ARB_get_program_binary */
    functions->ShaderCacheSerializeDriverBlob =  st_serialise_nir_program;
-   functions->ProgramBinarySerializeDriverBlob =
-      st_serialise_nir_program_binary;
-   functions->ProgramBinaryDeserializeDriverBlob =
-      st_deserialise_nir_program;
 }
 
 
@@ -945,6 +982,10 @@ st_destroy_context(struct st_context *st)
 
    st->pipe->sampler_view_release(st->pipe, st->pixel_xfer.pixelmap_sampler_view);
    pipe_resource_reference(&st->pixel_xfer.pixelmap_texture, NULL);
+
+   if (st->pstipple.sampler_view)
+      st->pipe->sampler_view_release(st->pipe, st->pstipple.sampler_view);
+   pipe_resource_reference(&st->pstipple.texture, NULL);
 
    _vbo_DestroyContext(ctx);
 

@@ -9,11 +9,45 @@
 #include "compiler/nir/nir_lower_blend.h"
 #include "v3d_compiler.h"
 
+static bool
+lower_dual_color_blend_by_location(nir_builder *b, nir_intrinsic_instr *intr,
+                                   void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location != FRAG_RESULT_DATA1)
+      return false;
+
+   sem.location = FRAG_RESULT_DATA0;
+   sem.dual_source_blend_index = 1;
+   nir_intrinsic_set_io_semantics(intr, sem);
+   return true;
+}
+
 bool
 v3d_nir_lower_blend(nir_shader *nir, struct v3d_compile *c)
 {
    if (!c->fs_key->software_blend)
       return false;
+
+   bool progress = false;
+
+   /* Workaround for Unigine Heaven/Valley */
+   if (unlikely(c->fs_key->force_dual_color_blend)) {
+      nir_variable *var =
+         nir_find_variable_with_location(nir, nir_var_shader_out,
+                                         FRAG_RESULT_DATA1);
+      if (var) {
+         var->data.location = FRAG_RESULT_DATA0;
+         var->data.index = 1;
+      }
+
+      progress = nir_shader_intrinsics_pass(nir,
+                                            lower_dual_color_blend_by_location,
+                                            nir_metadata_control_flow, NULL);
+   }
 
    nir_lower_blend_options options = {
       /* logic op is handled elsewhere in the compiler */
@@ -50,5 +84,8 @@ v3d_nir_lower_blend(nir_shader *nir, struct v3d_compile *c)
       options.rt[rt].alpha.src_factor = c->fs_key->blend[rt].alpha_src_factor;
    }
 
-   return lower_blend && nir_lower_blend(nir, &options);
+   if (lower_blend)
+      progress |= nir_lower_blend(nir, &options);
+
+   return progress;
 }

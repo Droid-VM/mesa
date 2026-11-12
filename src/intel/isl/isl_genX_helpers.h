@@ -89,7 +89,7 @@ isl_get_image_alignment(const struct isl_surf *surf)
    }
 
    if (GFX_VERx10 >= 125) {
-      if (isl_tiling_is_64(surf->tiling)) {
+      if (isl_tiling_is_standard(surf->tiling)) {
          /* The hardware ignores the alignment values. Anyway, the surface's
           * true alignment is likely outside the enum range of HALIGN* and
           * VALIGN*.
@@ -110,7 +110,7 @@ isl_get_image_alignment(const struct isl_surf *surf)
                              surf->image_alignment_el.d);
       }
    } else if (GFX_VER >= 9) {
-      if (isl_tiling_is_std_y(surf->tiling) ||
+      if (isl_tiling_is_standard(surf->tiling) ||
           surf->dim_layout == ISL_DIM_LAYOUT_GFX9_1D) {
          /* The hardware ignores the alignment values. Anyway, the surface's
           * true alignment is likely outside the enum range of HALIGN* and
@@ -477,6 +477,18 @@ isl_get_render_compression_format(enum isl_format format)
    case ISL_FORMAT_R8_SNORM:
    case ISL_FORMAT_R8_SINT:
       return 0x19;
+
+   /* These formats are not in the Enumeration_RenderCompressionFormat section
+    * in Bspec 53726. So, we align our mappings with the Xe2+ version of this
+    * function.
+    */
+   case ISL_FORMAT_L8A8_UNORM_SRGB:
+      return 0xA;  /* R8G8_UNORM */
+   case ISL_FORMAT_L8_UNORM_SRGB:
+      return 0x18; /* R8_UNORM */
+   case ISL_FORMAT_R9G9B9E5_SHAREDEXP:
+      return 0xD;  /* R11G11B10_FLOAT */
+
    default:
       UNREACHABLE("Unsupported render compression format!");
       return 0;

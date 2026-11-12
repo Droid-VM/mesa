@@ -50,6 +50,19 @@ bool
 dri2_yuv_dma_buf_supported(struct dri_screen *screen,
                            const struct dri2_format_mapping *map);
 
+enum pipe_format
+dri2_get_create_format(struct dri_screen *screen, enum pipe_format format,
+                       unsigned *tex_usage);
+
+int
+dri2_get_image_fourcc(struct dri_screen *screen,
+                      const struct dri2_format_mapping *map,
+                      enum pipe_format format);
+
+const struct dri2_format_mapping *
+dri2_get_import_mapping(struct dri_screen *screen, int fourcc,
+                        struct dri2_format_mapping *import_map);
+
 bool
 dri2_validate_egl_image(struct dri_screen *screen, void *handle);
 void

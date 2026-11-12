@@ -192,6 +192,7 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
    case SHADER_OPCODE_EXP2:
    case SHADER_OPCODE_SIN:
    case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH:
       /* 2 cycles:
        * math inv(8) g4<1>F g2<0,1,0>F      null       { align1 WE_normal 1Q };
        *
@@ -251,6 +252,7 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
 
       switch (send->sfid) {
       case GEN_SFID_SAMPLER: {
+         /* TODO: 64bit */
          unsigned msg_type = (send->desc >> 12) & 0x1f;
          switch (msg_type) {
          case GEN_SAMPLER_MESSAGE_SAMPLE_RESINFO:
@@ -344,6 +346,26 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
          break;
 
       case GEN_SFID_RENDER_CACHE:
+         if (send->efficient_64bit) {
+            switch (gen_64bit_msg_desc_get_opcode(send->combined_desc)) {
+            case GFX35_RENDER_TARGET_WRITE:
+            case GFX35_RENDER_TARGET_READ:
+               /* completely fabricated number like below */
+               latency = 600;
+               break;
+            case GFX35_RENDER_TARGET_DUAL_SOURCE_WRITE:
+               /* TODO: find the correct value, just got largest latency from
+                * the else block
+                */
+               latency = 14000;
+               break;
+            default:
+               UNREACHABLE("Unknown render cache message");
+            }
+
+            break;
+         }
+
          switch (brw_fb_desc_msg_type(isa->devinfo, send->desc)) {
          case GFX7_DATAPORT_RC_TYPED_SURFACE_WRITE:
          case GFX7_DATAPORT_RC_TYPED_SURFACE_READ:
@@ -480,7 +502,14 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
       case GEN_SFID_UGM:
       case GEN_SFID_TGM:
       case GEN_SFID_SLM:
-         switch (lsc_msg_desc_opcode(isa->devinfo, send->desc)) {
+         uint8_t opcode;
+
+         if (send->efficient_64bit)
+            opcode = gen_64bit_msg_desc_get_opcode(send->combined_desc);
+         else
+            opcode = lsc_msg_desc_opcode(isa->devinfo, send->desc);
+
+         switch (opcode) {
          case LSC_OP_LOAD:
          case LSC_OP_STORE:
          case LSC_OP_LOAD_CMASK:
@@ -1303,7 +1332,12 @@ brw_instruction_scheduler::calculate_deps()
     * GRF registers.
     */
    schedule_node *last_conditional_mod[16] = {};
-   schedule_node *last_accumulator_write = NULL;
+
+   /* In "big GRF" mode, Xe3 has 8 SIMD16 accumulators. Xe, Xe2, and Xe3 in
+    * normal mode have 4 accumulators. Gfx9/11/12 have 2 accumulators.
+    */
+   schedule_node *last_accumulator_write[16] = {};
+
    /* Fixed HW registers are assumed to be separate from the virtual
     * GRFs, so they can be tracked separately.  We don't really write
     * to fixed GRFs much, so don't bother tracking them on a more
@@ -1409,7 +1443,12 @@ brw_instruction_scheduler::calculate_deps()
                add_dep(last_fixed_grf_write, n);
             }
          } else if (inst->src[i].is_accumulator()) {
-            add_dep(last_accumulator_write, n);
+            unsigned acc_bits =
+               brw_explicit_accumulator_bits(inst->exec_size, inst->src[i]);
+
+            u_foreach_bit(j, acc_bits) {
+               add_dep(last_accumulator_write[j], n);
+            }
          } else if (inst->src[i].is_address()) {
             if (post_reg_alloc) {
                const unsigned read = inst->size_read(s->devinfo, i);
@@ -1431,7 +1470,13 @@ brw_instruction_scheduler::calculate_deps()
       }
 
       if (inst->reads_accumulator_implicitly()) {
-         add_dep(last_accumulator_write, n);
+         unsigned acc_bits =
+            brw_implicit_accumulator_bits(inst->exec_size, inst->group,
+                                          get_exec_type(inst));
+
+         u_foreach_bit(j, acc_bits) {
+            add_dep(last_accumulator_write[j], n);
+         }
       }
 
       /* write-after-write deps. */
@@ -1454,8 +1499,13 @@ brw_instruction_scheduler::calculate_deps()
             last_fixed_grf_write = n;
          }
       } else if (inst->dst.is_accumulator()) {
-         add_dep(last_accumulator_write, n);
-         last_accumulator_write = n;
+         unsigned acc_bits =
+            brw_explicit_accumulator_bits(inst->exec_size, inst->dst);
+
+         u_foreach_bit(i, acc_bits) {
+            add_dep(last_accumulator_write[i], n);
+            last_accumulator_write[i] = n;
+         }
       } else if (inst->dst.is_address()) {
          if (post_reg_alloc) {
             for (unsigned byte = 0; byte < inst->size_written; byte += 2) {
@@ -1480,8 +1530,14 @@ brw_instruction_scheduler::calculate_deps()
 
       if (inst->writes_accumulator_implicitly(s->devinfo) &&
           !inst->dst.is_accumulator()) {
-         add_dep(last_accumulator_write, n);
-         last_accumulator_write = n;
+         unsigned acc_bits =
+            brw_implicit_accumulator_bits(inst->exec_size, inst->group,
+                                          get_exec_type(inst));
+
+         u_foreach_bit(i, acc_bits) {
+            add_dep(last_accumulator_write[i], n);
+            last_accumulator_write[i] = n;
+         }
       }
 
       if (post_reg_alloc && inst->uses_address_register_implicitly()) {
@@ -1496,7 +1552,7 @@ brw_instruction_scheduler::calculate_deps()
 
    /* bottom-to-top dependencies: WAR */
    memset(last_conditional_mod, 0, sizeof(last_conditional_mod));
-   last_accumulator_write = NULL;
+   memset(last_accumulator_write, 0, sizeof(last_accumulator_write));
    last_fixed_grf_write = NULL;
    memset(last_address_write, 0, sizeof(last_address_write));
 
@@ -1518,7 +1574,12 @@ brw_instruction_scheduler::calculate_deps()
                add_dep(n, last_fixed_grf_write, 0);
             }
          } else if (inst->src[i].is_accumulator()) {
-            add_dep(n, last_accumulator_write, 0);
+            unsigned acc_bits =
+               brw_explicit_accumulator_bits(inst->exec_size, inst->src[i]);
+
+            u_foreach_bit(j, acc_bits) {
+               add_dep(n, last_accumulator_write[j], 0);
+            }
          } else if (inst->src[i].is_address()) {
             if (post_reg_alloc) {
                const unsigned read = inst->size_read(s->devinfo, i);
@@ -1541,7 +1602,13 @@ brw_instruction_scheduler::calculate_deps()
       }
 
       if (inst->reads_accumulator_implicitly()) {
-         add_dep(n, last_accumulator_write);
+         unsigned acc_bits =
+            brw_implicit_accumulator_bits(inst->exec_size, inst->group,
+                                          get_exec_type(inst));
+
+         u_foreach_bit(i, acc_bits) {
+            add_dep(n, last_accumulator_write[i]);
+         }
       }
 
       if (post_reg_alloc && inst->uses_address_register_implicitly()) {
@@ -1564,7 +1631,12 @@ brw_instruction_scheduler::calculate_deps()
             last_fixed_grf_write = n;
          }
       } else if (inst->dst.is_accumulator()) {
-         last_accumulator_write = n;
+         unsigned acc_bits =
+            brw_explicit_accumulator_bits(inst->exec_size, inst->dst);
+
+         u_foreach_bit(i, acc_bits) {
+            last_accumulator_write[i] = n;
+         }
       } else if (inst->dst.is_address()) {
          if (post_reg_alloc) {
             for (unsigned byte = 0; byte < inst->size_written; byte += 2)
@@ -1584,7 +1656,13 @@ brw_instruction_scheduler::calculate_deps()
       }
 
       if (inst->writes_accumulator_implicitly(s->devinfo)) {
-         last_accumulator_write = n;
+         unsigned acc_bits =
+            brw_implicit_accumulator_bits(inst->exec_size, inst->group,
+                                          get_exec_type(inst));
+
+         u_foreach_bit(i, acc_bits) {
+            last_accumulator_write[i] = n;
+         }
       }
    }
 

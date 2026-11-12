@@ -54,7 +54,7 @@ impl TestRunner {
         self.group.check_state()?;
 
         // Copy the data back
-        invoc.data.copy_from_slice(cs.read_host_data());
+        cs.copy_back(invoc);
 
         Ok(())
     }

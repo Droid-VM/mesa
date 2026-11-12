@@ -149,6 +149,19 @@ generate_texture_mipmap(struct gl_context *ctx,
          return;
       }
 
+      /* From OpenGL ES 2.0 spec, section 3.7.11 "Mipmap Generation":
+       *
+       *    "If either the width or height of the level zero array are not a
+       *     power or two, the error INVALID_OPERATION is generated."
+       */
+      if (_mesa_is_gles2(ctx) && !_mesa_has_OES_texture_npot(ctx) &&
+          !_mesa_is_power_of_two_texture(srcImage)) {
+         _mesa_unlock_texture(ctx, texObj);
+         _mesa_error(ctx, GL_INVALID_OPERATION,
+                     "%s(non-power-of-two base image)", caller);
+         return;
+      }
+
       /* The GLES 2.0 spec says:
        *
        *    "If the level zero array is stored in a compressed internal format,

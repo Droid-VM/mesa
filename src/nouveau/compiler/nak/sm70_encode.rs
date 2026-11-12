@@ -3,12 +3,12 @@
 
 use crate::ir::*;
 use crate::legalize::{
-    src_is_reg, src_is_upred_reg, swap_srcs_if_not_reg, LegalizeBuildHelpers,
-    LegalizeBuilder,
+    src_is_reg, src_is_upred_reg, swap_srcs_if_both_reg, swap_srcs_if_not_reg,
+    LegalizeBuildHelpers, LegalizeBuilder,
 };
 use crate::sm70::ShaderModel70;
-use bitview::*;
 
+use mesa_util::bitview::*;
 use rustc_hash::FxHashMap;
 use std::mem;
 use std::ops::Range;
@@ -1601,7 +1601,14 @@ impl SM70Op for OpIAdd3 {
         if !src0.is_unmodified() && !src1.is_unmodified() {
             assert!(self.overflow[0].is_none());
             assert!(self.overflow[1].is_none());
-            b.copy_alu_src_and_lower_ineg(src0, gpr, SrcType::I32);
+
+            if src2.is_unmodified() {
+                swap_srcs_if_both_reg(src0, src2, gpr);
+            }
+
+            if !src0.is_unmodified() {
+                b.copy_alu_src_and_lower_ineg(src0, gpr, SrcType::I32);
+            }
         }
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::I32);
         b.copy_alu_src_if_both_not_reg(src1, src2, gpr, SrcType::I32);
@@ -1709,7 +1716,7 @@ impl SM70Op for OpIDp4 {
             std::mem::swap(src_type0, src_type1);
         }
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::ALU);
-        b.copy_alu_src_if_ineg_imm(src1, gpr, SrcType::I32);
+        b.copy_alu_src_if_imm(src1, gpr, SrcType::I32);
         b.copy_alu_src_if_not_reg(src2, gpr, SrcType::ALU);
     }
 
@@ -1779,10 +1786,13 @@ impl SM70Op for OpIMad64 {
         let [src0, src1, src2] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, gpr);
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::ALU);
-        b.copy_alu_src_if_both_not_reg(src1, src2, gpr, SrcType::ALU);
+        // We prefer copying src1, because src2 is 64 bit and more expensive to
+        // copy, so src1 needs to be the second source passed in.
+        b.copy_alu_src_if_both_not_reg(src2, src1, gpr, SrcType::ALU);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(!self.srcs[2].is_immediate());
         if self.is_uniform() {
             e.encode_ualu(
                 0x0a5,

@@ -81,6 +81,14 @@ enum st_update_velems {
    UPDATE_VELEMS_ON,          /* always works */
 };
 
+/* Whether vertex formats that need translation must be sent to u_vbuf
+ * explicitly because cso doesn't always use it.
+ */
+enum st_check_format_fallbacks {
+   FORMAT_FALLBACKS_OFF,      /* specialized version (faster) */
+   FORMAT_FALLBACKS_ON,       /* always works */
+};
+
 /* Always inline the non-64bit element code, so that the compiler can see
  * that velements is on the stack.
  */
@@ -268,6 +276,12 @@ st_setup_arrays(struct st_context *st,
        vp_variant->vert_attrib_mask,
        vp_variant->vert_attrib_mask & enabled_arrays,
        velements, vbuffer, num_vbuffers);
+
+   /* The elements are laid out by their position in the mask, with holes
+    * left for the current values that st_setup_current_user() fills in, so
+    * count every attrib in the mask, not just the enabled arrays.
+    */
+   velements->count = util_bitcount(vp_variant->vert_attrib_mask);
 }
 
 /* ALWAYS_INLINE helps the compiler realize that most of the parameters are
@@ -396,7 +410,8 @@ template<util_popcnt POPCNT,
          st_allow_zero_stride_attribs ALLOW_ZERO_STRIDE_ATTRIBS,
          st_identity_attrib_mapping HAS_IDENTITY_ATTRIB_MAPPING,
          st_allow_user_buffers ALLOW_USER_BUFFERS,
-         st_update_velems UPDATE_VELEMS> void ALWAYS_INLINE
+         st_update_velems UPDATE_VELEMS,
+         st_check_format_fallbacks CHECK_FORMAT_FALLBACKS> void ALWAYS_INLINE
 st_update_array_templ(struct st_context *st,
                       const GLbitfield enabled_arrays,
                       const GLbitfield enabled_user_arrays,
@@ -470,6 +485,10 @@ st_update_array_templ(struct st_context *st,
    if (FILL_TC_SET_VB)
          assert(num_vbuffers == num_vbuffers_tc);
 
+   const bool uses_vbuf = uses_user_vertex_buffers ||
+                          (CHECK_FORMAT_FALLBACKS &&
+                           st->vertex_formats_need_vbuf);
+
    if (UPDATE_VELEMS) {
       struct cso_context *cso = st->cso_context;
       velements.count = vp->num_inputs + vp_variant->key.passthrough_edgeflags;
@@ -480,18 +499,18 @@ st_update_array_templ(struct st_context *st,
          tc_set_vertex_elements_for_call(st->pipe, vbuffer, state);
       } else {
          cso_set_vertex_buffers_and_elements(cso, &velements, num_vbuffers,
-                                             uses_user_vertex_buffers, vbuffer);
+                                             uses_vbuf, vbuffer);
       }
       /* The driver should clear this after it has processed the update. */
       ctx->Array.NewVertexElements = false;
-      st->uses_user_vertex_buffers = uses_user_vertex_buffers;
+      st->uses_user_vertex_buffers = uses_vbuf;
    } else {
       /* Only vertex buffers. */
       if (!FILL_TC_SET_VB)
          cso_set_vertex_buffers(st->cso_context, num_vbuffers, vbuffer);
 
       /* This can change only when we update vertex elements. */
-      assert(st->uses_user_vertex_buffers == uses_user_vertex_buffers);
+      assert(st->uses_user_vertex_buffers == uses_vbuf);
    }
 }
 
@@ -502,15 +521,16 @@ typedef void (*update_array_func)(struct st_context *st,
 
 /* This just initializes the table of all st_update_array variants. */
 struct st_update_array_table {
-   update_array_func funcs[2][2][2][2][2][2];
+   update_array_func funcs[2][2][2][2][2][2][2];
 
    template<util_popcnt POPCNT,
             st_fill_tc_set_vb FILL_TC_SET_VB,
             st_allow_zero_stride_attribs ALLOW_ZERO_STRIDE_ATTRIBS,
             st_identity_attrib_mapping HAS_IDENTITY_ATTRIB_MAPPING,
             st_allow_user_buffers ALLOW_USER_BUFFERS,
-            st_update_velems UPDATE_VELEMS>
-   void init_one()
+            st_update_velems UPDATE_VELEMS,
+            st_check_format_fallbacks CHECK_FORMAT_FALLBACKS>
+   void init_one_variant()
    {
       /* These conditions reduce the number of compiled variants. */
       /* The TC path is only valid without user buffers.
@@ -523,8 +543,15 @@ struct st_update_array_table {
          !ALLOW_ZERO_STRIDE_ATTRIBS && !fill_tc_set_vb ?
             POPCNT_INVALID : POPCNT;
 
+      /* Formats that need translation always select the user buffer
+       * variants.
+       */
+      constexpr st_check_format_fallbacks check_format_fallbacks =
+         ALLOW_USER_BUFFERS ? CHECK_FORMAT_FALLBACKS : FORMAT_FALLBACKS_OFF;
+
       funcs[POPCNT][FILL_TC_SET_VB][ALLOW_ZERO_STRIDE_ATTRIBS]
-           [HAS_IDENTITY_ATTRIB_MAPPING][ALLOW_USER_BUFFERS][UPDATE_VELEMS] =
+           [HAS_IDENTITY_ATTRIB_MAPPING][ALLOW_USER_BUFFERS][UPDATE_VELEMS]
+           [CHECK_FORMAT_FALLBACKS] =
          st_update_array_templ<
             popcnt,
             fill_tc_set_vb,
@@ -532,7 +559,24 @@ struct st_update_array_table {
             ALLOW_ZERO_STRIDE_ATTRIBS,
             HAS_IDENTITY_ATTRIB_MAPPING,
             ALLOW_USER_BUFFERS,
-            UPDATE_VELEMS>;
+            UPDATE_VELEMS,
+            check_format_fallbacks>;
+   }
+
+   template<util_popcnt POPCNT,
+            st_fill_tc_set_vb FILL_TC_SET_VB,
+            st_allow_zero_stride_attribs ALLOW_ZERO_STRIDE_ATTRIBS,
+            st_identity_attrib_mapping HAS_IDENTITY_ATTRIB_MAPPING,
+            st_allow_user_buffers ALLOW_USER_BUFFERS,
+            st_update_velems UPDATE_VELEMS>
+   void init_one()
+   {
+      init_one_variant<POPCNT, FILL_TC_SET_VB, ALLOW_ZERO_STRIDE_ATTRIBS,
+                       HAS_IDENTITY_ATTRIB_MAPPING, ALLOW_USER_BUFFERS,
+                       UPDATE_VELEMS, FORMAT_FALLBACKS_OFF>();
+      init_one_variant<POPCNT, FILL_TC_SET_VB, ALLOW_ZERO_STRIDE_ATTRIBS,
+                       HAS_IDENTITY_ATTRIB_MAPPING, ALLOW_USER_BUFFERS,
+                       UPDATE_VELEMS, FORMAT_FALLBACKS_ON>();
    }
 
    /* We have to do this in stages because of the combinatorial explosion of
@@ -593,7 +637,8 @@ struct st_update_array_table {
 static st_update_array_table update_array_table;
 
 template<util_popcnt POPCNT,
-         st_use_vao_fast_path USE_VAO_FAST_PATH> void ALWAYS_INLINE
+         st_use_vao_fast_path USE_VAO_FAST_PATH,
+         st_check_format_fallbacks CHECK_FORMAT_FALLBACKS> void ALWAYS_INLINE
 st_update_array_impl(struct st_context *st)
 {
    struct gl_context *ctx = st->ctx;
@@ -611,17 +656,30 @@ st_update_array_impl(struct st_context *st)
    _mesa_get_derived_vao_masks(ctx, enabled_arrays, &enabled_user_arrays,
                                &nonzero_divisor_arrays);
 
+   const GLbitfield inputs_read = st->vp_variant->vert_attrib_mask;
+
+   /* Current attribs don't need to be checked: their formats are always
+    * FLOAT32, SINT32, UINT32, or UINT64, which u_vbuf never translates.
+    */
+   if (CHECK_FORMAT_FALLBACKS && ctx->Array.NewVertexElements) {
+      st->vertex_formats_need_vbuf =
+         vao->FormatFallbackMask &&
+         (inputs_read & enabled_arrays &
+          _mesa_vao_enable_to_vp_inputs(vao->_AttributeMapMode,
+                                        vao->FormatFallbackMask));
+   }
+
    /* Execute the slow path without using multiple C++ template variants. */
    if (!USE_VAO_FAST_PATH) {
       st_update_array_templ<POPCNT, FILL_TC_SET_VB_OFF, VAO_FAST_PATH_OFF,
                             ZERO_STRIDE_ATTRIBS_ON, IDENTITY_ATTRIB_MAPPING_OFF,
-                            USER_BUFFERS_ON, UPDATE_VELEMS_ON>
+                            USER_BUFFERS_ON, UPDATE_VELEMS_ON,
+                            CHECK_FORMAT_FALLBACKS>
          (st, enabled_arrays, enabled_user_arrays, nonzero_divisor_arrays);
       return;
    }
 
    /* The fast path that selects from multiple C++ template variants. */
-   const GLbitfield inputs_read = st->vp_variant->vert_attrib_mask;
    const GLbitfield enabled_arrays_read = inputs_read & enabled_arrays;
 
    /* Check cso_context whether it goes directly to TC. */
@@ -635,7 +693,9 @@ st_update_array_impl(struct st_context *st)
                                  (vao->NonIdentityBufferAttribMapping |
                                   non_identity_attrib_mapping));
    /* has_user_buffers is always false with glthread. */
-   bool has_user_buffers = inputs_read & enabled_user_arrays;
+   bool has_user_buffers = (inputs_read & enabled_user_arrays) ||
+                           (CHECK_FORMAT_FALLBACKS &&
+                            st->vertex_formats_need_vbuf);
    /* Changing from user to non-user buffers and vice versa can switch between
     * cso and u_vbuf, which means that we need to update vertex elements even
     * when they have not changed.
@@ -645,7 +705,7 @@ st_update_array_impl(struct st_context *st)
 
    update_array_table.funcs[POPCNT][fill_tc_set_vbs][has_zero_stride_attribs]
                            [has_identity_mapping][has_user_buffers]
-                           [update_velems]
+                           [update_velems][CHECK_FORMAT_FALLBACKS]
       (st, enabled_arrays, enabled_user_arrays, nonzero_divisor_arrays);
 }
 
@@ -663,17 +723,29 @@ st_init_update_array(struct st_context *st)
 {
    st_update_func_t *func = &st->update_functions[ST_NEW_VERTEX_ARRAYS];
 
+#define SET_FUNC(POPCNT, FORMAT_FALLBACKS) \
+   do { \
+      if (st->ctx->Const.UseVAOFastPath) { \
+         *func = st_update_array_impl<POPCNT, VAO_FAST_PATH_ON, \
+                                      FORMAT_FALLBACKS>; \
+      } else { \
+         *func = st_update_array_impl<POPCNT, VAO_FAST_PATH_OFF, \
+                                      FORMAT_FALLBACKS>; \
+      } \
+   } while (0)
+
    if (util_get_cpu_caps()->has_popcnt) {
-      if (st->ctx->Const.UseVAOFastPath)
-         *func = st_update_array_impl<POPCNT_YES, VAO_FAST_PATH_ON>;
+      if (st->cso_context->vertex_format_fallbacks)
+         SET_FUNC(POPCNT_YES, FORMAT_FALLBACKS_ON);
       else
-         *func = st_update_array_impl<POPCNT_YES, VAO_FAST_PATH_OFF>;
+         SET_FUNC(POPCNT_YES, FORMAT_FALLBACKS_OFF);
    } else {
-      if (st->ctx->Const.UseVAOFastPath)
-         *func = st_update_array_impl<POPCNT_NO, VAO_FAST_PATH_ON>;
+      if (st->cso_context->vertex_format_fallbacks)
+         SET_FUNC(POPCNT_NO, FORMAT_FALLBACKS_ON);
       else
-         *func = st_update_array_impl<POPCNT_NO, VAO_FAST_PATH_OFF>;
+         SET_FUNC(POPCNT_NO, FORMAT_FALLBACKS_OFF);
    }
+#undef SET_FUNC
 }
 
 struct pipe_vertex_state *

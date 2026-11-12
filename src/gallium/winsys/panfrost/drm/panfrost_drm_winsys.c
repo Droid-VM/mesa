@@ -38,6 +38,10 @@
 #include "panfrost_drm_public.h"
 #include "xf86drm.h"
 
+#ifdef HAVE_PANFROST_VDRM
+#include "virtio/virtio-gpu/drm_hw.h"
+#endif
+
 struct renderonly_scanout *
 panfrost_create_kms_dumb_buffer_for_resource(struct pipe_resource *rsc,
                                              struct renderonly *ro,
@@ -131,4 +135,20 @@ panfrost_drm_screen_create_renderonly(int fd, struct renderonly *ro,
 {
    return u_pipe_screen_lookup_or_create(os_dupfd_cloexec(fd), config, ro,
                                          panfrost_create_screen);
+}
+
+bool
+panfrost_drm_probe_nctx(int fd, const struct virgl_renderer_capset_drm *caps)
+{
+#ifdef HAVE_PANFROST_VDRM
+   if (caps->context_type != VIRTGPU_DRM_CONTEXT_PANFROST)
+      return false;
+
+   if (debug_get_bool_option("PANFROST_VDRM_DISABLE", false))
+      return false;
+
+   return true;
+#else
+   return false;
+#endif
 }

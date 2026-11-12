@@ -15,7 +15,7 @@
 #include "util/ralloc.h"
 #include "util/u_math.h"
 #include "elk_isa_info.h"
-#include "../intel_shader_enums.h"
+#include "../intel_shader.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -72,51 +72,67 @@ type_to_documentation: dict[DrircOptionType, str] = {
 }
 
 class DrircOption(object):
-    def __init__(self, dtype, name, description, c_name):
+    def __init__(self, dtype, name, description, c_name, min_device_version=None, max_device_version=None):
         self.dtype = dtype
         self.name = name
         self.description = description
         self.c_name = c_name
         self.c_args = []
+        self.min_device_version = min_device_version
+        self.max_device_version = max_device_version
+
+    def device_version_out_of_range_expr(self):
+        parts = []
+        if self.min_device_version is not None:
+            parts.append(f"device_version < {self.min_device_version}ul")
+        if self.max_device_version is not None:
+            parts.append(f"device_version > {self.max_device_version}ul")
+        return " || ".join(parts) if parts else None
 
 class DrircBool(DrircOption):
-    def __init__(self, name, value, description="", c_name=None):
-        super().__init__(DrircOptionType.BOOL, name, description, c_name)
+    def __init__(self, name, value, description="", c_name=None, min_device_version=None, max_device_version=None):
+        super().__init__(DrircOptionType.BOOL, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         self.c_args = ["true" if value else "false", f"\"{self.description}\""]
 
 class DrircInt(DrircOption):
-    def __init__(self, name, value, min_value, max_value, description="", c_name=None):
-        super().__init__(DrircOptionType.INT, name, description, c_name)
+    def __init__(self, name, value, min_value, max_value, description="", c_name=None,
+                 min_device_version=None, max_device_version=None):
+        super().__init__(DrircOptionType.INT, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         self.min_value = min_value
         self.max_value = max_value
         self.c_args = [f"{value}", f"{min_value}", f"{max_value}", f"\"{self.description}\""]
 
 class DrircUint64(DrircOption):
-    def __init__(self, name, value, min_value, max_value, description="", c_name=None):
-        super().__init__(DrircOptionType.UINT64, name, description, c_name)
+    def __init__(self, name, value, min_value, max_value, description="", c_name=None,
+                 min_device_version=None, max_device_version=None):
+        super().__init__(DrircOptionType.UINT64, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         self.min_value = min_value
         self.max_value = max_value
         self.c_args = [f"{value}ULL", f"{min_value}ULL", f"{max_value}ULL", f"\"{self.description}\""]
 
 class DrircFloat(DrircOption):
-    def __init__(self, name, value, min_value, max_value, description="", c_name=None):
-        super().__init__(DrircOptionType.FLOAT, name, description, c_name)
+    def __init__(self, name, value, min_value, max_value, description="", c_name=None,
+                 min_device_version=None, max_device_version=None):
+        super().__init__(DrircOptionType.FLOAT, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         self.min_value = min_value
         self.max_value = max_value
         self.c_args = [f"{value}", f"{min_value}", f"{max_value}", f"\"{self.description}\""]
 
 class DrircString(DrircOption):
-    def __init__(self, name, value=None, description="", c_name=None):
+    def __init__(self, name, value=None, description="", c_name=None,
+                 min_device_version=None, max_device_version=None):
         dtype = DrircOptionType.STRING if value is not None else DrircOptionType.STRING_NODEF
-        super().__init__(dtype, name, description, c_name)
+        super().__init__(dtype, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         if value is not None:
             self.c_args = [f'"{value}"', f'"{self.description}"']
         else:
+            assert min_device_version is None and max_device_version is None, \
+                f"{name}: device version bounds require a default value (no STRING_NODEF)"
             self.c_args = [f'"{self.description}"']
 
 class DrircEnumValue(object):
@@ -125,13 +141,14 @@ class DrircEnumValue(object):
         self.description = description
 
 class DrircEnum(DrircOption):
-    def __init__(self, name, value, min_value, max_value, values, description="", c_name=None):
-        super().__init__(DrircOptionType.ENUM, name, description, c_name)
+    def __init__(self, name, value, min_value, max_value, values, description="", c_name=None,
+                 min_device_version=None, max_device_version=None):
+        super().__init__(DrircOptionType.ENUM, name, description, c_name, min_device_version, max_device_version)
         self.values = values
         self.value = value
         self.min_value = min_value
         self.max_value = max_value
-        self.c_args = [f"{value}", f"{min_value}", f"{min_value}", f"\"{self.description}\""]
+        self.c_args = [f"{value}", f"{min_value}", f"{max_value}", f"\"{self.description}\""]
         vals = []
         for v in values:
             vals.append(f"DRI_CONF_ENUM({v.value}, \"{v.description}\")")
@@ -192,6 +209,7 @@ void ${driver_prefix}_parse_dri_options(struct ${driver_prefix}_drirc *drirc,
 TEMPLATE_C = """\
 /* This file is autogenerated.  Do not edit. */
 
+#include <stdlib.h>
 #include "${include_file}"
 
 static const driOptionDescription dri_options[] = {
@@ -215,10 +233,18 @@ ${driver_prefix}_parse_dri_options(struct ${driver_prefix}_drirc *drirc,
    driParseOptionInfo(&drirc->available_options, dri_options, ARRAY_SIZE(dri_options));
    driParseConfigFiles(&drirc->options, &drirc->available_options, params);
 
+% if any(opt.device_version_out_of_range_expr() is not None for section in sections for opt in section.options):
+   uint32_t device_version = params->deviceVersion;
+% endif
+
 % for section in sections:
 %   for option in section.options:
 %     if option.c_name is not None:
    drirc->${section.c_name}.${option.c_name} = ${type_to_queryfn(option.dtype)}(&drirc->options, "${option.name}");
+%       if option.device_version_out_of_range_expr() is not None:
+   if (device_version != 0 && (${option.device_version_out_of_range_expr()}))
+      drirc->${section.c_name}.${option.c_name} = ${option.c_args[0]};
+%       endif
 %     endif
 %   endfor
 % endfor
@@ -343,6 +369,9 @@ def add_common_vk_options(debug_options, features_options, misc_options, valid_o
         S("force_vk_devicename", defaults.get("force_vk_devicename", None),
           "Override Vulkan deviceName.",
           c_name="force_vk_devicename"),
+        S("vk_app_layer", defaults.get("vk_app_layer", None),
+          "Select a common application workarounds layer",
+          c_name="vk_app_layer"),
         B("vk_lower_terminate_to_discard", defaults.get("vk_lower_terminate_to_discard", False),
           "Lower terminate to discard (which is implicitly demote)",
           c_name="lower_terminate_to_discard"),
@@ -395,4 +424,6 @@ def add_common_vk_wsi_options(debug_options, performance_options, defaults=None)
           "Disable unordered WSI submits to workaround application synchronization bugs"),
         B("vk_x11_ignore_suboptimal", defaults.get("vk_x11_ignore_suboptimal", False),
           "Force the X11 WSI to never report VK_SUBOPTIMAL_KHR"),
+        B("vk_x11_dedicated_event_connection", defaults.get("vk_x11_dedicated_event_connection", False),
+          "Read X11 Present events on a separate connection to the X server instead of the application's connection"),
     ])

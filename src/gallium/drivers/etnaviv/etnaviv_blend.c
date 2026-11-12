@@ -94,7 +94,8 @@ etna_blend_state_create(struct pipe_context *pctx,
                              rt->rgb_dst_factor == rt->alpha_dst_factor &&
                              rt->rgb_func == rt->alpha_func);
 
-      co->rt[i].fo_allowed = !co->rt[i].alpha_enable && !logicop_enable;
+      co->rt[i].fo_allowed = !co->rt[i].alpha_enable && !logicop_enable &&
+                             !so->advanced_blend_func;
    }
 
    co->PE_LOGIC_OP =
@@ -109,17 +110,23 @@ etna_blend_state_create(struct pipe_context *pctx,
 
    /* XXX alpha_to_one? */
 
+   if (so->advanced_blend_func)
+      co->PE_ADVANCED_ALPHA_CONFIG = VIVS_PE_ADVANCED_ALPHA_CONFIG_ADVANCED_BLEND_MODE(
+         translate_advanced_blend_mode(so->advanced_blend_func));
+
    return co;
 }
 
 bool
 etna_update_blend(struct etna_context *ctx)
 {
+   const bool widen_32bpc_colormask = !VIV_FEATURE(ctx->screen, ETNA_FEATURE_PE_32BPC_COLORMASK_FIX);
    struct pipe_framebuffer_state *pfb = &ctx->framebuffer_s.base;
    struct pipe_blend_state *pblend = ctx->blend;
    struct etna_blend_state *blend = etna_blend_state(pblend);
    unsigned current_rt = 0;
    bool dither_allow = true;
+   bool all_overwrite = true;
 
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
       if (!pfb->cbufs[i].texture)
@@ -163,17 +170,39 @@ etna_update_blend(struct etna_context *ctx)
          full_overwrite = blend->rt[src].fo_allowed && colormask == 0x3;
       }
 
-      if (current_rt == 0) {
-         blend->rt[0].PE_COLOR_FORMAT =
-                  VIVS_PE_COLOR_FORMAT_COMPONENTS(colormask) |
-                  COND(full_overwrite, VIVS_PE_COLOR_FORMAT_OVERWRITE);
-      } else {
-         blend->rt[current_rt].PE_HALTI5_COLORMASK =
-                  VIVS_PE_HALTI5_RT_COLORMASK_COMPONENTS(colormask) |
-                  COND(full_overwrite, VIVS_PE_HALTI5_RT_COLORMASK_OVERWRITE);
+      if (widen_32bpc_colormask) {
+         const bool is_128bit_plane = src >= 0 ||
+                                      (ctx->framebuffer_s.rt_is_128bit & (1u << i));
+         const bool is_32bpc = desc->channel[0].size == 32 && desc->nr_channels <= 2;
+
+         if (is_128bit_plane || is_32bpc)
+            colormask = (colormask & 1 ? 0x3 : 0) | (colormask & 2 ? 0xc : 0);
       }
 
-      if (blend->rt[i].alpha_enable) {
+      if (current_rt == 0) {
+         blend->rt[0].PE_COLOR_FORMAT =
+                  VIVS_PE_COLOR_FORMAT_COMPONENTS(colormask);
+      } else {
+         blend->rt[current_rt].PE_HALTI5_COLORMASK =
+                  VIVS_PE_HALTI5_RT_COLORMASK_COMPONENTS(colormask);
+      }
+
+      all_overwrite &= full_overwrite;
+
+      if (pblend->advanced_blend_func) {
+         /* The mode in PE_ADVANCED_ALPHA_CONFIG replaces the blend math, so the
+          * classic blender gets a neutral configuration.
+          */
+         blend->rt[current_rt].PE_ALPHA_CONFIG =
+            VIVS_PE_ALPHA_CONFIG_BLEND_ENABLE_COLOR |
+            VIVS_PE_ALPHA_CONFIG_BLEND_SEPARATE_ALPHA |
+            VIVS_PE_ALPHA_CONFIG_SRC_FUNC_COLOR(BLEND_FUNC_ONE) |
+            VIVS_PE_ALPHA_CONFIG_SRC_FUNC_ALPHA(BLEND_FUNC_ONE) |
+            VIVS_PE_ALPHA_CONFIG_DST_FUNC_COLOR(BLEND_FUNC_ZERO) |
+            VIVS_PE_ALPHA_CONFIG_DST_FUNC_ALPHA(BLEND_FUNC_ZERO) |
+            VIVS_PE_ALPHA_CONFIG_EQ_COLOR(BLEND_EQ_ADD) |
+            VIVS_PE_ALPHA_CONFIG_EQ_ALPHA(BLEND_EQ_ADD);
+      } else if (blend->rt[i].alpha_enable) {
          blend->rt[current_rt].PE_ALPHA_CONFIG =
             VIVS_PE_ALPHA_CONFIG_BLEND_ENABLE_COLOR |
             COND(blend->rt[i].separate_alpha, VIVS_PE_ALPHA_CONFIG_BLEND_SEPARATE_ALPHA) |
@@ -192,6 +221,16 @@ etna_update_blend(struct etna_context *ctx)
 
    if (current_rt == 0)
       blend->rt[0].PE_COLOR_FORMAT = VIVS_PE_COLOR_FORMAT_OVERWRITE;
+
+   /* On some cores the overwrite bit skips the destination read for every
+    * target, so set it only when all render targets are fully overwritten.
+    */
+   if (all_overwrite) {
+      blend->rt[0].PE_COLOR_FORMAT |= VIVS_PE_COLOR_FORMAT_OVERWRITE;
+
+      for (unsigned i = 1; i < current_rt; i++)
+         blend->rt[i].PE_HALTI5_COLORMASK |= VIVS_PE_HALTI5_RT_COLORMASK_OVERWRITE;
+   }
 
    /* Use same dither pattern as the blob */
    if (blend->base.dither && dither_allow) {

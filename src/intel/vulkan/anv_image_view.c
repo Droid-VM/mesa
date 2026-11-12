@@ -29,7 +29,8 @@ anv_image_fill_surface_state(struct anv_device *device,
                              enum isl_aux_usage aux_usage,
                              const union isl_color_value *clear_color,
                              enum anv_image_view_state_flags flags,
-                             struct anv_surface_state *state_inout)
+                             struct anv_surface_state *state_inout,
+                             struct anv_image_descriptor *out_indirect_desc)
 {
    uint32_t plane = anv_image_aspect_to_plane(image, aspect);
    if (image->emu_plane_format != VK_FORMAT_UNDEFINED) {
@@ -136,6 +137,27 @@ anv_image_fill_surface_state(struct anv_device *device,
                           device->vk.enabled_features.robustImageAccess2 ||
                           device->vk.enabled_extensions.EXT_pipeline_robustness);
 
+   if (out_indirect_desc != NULL) {
+      *out_indirect_desc = (struct anv_image_descriptor) {
+         .image = anv_surface_state_to_handle(device->physical, state_inout->state),
+         .width = isl_surf->logical_level0_px.width,
+         .height = isl_surf->logical_level0_px.height,
+         .depth_or_layer_count = MAX2(isl_surf->logical_level0_px.depth, view.array_len),
+         .base_array_layer = view.base_array_layer,
+         .base_mip_level = view.base_level,
+         .level_count = view.levels,
+         .address = anv_address_physical(address),
+         .tile_mode = isl_surf->tiling == ISL_TILING_LINEAR ? 0 : 0xffff,
+         .row_pitch_B = isl_surf->row_pitch_B,
+         .qpitch = isl_surf->array_pitch_el_rows,
+         .format = isl_surf->format,
+      };
+
+      if ((view.usage & ISL_SURF_USAGE_CUBE_BIT) &&
+          (view.usage & ISL_SURF_USAGE_TEXTURE_BIT))
+         out_indirect_desc->depth_or_layer_count /= 6;
+   }
+
    /* With the exception of gfx8, the bottom 12 bits of the MCS base address
     * are used to store other information. This should be ok, however, because
     * the surface buffer addresses are always 4K page aligned.
@@ -221,8 +243,8 @@ anv_image_view_init(struct anv_device *device,
          iview->planes[vplane].isl.usage = 0;
       }
 
-      if (iview->vk.usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
-                             VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
+      if (iview->vk.usage & (VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR |
+                             VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR)) {
          iview->planes[vplane].optimal_sampler.state =
             anv_device_maybe_alloc_surface_state(device, surface_state_stream);
          iview->planes[vplane].general_sampler.state =
@@ -230,12 +252,12 @@ anv_image_view_init(struct anv_device *device,
 
          enum isl_aux_usage general_aux_usage =
             anv_layout_to_aux_usage(device->info, image, 1UL << iaspect_bit,
-                                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                                    VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,
                                     VK_IMAGE_LAYOUT_GENERAL,
                                     device->view_queues);
          enum isl_aux_usage optimal_aux_usage =
             anv_layout_to_aux_usage(device->info, image, 1UL << iaspect_bit,
-                                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                                    VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                     device->view_queues);
 
@@ -244,18 +266,24 @@ anv_image_view_init(struct anv_device *device,
                                       ISL_SURF_USAGE_TEXTURE_BIT,
                                       optimal_aux_usage, NULL,
                                       ANV_IMAGE_VIEW_STATE_TEXTURE_OPTIMAL,
-                                      &iview->planes[vplane].optimal_sampler);
+                                      &iview->planes[vplane].optimal_sampler,
+                                      &iview->planes[vplane].general_indirect_descriptor);
 
          anv_image_fill_surface_state(device, image, 1ULL << iaspect_bit,
                                       &iview->planes[vplane].isl,
                                       ISL_SURF_USAGE_TEXTURE_BIT,
                                       general_aux_usage, NULL,
                                       0,
-                                      &iview->planes[vplane].general_sampler);
+                                      &iview->planes[vplane].general_sampler,
+                                      &iview->planes[vplane].optimal_indirect_descriptor);
+
+         iview->planes[vplane].general_indirect_descriptor.z_slice_count =
+            iview->planes[vplane].optimal_indirect_descriptor.z_slice_count =
+            MAX2(iview->planes[vplane].general_indirect_descriptor.depth_or_layer_count, iview->vk.layer_count);
       }
 
       /* NOTE: This one needs to go last since it may stomp isl_view.format */
-      if (iview->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+      if (iview->vk.usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR) {
          struct isl_view storage_view = iview->planes[vplane].isl;
          if (iview->vk.view_type == VK_IMAGE_VIEW_TYPE_3D) {
             storage_view.base_array_layer = iview->vk.storage.z_slice_offset;
@@ -264,7 +292,7 @@ anv_image_view_init(struct anv_device *device,
 
          enum isl_aux_usage general_aux_usage =
             anv_layout_to_aux_usage(device->info, image, 1UL << iaspect_bit,
-                                    VK_IMAGE_USAGE_STORAGE_BIT,
+                                    VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,
                                     VK_IMAGE_LAYOUT_GENERAL,
                                     device->view_queues);
          iview->planes[vplane].storage.state =
@@ -275,7 +303,11 @@ anv_image_view_init(struct anv_device *device,
                                       ISL_SURF_USAGE_STORAGE_BIT,
                                       general_aux_usage, NULL,
                                       0,
-                                      &iview->planes[vplane].storage);
+                                      &iview->planes[vplane].storage,
+                                      &iview->planes[vplane].storage_indirect_descriptor);
+
+         iview->planes[vplane].storage_indirect_descriptor.z_slice_count =
+            iview->vk.storage.z_slice_count;
       }
    }
 }

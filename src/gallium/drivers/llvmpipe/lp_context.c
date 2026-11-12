@@ -58,6 +58,8 @@ llvmpipe_destroy(struct pipe_context *pipe)
    struct llvmpipe_screen *lp_screen = llvmpipe_screen(pipe->screen);
    uint i;
 
+   llvmpipe_finish(pipe, __func__);
+
    mtx_lock(&lp_screen->ctx_mutex);
    list_del(&llvmpipe->list);
    mtx_unlock(&lp_screen->ctx_mutex);
@@ -72,6 +74,10 @@ llvmpipe_destroy(struct pipe_context *pipe)
    if (llvmpipe->mesh_ctx) {
       lp_csctx_destroy(llvmpipe->mesh_ctx);
    }
+   for (i = 0; i < llvmpipe->max_global_buffers; i++)
+      pipe_resource_reference(&llvmpipe->global_buffers[i], NULL);
+   free(llvmpipe->global_buffers);
+
    if (llvmpipe->blitter) {
       util_blitter_destroy(llvmpipe->blitter);
    }
@@ -110,8 +116,6 @@ llvmpipe_destroy(struct pipe_context *pipe)
    lp_destroy_cs_variants(llvmpipe);
 
    llvmpipe_destroy_fs_funcs(llvmpipe);
-
-   llvmpipe_sampler_matrix_destroy(llvmpipe);
 
    lp_context_destroy(&llvmpipe->context);
 
@@ -311,8 +315,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    llvmpipe_init_context_resource_funcs(&llvmpipe->pipe);
    llvmpipe_init_surface_functions(llvmpipe);
 
-   llvmpipe_init_sampler_matrix(llvmpipe);
-
 #ifdef HAVE_LIBDRM
    llvmpipe_init_fence_funcs(&llvmpipe->pipe);
 #endif
@@ -375,7 +377,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    /* plug in AA line/point stages */
    draw_install_aaline_stage(llvmpipe->draw, &llvmpipe->pipe);
    draw_install_aapoint_stage(llvmpipe->draw, &llvmpipe->pipe, nir_type_bool1);
-   draw_install_pstipple_stage(llvmpipe->draw, &llvmpipe->pipe);
 
    /* convert points and lines into triangles:
     * (otherwise, draw points and lines natively)
@@ -395,6 +396,9 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
     * See https://bugs.freedesktop.org/show_bug.cgi?id=101709
     */
    llvmpipe->dirty |= LP_NEW_SCISSOR;
+
+   p_atomic_set(&llvmpipe->sampler_matrix_update_count.value,
+                p_atomic_read(&lp_screen->sampler_matrix.update_count.value));
 
    mtx_lock(&lp_screen->ctx_mutex);
    list_addtail(&llvmpipe->list, &lp_screen->ctx_list);

@@ -158,6 +158,23 @@ categoryToPerfettogrpMask = {
 #undef CMP
 #undef RT
 
+static Counter::Units
+intel_perf_units_to_pps(enum intel_perf_counter_units units)
+{
+   switch (units) {
+   case INTEL_PERF_COUNTER_UNITS_PERCENT:
+      return Counter::Units::Percent;
+   case INTEL_PERF_COUNTER_UNITS_BYTES:
+      return Counter::Units::Byte;
+   case INTEL_PERF_COUNTER_UNITS_HZ:
+      return Counter::Units::Hertz;
+   case INTEL_PERF_COUNTER_UNITS_PIXELS:
+      return Counter::Units::Pixel;
+   default:
+      return Counter::Units::None;
+   }
+}
+
 // The HW sampling period is programmed using period_exponent following this
 // formula:
 //    sample_period = timestamp_period * 2^(period_exponent + 1)
@@ -270,6 +287,7 @@ bool IntelDriver::init_perfcnt()
       counter_desc.name = counter.symbol_name;
       counter_desc.description = counter.desc;
       counter_desc.group = block.id;
+      counter_desc.units = intel_perf_units_to_pps(counter.units);
       counter_desc.group_mask = classify_perfetto_counter_grp(counter.category);
       counter_desc.getter = [counter, this](
          const Counter &c, const Driver &dri) -> Counter::Value {

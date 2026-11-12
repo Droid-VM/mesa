@@ -15,8 +15,8 @@
 extern "C" {
 #endif
 
-#define DUPL_16BITS_IN_DWORD(x) (((x) << 16) | (x))
-#define DUPL_8BITS_IN_DWORD(x) (((x) << 24) | ((x) << 16) | ((x) << 8) | (x))
+#define DUPL_16BITS_IN_DWORD(x) (((uint32_t)(x) << 16) | (x))
+#define DUPL_8BITS_IN_DWORD(x) (((uint32_t)(x) << 24) | ((x) << 16) | ((x) << 8) | (x))
 #define DUPL_4BITS_IN_DWORD(x) DUPL_8BITS_IN_DWORD((x) | ((x) << 4))
 
 #define DCC_CODE                       DUPL_8BITS_IN_DWORD
@@ -66,6 +66,113 @@ enum {
    CMASK_8xMSAA_FMASK_UNCOMPRESSED_COLOR_EXPANDED  = CMASK_MSAA_CODE(3, 3),
 };
 
+/* FMASK is bandwidth compression of MSAA color images taking advantage of the fact that some
+ * samples in MSAA images have equal values. FMASK is essentially a mapping of logical samples to
+ * physical samples represented as an array of sample indices per pixel that can map multiple equal
+ * logical samples to 1 physical sample to save bandwidth. 8x MSAA stores 8 4-bit sample indices
+ * (only using range [0, 7]) in FMASK that map logical samples to physical samples, 4x MSAA stores
+ * 4 2-bit sample indices (range [0, 3]) in FMASK, and 2x MSAA stores 2 1-bit sample indices (range
+ * [0, 1]) in FMASK.
+ *
+ * FMASK uses a physical layout identical to UINT8, UINT16, and UINT32 images and it's effectively
+ * an additional plane of the color image. Regardless of the element encoding in memory, FMASK is
+ * always loaded to the shader as UINT32 (or UINT16 with D16). For example, FMASK value 0 means all
+ * logical samples map to physical sample 0, while FMASK values 0x76543210, 0x3210, and 0x10 are
+ * identity mappings for 8 samples, 4 samples, and 2 samples, respectively. The physical layout uses
+ * a tighter bit packing for 2 and 4 samples, which is hidden from the shader.
+ *
+ * Some generations don't have FMASK and instead fully rely on DCC for MSAA compression.
+ *
+ * Usage:
+ * - Rasterization is the only path that results in automatic optimal MSAA compression on GPUs with
+ *   FMASK. Compute-shader-based image clears and copies must compare sample values, store only
+ *   unique physical samples, and finally store FMASK manually to get the same bandwidth usage
+ *   reduction.
+ * - MSAA image stores are unaware of FMASK and always store to physical samples directly. For image
+ *   stores, the driver can either "expand" FMASK to an identity mapping and store to physical samples
+ *   as if they were logical samples, or store only unique physical samples and then store the FMASK
+ *   value manually to set the mapping from logical samples to physical samples.
+ * - MSAA image loads must first load the FMASK value, use that to remap the logical sample to
+ *   a physical sample, and then load the physical sample. This indirection adds latency and can be
+ *   skipped if we know in advance that FMASK is identity.
+ *
+ * (NOTE: FMASK image stores are untested, but we expect that they work either as-is or by
+ * reinterpreting the FMASK image format as UINT8/16/32.)
+ *
+ * While FMASK compresses the MSAA color image, FMASK itself can also be compressed by CMASK similar
+ * to how DCC compresses image data. CMASK is FMASK metadata and is cached by CB_META and
+ * L2_METADATA caches similar to how DCC is color metadata. CMASK can put FMASK in the following
+ * states:
+ * - cleared to 0: All logical samples map to physical sample 0.
+ * - compressed: CMASK compresses the FMASK image in a proprietary manner similar to DCC.
+ * - decompressed: FMASK is a regular UINT8, UINT16, or UINT32 image.
+ *
+ * TC-compatible CMASK removes the middle "compressed" state, which means that it can only be set
+ * to one of these 2 values:
+ * 1. CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED, which means FMASK loads return 0 and FMASK content
+ *    is ignored.
+ * 2. CMASK_*xMSAA_FMASK_UNCOMPRESSED_COLOR_EXPANDED, which means FMASK loads return FMASK pixels.
+ *
+ * Unlike DCC and HTILE-based compression, image stores into FMASK that's compressed by
+ * TC-compatible CMASK never corrupt FMASK. TC-compatible FMASK compression via CMASK doesn't
+ * store any compressed data in FMASK. TC-compatible CMASK only determines whether FMASK is read
+ * or whether FMASK reads are skipped and 0 is returned to shaders instead. Therefore, image
+ * stores can write FMASK at any time, and if CMASK doesn't indicate "cleared to 0", those FMASK
+ * pixels are returned via later image loads to shaders. If CMASK indicates "cleared to 0",
+ * nothing is read from FMASK, and therefore image stores into FMASK have no visible effect
+ * on FMASK loads with CMASK enabled. When writing an FMASK copy shader, one optimization is to
+ * write only the corresponding CMASK clear value to CMASK if an FMASK tile contains only zeros,
+ * and skip all FMASK image stores. This only applies to TC-compatible CMASK and not
+ * TC-incompatible CMASK. TC-incompatible CMASK does store compressed FMASK data into the FMASK
+ * image if CMASK is in the compressed state (not cleared and not decompressed). BTW, DCC and
+ * HTILE also have clear states where raw image stores that bypass compression have no effect.
+ *
+ * CMASK can also contain fast clear state for the MSAA color image predating DCC fast clear, but
+ * that's unrelated to FMASK. If that's used, CMASK provides fast clear for both FMASK and the color
+ * image simultaneously.
+ *
+ * Definitions:
+ * - "MSAA compression" means FMASK compresses the MSAA color image.
+ * - "FMASK compression" means CMASK compresses the FMASK image.
+ * - "FMASK fast clear" means that CMASK is in a state that indicates that FMASK is cleared to 0.
+ * - "fast color clear" means that CMASK and/or DCC are in a state that indicates that the color
+ *   (MSAA) image is cleared (to some value) and FMASK is cleared to 0. (thus it includes "FMASK
+ *   fast clear")
+ * - "FMASK decompression" means that the FMASK image is transitioned to the decompressed state
+ *   to enable shader access. Only TC-compatible CMASK doesn't require FMASK decompression before
+ *   shader access since it's never in the compressed state.
+ * - "FMASK expansion" means that the FMASK image is transitioned to an identity mapping, which
+ *   is done by moving/duplicating the physical samples in the MSAA image to match the identity
+ *   mapping, and clearing FMASK to the corresponding identity value.
+ *
+ * In NIR, nir_texop_fragment_mask_fetch_amd and nir_intrinsic_*_fragment_mask_load_amd load from
+ * FMASK, while nir_texop_fragment_fetch_amd and ACCESS_FMASK_LOWERED_AMD (for images) load
+ * physical samples from the color image. The corresponding lowering is done by nir_lower_tex and
+ * nir_lower_image. If the lowering is skipped, the image coordinates end up referencing physical
+ * samples instead of logical samples. Image stores and atomics are not lowered and therefore
+ * always reference physical samples.
+ *
+ * Since Z/S don't have FMASK, ACO and ac_nir_to_llvm conditionally replace the loaded FMASK value
+ * with 0x76543210 if the FMASK descriptor is NULL for tex opcodes only, thus forcing the identity
+ * mapping for Z/S samplers. That still costs VMEM latency even though nothing is loaded from
+ * memory. This is not done for image opcodes.
+ *
+ * EQAA increases quality by increasing the number of logical samples in FMASK that can map to
+ * physical samples. For example, EQAA 16S 8F (16 samples, 8 fragments) means that FMASK has
+ * 16 logical samples and the MSAA image has 8 physical samples. In that example, each physical
+ * sample can contribute any multiple of 1/16 of itself to the resolved color value instead of only
+ * any multiple of 1/8 of itself, giving the impression of 16x MSAA as long as there are at most
+ * 8 unique samples. If more than 8 unique samples are needed, FMASK stores a special sample index
+ * meaning "unknown" that's equal to the value of the last sample index + 1. The HW determines
+ * which drawn color samples are dropped and get the "unknown" value in FMASK when the number of
+ * samples that's needed exceeds the number of physical samples. Analogous logic applies to any
+ * scenario where the number of physical color samples is less than the number of rasterization
+ * samples, and even 1 physical sample with multiple logical samples is possible. Z/S supports
+ * up to 16 samples to match rasterization samples for precise coverage determination. The MSAA
+ * resolve pass can optionally ignore logical samples that say "unknown". This type of MSAA was
+ * mostly popular during the DX11 era and is being phased out today. GFX10.3 is the last generation
+ * that supports it.
+ */
 enum {
    /* Don't ever use this. Clear CMASK instead. */
    FMASK_CLEAR_0 = 0,
@@ -105,6 +212,49 @@ enum {
    #define FMASK_EQAA_16S_8F_EXPANDED 0x8888888876543210ull /* 8-byte clear value */
 };
 
+/* Each tile represented by one HTILE dword is always 8x8 pixels regardless of bpp and the number of
+ * samples. Tiles can be in 3 states: cleared, compressed, and uncompressed. "TC-compatible HTILE"
+ * allows shaders to read (and sometimes write) cleared/compressed Z/S, while TC-incompatible HTILE
+ * requires executing a decompression pass before shader access. When image stores (and atomics)
+ * with HTILE are supported, they invoke decompression of any tiles they touch and store only
+ * uncompressed Z/S.
+ *
+ * HTILE transitions:
+ * - Z/S decompression: Read compressed tiles and write them uncompressed. zmask (for Z) and smem
+ *   (for stencil) are cleared to ~0 in HTILE, meaning "uncompressed". This is what Z/S decompression
+ *   via DB seems to do. It doesn't seem to change any other HTILE fields.
+ * - Z expansion (for HiZ): Set the Z bounds to [0, 1], which represent the minimum and maximum Z
+ *   present in each tile of the Z image and are encoded in minz/maxz or zbase/zdelta HTILE fields.
+ *   No change to image data. It only affects subsequent Z tests. Setting FORCE_FULL_Z_RANGE during
+ *   Z tests makes the HW ignore the Z bounds in HTILE.
+ * - Stencil expansion (for HiS): Set sr0 and sr1 to neutral values in HTILE. No change to image
+ *   data. It only affects subsequent stencil tests. (note that we don't use this in Mesa)
+ *
+ * Note that the Z range of TC-compatible cleared tiles (zmask == 0) should never be expanded
+ * to [0, 1]. That's because the last bit of the HTILE dword determines whether the clear value is
+ * 0 or 1 for cleared tiles of TC-compatible HTILE, which happens to be the last bit of zbase and
+ * maxz fields (so the clear value is consistent with [0, 0] and [1, 1] Z ranges). The effect of
+ * expanding the Z range of TC-compatible cleared tiles to [0, 1] changes the clear value of those
+ * tiles to:
+ * - 1 if the Z-only encoding (minz/maxz) is used, or
+ * - the value of the ZRANGE_PRECISION state if the Z/S encoding (zbase/zdelta) is used, e.g.
+ *   if ZRANGE_PRECISION == 1, the clear value is changed to 1, else it's changed to 0.
+ *
+ * If the tiles had originally been cleared to the opposite clear value, later image loads will
+ * return the wrong clear value, and decompression through image stores/atomics will write the wrong
+ * clear value to the image.
+ *
+ * When image stores ignore HTILE and such image stores touch any compressed 8x8 tile
+ * (represented by 1 HTILE dword), that whole 8x8 tile can get corrupted because even one
+ * changed byte can affect the content of all 8x8 pixels in the tile.
+ *
+ * The best thing to do is:
+ * - Partially overwritten 8x8 tiles: Decompress them before image stores.
+ * - Fully overwritten 8x8 tiles: Only set the HTILE dword of that tile to uncompressed.
+ * - For both of the above: Recompute the Z bounds of each touched tile and write them
+ *   to the HTILE dword.
+ * - Untouched tiles: Leave them alone.
+ */
 typedef union {
    /* Z only */
    struct {
@@ -284,11 +434,6 @@ void
 ac_build_texture_descriptor(const struct radeon_info *info,
                             const struct ac_texture_state *state,
                             uint32_t desc[8]);
-
-uint32_t
-ac_tile_mode_index(const struct radeon_surf *surf,
-                   unsigned level,
-                   bool stencil);
 
 struct ac_mutable_tex_state {
    const struct radeon_surf *surf;

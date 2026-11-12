@@ -58,8 +58,6 @@
 #include "dzn_dxgi.h"
 #endif
 
-#include <directx/d3d12sdklayers.h>
-
 #define DZN_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
 
 #define MAX_TIER2_MEMORY_TYPES 4
@@ -146,6 +144,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_uniform_buffer_standard_layout    = true,
       .EXT_buffer_device_address             = pdev->shader_model >= D3D_SHADER_MODEL_6_6,
       .EXT_debug_marker                      = true,
+      .EXT_depth_clip_control                = true,
       .EXT_descriptor_indexing               = pdev->shader_model >= D3D_SHADER_MODEL_6_6,
 #if defined(_WIN32)
       .EXT_external_memory_host              = pdev->dev13,
@@ -683,6 +682,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .multiDrawIndirect = true,
       .drawIndirectFirstInstance = true,
       .depthClamp = true,
+      .depthClipControl = true,
       .depthBiasClamp = true,
       .fillModeNonSolid = true,
       .depthBounds = pdev->options2.DepthBoundsTestSupported,
@@ -1008,7 +1008,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .shaderSignedZeroInfNanPreserveFloat16 = false,
-      .shaderSignedZeroInfNanPreserveFloat32 = false,
+      .shaderSignedZeroInfNanPreserveFloat32 = true,
       .shaderSignedZeroInfNanPreserveFloat64 = false,
       .shaderDenormPreserveFloat16 = true,
       .shaderDenormPreserveFloat32 = pdev->shader_model >= D3D_SHADER_MODEL_6_2,
@@ -1290,8 +1290,8 @@ dzn_physical_device_get_format_properties(struct dzn_physical_device *pdev,
       dzn_physical_device_get_format_support(pdev, format, 0);
    VkFormatProperties *base_props = &properties->formatProperties;
 
-   vk_foreach_struct(ext, properties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(sType, ext, properties->pNext) {
+      vk_debug_ignored_stype(sType);
    }
 
    if (dfmt_info.Format == DXGI_FORMAT_UNKNOWN) {
@@ -1409,8 +1409,8 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
    VkImageUsageFlags usage = info->usage;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const(sType, s, info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
          external_info = (const VkPhysicalDeviceExternalImageFormatInfo *)s;
          break;
@@ -1418,7 +1418,7 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
          usage |= ((const VkImageStencilUsageCreateInfo *)s)->stencilUsage;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1426,14 +1426,14 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
    assert(info->tiling == VK_IMAGE_TILING_OPTIMAL || info->tiling == VK_IMAGE_TILING_LINEAR);
 
    /* Extract output structs */
-   vk_foreach_struct(s, properties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, properties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (VkExternalImageFormatProperties *)s;
          external_props->externalMemoryProperties = (VkExternalMemoryProperties) { 0 };
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1926,8 +1926,8 @@ dzn_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
       vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
          p->queueFamilyProperties = pdev->queue_families[i].props;
 
-         vk_foreach_struct(ext, pQueueFamilyProperties->pNext) {
-            vk_debug_ignored_stype(ext->sType);
+         vk_foreach_struct(sType, ext, pQueueFamilyProperties->pNext) {
+            vk_debug_ignored_stype(sType);
          }
       }
    }
@@ -1949,8 +1949,8 @@ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
    dzn_GetPhysicalDeviceMemoryProperties(physicalDevice,
                                          &pMemoryProperties->memoryProperties);
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      if(ext->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT){
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      if(sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT){
 
          VkPhysicalDeviceMemoryBudgetPropertiesEXT* vk_physical_memory_budget_properties = (VkPhysicalDeviceMemoryBudgetPropertiesEXT*)ext;
          VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
@@ -1973,7 +1973,7 @@ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
          }
       }
       else {
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
       }
    }
 }
@@ -2615,8 +2615,8 @@ dzn_device_memory_create(struct dzn_device *device,
    const wchar_t *import_name = NULL;
    const VkExportMemoryWin32HandleInfoKHR *win32_export = NULL;
 #endif
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO: {
          const VkExportMemoryAllocateInfo *exp =
             (const VkExportMemoryAllocateInfo *)ext;
@@ -2678,7 +2678,7 @@ dzn_device_memory_create(struct dzn_device *device,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -3294,8 +3294,8 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
    pMemoryRequirements->memoryRequirements.memoryTypeBits =
       dzn_physical_device_get_mem_type_mask_for_resource(pdev, &buffer->desc, buffer->shared);
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *requirements =
             (VkMemoryDedicatedRequirements *)ext;
@@ -3305,7 +3305,7 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

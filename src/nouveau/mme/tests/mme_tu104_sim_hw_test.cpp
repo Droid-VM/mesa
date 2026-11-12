@@ -50,9 +50,9 @@ mme_tu104_sim_test::test_macro(const mme_builder *b,
       .data = &sim_data[0],
       .size = DATA_BO_SIZE,
    };
-   mme_tu104_sim(insts.size(), &insts[0],
-                 params.size(), params.size() ? &params[0] : NULL,
-                 1, &sim_mem);
+   mme_tu104_sim(insts.size(), &insts[0], params.size(),
+                 params.size() ? &params[0] : NULL, 1, &sim_mem,
+                 b->devinfo->cls_eng3d);
 
    /* Now run the macro on the GPU */
    push_macro(0, macro);
@@ -1614,6 +1614,63 @@ TEST_F(mme_tu104_sim_test, dram_limit)
    }
 }
 
+TEST_F(mme_tu104_sim_test, dma_read)
+{
+   const uint32_t read_base = 0x80;
+   const uint32_t sync_idx = 0x100;
+   const uint32_t sync_val = 0x2;
+
+   mme_builder b;
+   mme_builder_init(&b, devinfo);
+
+   /* Sets up the dmem base for the read */
+   mme_mthd(&b, NVC597_SET_MME_DATA_RAM_ADDRESS);
+   mme_emit(&b, mme_imm(read_base));
+
+   mme_mthd(&b, NVC597_SET_MME_MEM_ADDRESS_A);
+   mme_emit(&b, mme_imm(high32(data_addr)));
+   mme_emit(&b, mme_imm(low32(data_addr)));
+
+   /* How many words to read? */
+   mme_mthd(&b, NVC597_MME_DMA_READ);
+   mme_emit(&b, mme_imm(16));
+
+   /* Write 0 to our sync value and set it up */
+   mme_dwrite(&b, mme_imm(sync_idx), mme_zero());
+   mme_mthd(&b, NVC597_SET_MME_DATA_RAM_ADDRESS);
+   mme_emit(&b, mme_imm(sync_idx));
+
+   /* Send the sync and busy wait until we read our sentinel back */
+   mme_mthd(&b, NVC597_MME_DMA_SYNC);
+   mme_emit(&b, mme_imm(sync_val));
+
+   mme_value tmp = mme_add(&b, mme_zero(), mme_zero());
+   mme_while(&b, ine, tmp, mme_imm(sync_val)) {
+      mme_dread_to(&b, tmp, mme_imm(sync_idx));
+   }
+
+   /* Write out all DMA fetched values */
+   for (unsigned i = 0; i < 16; i++) {
+      mme_value x = mme_dread(&b, mme_imm(read_base + i));
+      mme_store_imm_addr(&b, data_addr + 256 + (4 * i), x);
+      mme_free_reg(&b, x);
+   }
+
+   auto macro = mme_builder_finish_vec(&b);
+
+   for (uint32_t i = 0; i < 64; i++)
+      data[i] = 1000 + i;
+
+   std::vector<uint32_t> params;
+   params.push_back(7);
+   params.push_back(7);
+
+   test_macro(&b, macro, params);
+
+   for (unsigned i = 0; i < 16; i++)
+      ASSERT_EQ(data[64 + i], 1000 + i);
+}
+
 TEST_F(mme_tu104_sim_test, dma_read_fifoed)
 {
    mme_builder b;
@@ -1649,6 +1706,9 @@ TEST_F(mme_tu104_sim_test, dma_read_fifoed)
    params.push_back(7);
 
    test_macro(&b, macro, params);
+
+   ASSERT_EQ(data[64], data[0]);
+   ASSERT_EQ(data[65], data[1]);
 }
 
 TEST_F(mme_tu104_sim_test, scratch_limit)
@@ -1763,6 +1823,9 @@ TEST_F(mme_tu104_sim_test, scratch_limit_compute)
 
 TEST_F(mme_tu104_sim_test, scratch_share_3d_to_compute)
 {
+   if (devinfo->cls_compute < AMPERE_COMPUTE_B)
+      GTEST_SKIP();
+
    static const uint32_t chunk_size = 4;
    
    mme_builder b;
@@ -1800,6 +1863,10 @@ TEST_F(mme_tu104_sim_test, scratch_share_3d_to_compute)
 
       push_macro(0, macro);
 
+      /* Ensure some initial values on compute */
+      for (uint32_t j = 0; j < chunk_size; j++)
+         P_IMMD(p, NVC7C0, SET_MME_SHADOW_SCRATCH(i + j), 0xCAFECAFE ^ (i + j));
+
       P_1INC(p, NVC597, CALL_MME_MACRO(0));
       P_INLINE_DATA(p, i);
       P_INLINE_DATA(p, chunk_size);
@@ -1813,6 +1880,6 @@ TEST_F(mme_tu104_sim_test, scratch_share_3d_to_compute)
       submit_push();
 
       for (uint32_t j = 0; j < chunk_size; j++)
-         ASSERT_EQ(data[j], i + j);
+         ASSERT_EQ(data[j], 0xCAFECAFE ^ (i + j));
    }
 }

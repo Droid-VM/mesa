@@ -508,6 +508,11 @@ stw_pixelformat_choose(HDC hdc, CONST PIXELFORMATDESCRIPTOR *ppfd)
           !!(pfi->pfd.dwFlags & PFD_DOUBLEBUFFER))
          continue;
 
+      /* pbuffer-only formats can't be set on a window */
+      if ((ppfd->dwFlags & PFD_DRAW_TO_WINDOW) &&
+          !(pfi->pfd.dwFlags & PFD_DRAW_TO_WINDOW))
+         continue;
+
       /* Selection logic:
       * - Enabling a feature (depth, stencil...) is given highest priority.
       * - Giving as many bits as requested is given medium priority.

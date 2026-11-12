@@ -2758,7 +2758,7 @@ _mesa_PatchParameteri(GLenum pname, GLint value)
       return;
    }
 
-   if (value <= 0 || value > ctx->Const.MaxPatchVertices) {
+   if (value <= 0 || value > MAX_PATCH_VERTICES) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glPatchParameteri");
       return;
    }

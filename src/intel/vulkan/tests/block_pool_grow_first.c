@@ -43,7 +43,7 @@ void block_pool_grow_first_test(void)
    test_device_info_init(&physical_device.info);
    anv_device_set_physical(&device, &physical_device);
    device.kmd_backend = anv_kmd_backend_get(INTEL_KMD_TYPE_STUB);
-   pthread_mutex_init(&device.mutex, NULL);
+   simple_mtx_init(&device.mutex, mtx_plain);
    anv_bo_cache_init(&device.bo_cache, &device);
    anv_block_pool_init(&pool, &device, "test", 4096, initial_size, _1Gb);
    ASSERT(pool.size == initial_size);
@@ -69,5 +69,5 @@ void block_pool_grow_first_test(void)
 
    anv_block_pool_finish(&pool);
    anv_bo_cache_finish(&device.bo_cache);
-   pthread_mutex_destroy(&device.mutex);
+   simple_mtx_destroy(&device.mutex);
 }

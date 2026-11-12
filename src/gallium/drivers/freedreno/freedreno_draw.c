@@ -677,8 +677,10 @@ fd_draw_init(struct pipe_context *pctx)
 {
    if (FD_DBG(DDRAW) || FD_DBG(FLUSH)) {
       pctx->draw_vbo = fd_draw_vbo_dbg;
+      pctx->draw_vbo_buffers = util_draw_vbo_buffers;
    } else {
       pctx->draw_vbo = fd_draw_vbo;
+      pctx->draw_vbo_buffers = util_draw_vbo_buffers;
    }
 
    pctx->clear = fd_clear;

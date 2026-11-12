@@ -19,6 +19,7 @@
 #include "util/timespec.h"
 #include "util/u_debug.h"
 #include "util/vma.h"
+#include "util/u_sync_provider.h"
 
 #include "drm-uapi/dma-buf.h"
 #include "drm-uapi/panthor_drm.h"
@@ -55,8 +56,19 @@ struct panthor_kmod_vm {
       /* Lock protecting VA allocation/freeing. */
       simple_mtx_t lock;
 
-      /* VA heap used to automatically assign a VA. */
-      struct util_vma_heap heap;
+      /* VA heap used to automatically assign a VA for non executable buffers.
+       * This heap is prefered when there's space left, but we fallback to
+       * the "any" heap otherwise.
+       */
+      struct {
+         struct util_vma_heap heap;
+         uint64_t start;
+      } no_exec;
+
+      /* VA heap used to automatically assign a VA for any kind of buffer. */
+      struct {
+         struct util_vma_heap heap;
+      } any;
 
       /* VA ranges to garbage collect. */
       struct list_head gc_list;
@@ -160,6 +172,7 @@ panthor_dev_query_props(struct panthor_kmod_dev *panthor_dev)
    *props = (struct pan_kmod_dev_props){
       .gpu_id = panthor_dev->props.gpu.gpu_id,
       .gpu_variant = panthor_dev->props.gpu.core_features & 0xff,
+      .gpu_features = panthor_dev->props.gpu.gpu_features,
       .shader_present = panthor_dev->props.gpu.shader_present,
       .tiler_features = panthor_dev->props.gpu.tiler_features,
       .mem_features = panthor_dev->props.gpu.mem_features,
@@ -212,9 +225,13 @@ panthor_dev_query_props(struct panthor_kmod_dev *panthor_dev)
 
 static struct pan_kmod_dev *
 panthor_kmod_dev_create(int fd, uint32_t flags,
-                        const struct pan_kmod_driver *drv_info,
                         const struct pan_kmod_allocator *allocator)
 {
+   struct pan_kmod_driver drv_info;
+
+   if (!pan_kmod_drm_drv_match(fd, "panthor", &drv_info))
+      return NULL;
+
    struct panthor_kmod_dev *panthor_dev =
       pan_kmod_alloc(allocator, sizeof(*panthor_dev));
    if (!panthor_dev) {
@@ -247,7 +264,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags,
       goto err_free_dev;
    }
 
-   if (pan_kmod_driver_version_at_least(drv_info, 1, 9)) {
+   if (pan_kmod_driver_version_at_least(&drv_info, 1, 9)) {
       query = (struct drm_panthor_dev_query){
          .type = DRM_PANTHOR_DEV_QUERY_MMU_INFO,
          .size = sizeof(panthor_dev->props.mmu),
@@ -263,7 +280,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags,
       panthor_dev->props.mmu.page_size_bitmap = PAN_PGSIZE_4K | PAN_PGSIZE_2M;
    }
 
-   if (pan_kmod_driver_version_at_least(drv_info, 1, 1)) {
+   if (pan_kmod_driver_version_at_least(&drv_info, 1, 1)) {
       query = (struct drm_panthor_dev_query){
          .type = DRM_PANTHOR_DEV_QUERY_TIMESTAMP_INFO,
          .size = sizeof(panthor_dev->props.timestamp),
@@ -278,7 +295,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags,
    }
 
    /* Map the LATEST_FLUSH_ID register at device creation time. */
-   if (pan_kmod_driver_version_at_least(drv_info, 1, 5)) {
+   if (pan_kmod_driver_version_at_least(&drv_info, 1, 5)) {
       struct drm_panthor_set_user_mmio_offset user_mmio_offset = {
          .offset = DRM_PANTHOR_USER_MMIO_OFFSET,
       };
@@ -297,7 +314,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags,
       goto err_free_dev;
    }
 
-   if (pan_kmod_driver_version_at_least(drv_info, 1, 2)) {
+   if (pan_kmod_driver_version_at_least(&drv_info, 1, 2)) {
       query = (struct drm_panthor_dev_query){
          .type = DRM_PANTHOR_DEV_QUERY_GROUP_PRIORITIES_INFO,
          .size = sizeof(panthor_dev->props.group_priorities),
@@ -320,8 +337,11 @@ panthor_kmod_dev_create(int fd, uint32_t flags,
 
    assert(!ret);
 
-   pan_kmod_dev_init(&panthor_dev->base, fd, flags, drv_info, &panthor_kmod_ops,
-                     allocator);
+   ret = pan_kmod_dev_init(&panthor_dev->base, fd, flags, &drv_info, allocator,
+                           &panthor_kmod_ops, util_sync_provider_drm(fd));
+   if (ret)
+      goto err_free_dev;
+
    panthor_dev_query_props(panthor_dev);
 
    return &panthor_dev->base;
@@ -432,7 +452,7 @@ panthor_kmod_bo_alloc(struct pan_kmod_dev *dev,
    return &bo->base;
 
 err_destroy_bo:
-   drmCloseBufferHandle(dev->fd, bo->base.handle);
+   drmCloseBufferHandle(dev->fd, req.handle);
 err_free_bo:
    pan_kmod_dev_free(dev, bo);
    return NULL;
@@ -454,7 +474,8 @@ panthor_kmod_bo_free(struct pan_kmod_bo *bo)
 }
 
 static struct pan_kmod_bo *
-panthor_kmod_bo_import(struct pan_kmod_dev *dev, uint32_t handle, uint64_t size)
+panthor_kmod_bo_import_handle(struct pan_kmod_dev *dev, uint32_t handle,
+                              uint64_t size)
 {
    int ret;
    struct panthor_kmod_bo *panthor_bo =
@@ -505,8 +526,47 @@ err_free_bo:
    return NULL;
 }
 
-static int
-panthor_kmod_bo_export(struct pan_kmod_bo *bo, int dmabuf_fd)
+static struct pan_kmod_bo *
+panthor_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
+{
+   struct pan_kmod_bo *bo = NULL;
+   struct pan_kmod_bo **slot;
+   uint32_t handle;
+
+   if (drmPrimeFDToHandle(dev->fd, fd, &handle))
+      return NULL;
+
+   slot = util_sparse_array_get(&dev->handle_to_bo.array, handle);
+   if (!slot)
+      goto err_close_handle;
+
+   if (*slot) {
+      bo = *slot;
+
+      p_atomic_inc(&bo->refcnt);
+   } else {
+      size_t bo_size = lseek(fd, 0, SEEK_END);
+      if (bo_size == 0 || bo_size == (size_t)-1) {
+         mesa_loge("invalid dmabuf size");
+         goto err_close_handle;
+      }
+
+      bo = panthor_kmod_bo_import_handle(dev, handle, bo_size);
+      if (!bo)
+         goto err_close_handle;
+
+      *slot = bo;
+   }
+
+   return bo;
+
+err_close_handle:
+   drmCloseBufferHandle(dev->fd, handle);
+   return NULL;
+}
+
+static inline int
+panthor_kmod_bo_post_export(struct pan_kmod_bo *bo, int dmabuf_fd)
 {
    struct panthor_kmod_bo *panthor_bo =
       container_of(bo, struct panthor_kmod_bo, base);
@@ -555,6 +615,25 @@ panthor_kmod_bo_export(struct pan_kmod_bo *bo, int dmabuf_fd)
    return 0;
 }
 
+static inline int
+panthor_kmod_bo_export(struct pan_kmod_bo *bo)
+{
+   int fd;
+
+   if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
+                          &fd)) {
+      mesa_loge("drmPrimeHandleToFD() failed (err=%d)", errno);
+      return -1;
+   }
+
+   if (panthor_kmod_bo_post_export(bo, fd)) {
+      close(fd);
+      return -1;
+   }
+
+   return fd;
+}
+
 static off_t
 panthor_kmod_bo_get_mmap_offset(struct pan_kmod_bo *bo)
 {
@@ -568,6 +647,19 @@ panthor_kmod_bo_get_mmap_offset(struct pan_kmod_bo *bo)
    }
 
    return req.offset;
+}
+
+static inline void *
+panthor_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags,
+                     void *host_addr)
+{
+   off_t mmap_offset;
+
+   mmap_offset = panthor_kmod_bo_get_mmap_offset(bo);
+   if (mmap_offset < 0)
+      return MAP_FAILED;
+
+   return os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
 }
 
 static bool
@@ -818,10 +910,18 @@ panthor_kmod_vm_create(struct pan_kmod_dev *dev, uint32_t flags,
    }
 
    if (flags & PAN_KMOD_VM_FLAG_AUTO_VA) {
+      uint64_t user_va_end = user_va_start + user_va_range;
+      uint64_t any_heap_va_end = MIN2(user_va_end,
+                                      ALIGN_POT(user_va_start + 1, 1ull << 32));
+
       simple_mtx_init(&panthor_vm->auto_va.lock, mtx_plain);
       list_inithead(&panthor_vm->auto_va.gc_list);
-      util_vma_heap_init(&panthor_vm->auto_va.heap, user_va_start,
-                         user_va_range);
+
+      util_vma_heap_init(&panthor_vm->auto_va.any.heap, user_va_start,
+                         any_heap_va_end - user_va_start);
+      panthor_vm->auto_va.no_exec.start = any_heap_va_end;
+      util_vma_heap_init(&panthor_vm->auto_va.no_exec.heap, any_heap_va_end,
+                         user_va_end - any_heap_va_end);
    }
 
    if (flags & PAN_KMOD_VM_FLAG_TRACK_ACTIVITY) {
@@ -854,12 +954,22 @@ err_destroy_sync:
 
 err_free_vm:
    if (flags & PAN_KMOD_VM_FLAG_AUTO_VA) {
-      util_vma_heap_finish(&panthor_vm->auto_va.heap);
+      util_vma_heap_finish(&panthor_vm->auto_va.any.heap);
+      util_vma_heap_finish(&panthor_vm->auto_va.no_exec.heap);
       simple_mtx_destroy(&panthor_vm->auto_va.lock);
    }
 
    pan_kmod_dev_free(dev, panthor_vm);
    return NULL;
+}
+
+static struct util_vma_heap *
+select_heap_for_va(struct panthor_kmod_vm *vm, uint64_t va)
+{
+   if (va >= vm->auto_va.no_exec.start)
+      return &vm->auto_va.no_exec.heap;
+
+   return &vm->auto_va.any.heap;
 }
 
 static void
@@ -886,7 +996,7 @@ panthor_kmod_vm_collect_freed_vas(struct panthor_kmod_vm *vm)
       }
 
       list_del(&req->node);
-      util_vma_heap_free(&vm->auto_va.heap, req->va, req->size);
+      util_vma_heap_free(select_heap_for_va(vm, req->va), req->va, req->size);
       pan_kmod_dev_free(vm->base.dev, req);
    }
 }
@@ -913,10 +1023,12 @@ panthor_kmod_vm_destroy(struct pan_kmod_vm *vm)
       list_for_each_entry_safe(struct panthor_kmod_va_collect, req,
                                &panthor_vm->auto_va.gc_list, node) {
          list_del(&req->node);
-         util_vma_heap_free(&panthor_vm->auto_va.heap, req->va, req->size);
+         util_vma_heap_free(select_heap_for_va(panthor_vm, req->va), req->va,
+                            req->size);
          pan_kmod_dev_free(vm->dev, req);
       }
-      util_vma_heap_finish(&panthor_vm->auto_va.heap);
+      util_vma_heap_finish(&panthor_vm->auto_va.any.heap);
+      util_vma_heap_finish(&panthor_vm->auto_va.no_exec.heap);
       simple_mtx_unlock(&panthor_vm->auto_va.lock);
       simple_mtx_destroy(&panthor_vm->auto_va.lock);
    }
@@ -926,16 +1038,27 @@ panthor_kmod_vm_destroy(struct pan_kmod_vm *vm)
 }
 
 static uint64_t
-panthor_kmod_vm_alloc_va(struct panthor_kmod_vm *panthor_vm, uint64_t size)
+panthor_kmod_vm_alloc_va(struct panthor_kmod_vm *panthor_vm,
+                         const struct pan_kmod_bo *bo, uint64_t size)
 {
-   uint64_t va;
+   uint64_t va = 0;
 
    assert(panthor_vm->base.flags & PAN_KMOD_VM_FLAG_AUTO_VA);
 
    simple_mtx_lock(&panthor_vm->auto_va.lock);
    panthor_kmod_vm_collect_freed_vas(panthor_vm);
-   va = util_vma_heap_alloc(&panthor_vm->auto_va.heap, size,
-      pan_choose_gpu_va_alignment(&panthor_vm->base, size));
+
+   if (!(bo->flags & PAN_KMOD_BO_FLAG_EXECUTABLE)) {
+      va = util_vma_heap_alloc(
+         &panthor_vm->auto_va.no_exec.heap, size,
+         pan_choose_gpu_va_alignment(&panthor_vm->base, size));
+   }
+
+   if (!va) {
+      va = util_vma_heap_alloc(
+         &panthor_vm->auto_va.any.heap, size,
+         pan_choose_gpu_va_alignment(&panthor_vm->base, size));
+   }
    simple_mtx_unlock(&panthor_vm->auto_va.lock);
 
    return va;
@@ -948,7 +1071,7 @@ panthor_kmod_vm_free_va(struct panthor_kmod_vm *panthor_vm, uint64_t va,
    assert(panthor_vm->base.flags & PAN_KMOD_VM_FLAG_AUTO_VA);
 
    simple_mtx_lock(&panthor_vm->auto_va.lock);
-   util_vma_heap_free(&panthor_vm->auto_va.heap, va, size);
+   util_vma_heap_free(select_heap_for_va(panthor_vm, va), va, size);
    simple_mtx_unlock(&panthor_vm->auto_va.lock);
 }
 
@@ -1148,8 +1271,8 @@ panthor_kmod_vm_bind(struct pan_kmod_vm *vm, enum pan_kmod_vm_op_mode mode,
          }
 
          if (ops[i].va.start == PAN_KMOD_VM_MAP_AUTO_VA) {
-            bind_ops[i].va =
-               panthor_kmod_vm_alloc_va(panthor_vm, bind_ops[i].size);
+            bind_ops[i].va = panthor_kmod_vm_alloc_va(panthor_vm, ops[i].map.bo,
+                                                      bind_ops[i].size);
             if (!bind_ops[i].va) {
                mesa_loge("VA allocation failed");
                ret = -1;
@@ -1365,7 +1488,7 @@ const struct pan_kmod_ops panthor_kmod_ops = {
    .bo_free = panthor_kmod_bo_free,
    .bo_import = panthor_kmod_bo_import,
    .bo_export = panthor_kmod_bo_export,
-   .bo_get_mmap_offset = panthor_kmod_bo_get_mmap_offset,
+   .bo_mmap = panthor_kmod_bo_mmap,
    .bo_wait = panthor_kmod_bo_wait,
    .flush_bo_map_syncs = panthor_kmod_flush_bo_map_syncs,
    .vm_create = panthor_kmod_vm_create,

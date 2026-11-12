@@ -145,17 +145,17 @@ fd3_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
    so->base.context = pctx;
 
    so->texconst0 = A3XX_TEX_CONST_0_TILE_MODE(rsc->layout.tile_mode) |
-                   A3XX_TEX_CONST_0_TYPE(tex_type(prsc->target)) |
+                   A3XX_TEX_CONST_0_TYPE(tex_type(cso->target)) |
                    A3XX_TEX_CONST_0_FMT(fd3_pipe2tex(cso->format)) |
                    fd3_tex_swiz(cso->format, cso->swizzle_r, cso->swizzle_g,
                                 cso->swizzle_b, cso->swizzle_a);
 
-   if (prsc->target == PIPE_BUFFER || util_format_is_pure_integer(cso->format))
+   if (cso->target == PIPE_BUFFER || util_format_is_pure_integer(cso->format))
       so->texconst0 |= A3XX_TEX_CONST_0_NOCONVERT;
    if (util_format_is_srgb(cso->format))
       so->texconst0 |= A3XX_TEX_CONST_0_SRGB;
 
-   if (prsc->target == PIPE_BUFFER) {
+   if (cso->target == PIPE_BUFFER) {
       lvl = 0;
       so->texconst1 =
          A3XX_TEX_CONST_1_WIDTH(cso->u.buf.size /
@@ -168,14 +168,19 @@ fd3_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
       miplevels = fd_sampler_last_level(cso) - lvl;
 
       so->texconst0 |= A3XX_TEX_CONST_0_MIPLVLS(miplevels);
-      so->texconst1 = A3XX_TEX_CONST_1_PITCHALIGN(rsc->layout.pitchalign - 4) |
-                      A3XX_TEX_CONST_1_WIDTH(u_minify(prsc->width0, lvl)) |
+      so->texconst1 = A3XX_TEX_CONST_1_WIDTH(u_minify(prsc->width0, lvl)) |
                       A3XX_TEX_CONST_1_HEIGHT(u_minify(prsc->height0, lvl));
+
+      /* Buffer-backed views only use level zero and have no mipmap pitch
+       * alignment. Their explicit pitch is emitted below.
+       */
+      if (prsc->target != PIPE_BUFFER)
+         so->texconst1 |= A3XX_TEX_CONST_1_PITCHALIGN(rsc->layout.pitchalign - 4);
    }
    /* when emitted, A3XX_TEX_CONST_2_INDX() must be OR'd in: */
    struct fdl_slice *slice = fd_resource_slice(rsc, lvl);
    so->texconst2 = A3XX_TEX_CONST_2_PITCH(fd_resource_pitch(rsc, lvl));
-   switch (prsc->target) {
+   switch (cso->target) {
    case PIPE_TEXTURE_1D_ARRAY:
    case PIPE_TEXTURE_2D_ARRAY:
       so->texconst3 = A3XX_TEX_CONST_3_DEPTH(prsc->array_size - 1) |

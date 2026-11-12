@@ -154,7 +154,6 @@ struct draw_context
       struct draw_stage *stipple;
       struct draw_stage *aapoint;
       struct draw_stage *aaline;
-      struct draw_stage *pstipple;
       struct draw_stage *wide_line;
       struct draw_stage *wide_point;
       struct draw_stage *rasterize;
@@ -256,6 +255,8 @@ struct draw_context
 
    bool flushing;         /**< debugging/sanity */
    bool suspend_flushing; /**< internally set */
+
+   bool tess_ccw_flip; /**< flip tess ccw during execution */
 
    /* Flags set if API requires clipping in these planes and the
     * driver doesn't indicate that it can do it for us.

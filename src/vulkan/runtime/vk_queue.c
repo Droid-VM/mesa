@@ -25,6 +25,7 @@
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_debug.h"
+#include "util/u_thread.h"
 #include <inttypes.h>
 
 #include "vk_alloc.h"
@@ -69,6 +70,9 @@ vk_queue_init(struct vk_queue *queue, struct vk_device *device,
    queue->submit.mode = device->submit_mode;
    if (queue->submit.mode == VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND)
       queue->submit.mode = VK_QUEUE_SUBMIT_MODE_IMMEDIATE;
+
+   queue->internally_synchronized =
+      pCreateInfo->flags & VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR;
 
    list_inithead(&queue->submit.submits);
 
@@ -735,6 +739,8 @@ vk_queue_submit_thread_func(void *_data)
    struct vk_queue *queue = _data;
    VkResult result;
 
+   util_set_current_thread_initial_affinity();
+
    mtx_lock(&queue->submit.mutex);
 
    while (queue->submit.thread_run) {
@@ -809,7 +815,7 @@ vk_queue_start_submit_thread(struct vk_queue *queue)
    return VK_SUCCESS;
 }
 
-static void
+void
 vk_queue_stop_submit_thread(struct vk_queue *queue)
 {
    vk_queue_drain(queue);

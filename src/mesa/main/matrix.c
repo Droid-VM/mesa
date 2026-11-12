@@ -85,7 +85,7 @@ get_named_matrix_stack(struct gl_context *ctx, GLenum mode, const char* caller)
           && (ctx->Extensions.ARB_vertex_program ||
               ctx->Extensions.ARB_fragment_program)) {
          const GLuint m = mode - GL_MATRIX0_ARB;
-         if (m <= ctx->Const.MaxProgramMatrices)
+         if (m <= MAX_PROGRAM_MATRICES)
             return &ctx->ProgramMatrixStack[m];
       }
       FALLTHROUGH;

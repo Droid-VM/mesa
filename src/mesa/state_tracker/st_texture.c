@@ -95,7 +95,13 @@ st_texture_create(struct st_context *st,
    pt.usage = PIPE_USAGE_DEFAULT;
    pt.bind = bind;
    /* only set this for OpenGL textures, not renderbuffers */
-   pt.flags = PIPE_RESOURCE_FLAG_TEXTURING_MORE_LIKELY;
+   pt.flags = PIPE_RESOURCE_FLAG_TEXTURING_MORE_LIKELY | flags;
+   /* threaded maps skip sync
+    * only textures with support
+    * may then take this path
+    */
+   if (!screen->caps.map_unsynchronized_texture_thread_safe)
+      pt.flags &= ~PIPE_RESOURCE_FLAG_MAP_UNSYNCHRONIZED;
    pt.nr_samples = nr_samples;
    pt.nr_storage_samples = nr_samples;
    pt.compression_rate = compression;
@@ -321,6 +327,33 @@ st_texture_image_map(struct st_context *st, struct gl_texture_image *stImage,
    if (map)
       st_texture_image_insert_transfer(stImage, z, *transfer);
 
+   if (map && util_format_description(stImage->pt->format)->is_byte_swapped) {
+      /* stImage->TexFormat is host-endian */
+      struct st_texture_image_transfer *itransfer = &stImage->transfer[z];
+      const struct pipe_box *box = &(*transfer)->box;
+
+      itransfer->swapped_map =
+         malloc((size_t)(*transfer)->layer_stride * box->depth);
+      if (!itransfer->swapped_map) {
+         pipe_texture_unmap(st->pipe, *transfer);
+         itransfer->transfer = NULL;
+         return NULL;
+      }
+
+      itransfer->transfer_map = map;
+      if (usage & PIPE_MAP_READ) {
+         for (int i = 0; i < box->depth; i++) {
+            const size_t offset = (size_t)(*transfer)->layer_stride * i;
+            util_format_byte_swap_rect(stImage->pt->format,
+                                       itransfer->swapped_map + offset,
+                                       itransfer->transfer_map + offset,
+                                       (*transfer)->stride,
+                                       box->width, box->height);
+         }
+      }
+      map = itransfer->swapped_map;
+   }
+
    return map;
 }
 
@@ -338,6 +371,26 @@ st_texture_image_unmap(struct st_context *st,
    transfer = &stImage->transfer[slice + stImage->Face].transfer;
 
    DBG("%s\n", __func__);
+
+   struct st_texture_image_transfer *itransfer =
+      &stImage->transfer[slice + stImage->Face];
+   if (itransfer->swapped_map) {
+      const struct pipe_box *box = &(*transfer)->box;
+
+      if ((*transfer)->usage & PIPE_MAP_WRITE) {
+         for (int i = 0; i < box->depth; i++) {
+            const size_t offset = (size_t)(*transfer)->layer_stride * i;
+            util_format_byte_swap_rect(stImage->pt->format,
+                                       itransfer->transfer_map + offset,
+                                       itransfer->swapped_map + offset,
+                                       (*transfer)->stride,
+                                       box->width, box->height);
+         }
+      }
+      free(itransfer->swapped_map);
+      itransfer->swapped_map = NULL;
+      itransfer->transfer_map = NULL;
+   }
 
    pipe_texture_unmap(pipe, *transfer);
    *transfer = NULL;
@@ -509,7 +562,7 @@ st_destroy_bound_image_handles_per_stage(struct st_context *st,
    for (i = 0; i < bound_handles->num_handles; i++) {
       uint64_t handle = bound_handles->handles[i];
 
-      pipe->make_image_handle_resident(pipe, handle, GL_READ_WRITE, false);
+      pipe->make_image_handle_resident(pipe, handle, PIPE_IMAGE_ACCESS_READ_WRITE, false);
       pipe->delete_image_handle(pipe, handle);
    }
    free(bound_handles->handles);
@@ -652,7 +705,7 @@ st_make_bound_images_resident(struct st_context *st,
       if (!handle)
          continue;
 
-      pipe->make_image_handle_resident(st->pipe, handle, GL_READ_WRITE, true);
+      pipe->make_image_handle_resident(st->pipe, handle, PIPE_IMAGE_ACCESS_READ_WRITE, true);
 
       /* Overwrite the image unit value by the resident handle before uploading
        * the constant buffer.

@@ -24,22 +24,25 @@
 #ifndef INTEL_MEASURE_H
 #define INTEL_MEASURE_H
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "util/list.h"
+#include "util/simple_mtx.h"
 
 enum intel_measure_snapshot_type {
    INTEL_SNAPSHOT_UNDEFINED,
    INTEL_SNAPSHOT_BLIT,
+   INTEL_SNAPSHOT_BLIT_COPY,
+   INTEL_SNAPSHOT_MEM_COPY,
+   INTEL_SNAPSHOT_COPY_INDIRECT,
+   INTEL_SNAPSHOT_COPY_IMAGE_INDIRECT,
    INTEL_SNAPSHOT_CCS_AMBIGUATE,
    INTEL_SNAPSHOT_CCS_COLOR_CLEAR,
    INTEL_SNAPSHOT_CCS_PARTIAL_RESOLVE,
    INTEL_SNAPSHOT_CCS_RESOLVE,
    INTEL_SNAPSHOT_COMPUTE,
-   INTEL_SNAPSHOT_COPY,
    INTEL_SNAPSHOT_DRAW,
    INTEL_SNAPSHOT_FAST_STENCIL_CLEAR,
    INTEL_SNAPSHOT_HIZ_AMBIGUATE,
@@ -154,7 +157,7 @@ struct intel_measure_device {
    /* Holds the list of (iris/anv)_measure_batch snapshots that have been
     * submitted for rendering, but have not completed.
     */
-   pthread_mutex_t mutex;
+   simple_mtx_t mutex;
    struct list_head queued_snapshots;
 
    /* Holds completed snapshots that may need to be combined before being

@@ -159,8 +159,6 @@ protected:
     // Number of unique MSAA sample rates (1/2/4/8)
     static const UINT_32 MaxNumMsaaRates     = 4;
 
-    //# These fields exist in the GB_ADDR_CONFIG register; however, the HW does not care about them.
-    //# The HW acts as if the log2(pipes)==5 and log2(pi) == 8, always.
     static const UINT_32  NumPipesLog2       = 5;
     static const UINT_32  PipeInterleaveLog2 = 8;
 

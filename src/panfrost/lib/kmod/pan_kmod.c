@@ -14,11 +14,15 @@
 
 extern const struct pan_kmod_ops panfrost_kmod_ops;
 extern const struct pan_kmod_ops panthor_kmod_ops;
+#ifdef HAVE_PANFROST_VDRM
+extern const struct pan_kmod_ops panfrost_virtio_gpu_ops;
+extern const struct pan_kmod_ops panfrost_vpipe_ops;
+#endif /* HAVE_PANFROST_VDRM */
 
-static const struct {
+static const struct backend {
    const char *name;
    const struct pan_kmod_ops *ops;
-} drivers[] = {
+} backends[] = {
    {
       "panfrost",
       &panfrost_kmod_ops,
@@ -27,7 +31,26 @@ static const struct {
       "panthor",
       &panthor_kmod_ops,
    },
+#ifdef HAVE_PANFROST_VDRM
+   {
+      "panfrost_virtio_gpu",
+      &panfrost_virtio_gpu_ops,
+   },
+   {
+      "panfrost_vpipe",
+      &panfrost_vpipe_ops,
+   },
+#endif /* HAVE_PANFROST_VDRM */
 };
+
+DEBUG_GET_ONCE_OPTION(enabled_backends, "PAN_KMOD_RESTRICT_TO_BACKENDS", "all");
+
+static inline bool
+pan_kmod_backend_is_enabled(const char *enabled_backends, const char *backend)
+{
+   return !strcmp(enabled_backends, "all") ||
+          comma_separated_list_contains(enabled_backends, backend);
+}
 
 static void *
 default_zalloc(const struct pan_kmod_allocator *allocator, size_t size,
@@ -51,33 +74,22 @@ struct pan_kmod_dev *
 pan_kmod_dev_create(int fd, uint32_t flags,
                     const struct pan_kmod_allocator *allocator)
 {
-   drmVersionPtr version = drmGetVersion(fd);
+   const char *selected_backends = debug_get_option_enabled_backends();
    struct pan_kmod_dev *dev = NULL;
-
-   if (!version)
-      return NULL;
 
    if (!allocator)
       allocator = &default_allocator;
 
-   const char *drv_name = version->name;
-   const struct pan_kmod_driver drv_info = {
-      .version = {
-         .major = version->version_major,
-         .minor = version->version_minor,
-      },
-   };
+   for (int i = 0; i < ARRAY_SIZE(backends); i++) {
+      if (pan_kmod_backend_is_enabled(selected_backends, backends[i].name))
+         dev = backends[i].ops->dev_create(fd, flags, allocator);
+      else
+         mesa_logi("skipping '%s'", backends[i].name);
 
-   for (unsigned i = 0; i < ARRAY_SIZE(drivers); i++) {
-      if (!strcmp(drivers[i].name, drv_name)) {
-         const struct pan_kmod_ops *ops = drivers[i].ops;
-
-         dev = ops->dev_create(fd, flags, &drv_info, allocator);
+      if (dev)
          break;
-      }
    }
 
-   drmFreeVersion(version);
    return dev;
 }
 
@@ -150,51 +162,16 @@ pan_kmod_bo_put(struct pan_kmod_bo *bo)
 struct pan_kmod_bo *
 pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
 {
-   struct pan_kmod_bo *bo = NULL;
-   struct pan_kmod_bo **slot;
+   struct pan_kmod_bo *bo;
 
    simple_mtx_lock(&dev->handle_to_bo.lock);
-
-   uint32_t handle;
-   int ret = drmPrimeFDToHandle(dev->fd, fd, &handle);
-   if (ret)
-      goto err_unlock;
-
-   slot = util_sparse_array_get(&dev->handle_to_bo.array, handle);
-   if (!slot)
-      goto err_close_handle;
-
-   if (*slot) {
-      bo = *slot;
-
-      p_atomic_inc(&bo->refcnt);
-   } else {
-      size_t size = lseek(fd, 0, SEEK_END);
-      if (size == 0 || size == (size_t)-1) {
-         mesa_loge("invalid dmabuf size");
-         goto err_close_handle;
-      }
-
-      bo = dev->ops->bo_import(dev, handle, size);
-      if (!bo)
-         goto err_close_handle;
-
-      *slot = bo;
-   }
-
-   assert(p_atomic_read(&bo->refcnt) > 0);
-
+   bo = dev->ops->bo_import(dev, fd);
+   if (bo)
+      assert(p_atomic_read(&bo->refcnt) > 0);
    simple_mtx_unlock(&dev->handle_to_bo.lock);
+
 
    return bo;
-
-err_close_handle:
-   drmCloseBufferHandle(dev->fd, handle);
-
-err_unlock:
-   simple_mtx_unlock(&dev->handle_to_bo.lock);
-
-   return NULL;
 }
 
 void
@@ -284,8 +261,13 @@ pan_kmod_queue_bo_map_sync(struct pan_kmod_bo *bo, uint64_t bo_offset,
        MAX_PENDING_SYNC_OPS)
       pan_kmod_flush_bo_map_syncs_locked(dev);
 
-   uint64_t start = bo_offset & ~((uint64_t)util_cache_granularity() - 1);
-   uint64_t end = ALIGN_POT(bo_offset + range, util_cache_granularity());
+   /* Architectures that use cache_ops_null.c will always return 0 for
+    * util_cache_granularity(). But using that result would make
+    * pan_kmod_deferred_bo_sync be initialized with size = 0.
+    */
+   uint64_t granularity = util_has_cache_ops() ? util_cache_granularity() : 64;
+   uint64_t start = bo_offset & ~(granularity - 1);
+   uint64_t end = ALIGN_POT(bo_offset + range, granularity);
 
    struct pan_kmod_deferred_bo_sync new_sync = {
       .bo = bo,

@@ -15,6 +15,7 @@
 #include "pco.h"
 #include "pco_builder.h"
 #include "pco_internal.h"
+#include "pvr_iface.h"
 #include "util/bitset.h"
 #include "util/list.h"
 #include "util/macros.h"
@@ -185,7 +186,7 @@ pco_ref_nir_alu_src_t(const nir_alu_instr *alu, unsigned src, trans_ctx *tctx)
  */
 static enum pco_mcu_cache_mode_ld get_ld_cache_mode(nir_intrinsic_instr *intr)
 {
-   if (!nir_intrinsic_has_access(intr))
+   if (PCO_DEBUG(NO_DMA_CACHE) || !nir_intrinsic_has_access(intr))
       return PCO_MCU_CACHE_MODE_LD_NORMAL;
 
    enum gl_access_qualifier access_qual = nir_intrinsic_access(intr);
@@ -205,7 +206,7 @@ static enum pco_mcu_cache_mode_ld get_ld_cache_mode(nir_intrinsic_instr *intr)
 static enum pco_mcu_cache_mode_st get_st_cache_mode(nir_intrinsic_instr *intr,
                                                     trans_ctx *tctx)
 {
-   if (!nir_intrinsic_has_access(intr))
+   if (PCO_DEBUG(NO_DMA_CACHE) || !nir_intrinsic_has_access(intr))
       return PCO_MCU_CACHE_MODE_ST_WRITE_THROUGH;
 
    enum gl_access_qualifier access_qual = nir_intrinsic_access(intr);
@@ -235,7 +236,8 @@ static enum pco_mcu_cache_mode_st get_st_cache_mode(nir_intrinsic_instr *intr,
 static pco_instr *
 trans_load_input_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
 {
-   UNUSED unsigned base = nir_intrinsic_base(intr);
+   ASSERTED unsigned base = nir_intrinsic_base(intr);
+   assert(!base);
 
    /* TODO: f16 support. */
 
@@ -246,6 +248,7 @@ trans_load_input_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
    unsigned component = nir_intrinsic_component(intr);
    unsigned chans = pco_ref_get_chans(dest);
 
+   assert(location < ARRAY_SIZE(tctx->shader->data.vs.attribs));
    const pco_range *range = &tctx->shader->data.vs.attribs[location];
    assert(component + chans <= range->count);
 
@@ -282,6 +285,7 @@ trans_store_output_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref src)
    ASSERTED unsigned write_mask = nir_intrinsic_write_mask(intr);
    assert(write_mask == BITFIELD_MASK(chans));
 
+   assert(location < ARRAY_SIZE(tctx->shader->data.vs.varyings));
    const pco_range *range = &tctx->shader->data.vs.varyings[location];
    assert(component + chans <= range->count);
 
@@ -326,6 +330,7 @@ static pco_instr *trans_load_tiled_offset(trans_ctx *tctx,
                                           pco_ref dest)
 {
    unsigned component = nir_intrinsic_component(intr);
+   assert(component < 8);
    bool store = !!nir_intrinsic_flags(intr);
 
    unsigned base0 = store ? PCO_SR_TILED_ST_COMP0 : PCO_SR_TILED_LD_COMP0;
@@ -370,10 +375,8 @@ static inline pco_instr *build_itr(pco_builder *b,
    return instr;
 }
 
-static pco_ref fs_is_single_sampled(trans_ctx *tctx)
+static pco_ref fs_is_single_sampled_covmsk(trans_ctx *tctx)
 {
-   assert(tctx->stage == MESA_SHADER_FRAGMENT);
-
    /* n samples = ...
     * 1 = 0b00000001
     * 2 = 0b00000011
@@ -405,6 +408,51 @@ static pco_ref fs_is_single_sampled(trans_ctx *tctx)
             .tst_type_main = PCO_TST_TYPE_MAIN_U32);
 
    return is_single_sampled;
+}
+
+static pco_ref fs_is_single_sampled_meta(trans_ctx *tctx)
+{
+   assert(tctx->shader->data.fs.meta.count > 0);
+   pco_ref fs_meta = pco_ref_new_ssa32(tctx->func);
+   pco_mov(&tctx->b,
+           fs_meta,
+           pco_ref_hwreg(tctx->shader->data.fs.meta.start,
+                         PCO_REG_CLASS_SHARED));
+
+   pco_ref sample_shading_bit = pco_ref_new_ssa32(tctx->func);
+   pco_movi32(&tctx->b,
+              sample_shading_bit,
+              pco_ref_imm32(PVR_FS_META_SAMPLE_SHADING));
+
+   pco_ref sample_shading_len = pco_ref_new_ssa32(tctx->func);
+   pco_movi32(&tctx->b,
+              sample_shading_len,
+              pco_ref_imm32(PVR_FS_META_SAMPLE_SHADING_LENGTH));
+
+   pco_ref sample_shading = pco_ref_new_ssa32(tctx->func);
+   pco_ubfe(&tctx->b,
+            sample_shading,
+            fs_meta,
+            sample_shading_bit,
+            sample_shading_len);
+
+   pco_ref is_single_sampled = pco_ref_new_ssa32(tctx->func);
+   pco_tstz(&tctx->b,
+            is_single_sampled,
+            pco_ref_null(),
+            sample_shading,
+            .tst_type_main = PCO_TST_TYPE_MAIN_U32);
+
+   return is_single_sampled;
+}
+
+/* TODO: revisit */
+static pco_ref fs_is_single_sampled(trans_ctx *tctx)
+{
+   assert(tctx->stage == MESA_SHADER_FRAGMENT);
+
+   return tctx->shader->is_internal ? fs_is_single_sampled_covmsk(tctx)
+                                    : fs_is_single_sampled_meta(tctx);
 }
 
 /**
@@ -514,15 +562,17 @@ static pco_instr *trans_load_input_fs(trans_ctx *tctx,
       }
    }
 
+   assert(location < ARRAY_SIZE(fs_data->varyings));
    const pco_range *range = &fs_data->varyings[location];
-   assert(component + (ROGUE_USC_COEFFICIENT_SET_SIZE * chans) <= range->count);
 
-   unsigned coeffs_index =
-      range->start + (ROGUE_USC_COEFFICIENT_SET_SIZE * component);
+   unsigned component_size = ROGUE_USC_COEFFICIENT_SET_SIZE * component;
+   unsigned chans_size = ROGUE_USC_COEFFICIENT_SET_SIZE * chans;
+   assert(component_size + chans_size <= range->count);
 
-   pco_ref coeffs = pco_ref_hwreg_vec(coeffs_index,
-                                      PCO_REG_CLASS_COEFF,
-                                      ROGUE_USC_COEFFICIENT_SET_SIZE * chans);
+   unsigned coeffs_index = range->start + component_size;
+
+   pco_ref coeffs =
+      pco_ref_hwreg_vec(coeffs_index, PCO_REG_CLASS_COEFF, chans_size);
 
    bool usc_itrsmp_enhanced =
       PVR_HAS_FEATURE(tctx->pco_ctx->dev_info, usc_itrsmp_enhanced);
@@ -607,11 +657,13 @@ trans_load_fs_coeffs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
       UNREACHABLE("");
    }
 
+   assert(location < ARRAY_SIZE(fs_data->varyings));
    const pco_range *range = &fs_data->varyings[location];
-   assert(component + chans <= range->count);
 
-   unsigned coeffs_index =
-      range->start + (ROGUE_USC_COEFFICIENT_SET_SIZE * component);
+   unsigned component_size = ROGUE_USC_COEFFICIENT_SET_SIZE * component;
+   assert(component_size + chans <= range->count);
+
+   unsigned coeffs_index = range->start + component_size;
 
    pco_ref coeffs = pco_ref_hwreg_vec(coeffs_index, PCO_REG_CLASS_COEFF, chans);
 
@@ -641,6 +693,7 @@ trans_store_output_fs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref src)
 
    gl_frag_result location = nir_intrinsic_io_semantics(intr).location;
 
+   assert(location < ARRAY_SIZE(fs_data->outputs));
    const pco_range *range = &fs_data->outputs[location];
    assert(component < range->count);
 
@@ -778,21 +831,23 @@ static unsigned fetch_resource_base_reg(const pco_common_data *common,
                                         unsigned binding,
                                         unsigned elem,
                                         unsigned *stride,
-                                        bool *is_img_smp)
+                                        unsigned *count,
+                                        bool *is_img_smp,
+                                        bool *is_inline_ubo)
 {
+   if (is_img_smp)
+      *is_img_smp = false;
+
+   if (is_inline_ubo)
+      *is_inline_ubo = false;
+
    const pco_range *range;
    if (desc_set == PCO_POINT_SAMPLER && binding == PCO_POINT_SAMPLER) {
       assert(common->uses.point_sampler);
       range = &common->point_sampler;
-
-      if (is_img_smp)
-         *is_img_smp = false;
    } else if (desc_set == PCO_IA_SAMPLER && binding == PCO_IA_SAMPLER) {
       assert(common->uses.ia_sampler);
       range = &common->ia_sampler;
-
-      if (is_img_smp)
-         *is_img_smp = false;
    } else {
       assert(desc_set < ARRAY_SIZE(common->desc_sets));
       const pco_descriptor_set_data *desc_set_data =
@@ -807,6 +862,9 @@ static unsigned fetch_resource_base_reg(const pco_common_data *common,
 
       if (is_img_smp)
          *is_img_smp = binding_data->is_img_smp;
+
+      if (is_inline_ubo)
+         *is_inline_ubo = binding_data->is_inline_ubo;
    }
 
    if (stride)
@@ -814,6 +872,9 @@ static unsigned fetch_resource_base_reg(const pco_common_data *common,
 
    unsigned reg_offset = elem * range->stride;
    assert(reg_offset < range->count);
+
+   if (count)
+      *count = range->count - reg_offset;
 
    unsigned reg_index = range->start + reg_offset;
    return reg_index;
@@ -823,7 +884,9 @@ static unsigned fetch_resource_base_reg_packed(const pco_common_data *common,
                                                uint32_t packed_desc,
                                                unsigned elem,
                                                unsigned *stride,
-                                               bool *is_img_smp)
+                                               unsigned *count,
+                                               bool *is_img_smp,
+                                               bool *is_inline_ubo)
 {
    unsigned desc_set;
    unsigned binding;
@@ -834,7 +897,9 @@ static unsigned fetch_resource_base_reg_packed(const pco_common_data *common,
                                   binding,
                                   elem,
                                   stride,
-                                  is_img_smp);
+                                  count,
+                                  is_img_smp,
+                                  is_inline_ubo);
 }
 
 /**
@@ -862,6 +927,7 @@ trans_load_output_fs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
    bool tile_buffer;
    if (location >= FRAG_RESULT_DATA0) {
       assert(!base);
+      assert(location < ARRAY_SIZE(tctx->shader->data.fs.outputs));
       range = &tctx->shader->data.fs.outputs[location];
       unsigned idx = location - FRAG_RESULT_DATA0;
       tile_buffer = fs_data->output_tile_buffers & BITFIELD_BIT(idx);
@@ -927,10 +993,11 @@ static pco_instr *trans_load_common_store(trans_ctx *tctx,
                                           nir_intrinsic_instr *intr,
                                           pco_ref dest,
                                           pco_ref offset_src,
+                                          unsigned noffset_src_idx,
                                           bool coeffs,
                                           pco_range *range)
 {
-   nir_src *noffset_src = &intr->src[0];
+   nir_src *noffset_src = &intr->src[noffset_src_idx];
    enum pco_reg_class reg_class = coeffs ? PCO_REG_CLASS_COEFF
                                          : PCO_REG_CLASS_SHARED;
 
@@ -1221,8 +1288,26 @@ static pco_instr *trans_load_buffer(trans_ctx *tctx,
    }
 
    unsigned stride;
+   unsigned count;
+   bool is_inline_ubo;
    unsigned sh_index =
-      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL);
+      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, &count, NULL, &is_inline_ubo);
+
+   if (is_inline_ubo) {
+      /* Uniform blocks can't be arrayed. */
+      assert(!is_dynidx && !elem);
+
+      return trans_load_common_store(tctx,
+                                     intr,
+                                     dest,
+                                     offset_src,
+                                     1,
+                                     false,
+                                     &(pco_range){
+                                        .start = sh_index,
+                                        .count = count,
+                                     });
+   }
 
    pco_ref base_addr[2];
    pco_ref_hwreg_addr_comps(sh_index, PCO_REG_CLASS_SHARED, base_addr);
@@ -1388,9 +1473,11 @@ static pco_instr *trans_get_buffer_size(trans_ctx *tctx,
       elem = nir_src_comp_as_uint(intr->src[0], 1);
    }
 
+   ASSERTED bool is_inline_ubo;
    unsigned stride;
    unsigned sh_index =
-      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL);
+      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL, NULL, &is_inline_ubo);
+   assert(!is_inline_ubo);
 
    pco_ref size_reg = pco_ref_hwreg(sh_index, PCO_REG_CLASS_SHARED);
    size_reg = pco_ref_offset(size_reg, 2);
@@ -1448,7 +1535,7 @@ static pco_instr *trans_store_buffer(trans_ctx *tctx,
 
    unsigned stride;
    unsigned sh_index =
-      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL);
+      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL, NULL, NULL);
 
    pco_ref base_addr[2];
    pco_ref_hwreg_addr_comps(sh_index, PCO_REG_CLASS_SHARED, base_addr);
@@ -1582,7 +1669,7 @@ static pco_instr *trans_atomic_buffer(trans_ctx *tctx,
 
    unsigned stride;
    unsigned sh_index =
-      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL);
+      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL, NULL, NULL);
 
    pco_ref base_addr[2];
    pco_ref_hwreg_addr_comps(sh_index, PCO_REG_CLASS_SHARED, base_addr);
@@ -1914,7 +2001,9 @@ static pco_ref lookup_load_tex_smp_state(trans_ctx *tctx,
                                                binding,
                                                elem,
                                                &stride,
-                                               &is_img_smp);
+                                               NULL,
+                                               &is_img_smp,
+                                               NULL);
 
    if (is_dynidx) {
       assert(dynidx_stride);
@@ -2164,6 +2253,49 @@ static pco_instr *lower_alphatst(trans_ctx *tctx,
                    pco_zero);
 }
 
+static pco_instr *lower_isp_feedback(trans_ctx *tctx,
+                                     nir_intrinsic_instr *intr,
+                                     pco_ref discard_src,
+                                     pco_ref depth_src)
+{
+   assert(tctx->stage == MESA_SHADER_FRAGMENT);
+
+   bool does_discard = !nir_src_is_undef(intr->src[0]);
+   bool does_depthf = !nir_src_is_undef(intr->src[1]);
+
+   if (!does_discard && !does_depthf)
+      return NULL;
+
+   if (does_discard) {
+      pco_tstz(&tctx->b,
+               pco_ref_null(),
+               pco_ref_pred(PCO_PRED_P0),
+               discard_src,
+               .tst_type_main = PCO_TST_TYPE_MAIN_U32);
+   }
+
+   pco_instr *instr;
+   if (does_depthf) {
+      instr = pco_depthf(&tctx->b,
+                         pco_ref_drc(PCO_DRC_0),
+                         depth_src,
+                         .olchk = tctx->olchk);
+   } else {
+      instr = pco_alphaf(&tctx->b,
+                         pco_ref_null(),
+                         pco_ref_drc(PCO_DRC_0),
+                         pco_zero,
+                         pco_zero,
+                         pco_7,
+                         .olchk = tctx->olchk);
+   }
+
+   if (does_discard)
+      pco_instr_set_exec_cnd(instr, PCO_EXEC_CND_E1_Z1);
+
+   return instr;
+}
+
 static inline unsigned lookup_reg_bits(nir_intrinsic_instr *intr)
 {
    nir_def *reg;
@@ -2332,11 +2464,8 @@ static pco_instr *trans_is_null_desc(trans_ctx *tctx,
 
    unsigned stride;
    bool is_img_smp;
-   unsigned sh_index = fetch_resource_base_reg_packed(common,
-                                                      packed_desc,
-                                                      elem,
-                                                      &stride,
-                                                      &is_img_smp);
+   unsigned sh_index =
+      fetch_resource_base_reg_packed(common, packed_desc, elem, &stride, NULL, &is_img_smp, NULL);
 
    unsigned num_dwords = is_img_smp ? ROGUE_NUM_TEXSTATE_DWORDS : stride;
 
@@ -2389,6 +2518,28 @@ static pco_instr *trans_is_null_desc(trans_ctx *tctx,
    }
 
    return pco_mov(&tctx->b, dest, all_dwords_zero);
+}
+
+static pco_instr *
+trans_blend_load(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
+{
+   pco_range range = tctx->shader->data.fs.blend_consts;
+
+   if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba) {
+      unsigned offset =
+         util_bitcount((pco_nir_blend_load_to_mask(intr->intrinsic) - 1) &
+                       tctx->shader->data.fs.blend_consts_needed);
+      range.start += offset;
+      range.count -= offset;
+   }
+
+   return trans_load_common_store(tctx,
+                                  intr,
+                                  dest,
+                                  pco_ref_null(),
+                                  0u,
+                                  false,
+                                  &range);
 }
 
 /**
@@ -2524,18 +2675,18 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
                                  intr,
                                  dest,
                                  src[0],
+                                 0u,
                                  false,
                                  &tctx->shader->data.common.push_consts.range);
       break;
 
    case nir_intrinsic_load_blend_const_color_rgba:
+   case nir_intrinsic_load_blend_const_color_r_float:
+   case nir_intrinsic_load_blend_const_color_g_float:
+   case nir_intrinsic_load_blend_const_color_b_float:
+   case nir_intrinsic_load_blend_const_color_a_float:
       assert(tctx->stage == MESA_SHADER_FRAGMENT);
-      instr = trans_load_common_store(tctx,
-                                      intr,
-                                      dest,
-                                      pco_ref_null(),
-                                      false,
-                                      &tctx->shader->data.fs.blend_consts);
+      instr = trans_blend_load(tctx, intr, dest);
       break;
 
    case nir_intrinsic_load_packed_sample_location_pco:
@@ -2549,6 +2700,7 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
                                       intr,
                                       dest,
                                       src[0],
+                                      0u,
                                       true,
                                       &tctx->shader->data.cs.shmem);
       break;
@@ -2719,6 +2871,13 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
       break;
    }
 
+   case nir_intrinsic_dma_flush_pco:
+      assert(pco_ref_get_chans(dest) == 1u);
+      assert(pco_ref_get_chans(src[0]) == 2u);
+
+      instr = pco_flush_dma(&tctx->b, dest, src[0]);
+      break;
+
    /* Vertex sysvals. */
    case nir_intrinsic_load_vertex_id:
    case nir_intrinsic_load_instance_id:
@@ -2791,39 +2950,9 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
       instr = lower_alphatst(tctx, dest, src[0], src[1], src[2]);
       break;
 
-   case nir_intrinsic_isp_feedback_pco: {
-      assert(tctx->stage == MESA_SHADER_FRAGMENT);
-      bool does_discard = !nir_src_is_undef(intr->src[0]);
-      bool does_depthf = !nir_src_is_undef(intr->src[1]);
-
-      does_depthf &= (tctx->shader->data.fs.uses.depth_feedback &&
-                      !tctx->shader->data.fs.uses.early_frag);
-
-      if (does_discard) {
-         pco_tstz(&tctx->b,
-                  pco_ref_null(),
-                  pco_ref_pred(PCO_PRED_P0),
-                  src[0],
-                  .tst_type_main = PCO_TST_TYPE_MAIN_U32);
-      }
-
-      instr = does_depthf ? pco_depthf(&tctx->b,
-                                       pco_ref_drc(PCO_DRC_0),
-                                       src[1],
-                                       .olchk = tctx->olchk)
-                          : pco_alphaf(&tctx->b,
-                                       pco_ref_null(),
-                                       pco_ref_drc(PCO_DRC_0),
-                                       pco_zero,
-                                       pco_zero,
-                                       pco_7,
-                                       .olchk = tctx->olchk);
-
-      if (does_discard)
-         pco_instr_set_exec_cnd(instr, PCO_EXEC_CND_E1_Z1);
-
+   case nir_intrinsic_isp_feedback_pco:
+      instr = lower_isp_feedback(tctx, intr, src[0], src[1]);
       break;
-   }
 
    case nir_intrinsic_alpha_to_coverage:
       assert(tctx->stage == MESA_SHADER_FRAGMENT);
@@ -3715,18 +3844,26 @@ static pco_instr *trans_alu(trans_ctx *tctx, nir_alu_instr *alu)
       instr = pco_iadd32(&tctx->b, dest, src[0], src[1], pco_ref_null());
       break;
 
-   /* TODO: PCO pass to combine u{add,sub}{carry,borrow}s with the same srcs. */
-   case nir_op_uadd_carry:
-      instr = pco_uadd_carry(&tctx->b, pco_ref_null(), dest, src[0], src[1]);
-      break;
+   case nir_op_uadd_with_carry_out:
+   case nir_op_usub_with_borrow_out: {
+      pco_ref dest_comps[2] = {
+         pco_ref_new_ssa32(tctx->func),
+         pco_ref_new_ssa32(tctx->func),
+      };
 
-   case nir_op_usub_borrow:
-      instr = pco_uadd_carry(&tctx->b,
-                             pco_ref_null(),
-                             dest,
-                             pco_ref_neg(src[1]),
-                             src[0]);
+      if (alu->op == nir_op_uadd_with_carry_out) {
+         pco_uadd_carry(&tctx->b, dest_comps[0], dest_comps[1], src[0], src[1]);
+      } else {
+         pco_uadd_carry(&tctx->b,
+                        dest_comps[0],
+                        dest_comps[1],
+                        pco_ref_neg(src[1]),
+                        src[0]);
+      }
+
+      instr = pco_trans_nir_vec(tctx, dest, 2, dest_comps);
       break;
+   }
 
    case nir_op_uadd_sat:
       instr = pco_uadd_sat(&tctx->b, dest, src[0], src[1], pco_u32max);

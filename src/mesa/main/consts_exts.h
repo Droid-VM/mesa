@@ -220,6 +220,7 @@ struct gl_extensions
    GLboolean EXT_timer_query;
    GLboolean EXT_vertex_array_bgra;
    GLboolean EXT_window_rectangles;
+   GLboolean EXT_YUV_target;
    GLboolean OES_copy_image;
    GLboolean OES_primitive_bounding_box;
    GLboolean OES_sample_variables;
@@ -262,6 +263,7 @@ struct gl_extensions
    GLboolean KHR_texture_compression_astc_ldr;
    GLboolean KHR_texture_compression_astc_sliced_3d;
    GLboolean MESA_framebuffer_flip_y;
+   GLboolean MESA_map_buffer_client_pointer;
    GLboolean MESA_texture_const_bandwidth;
    GLboolean MESA_pack_invert;
    GLboolean MESA_tile_raster_order;
@@ -415,8 +417,6 @@ struct gl_constants
 
    GLuint TextureBufferOffsetAlignment; /**< GL_ARB_texture_buffer_range */
 
-   GLuint MaxArrayLockSize;
-
    GLint SubPixelBits;
 
    GLfloat MinPointSize, MaxPointSize;	     /**< aliased */
@@ -427,9 +427,6 @@ struct gl_constants
    GLfloat LineWidthGranularity;
 
    GLuint MaxClipPlanes;
-   GLuint MaxLights;
-   GLfloat MaxShininess;                     /**< GL_NV_light_max_exponent */
-   GLfloat MaxSpotExponent;                  /**< GL_NV_light_max_exponent */
 
    GLuint MaxViewportWidth, MaxViewportHeight;
    GLuint MaxViewports;                      /**< GL_ARB_viewport_array */
@@ -441,29 +438,10 @@ struct gl_constants
    GLuint MaxWindowRectangles;               /**< GL_EXT_window_rectangles */
 
    struct gl_program_constants Program[MESA_SHADER_MESH_STAGES];
-   GLuint MaxProgramMatrices;
-   GLuint MaxProgramMatrixStackDepth;
 
    struct {
       GLuint SamplesPassed;
-      GLuint TimeElapsed;
       GLuint Timestamp;
-      GLuint PrimitivesGenerated;
-      GLuint PrimitivesWritten;
-      GLuint VerticesSubmitted;
-      GLuint PrimitivesSubmitted;
-      GLuint VsInvocations;
-      GLuint TessPatches;
-      GLuint TessInvocations;
-      GLuint GsInvocations;
-      GLuint GsPrimitives;
-      GLuint FsInvocations;
-      GLuint ComputeInvocations;
-      GLuint ClInPrimitives;
-      GLuint ClOutPrimitives;
-      GLuint TsInvocations;
-      GLuint MsInvocations;
-      GLuint MeshPrimitivesGenerated;
    } QueryCounterBits;
 
    GLuint MaxDrawBuffers;    /**< GL_ARB_draw_buffers */
@@ -531,6 +509,12 @@ struct gl_constants
     * with "#version ForceGLSLVersion".
     */
    GLuint ForceGLSLVersion;
+
+   /**
+    * For GLSL shaders that don't begin with "#version <version>",
+    * this version is used.
+    */
+   GLuint DefaultGLSLVersion;
 
    /**
     * Allow GLSL #extension directives in the middle of shaders.
@@ -829,7 +813,6 @@ struct gl_constants
 
    /** GL_ARB_vertex_attrib_binding */
    GLint MaxVertexAttribRelativeOffset;
-   GLint MaxVertexAttribBindings;
 
    /* GL_ARB_shader_image_load_store */
    GLuint MaxImageUnits;
@@ -863,14 +846,8 @@ struct gl_constants
    GLboolean TESPositionAlwaysPrecise;
 
    /** GL_ARB_tessellation_shader */
-   GLuint MaxPatchVertices;
-   GLuint MaxTessGenLevel;
    GLuint MaxTessPatchComponents;
-   GLuint MaxTessControlTotalOutputComponents;
    bool PrimitiveRestartForPatches;
-
-   /** GL_OES_primitive_bounding_box */
-   bool NoPrimitiveBoundingBoxOutput;
 
    /** GL_ARB_sparse_buffer */
    GLuint SparseBufferPageSize;
@@ -904,6 +881,12 @@ struct gl_constants
    bool PackedDriverUniformStorage;
 
    bool HasFBFetch;
+
+   /** Bitmask of enum pipe_advanced_blend_mode blended natively by the
+    * driver. Modes that aren't set in the mask are lowered into the
+    * fragment shader using framebuffer fetch.
+    */
+   GLbitfield NativeAdvancedBlendModes;
 
    bool PointSizeFixed;
 

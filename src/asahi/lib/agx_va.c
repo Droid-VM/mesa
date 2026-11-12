@@ -9,7 +9,13 @@
 static struct util_vma_heap *
 agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
 {
-   return (flags & AGX_VA_USC) ? &dev->usc_heap : &dev->main_heap;
+   if (flags & AGX_VA_USC)
+      return &dev->usc_heap;
+
+   if (flags & AGX_VA_CAPTURE)
+      return &dev->capture_heap;
+
+   return &dev->main_heap;
 }
 
 struct agx_va *
@@ -35,6 +41,14 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
    } else {
       addr = util_vma_heap_alloc(heap, size_B, align_B);
    }
+
+   /* Mirror and validate that we can allocate on the main heap the same spot for replay */
+   if (flags & AGX_VA_CAPTURE && addr != 0 &&
+       !util_vma_heap_alloc_addr(agx_vma_heap(dev, 0), addr, size_B)) {
+      util_vma_heap_free(heap, addr, size_B);
+      addr = 0;
+   }
+
    simple_mtx_unlock(&dev->vma_lock);
 
    if (addr == 0)
@@ -63,6 +77,11 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
 
    simple_mtx_lock(&dev->vma_lock);
    util_vma_heap_free(heap, va->addr, va->size_B);
+
+   /* Mirror free on the main heap as we should have allocated from there */
+   if (va->flags & AGX_VA_CAPTURE)
+      util_vma_heap_free(agx_vma_heap(dev, 0), va->addr, va->size_B);
+
    simple_mtx_unlock(&dev->vma_lock);
    free(va);
 }

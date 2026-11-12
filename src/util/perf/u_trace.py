@@ -535,12 +535,14 @@ static void ${func_name}${trace_name}(FILE *out, const void *arg, const void *in
  * ${trace_name}
  */\
 <%call expr="print_func('U_TRACE_BACKEND_PRINT', trace_name, trace)">\
-<%def name="tp_print_custom_fmt()">"${trace.tp_print_custom[0]}\\n"</%def>
+<%def name="tp_print_custom_fmt()">"${trace.tp_print_custom[0]}"</%def>
 <%def name="tp_print_fmt()">\\
    % for arg in trace.tp_print:
-      "${arg.name}=${arg.c_format}, "
+      "${arg.name}=${arg.c_format}"
+    % if arg != trace.tp_print[-1]:
+         ", "
+    % endif
    % endfor
-         "\\n"
 </%def>
 </%call>\
 \

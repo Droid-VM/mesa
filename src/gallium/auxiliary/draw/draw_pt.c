@@ -65,8 +65,10 @@ draw_pt_arrays(struct draw_context *draw,
 
    if (draw->gs.geometry_shader)
       out_prim = draw->gs.geometry_shader->output_primitive;
-   else if (draw->tes.tess_eval_shader)
-      out_prim = get_tes_output_prim(draw->tes.tess_eval_shader);
+   else if (draw->tes.tess_eval_shader) {
+      struct draw_tess_info tess_info = draw_tess_info_merge(draw->tcs.tess_ctrl_shader, draw->tes.tess_eval_shader);
+      out_prim = get_tes_output_prim(&tess_info);
+   }
 
    unsigned opt = PT_SHADE;
    if (!draw->render) {

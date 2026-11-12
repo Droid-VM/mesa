@@ -93,7 +93,7 @@ rewrite_derefs_to_per_prim_vars(nir_builder *b,
 
 static bool
 mesh_convert_attrs_prim_to_vert(struct nir_shader *nir,
-                                struct brw_compile_mesh_params *params,
+                                struct brw_compile_params *params,
                                 int *wa_mapping)
 {
    const uint64_t outputs_written = nir->info.outputs_written;
@@ -231,8 +231,8 @@ mesh_convert_attrs_prim_to_vert(struct nir_shader *nir,
    nir_def *zero = nir_imm_int(b, 0);
 
    nir_def *provoking_vertex =
-      params->wa_18019110168_load_provoking_vertex(
-         b, params->wa_18019110168_data);
+      params->mesh.wa_18019110168_load_provoking_vertex(
+         b, params->mesh.wa_18019110168_data);
    nir_def *local_invocation_index = nir_load_local_invocation_index(b);
 
    nir_def *cmp = nir_ieq(b, local_invocation_index, zero);
@@ -444,7 +444,7 @@ mesh_convert_attrs_prim_to_vert(struct nir_shader *nir,
 
 void
 brw_nir_mesh_convert_attrs_prim_to_vert(struct nir_shader *nir,
-                                        struct brw_compile_mesh_params *params,
+                                        struct brw_compile_params *params,
                                         int *wa_mapping)
 {
    NIR_PASS(_, nir, mesh_convert_attrs_prim_to_vert, params, wa_mapping);
@@ -544,7 +544,7 @@ brw_nir_frag_convert_attrs_prim_to_vert(struct nir_shader *nir,
 bool
 brw_nir_frag_convert_attrs_prim_to_vert_indirect(struct nir_shader *nir,
                                                  const struct intel_device_info *devinfo,
-                                                 struct brw_compile_fs_params *params)
+                                                 struct brw_compile_params *params)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_builder _b = nir_builder_at(nir_before_impl(impl)), *b = &_b;
@@ -576,8 +576,8 @@ brw_nir_frag_convert_attrs_prim_to_vert_indirect(struct nir_shader *nir,
       nir_def *remap_table_addr =
          nir_pack_64_2x32_split(
             b,
-            params->wa_18019110168_load_per_primitive_remap_table_offset(
-               b, params->wa_18019110168_data),
+            params->fs.wa_18019110168_load_per_primitive_remap_table_offset(
+               b, params->fs.wa_18019110168_data),
             nir_load_reloc_const_intel(
                b, BRW_SHADER_RELOC_INSTRUCTION_BASE_ADDR_HIGH));
       u_foreach_bit64(location, per_primitive_inputs) {

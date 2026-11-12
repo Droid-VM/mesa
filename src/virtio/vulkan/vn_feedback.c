@@ -586,6 +586,7 @@ vn_sync_feedback_command(struct vn_device *dev,
    if (!list_is_empty(&sfb->free_cmds)) {
       sfb_cmd =
          list_first_entry(&sfb->free_cmds, struct vn_sync_feedback_cmd, head);
+      vn_feedback_set_counter(sfb_cmd->src_slot, counter);
       list_move_to(&sfb_cmd->head, &sfb->pending_cmds);
       sfb->free_cmd_count--;
    }
@@ -596,12 +597,12 @@ vn_sync_feedback_command(struct vn_device *dev,
       if (!sfb_cmd)
          return VK_NULL_HANDLE;
 
+      vn_feedback_set_counter(sfb_cmd->src_slot, counter);
+
       simple_mtx_lock(&sfb->cmd_mtx);
       list_add(&sfb_cmd->head, &sfb->pending_cmds);
       simple_mtx_unlock(&sfb->cmd_mtx);
    }
-
-   vn_feedback_set_counter(sfb_cmd->src_slot, counter);
 
    VkCommandBuffer sfb_cmd_handle = VK_NULL_HANDLE;
    for (uint32_t i = 0; i < dev->queue_family_count; i++) {

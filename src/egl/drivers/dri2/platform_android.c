@@ -610,8 +610,11 @@ droid_query_buffer_age(_EGLDisplay *disp, _EGLSurface *surface)
    return dri2_surf->back ? dri2_surf->back->age : 0;
 }
 
+/* The damage regions are unused; the Android EGL framework already takes
+ * care of pushing them into ANativeWindow. */
 static EGLBoolean
-droid_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
+droid_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+		   const EGLint *rects, EGLint n_rects)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
@@ -644,7 +647,7 @@ droid_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
                                              __DRI2_NOTHROTTLE_SWAPBUFFER);
 
    if (dri2_dpy->pure_swrast) {
-      driSwapBuffers(dri2_surf->dri_drawable);
+      driSwapBuffers(dri2_surf->dri_drawable, n_rects, rects);
       if (dri2_surf->buffer)
          droid_window_enqueue_buffer(disp, dri2_surf);
    } else {
@@ -875,13 +878,10 @@ static const struct dri2_egl_display_vtbl droid_display_vtbl = {
    .swap_interval = droid_swap_interval,
    .query_buffer_age = droid_query_buffer_age,
    .query_surface = droid_query_surface,
-   .get_dri_drawable = dri2_surface_get_dri_drawable,
    .set_shared_buffer_mode = droid_set_shared_buffer_mode,
 };
 
 static const __DRIimageLoaderExtension droid_image_loader_extension = {
-   .base = {__DRI_IMAGE_LOADER, 4},
-
    .getBuffers = droid_image_get_buffers,
    .flushFrontBuffer = droid_flush_front_buffer,
    .getCapability = droid_get_capability,
@@ -985,8 +985,6 @@ droid_swrast_get_image(struct dri_drawable *read, int x, int y, int w, int h,
 }
 
 static const __DRIswrastLoaderExtension swrast_loader_extension = {
-   .base = {__DRI_SWRAST_LOADER, 2},
-
    .getDrawableInfo = droid_swrast_get_drawable_info,
    .putImage = droid_swrast_put_image,
    .getImage = droid_swrast_get_image,
@@ -995,23 +993,20 @@ static const __DRIswrastLoaderExtension swrast_loader_extension = {
 
 static const __DRImutableRenderBufferLoaderExtension
    droid_mutable_render_buffer_extension = {
-      .base = {__DRI_MUTABLE_RENDER_BUFFER_LOADER, 1},
       .displaySharedBuffer = droid_display_shared_buffer,
 };
 
-static const __DRIextension *droid_image_loader_extensions[] = {
-   &droid_image_loader_extension.base,
-   &image_lookup_extension.base,
-   &droid_mutable_render_buffer_extension.base,
-   NULL,
+static const struct dri_loader_funcs droid_image_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &droid_image_loader_extension,
+   .mutable_render_buffer = &droid_mutable_render_buffer_extension,
 };
 
-static const __DRIextension *droid_swrast_image_loader_extensions[] = {
-   &droid_image_loader_extension.base,
-   &image_lookup_extension.base,
-   &droid_mutable_render_buffer_extension.base,
-   &swrast_loader_extension.base,
-   NULL,
+static const struct dri_loader_funcs droid_swrast_image_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &droid_image_loader_extension,
+   .swrast = &swrast_loader_extension,
+   .mutable_render_buffer = &droid_mutable_render_buffer_extension,
 };
 
 static EGLBoolean
@@ -1040,7 +1035,7 @@ droid_load_driver(_EGLDisplay *disp, bool swrast)
       }
    }
 
-   dri2_dpy->loader_extensions = droid_image_loader_extensions;
+   dri2_dpy->loader_funcs = &droid_image_loader_funcs;
    dri2_detect_swrast_kopper(disp);
 
    return true;
@@ -1192,7 +1187,7 @@ dri2_initialize_android(_EGLDisplay *disp)
    if ((!device_opened && disp->Options.ForceSoftware) ||
        force_pure_swrast) {
       dri2_dpy->driver_name = strdup("swrast");
-      dri2_dpy->loader_extensions = droid_swrast_image_loader_extensions;
+      dri2_dpy->loader_funcs = &droid_swrast_image_loader_funcs;
       dri2_dpy->fd_render_gpu = -1;
       dri2_dpy->pure_swrast = true;
       dri2_detect_swrast_kopper(disp);
@@ -1247,7 +1242,7 @@ dri2_initialize_android(_EGLDisplay *disp)
    dri2_dpy->front_rendering_usage = 0;
 #if ANDROID_API_LEVEL >= 24
    if (!dri2_dpy->swrast_not_kms &&
-       dri2_dpy->loader_extensions == droid_image_loader_extensions &&
+       dri2_dpy->loader_funcs == &droid_image_loader_funcs &&
        /* In big GL, front rendering is done at the core API level by directly
         * rendering on the front buffer. However, in ES, the front buffer is
         * completely inaccessible through the core ES API.

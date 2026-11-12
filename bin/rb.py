@@ -57,7 +57,6 @@ TEST_CASES = {
     'gfxstrand': 'faith.ekstrand@collabora.com',
     'Faith': 'faith.ekstrand@collabora.com',
     'faith': 'faith.ekstrand@collabora.com',
-    'alyssa': 'alyssa.rosenzweig@intel.com',
     'briano': 'ivan.briano@intel.com',
     'schurmann': 'daniel@schuermann.dev',
     'Schürmann': 'daniel@schuermann.dev',

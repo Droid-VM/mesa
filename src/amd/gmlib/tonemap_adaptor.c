@@ -101,7 +101,7 @@ int tm_generate_formatted_3DLut(
          for (j = 0; j < cpuLutDim; j++) {
             for (k = 0; k < cpuLutDim; k++) {
                cpuSurfIndex = i * cpuLutDim * cpuLutDim * 3 + j * cpuLutDim * 3 + k * 3;
-               gpuSurfIndex = i * sliceSize + j * widthSize + k * 4;
+               gpuSurfIndex = k * sliceSize + j * widthSize + i * 4;
                *(pGpuData + gpuSurfIndex + 0) = (uint16_t)(((float)(pCpuLutData[cpuSurfIndex + 0]) / (float)bitDepthCpu) * bitDepthGpu);
                *(pGpuData + gpuSurfIndex + 1) = (uint16_t)(((float)(pCpuLutData[cpuSurfIndex + 1]) / (float)bitDepthCpu) * bitDepthGpu);
                *(pGpuData + gpuSurfIndex + 2) = (uint16_t)(((float)(pCpuLutData[cpuSurfIndex + 2]) / (float)bitDepthCpu) * bitDepthGpu);

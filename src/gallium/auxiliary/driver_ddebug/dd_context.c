@@ -360,6 +360,18 @@ DD_IMM_STATE(framebuffer_state, const struct pipe_framebuffer_state, *state, sta
 DD_IMM_STATE(polygon_stipple, const struct pipe_poly_stipple, *state, state)
 
 static void
+dd_context_set_sample_coverage(struct pipe_context *_pipe, float value,
+                               bool invert)
+{
+   struct dd_context *dctx = dd_context(_pipe);
+   struct pipe_context *pipe = dctx->pipe;
+
+   dctx->draw_state.sample_coverage = value;
+   dctx->draw_state.sample_coverage_invert = invert;
+   pipe->set_sample_coverage(pipe, value, invert);
+}
+
+static void
 dd_context_set_constant_buffer(struct pipe_context *_pipe,
                                mesa_shader_stage shader, uint index,
                                const struct pipe_constant_buffer *constant_buffer)
@@ -687,6 +699,15 @@ dd_context_resource_commit(struct pipe_context *_pipe,
 }
 
 static void
+dd_context_resource_release(struct pipe_context *_pipe,
+                            struct pipe_resource *resource)
+{
+   struct pipe_context *pipe = dd_context(_pipe)->pipe;
+
+   pipe->resource_release(pipe, resource);
+}
+
+static void
 dd_context_set_global_binding(struct pipe_context *_pipe,
 			      unsigned first, unsigned count,
 			      struct pipe_resource **resources,
@@ -827,6 +848,16 @@ dd_context_set_inlinable_constants(struct pipe_context *_pipe,
    pipe->set_inlinable_constants(pipe, shader, num_values, values);
 }
 
+static struct pipe_context *
+dd_get_driver_pipe_context(struct pipe_context *_pipe)
+{
+   struct pipe_context *pipe = dd_context(_pipe)->pipe;
+
+   if (pipe->get_driver_pipe_context)
+      return pipe->get_driver_pipe_context(pipe);
+   return pipe;
+}
+
 struct pipe_context *
 dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
 {
@@ -846,6 +877,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
    dctx->base.const_uploader = pipe->const_uploader;
 
    dctx->base.destroy = dd_context_destroy;
+   dctx->base.get_driver_pipe_context = dd_get_driver_pipe_context;
 
    CTX_INIT(render_condition);
    CTX_INIT(create_query);
@@ -897,6 +929,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
    CTX_INIT(set_blend_color);
    CTX_INIT(set_stencil_ref);
    CTX_INIT(set_sample_mask);
+   CTX_INIT(set_sample_coverage);
    CTX_INIT(set_min_samples);
    CTX_INIT(set_clip_state);
    CTX_INIT(set_constant_buffer);
@@ -922,6 +955,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
    CTX_INIT(texture_barrier);
    CTX_INIT(memory_barrier);
    CTX_INIT(resource_commit);
+   CTX_INIT(resource_release);
    CTX_INIT(set_global_binding);
    /* create_video_codec */
    /* create_video_buffer */
@@ -947,6 +981,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
       pipe->set_log_context(pipe, &dctx->log);
 
    dctx->draw_state.sample_mask = ~0;
+   dctx->draw_state.sample_coverage = 1.0f;
 
    list_inithead(&dctx->records);
    (void) mtx_init(&dctx->mutex, mtx_plain);

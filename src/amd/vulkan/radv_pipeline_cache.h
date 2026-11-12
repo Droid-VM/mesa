@@ -63,17 +63,22 @@ nir_shader *radv_pipeline_cache_lookup_nir(const struct radv_compiler_info *comp
 void radv_pipeline_cache_insert_nir(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
                                     const blake3_hash key, const nir_shader *nir);
 
-struct vk_pipeline_cache_object *radv_pipeline_cache_lookup_nir_handle(const struct radv_compiler_info *compiler_info,
-                                                                       struct vk_pipeline_cache *cache,
-                                                                       const unsigned char *blake3);
-
 struct nir_shader *radv_pipeline_cache_handle_to_nir(const struct radv_compiler_info *compiler_info,
                                                      struct vk_pipeline_cache_object *object);
 
-struct vk_pipeline_cache_object *radv_pipeline_cache_nir_to_handle(struct radv_device *device,
-                                                                   struct vk_pipeline_cache *cache,
-                                                                   struct nir_shader *nir, const unsigned char *blake3,
-                                                                   bool cached);
+/* Creates an uncached handle by copying serialized NIR. */
+struct vk_pipeline_cache_object *radv_pipeline_cache_create_nir_handle(struct radv_device *device,
+                                                                       const unsigned char *blake3, const void *data,
+                                                                       size_t size);
+
+/* Creates an uncached handle by serializing NIR. */
+struct vk_pipeline_cache_object *radv_pipeline_cache_nir_to_handle(struct radv_device *device, struct nir_shader *nir,
+                                                                   const unsigned char *blake3);
+
+/* Consumes a reference and returns the handle to use, which may already be cached. */
+struct vk_pipeline_cache_object *radv_pipeline_cache_insert_nir_handle(struct radv_device *device,
+                                                                      struct vk_pipeline_cache *cache,
+                                                                      struct vk_pipeline_cache_object *object);
 
 void radv_shader_serialize(struct radv_shader *shader, struct blob *blob);
 

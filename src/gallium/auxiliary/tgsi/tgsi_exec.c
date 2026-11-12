@@ -2136,14 +2136,8 @@ exec_lodq(struct tgsi_exec_machine *mach,
    union tgsi_exec_channel r[2];
 
    resource_unit = fetch_sampler_unit(mach, inst, 1);
-   if (inst->Instruction.Opcode == TGSI_OPCODE_LOD) {
-      unsigned target = mach->SamplerViews[resource_unit].Resource;
-      dim = tgsi_util_get_texture_coord_dim(target);
-      sampler_unit = fetch_sampler_unit(mach, inst, 2);
-   } else {
-      dim = tgsi_util_get_texture_coord_dim(inst->Texture.Texture);
-      sampler_unit = resource_unit;
-   }
+   dim = tgsi_util_get_texture_coord_dim(inst->Texture.Texture);
+   sampler_unit = resource_unit;
    assert(dim <= ARRAY_SIZE(coords));
    /* fetch coordinates */
    for (i = 0; i < dim; i++) {
@@ -2168,32 +2162,11 @@ exec_lodq(struct tgsi_exec_machine *mach,
    if (inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_Y) {
       store_dest(mach, &r[1], &inst->Dst[0], inst, TGSI_CHAN_Y);
    }
-   if (inst->Instruction.Opcode == TGSI_OPCODE_LOD) {
-      unsigned char swizzles[4];
-      unsigned chan;
-      swizzles[0] = inst->Src[1].Register.SwizzleX;
-      swizzles[1] = inst->Src[1].Register.SwizzleY;
-      swizzles[2] = inst->Src[1].Register.SwizzleZ;
-      swizzles[3] = inst->Src[1].Register.SwizzleW;
-
-      for (chan = 0; chan < TGSI_NUM_CHANNELS; chan++) {
-         if (inst->Dst[0].Register.WriteMask & (1 << chan)) {
-            if (swizzles[chan] >= 2) {
-               store_dest(mach, &ZeroVec,
-                          &inst->Dst[0], inst, chan);
-            } else {
-               store_dest(mach, &r[swizzles[chan]],
-                          &inst->Dst[0], inst, chan);
-            }
-         }
-      }
-   } else {
-      if (inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_X) {
-         store_dest(mach, &r[0], &inst->Dst[0], inst, TGSI_CHAN_X);
-      }
-      if (inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_Y) {
-         store_dest(mach, &r[1], &inst->Dst[0], inst, TGSI_CHAN_Y);
-      }
+   if (inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_X) {
+      store_dest(mach, &r[0], &inst->Dst[0], inst, TGSI_CHAN_X);
+   }
+   if (inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_Y) {
+      store_dest(mach, &r[1], &inst->Dst[0], inst, TGSI_CHAN_Y);
    }
 }
 
@@ -5459,18 +5432,6 @@ exec_instruction(
 
    case TGSI_OPCODE_SVIEWINFO:
       exec_txq(mach, inst);
-      break;
-
-   case TGSI_OPCODE_SAMPLE_POS:
-      assert(0);
-      break;
-
-   case TGSI_OPCODE_SAMPLE_INFO:
-      assert(0);
-      break;
-
-   case TGSI_OPCODE_LOD:
-      exec_lodq(mach, inst);
       break;
 
    case TGSI_OPCODE_UARL:

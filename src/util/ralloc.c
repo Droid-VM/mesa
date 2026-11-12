@@ -618,7 +618,15 @@ typedef struct
  * allocated using a freelist backed by a simple linear allocator.
  */
 typedef struct gc_slab {
-   alignas(HEADER_ALIGN)
+   /* Slabs that handle the same-sized objects. Users of this list must ensure that their list_head
+    * is aligned properly.
+    */
+   alignas(HEADER_ALIGN) struct list_head link;
+
+   /* Free slabs that handle the same-sized objects. Users of this list must ensure that their
+    * list_head is also aligned properly.
+    */
+   alignas(HEADER_ALIGN) struct list_head free_link;
 
    gc_ctx *ctx;
 
@@ -628,12 +636,6 @@ typedef struct gc_slab {
     */
    char *next_available;
    gc_block_header *freelist;
-
-   /* Slabs that handle the same-sized objects. */
-   struct list_head link;
-
-   /* Free slabs that handle the same-sized objects. */
-   struct list_head free_link;
 
    /* Number of allocated and free objects, recorded so that we can free the slab if it
     * becomes empty or add one to the freelist if it's no longer full.
@@ -652,19 +654,30 @@ struct gc_ctx {
     * fixed size. slabs[N] contains allocations of size
     * FREELIST_ALIGNMENT * (N + 1).
     */
-   struct {
-      /* List of slabs in this bucket. */
-      struct list_head slabs;
+   struct gc_slab_bucket {
+      /* List of slabs in this bucket. The member must be aligned identically to gc_slab.link. */
+      alignas(HEADER_ALIGN) struct list_head slabs;
 
       /* List of slabs with free space in this bucket, so we can quickly choose one when
-       * allocating.
+       * allocating. The member must be aligned identically to gc_slab.free_link.
        */
-      struct list_head free_slabs;
+      alignas(HEADER_ALIGN) struct list_head free_slabs;
    } slabs[NUM_FREELIST_BUCKETS];
 
    uint8_t current_gen;
    void *rubbish;
 };
+
+/* These asserts are necessary to enforce that the offset of link and free_link within gc_slab are
+ * congruent modulo alignof(gc_slab) to the offset of slabs and free_slabs within gc_ctx to avoid
+ * alignment issues.
+ */
+static_assert((offsetof(gc_ctx, slabs) +
+               offsetof(struct gc_slab_bucket, slabs)) % alignof(gc_slab) ==
+              offsetof(gc_slab, link) % alignof(gc_slab), "");
+static_assert((offsetof(gc_ctx, slabs) +
+               offsetof(struct gc_slab_bucket, free_slabs)) % alignof(gc_slab) ==
+              offsetof(gc_slab, free_link) % alignof(gc_slab), "");
 
 static gc_block_header *
 get_gc_header(const void *ptr)

@@ -46,6 +46,7 @@
 #include "dri_util.h"
 #include "pipe-loader/pipe_loader.h"
 #include "x11/x11_display.h"
+#include "util/bitscan.h"
 
 #define __ATTRIB(attrib, field) \
     { attrib, offsetof(struct glx_config, field) }
@@ -79,21 +80,30 @@ static const struct
 };
 
 static int
-scalarEqual(struct glx_config *mode, unsigned int attrib, unsigned int value)
+scalarEqual(const struct glx_config *mode, unsigned int attrib, unsigned int value)
 {
    unsigned glxValue, i;
 
    for (i = 0; i < ARRAY_SIZE(attribMap); i++)
       if (attribMap[i].attrib == attrib) {
-         glxValue = *(unsigned int *) ((char *) mode + attribMap[i].offset);
+         glxValue = *(const unsigned int *) ((const char *) mode + attribMap[i].offset);
          return glxValue == GLX_DONT_CARE || glxValue == value;
       }
 
    return GL_TRUE;              /* Is a non-existing attribute equal to value? */
 }
 
+/* server config attributes a match drops, accum and sRGB only when relaxed */
+#define DRI_CONFIG_DROP_ACCUM       (1 << 0)
+#define DRI_CONFIG_DROP_SRGB        (1 << 1)
+#define DRI_CONFIG_DROP_AUX         (1 << 2)
+#define DRI_CONFIG_DROP_TFP_MIPMAP  (1 << 3)
+#define DRI_CONFIG_DROP_RELAXED     (DRI_CONFIG_DROP_ACCUM | DRI_CONFIG_DROP_SRGB)
+
+/* never modifies config since it is compared against every driver config */
 static int
-driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
+driConfigEqual(const struct glx_config *config, const struct dri_config *driConfig,
+               bool relaxed, unsigned *drop)
 {
    unsigned int attrib, value, glxValue;
    int i;
@@ -127,7 +137,11 @@ driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
             glxValue |= GLX_TEXTURE_2D_BIT_EXT;
          if (value & __DRI_ATTRIB_TEXTURE_RECTANGLE_BIT)
             glxValue |= GLX_TEXTURE_RECTANGLE_BIT_EXT;
+         /* a server config that can't be bound to any target doesn't care
+          * which targets the driver config supports
+          */
          if (config->bindToTextureTargets != GLX_DONT_CARE &&
+             config->bindToTextureTargets &&
              glxValue != config->bindToTextureTargets)
             return GL_FALSE;
          break;
@@ -162,8 +176,54 @@ driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
                DebugMessageF("Disabling server's aux buffer support\n");
                warned = 1;
             }
-            config->numAuxBuffers = 0;
+            *drop |= DRI_CONFIG_DROP_AUX;
          }
+         break;
+
+      /* Multisampled driver configs never have an accumulation buffer. If
+       * the server's multisampled config has one, drop it from the server
+       * config instead of losing the config. Single-sampled configs must
+       * still match exactly, since the driver has both variants of those.
+       */
+      case __DRI_ATTRIB_ACCUM_RED_SIZE:
+      case __DRI_ATTRIB_ACCUM_GREEN_SIZE:
+      case __DRI_ATTRIB_ACCUM_BLUE_SIZE:
+      case __DRI_ATTRIB_ACCUM_ALPHA_SIZE:
+         if (!scalarEqual(config, attrib, value)) {
+            if (!relaxed || value || !config->sampleBuffers)
+               return GL_FALSE;
+            *drop |= DRI_CONFIG_DROP_ACCUM;
+         }
+         break;
+
+      /* The texture-from-pixmap attributes only matter if the server can
+       * bind the config to a texture at all.
+       */
+      case __DRI_ATTRIB_BIND_TO_TEXTURE_RGB:
+         if (!scalarEqual(config, attrib, value) && config->bindToTextureRgb)
+            return GL_FALSE;
+         break;
+
+      case __DRI_ATTRIB_BIND_TO_TEXTURE_RGBA:
+         if (!scalarEqual(config, attrib, value) && config->bindToTextureRgba)
+            return GL_FALSE;
+         break;
+
+      /* same as accumulation buffers: a multisampled server config may
+       * advertise sRGB where the driver config does not
+       */
+      case __DRI_ATTRIB_FRAMEBUFFER_SRGB_CAPABLE:
+         if (!scalarEqual(config, attrib, value)) {
+            if (!relaxed || value || !config->sampleBuffers)
+               return GL_FALSE;
+            *drop |= DRI_CONFIG_DROP_SRGB;
+         }
+         break;
+
+      case __DRI_ATTRIB_YINVERTED:
+         if (!scalarEqual(config, attrib, value) &&
+             (config->bindToTextureRgb || config->bindToTextureRgba))
+            return GL_FALSE;
          break;
 
       case __DRI_ATTRIB_BIND_TO_MIPMAP_TEXTURE:
@@ -173,7 +233,7 @@ driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
                DebugMessageF("Disabling server's tfp mipmap support\n");
                warned = 1;
             }
-            config->bindToMipmapTexture = 0;
+            *drop |= DRI_CONFIG_DROP_TFP_MIPMAP;
          }
          break;
 
@@ -190,14 +250,36 @@ static struct glx_config *
 createDriMode(struct glx_config *config, const struct dri_config **driConfigs)
 {
    __GLXDRIconfigPrivate *driConfig;
+   const struct dri_config *match = NULL;
+   unsigned drop = 0;
    int i;
 
+   /* prefer an exact match, then the one dropping the fewest attributes */
    for (i = 0; driConfigs[i]; i++) {
-      if (driConfigEqual(config, driConfigs[i]))
+      drop = 0;
+      if (driConfigEqual(config, driConfigs[i], false, &drop)) {
+         match = driConfigs[i];
          break;
+      }
+   }
+   if (!match && config->sampleBuffers) {
+      unsigned best = 0;
+      for (i = 0; driConfigs[i]; i++) {
+         unsigned d = 0;
+         if (driConfigEqual(config, driConfigs[i], true, &d) &&
+             (!match || util_bitcount(d & DRI_CONFIG_DROP_RELAXED) <
+                        util_bitcount(best & DRI_CONFIG_DROP_RELAXED))) {
+            match = driConfigs[i];
+            best = d;
+            /* an exact match was already ruled out */
+            if (util_bitcount(d & DRI_CONFIG_DROP_RELAXED) == 1)
+               break;
+         }
+      }
+      drop = best;
    }
 
-   if (driConfigs[i] == NULL)
+   if (match == NULL)
       return NULL;
 
    driConfig = malloc(sizeof *driConfig);
@@ -205,7 +287,19 @@ createDriMode(struct glx_config *config, const struct dri_config **driConfigs)
       return NULL;
 
    driConfig->base = *config;
-   driConfig->driConfig = driConfigs[i];
+   driConfig->driConfig = match;
+   if (drop & DRI_CONFIG_DROP_ACCUM) {
+      driConfig->base.accumRedBits = 0;
+      driConfig->base.accumGreenBits = 0;
+      driConfig->base.accumBlueBits = 0;
+      driConfig->base.accumAlphaBits = 0;
+   }
+   if (drop & DRI_CONFIG_DROP_SRGB)
+      driConfig->base.sRGBCapable = 0;
+   if (drop & DRI_CONFIG_DROP_AUX)
+      driConfig->base.numAuxBuffers = 0;
+   if (drop & DRI_CONFIG_DROP_TFP_MIPMAP)
+      driConfig->base.bindToMipmapTexture = 0;
 
    return &driConfig->base;
 }
@@ -229,16 +323,6 @@ driConvertConfigs(struct glx_config *configs, const struct dri_config **driConfi
    }
 
    return head.next;
-}
-
-void
-driDestroyConfigs(const struct dri_config **configs)
-{
-   int i;
-
-   for (i = 0; configs[i]; i++)
-      free((struct dri_config *) configs[i]);
-   free(configs);
 }
 
 static struct glx_config *
@@ -782,6 +866,7 @@ dri_unbind_context(struct glx_context *context)
 void
 dri_destroy_context(struct glx_context *context)
 {
+   glx_display_remove_context(context);
    driReleaseDrawables(context);
  
    free((char *) context->extensions);
@@ -941,7 +1026,7 @@ dri_bind_tex_image(__GLXDRIdrawable *base, int buffer, const int *attrib_list)
 }
 
 bool
-dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, int fd, const __DRIextension **loader_extensions, bool driver_name_is_inferred)
+dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, int fd, const struct dri_loader_funcs *loader_funcs, bool driver_name_is_inferred)
 {
    const struct dri_config **driver_configs;
    struct glx_config *configs = NULL, *visuals = NULL;
@@ -965,7 +1050,7 @@ dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, in
    }
 
    psc->frontend_screen = driCreateNewScreen3(screen, fd,
-                                                 loader_extensions,
+                                                 loader_funcs,
                                                  type,
                                                  &driver_configs, driver_name_is_inferred,
                                                  psc->display->has_multibuffer, psc);

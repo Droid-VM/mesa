@@ -235,6 +235,8 @@ lower_alu_instr_width(nir_builder *b, nir_instr *instr, void *_data)
    case nir_op_vec3:
    case nir_op_vec2:
    case nir_op_cube_amd:
+   case nir_op_uadd_with_carry_out:
+   case nir_op_usub_with_borrow_out:
       /* We don't need to scalarize these ops, they're the ones generated to
        * group up outputs into a value that can be SSAed.
        */

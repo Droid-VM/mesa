@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2023 Collabora Ltd.
  * Copyright (C) 2026 Arm Ltd.
+ * Copyright (C) 2026 NXP
  * SPDX-License-Identifier: MIT
  */
 
@@ -15,6 +16,7 @@
 #include "pan_context.h"
 #include "pan_csf.h"
 #include "pan_fb_preload.h"
+#include "pan_shader.h"
 #include "pan_job.h"
 #include "pan_trace.h"
 #include "panfrost_tracepoints.h"
@@ -302,13 +304,25 @@ csf_oom_handler_init(struct panfrost_context *ctx)
    cs_function_def(&b, &handler, handler_ctx) {
       struct cs_index tiler_oom_ctx = cs_reg64(&b, TILER_OOM_CTX_REG);
       struct cs_index counter = cs_reg32(&b, 31);
-      struct cs_index zero = cs_reg64(&b, 56);
-      struct cs_index flush_id = cs_reg32(&b, 58);
+      struct cs_index zero64 = cs_reg64(&b, 56);
+      /* zero32 aliases the low 32 bits of zero64 (both map to r56).
+       * Both are initialized to 0 immediately below; do not assign any
+       * other value to zero64/zero32 between here and cs_flush_caches(),
+       * and do not re-order cs_flush_caches() ahead of that initialization.
+       * A non-zero flush_id makes the hardware treat the cache flush as
+       * already completed and skip the invalidate.
+       */
+      struct cs_index zero32 = cs_reg32(&b, 56);
       struct cs_index tiler_ctx = cs_reg64(&b, 60);
       struct cs_index completed_top = cs_reg64(&b, 64);
       struct cs_index completed_bottom = cs_reg64(&b, 66);
       struct cs_index completed_chunks = cs_reg_tuple(&b, 64, 4);
       struct cs_index fbd_pointer = cs_sr_reg64(&b, FRAGMENT, FBD_POINTER);
+
+      /* Initialize zero64/zero32 to 0, zero32 is used as flush_id
+       * in cs_flush_caches() below, and zero64 is reused for the
+       * polygon-list and completed-chunks stores that follow. */
+      cs_move64_to(&b, zero64, 0);
 
       /* Ensure that the OTHER endpoint is valid */
 #if PAN_ARCH >= 11
@@ -360,15 +374,14 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       cs_finish_fragment(&b, false, completed_top, completed_bottom, cs_now());
 
       /* Zero out polygon list, completed_top and completed_bottom */
-      cs_move64_to(&b, zero, 0);
-      cs_store64(&b, zero, tiler_ctx, 0);
-      cs_store64(&b, zero, tiler_ctx, 10 * 4);
-      cs_store64(&b, zero, tiler_ctx, 12 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 0);
+      cs_store64(&b, zero64, tiler_ctx, 10 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 12 * 4);
 
       /* We need to flush the texture caches so future preloads see the new
        * content. */
       cs_flush_caches(&b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
-                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, zero32,
                       cs_defer(0, 0));
 
       cs_wait_slot(&b, PANFROST_SB_LS);
@@ -480,19 +493,22 @@ GENX(csf_init_batch)(struct panfrost_batch *batch)
       .ls_sb_slot = 0,
    };
 
-   /* Setup the queue builder */
+   /* Setup the queue builder. Render batches need compute enabled for XFB. */
    batch->csf.cs.builder = malloc(sizeof(struct cs_builder));
    batch->csf.cs.current_ep_sb = ~0u;
    cs_builder_init(batch->csf.cs.builder, &conf, queue);
-   cs_req_res(batch->csf.cs.builder,
-              CS_COMPUTE_RES | CS_TILER_RES | CS_IDVS_RES | CS_FRAG_RES);
+   cs_req_res(batch->csf.cs.builder, batch->type == PANFROST_BATCH_RENDER ?
+              CS_TILER_RES | CS_IDVS_RES | CS_FRAG_RES | CS_COMPUTE_RES :
+              CS_COMPUTE_RES);
 
    /* Set up entries */
    csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
 
-   batch->framebuffer = alloc_fbd(batch);
-   if (!batch->framebuffer.gpu)
-      return -1;
+   if (batch->type == PANFROST_BATCH_RENDER) {
+      batch->framebuffer = alloc_fbd(batch);
+      if (!batch->framebuffer.gpu)
+         return -1;
+   }
 
    batch->tls = pan_pool_alloc_desc(&batch->pool.base, LOCAL_STORAGE);
    if (!batch->tls.cpu)
@@ -627,13 +643,6 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
       if (!flags)
          continue;
 
-      /* Update the BO access flags so that panfrost_bo_wait() knows
-       * about all pending accesses.
-       * We only keep the READ/WRITE info since this is all the BO
-       * wait logic cares about.
-       * We also preserve existing flags as this batch might not
-       * be the first one to access the BO.
-       */
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
       ret = panthor_kmod_bo_get_sync_point(bo->kmod_bo, &bo_sync_handle,
@@ -673,8 +682,8 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
    }
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
-                                     ctx->in_sync_fd);
+      ret = pan_kmod_sync_import_file(dev->kmod.dev, ctx->in_sync_obj,
+                                      ctx->in_sync_fd);
       if (ret)
          return ret;
 
@@ -708,7 +717,6 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
     * be written by the GPU to keep things simple.
     */
    util_dynarray_foreach(&batch->pool.bos, struct panfrost_bo *, bo) {
-      (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
       ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
@@ -717,7 +725,6 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
 
    util_dynarray_foreach(&batch->csf.cs_chunk_pool.bos, struct panfrost_bo *,
                          bo) {
-      (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
       ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
@@ -734,7 +741,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
 
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
-      bo->gpu_access |= flags & (PAN_BO_ACCESS_RW);
+      panfrost_context_report_bo_access(ctx, bo, flags);
       ret = panthor_kmod_bo_attach_sync_point(bo->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point,
                                               flags & PAN_BO_ACCESS_WRITE);
@@ -743,8 +750,8 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
    }
 
    /* And finally transfer the VM sync point to the context syncobj. */
-   return drmSyncobjTransfer(panfrost_device_fd(dev), ctx->syncobj, 0,
-                             vm_sync_handle, vm_sync_signal_point, 0);
+   return pan_kmod_sync_transfer(dev->kmod.dev, ctx->syncobj, 0,
+                                 vm_sync_handle, vm_sync_signal_point, 0);
 }
 
 static void
@@ -854,8 +861,9 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
    /* Wait so we can get errors reported back */
    if (wait) {
       ASSERTED int ret =
-         drmSyncobjTimelineWait(panfrost_device_fd(dev), &vm_sync_handle,
-                                &vm_sync_signal_point, 1, INT64_MAX, 0, NULL);
+         pan_kmod_sync_timeline_wait(dev->kmod.dev, &vm_sync_handle,
+                                     &vm_sync_signal_point, 1, INT64_MAX, 0,
+                                     NULL);
       assert(ret >= 0);
 
       struct pan_csf_tiler_oom_ctx *tiler_oom_ctx =
@@ -1233,7 +1241,9 @@ csf_emit_shader_regs(struct panfrost_batch *batch, mesa_shader_stage stage,
    cs_move64_to(b, cs_reg64(b, 0 + offset), resources);
    cs_move64_to(b, cs_reg64(b, 8 + offset),
                 batch->push_uniforms[stage] | ((uint64_t)fau_count << 56));
-   cs_move64_to(b, cs_reg64(b, 16 + offset), shader);
+   uint64_t spd_addr =
+      pan_shader_get_spd_addr(&batch->ctx->prog[stage]->info, shader);
+   cs_move64_to(b, cs_reg64(b, 16 + offset), spd_addr);
 }
 
 void
@@ -1406,6 +1416,20 @@ GENX(csf_launch_xfb)(struct panfrost_batch *batch,
 
    /* XXX: Choose correctly */
    cs_run_compute(b, 1, MALI_TASK_AXIS_Z, cs_shader_res_sel(0, 0, 0, 0));
+
+   /* Flush GPU caches so that XFB buffer writes are visible to the
+    * subsequent vertex fetch. cs_defer(BIT(RENDER), SB_LS) makes the flush
+    * wait for the RENDER scoreboard slot (where the XFB compute ran) before
+    * executing, replacing the previously explicit cs_wait_slot(RENDER). The
+    * tiler flush mode is NONE because XFB is a pure compute pass with no
+    * tiler activity.
+    */
+   struct cs_index flush_id = cs_reg32(b, 74);
+   cs_move32_to(b, flush_id, 0);
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_NONE,
+                   MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                   cs_defer(BITFIELD_BIT(PANFROST_SB_RENDER), PANFROST_SB_LS));
+   cs_wait_slot(b, PANFROST_SB_LS);
 }
 
 static void
@@ -1537,8 +1561,10 @@ csf_emit_draw_flags(struct panfrost_context *ctx, enum mesa_prim mode,
 
       if (fs_required) {
          /* See JM Valhall equivalent code */
-         flags_1->render_target_mask =
-            (fs->info.outputs_written >> FRAG_RESULT_DATA0) & ctx->fb_rt_mask;
+         /* if PLS is enabled we may write to any output to store data */
+         flags_1->render_target_mask = ctx->fb_rt_mask;
+         if (!ctx->pipe_framebuffer.pls_enabled)
+            flags_1->render_target_mask &= fs->info.outputs_written >> FRAG_RESULT_DATA0;
       }
    }
 }
@@ -1614,7 +1640,7 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    if (panfrost_occlusion_query_active(ctx)) {
       struct panfrost_resource *rsrc = pan_resource(ctx->occlusion_query->rsrc);
       cs_move64_to(b, cs_sr_reg64(b, IDVS, OQ), rsrc->plane.base);
-      panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
+      panfrost_batch_write_rsrc(ctx->batch[PANFROST_BATCH_RENDER], rsrc);
    }
 
    cs_move32_to(b, cs_sr_reg32(b, IDVS, VARY_SIZE),
@@ -1670,9 +1696,9 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    struct mali_primitive_size_packed primsize;
    panfrost_emit_primitive_size(ctx, info->mode == MESA_PRIM_POINTS, 0,
                                 &primsize);
-   struct mali_primitive_size_packed *primsize_ptr = &primsize;
+
    cs_move64_to(b, cs_sr_reg64(b, IDVS, PRIMITIVE_SIZE),
-                *((uint64_t *)primsize_ptr));
+                primsize.opaque[0] | (uint64_t)primsize.opaque[1] << 32);
 #endif
 
    struct mali_primitive_flags_packed flags_override;
@@ -2072,8 +2098,8 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       goto err_g_submit;
 
    /* Wait before freeing the buffer. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
-                        NULL);
+   ret = pan_kmod_sync_wait(dev->kmod.dev, &ctx->syncobj, 1, INT64_MAX, 0,
+                            NULL);
    assert(!ret);
 
    panfrost_bo_unreference(cs_bo);
@@ -2113,8 +2139,8 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    ASSERTED int ret;
 
    /* Make sure all jobs are done before destroying the heap. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
-                        NULL);
+   ret = pan_kmod_sync_wait(dev->kmod.dev, &ctx->syncobj, 1, INT64_MAX, 0,
+                            NULL);
    assert(!ret);
 
    ret = pan_kmod_ioctl(panfrost_device_fd(dev),
@@ -2159,7 +2185,7 @@ GENX(csf_emit_write_timestamp)(struct panfrost_batch *batch,
       : cs_now();
    cs_store_state(b, address, 0, MALI_CS_STATE_TIMESTAMP, async);
 
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   panfrost_batch_write_rsrc(batch, dst);
 }
 
 void
@@ -2189,5 +2215,5 @@ GENX(csf_emit_copy_data)(struct panfrost_batch *batch,
    cs_wait_slot(b, 0);
    cs_store(b, data, dst_addr, BITFIELD_MASK(count), 0);
 
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   panfrost_batch_write_rsrc(batch, dst);
 }

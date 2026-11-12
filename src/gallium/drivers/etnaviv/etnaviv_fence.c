@@ -32,6 +32,7 @@
 #include "etnaviv_screen.h"
 
 #include "util/os_file.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 
@@ -65,6 +66,7 @@ static bool
 etna_screen_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
                          struct pipe_fence_handle *fence, uint64_t timeout)
 {
+   MESA_TRACE_FUNC();
    if (fence->fence_fd >= 0)
       return !sync_wait(fence->fence_fd, timeout / 1000000);
 
@@ -88,6 +90,7 @@ etna_fence_server_sync(struct pipe_context *pctx,
                        struct pipe_fence_handle *pfence,
                        uint64_t value)
 {
+   MESA_TRACE_FUNC();
    struct etna_context *ctx = etna_context(pctx);
    assert(!value);
 
@@ -99,6 +102,7 @@ static int
 etna_screen_fence_get_fd(struct pipe_screen *pscreen,
                          struct pipe_fence_handle *pfence)
 {
+   MESA_TRACE_FUNC();
    return os_dupfd_cloexec(pfence->fence_fd);
 }
 

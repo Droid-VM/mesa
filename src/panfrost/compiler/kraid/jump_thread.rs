@@ -14,17 +14,6 @@ fn validate_jump_instr(instr: &Instr) {
     }
 }
 
-fn jump_is_unconditional(instr: &Instr) -> bool {
-    match &instr.op {
-        Op::Branch(op) => op.is_unconditional(),
-        Op::Nop(_) => {
-            assert!(instr.flow.get_end_shader());
-            true
-        }
-        _ => panic!("All blocks must end in BRANCH or NOP.end"),
-    }
-}
-
 enum Jump {
     End,
     Branch(Label),

@@ -10,6 +10,7 @@
 #define GPU 500
 
 #include "ir3_context.h"
+#include "ir3_ldg_stg.h"
 #include "ir3_image.h"
 
 /* SSBO data is available at this CB address, addressed like regular consts
@@ -228,9 +229,13 @@ get_image_offset(struct ir3_context *ctx, const nir_intrinsic_instr *instr,
    else
       offset = ir3_MUL_S24(b, coords[0], 0, create_uniform(b, cb + 0), 0);
    if (ncoords > 1) {
-      /* offset += coords.y * y_pitch: */
+      /* offset += coords.y * y_pitch: (where y_pitch is the layer_size from
+       * .z for 1D arrays.)
+       */
+      uint32_t pitch_index =
+         nir_intrinsic_image_dim(instr) == GLSL_SAMPLER_DIM_1D ? 2 : 1;
       offset =
-         ir3_MAD_S24(b, create_uniform(b, cb + 1), 0, coords[1], 0, offset, 0);
+         ir3_MAD_S24(b, create_uniform(b, cb + pitch_index), 0, coords[1], 0, offset, 0);
    }
    if (ncoords > 2) {
       /* offset += coords.z * z_pitch: */
@@ -377,10 +382,194 @@ emit_intrinsic_atomic_image(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    return atomic;
 }
 
+/* An atomic.s whose UAV operand is a register rather than an immediate
+ * addresses memory directly instead of through a descriptor, and then the
+ * operands mean something else: src0 is the 64b address, src1 the data, and
+ * the src2 field an immediate byte offset.  The UAV register itself is not
+ * read, so point it at the address to avoid tying up another.
+ */
+static struct ir3_instruction *
+emit_atomic_global(struct ir3_builder *b, nir_atomic_op op,
+                   struct ir3_instruction *addr, struct ir3_instruction *data,
+                   struct ir3_instruction *off)
+{
+   switch (op) {
+   case nir_atomic_op_iadd:
+      return ir3_ATOMIC_S_ADD(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_imin:
+   case nir_atomic_op_umin:
+      return ir3_ATOMIC_S_MIN(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_imax:
+   case nir_atomic_op_umax:
+      return ir3_ATOMIC_S_MAX(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_iand:
+      return ir3_ATOMIC_S_AND(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_ior:
+      return ir3_ATOMIC_S_OR(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_ixor:
+      return ir3_ATOMIC_S_XOR(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_xchg:
+      return ir3_ATOMIC_S_XCHG(b, addr, 0, addr, 0, data, 0, off, 0);
+   case nir_atomic_op_cmpxchg:
+      return ir3_ATOMIC_S_CMPXCHG(b, addr, 0, addr, 0, data, 0, off, 0);
+   default:
+      UNREACHABLE("Unknown global atomic op");
+   }
+}
+
 static struct ir3_instruction *
 emit_intrinsic_atomic_global(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 {
-   UNREACHABLE("Global atomic are unimplemented on A5xx");
+   struct ir3_builder *b = &ctx->build;
+   nir_atomic_op op = nir_intrinsic_atomic_op(intr);
+   type_t type = nir_atomic_op_type(op) == nir_type_int ? TYPE_S32 : TYPE_U32;
+   struct ir3_instruction *value = ir3_get_src(ctx, &intr->src[1])[0];
+   struct ir3_instruction *data;
+
+   /* only measured on a5xx; a4xx encodes the instruction differently and its
+    * own compiler never emits one
+    */
+   assert(ctx->compiler->gen >= 5);
+
+   struct ir3_instruction *addr =
+      ir3_collect(b, ir3_get_src(ctx, &intr->src[0])[0]);
+
+   if (op == nir_atomic_op_cmpxchg) {
+      struct ir3_instruction *compare = ir3_get_src(ctx, &intr->src[2])[0];
+      data = ir3_collect(b, compare, value);
+   } else {
+      data = value;
+   }
+
+   struct ir3_instruction *atomic =
+      emit_atomic_global(b, op, addr, data, create_immed(b, 0));
+
+   atomic->cat6.iim_val = 1;
+   atomic->cat6.d = 1;
+   atomic->cat6.type = type;
+   atomic->barrier_class = IR3_BARRIER_BUFFER_W;
+   atomic->barrier_conflict = IR3_BARRIER_BUFFER_R | IR3_BARRIER_BUFFER_W;
+
+   /* even if nothing consume the result, we can't DCE the instruction: */
+   array_insert(ctx->block, ctx->block->keeps, atomic);
+
+   return atomic;
+}
+
+/* a5xx shares a6xx's register-offset ldg.a/stg.a; a constant offset that
+ * fits rides in the plain form's immediate field.
+ */
+static void
+emit_intrinsic_load_global(struct ir3_context *ctx, nir_intrinsic_instr *intr,
+                           struct ir3_instruction **dst)
+{
+   struct ir3_builder *b = &ctx->build;
+   unsigned dest_components = nir_intrinsic_dest_components(intr);
+   struct ir3_instruction *addr;
+
+   addr = ir3_collect(b, ir3_get_src(ctx, &intr->src[0])[0]);
+
+   struct ldg_stg_offset offset = ldg_stg_offset(ctx, intr);
+   struct ir3_instruction *load;
+
+   if (!offset.src) {
+      load = ir3_LDG(b, addr, 0, offset.imm, 0,
+                     create_immed(b, dest_components), 0);
+   } else {
+      load = ir3_LDG_A(b, addr, 0, offset.src, 0, offset.src_shift, 0,
+                       offset.imm, 0, create_immed(b, dest_components), 0);
+   }
+
+   load->cat6.type = type_uint_size(intr->def.bit_size);
+   load->dsts[0]->wrmask = MASK(dest_components);
+
+   load->barrier_class = IR3_BARRIER_BUFFER_R;
+   load->barrier_conflict = IR3_BARRIER_BUFFER_W;
+
+   ir3_split_dest(b, dst, load, 0, dest_components);
+}
+
+static void
+emit_intrinsic_store_global(struct ir3_context *ctx, nir_intrinsic_instr *intr)
+{
+   struct ir3_builder *b = &ctx->build;
+   struct ir3_instruction *value, *addr;
+   unsigned ncomp = nir_intrinsic_src_components(intr, 0);
+
+   addr = ir3_collect(b, ir3_get_src(ctx, &intr->src[1])[0]);
+
+   value = ir3_create_collect(b, ir3_get_src(ctx, &intr->src[0]), ncomp);
+
+   struct ldg_stg_offset offset = ldg_stg_offset(ctx, intr);
+   struct ir3_instruction *stg;
+
+   if (!offset.src) {
+      stg = ir3_STG(b, addr, 0, offset.imm, 0, value, 0,
+                    create_immed(b, ncomp), 0);
+   } else {
+      stg = ir3_STG_A(b, addr, 0, offset.src, 0, offset.src_shift, 0,
+                      offset.imm, 0, value, 0, create_immed(b, ncomp), 0);
+   }
+
+   stg->cat6.type = type_uint_size(intr->src[0].ssa->bit_size);
+   stg->cat6.iim_val = 1;
+
+   array_insert(ctx->block, ctx->block->keeps, stg);
+
+   stg->barrier_class = IR3_BARRIER_BUFFER_W;
+   stg->barrier_conflict = IR3_BARRIER_BUFFER_R | IR3_BARRIER_BUFFER_W;
+}
+
+/* imageSize() is a resinfo on the image's IBO slot, as the a418 and a530 blobs
+ * do it, rather than a getsize on a texture.  It reads the SSBO descriptor's
+ * size fields back, writing three components (measured on a5xx):
+ *
+ *   .1d: (WIDTH, 0, 0)
+ *   .2d: (WIDTH, HEIGHT, 0)
+ *   .3d: (WIDTH, HEIGHT, DEPTH)
+ *   .4d: (WIDTH + (HEIGHT << 16), 0, 0), the buffer form
+ *
+ * The dimension follows the blob: a 1D array's layers are its HEIGHT, and a
+ * cube (array) is a 2D array of faces whose DEPTH is the layer count (so
+ * nir_lower_image's lower_cube_size divides it by 6).
+ */
+static void
+emit_intrinsic_image_size(struct ir3_context *ctx, nir_intrinsic_instr *intr,
+                          struct ir3_instruction **dst)
+{
+   struct ir3_builder *b = &ctx->build;
+   struct ir3_instruction *ibo = ir3_image_to_ibo(ctx, intr->src[0]);
+   struct ir3_instruction *resinfo = ir3_RESINFO(b, ibo, 0);
+   bool array = nir_intrinsic_image_array(intr);
+
+   switch (nir_intrinsic_image_dim(intr)) {
+   case GLSL_SAMPLER_DIM_1D:
+      resinfo->cat6.d = array ? 2 : 1;
+      break;
+   case GLSL_SAMPLER_DIM_2D:
+   case GLSL_SAMPLER_DIM_RECT:
+      resinfo->cat6.d = array ? 3 : 2;
+      break;
+   case GLSL_SAMPLER_DIM_3D:
+      resinfo->cat6.d = 3;
+      break;
+   case GLSL_SAMPLER_DIM_BUF:
+      resinfo->cat6.d = 4;
+      break;
+   default:
+      UNREACHABLE("image dimension without a resinfo form");
+   }
+
+   resinfo->cat6.iim_val = 1;
+   resinfo->cat6.type = TYPE_U32;
+   /* a530 blob (but not a418) sets typed for buffers, but that doesn't seem to change anything. */
+   resinfo->cat6.typed = false;
+   /* resinfo has no writemask and always writes out 3 components: */
+   compile_assert(ctx, intr->num_components <= 3);
+   resinfo->dsts[0]->wrmask = MASK(3);
+   ir3_handle_nonuniform(resinfo, intr);
+
+   ir3_split_dest(b, dst, resinfo, 0, intr->num_components);
 }
 
 const struct ir3_context_funcs ir3_a4xx_funcs = {
@@ -390,6 +579,8 @@ const struct ir3_context_funcs ir3_a4xx_funcs = {
    .emit_intrinsic_load_image = emit_intrinsic_load_image,
    .emit_intrinsic_store_image = emit_intrinsic_store_image,
    .emit_intrinsic_atomic_image = emit_intrinsic_atomic_image,
-   .emit_intrinsic_image_size = emit_intrinsic_image_size_tex,
+   .emit_intrinsic_image_size = emit_intrinsic_image_size,
+   .emit_intrinsic_load_global = emit_intrinsic_load_global,
+   .emit_intrinsic_store_global = emit_intrinsic_store_global,
    .emit_intrinsic_atomic_global = emit_intrinsic_atomic_global,
 };

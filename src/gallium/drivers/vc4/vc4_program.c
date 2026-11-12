@@ -1105,6 +1105,19 @@ ntq_emit_alu(struct vc4_compile *c, nir_alu_instr *instr)
 
         struct qreg result;
 
+        if (instr->op == nir_op_uadd_with_carry_out ||
+            instr->op == nir_op_usub_with_borrow_out) {
+                if (instr->op == nir_op_uadd_with_carry_out)
+                        result = qir_ADD(c, src[0], src[1]);
+                else
+                        result = qir_SUB(c, src[0], src[1]);
+
+                qir_SF(c, result);
+                ntq_store_def(c, &instr->def, 0, result);
+                ntq_store_def(c, &instr->def, 1, ntq_emit_cond_to_int(c, QPU_COND_CS));
+                return;
+        }
+
         switch (instr->op) {
         case nir_op_mov:
                 result = qir_MOV(c, src[0]);
@@ -1276,16 +1289,6 @@ ntq_emit_alu(struct vc4_compile *c, nir_alu_instr *instr)
 
         case nir_op_umul_unorm_4x8_vc4:
                 result = qir_V8MULD(c, src[0], src[1]);
-                break;
-
-        case nir_op_uadd_carry:
-                qir_SF(c, qir_ADD(c, src[0], src[1]));
-                result = ntq_emit_cond_to_int(c, QPU_COND_CS);
-                break;
-
-        case nir_op_usub_borrow:
-                qir_SF(c, qir_SUB(c, src[0], src[1]));
-                result = ntq_emit_cond_to_int(c, QPU_COND_CS);
                 break;
 
         default:
@@ -2154,6 +2157,7 @@ static const nir_shader_compiler_options nir_options = {
         .max_samples = 4,
         .force_indirect_unrolling = (nir_var_shader_in | nir_var_shader_out | nir_var_function_temp),
         .scalarize_ddx = true,
+        .lower_int64_options = (nir_lower_int64_options)~0,
 };
 
 const struct nir_shader_compiler_options *
@@ -2287,6 +2291,8 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
                 NIR_PASS(_, c->s, nir_opt_dce);
                 NIR_PASS(_, c->s, nir_opt_cse);
         }
+
+        NIR_PASS(_, c->s, nir_opt_uadd_carry, 32);
 
         NIR_PASS(_, c->s, nir_lower_bool_to_int32);
 
@@ -2721,6 +2727,18 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
                 if (!sampler)
                         continue;
 
+                /* Check if MIN_LOD / MAX_LOD is set, as we can't handle them */
+                if (sampler_state->min_mip_filter != PIPE_TEX_MIPFILTER_NONE) {
+                        if (sampler_state->min_lod > 0) {
+                                mesa_logw_once("Setting GL_TEXTURE_MIN_LOD is not supported");
+                        }
+
+                        unsigned last_level = sampler->u.tex.last_level - sampler->u.tex.first_level;
+                        if (sampler_state->max_lod < last_level){
+                                mesa_logw_once("Setting GL_TEXTURE_MAX_LOD is not supported");
+                        }
+                }
+
                 key->tex[i].format = sampler->format;
                 key->tex[i].swizzle[0] = sampler->swizzle_r;
                 key->tex[i].swizzle[1] = sampler->swizzle_g;
@@ -2742,7 +2760,7 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
 }
 
 static void
-vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_fs(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         struct vc4_job *job = vc4->job;
         struct vc4_fs_key local_key;
@@ -2816,7 +2834,7 @@ vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
 }
 
 static void
-vc4_update_compiled_vs(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_vs(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         struct vc4_vs_key local_key;
         struct vc4_vs_key *key = &local_key;
@@ -2861,7 +2879,7 @@ vc4_update_compiled_vs(struct vc4_context *vc4, uint8_t prim_mode)
 }
 
 bool
-vc4_update_compiled_shaders(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_shaders(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         vc4_update_compiled_fs(vc4, prim_mode);
         vc4_update_compiled_vs(vc4, prim_mode);

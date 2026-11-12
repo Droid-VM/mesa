@@ -154,8 +154,9 @@ llvm_middle_end_prepare(struct draw_pt_middle_end *middle,
    struct draw_geometry_shader *gs = draw->gs.geometry_shader;
    struct draw_tess_ctrl_shader *tcs = draw->tcs.tess_ctrl_shader;
    struct draw_tess_eval_shader *tes = draw->tes.tess_eval_shader;
+   struct draw_tess_info tess_info = draw_tess_info_merge(tcs, tes);
    const enum mesa_prim out_prim =
-      gs ? gs->output_primitive : tes ? get_tes_output_prim(tes) :
+      gs ? gs->output_primitive : tes ? get_tes_output_prim(&tess_info) :
       u_assembled_prim(in_prim);
    unsigned point_line_clip = draw->rasterizer->fill_front == PIPE_POLYGON_MODE_POINT ||
                               draw->rasterizer->fill_front == PIPE_POLYGON_MODE_LINE ||
@@ -435,11 +436,13 @@ llvm_pipeline_generic(struct draw_pt_middle_end *middle,
       }
 
       if (tes_shader) {
+         struct draw_tess_info tess_info = draw_tess_info_merge(tcs_shader, tes_shader);
          draw_tess_eval_shader_run(draw, tes_shader,
                                    tcs_shader ? tcs_shader->vertices_out : draw->pt.vertices_per_patch,
                                    vert_info,
                                    prim_info,
                                    tcs_shader ? &tcs_shader->info : &vshader->info,
+                                   &tess_info,
                                    &tes_vert_info,
                                    &tes_prim_info,
                                    gshader ? &patch_lengths : NULL,

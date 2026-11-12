@@ -5,13 +5,13 @@
 #include "nvk_image.h"
 
 #include "nvk_device.h"
+#include "nvk_instance.h"
 #include "nvk_device_memory.h"
 #include "nvk_entrypoints.h"
 #include "nvk_format.h"
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 
-#include "util/detect_os.h"
 #include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
@@ -61,12 +61,12 @@ nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
    if (nil_format_supports_texturing(&pdev->info, p_format)) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
       features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+      if (pdev->info.cls_eng3d >= MAXWELL_B)
+         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
    }
 
    if (nil_format_supports_filtering(&pdev->info, p_format)) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-      if (pdev->info.cls_eng3d >= MAXWELL_B)
-         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
    }
 
    /* TODO: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT */
@@ -88,6 +88,7 @@ nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
          return 0;
 
       features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
    }
 
    if (nvk_format_supports_storage(pdev, p_format)) {
@@ -183,6 +184,14 @@ nvk_get_image_format_features(const struct nvk_physical_device *pdev,
 
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
+
+   /* At least advertise support for NV12. This is incomplete. */
+   const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
+   if (vk_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM &&
+       nvk_video_enabled(instance, &pdev->info)) {
+      features |= VK_FORMAT_FEATURE_VIDEO_DECODE_OUTPUT_BIT_KHR;
+      features |= VK_FORMAT_FEATURE_VIDEO_DECODE_DPB_BIT_KHR;
+   }
 
    return features;
 }
@@ -284,9 +293,9 @@ nvk_get_drm_format_modifier_properties_list(const struct nvk_physical_device *pd
 }
 
 static VkFormatFeatureFlags2
-vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
+vk_image_usage_to_format_features(VkImageUsageFlagBits2KHR usage_flag)
 {
-   assert(util_bitcount(usage_flag) == 1);
+   assert(util_bitcount64(usage_flag) == 1);
    switch (usage_flag) {
    case VK_IMAGE_USAGE_TRANSFER_SRC_BIT:
       return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
@@ -351,6 +360,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
    VkImageFormatProperties2 *pImageFormatProperties)
 {
    VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
+
+   const VkImageUsageFlags2KHR all_usage =
+      vk_image_format_info_2_usage(pImageFormatInfo) |
+      vk_image_format_info_2_stencil_usage(pImageFormatInfo);
 
    const VkPhysicalDeviceExternalImageFormatInfo *external_info =
       vk_find_struct_const(pImageFormatInfo->pNext,
@@ -445,12 +458,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
        (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -463,12 +476,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
     * since it wouldn't know the other planes.
     * See comment in nvk_image_init() below for more details.
     */
-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
        (pImageFormatInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
@@ -529,14 +542,13 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
     * different usage than the image so we can't always filter on usage.
     * There is one exception to this below for storage.
     */
-   const VkImageUsageFlags image_usage = pImageFormatInfo->usage;
-   VkImageUsageFlags view_usage = image_usage;
+   VkImageUsageFlags2KHR view_usage = all_usage;
    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       view_usage = 0;
 
-   u_foreach_bit(b, view_usage) {
+   u_foreach_bit64(b, view_usage) {
       VkFormatFeatureFlags2 usage_features =
-         vk_image_usage_to_format_features(1 << b);
+         vk_image_usage_to_format_features(1ull << b);
       if (usage_features && !(features & usage_features))
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
@@ -630,7 +642,7 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
-       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+       (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties) {
@@ -641,10 +653,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       .maxResourceSize = UINT32_MAX, /* TODO */
    };
 
-   vk_foreach_struct(s, pImageFormatProperties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, pImageFormatProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES: {
-         VkExternalImageFormatProperties *p = (void *)s;
+         VkExternalImageFormatProperties *p = s;
          /* From the Vulkan 1.3.256 spec:
           *
           *    "If handleType is 0, vkGetPhysicalDeviceImageFormatProperties2
@@ -659,18 +671,18 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
-         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = (void *) s;
+         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = s;
          ycbcr_props->combinedImageSamplerDescriptorCount = plane_count;
          break;
       }
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
-         VkHostImageCopyDevicePerformanceQueryEXT *host_props = (void *) s;
+         VkHostImageCopyDevicePerformanceQueryEXT *host_props = s;
          host_props->optimalDeviceAccess = true;
          host_props->identicalMemoryLayout = true;
          break;
       }
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -943,18 +955,31 @@ nvk_image_init(struct nvk_device *dev,
             explicit_offsets_B[plane] = mod_explicit_info->pPlaneLayouts[plane].offset;
          }
       } else {
-         /* Non-linear modifiers are not supported with YCbCr */
-         assert(image->plane_count == 1);
          const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list_info =
             vk_find_struct_const(pCreateInfo->pNext,
                                  IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
 
-         enum pipe_format p_format =
-            nvk_format_to_pipe_format(image->vk.format);
-         image->vk.drm_format_mod =
-            nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
-                                           mod_list_info->drmFormatModifierCount,
-                                           mod_list_info->pDrmFormatModifiers);
+         if (ycbcr_info != NULL) {
+            /* Multi-planar formats only ever advertise LINEAR (see
+             * nvk_get_drm_format_properties()), and nil has no format for the
+             * combined multi-planar format, so pick LINEAR out of the list
+             * rather than asking nil to choose.
+             */
+            image->vk.drm_format_mod = DRM_FORMAT_MOD_INVALID;
+            for (uint32_t i = 0; i < mod_list_info->drmFormatModifierCount; i++) {
+               if (mod_list_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_LINEAR) {
+                  image->vk.drm_format_mod = DRM_FORMAT_MOD_LINEAR;
+                  break;
+               }
+            }
+         } else {
+            enum pipe_format p_format =
+               nvk_format_to_pipe_format(image->vk.format);
+            image->vk.drm_format_mod =
+               nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
+                                              mod_list_info->drmFormatModifierCount,
+                                              mod_list_info->pDrmFormatModifiers);
+         }
          assert(image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID);
       }
 
@@ -1354,10 +1379,10 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
    pMemoryRequirements->memoryRequirements.alignment = align_B;
    pMemoryRequirements->memoryRequirements.size = size_B;
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
              image->vk.drm_format_mod != DRM_FORMAT_MOD_LINEAR) {
             dedicated->prefersDedicatedAllocation = true;
@@ -1379,7 +1404,7 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1657,7 +1682,7 @@ nvk_bind_image_memory(struct nvk_device *dev,
    uint64_t offset_B = info->memoryOffset;
    VkResult result;
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    const VkNativeBufferANDROID *anb_info =
       vk_find_struct_const(info->pNext, NATIVE_BUFFER_ANDROID);
    if (anb_info != NULL && anb_info->handle != NULL) {

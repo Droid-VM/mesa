@@ -37,6 +37,8 @@
 
 #include "state_tracker/st_context.h"
 #include "main/context.h"
+#include "util/bitscan.h"
+#include "util/bitset.h"
 
 
 #ifdef __cplusplus
@@ -122,19 +124,23 @@ st_validate_state(struct st_context *st, const st_state_bitset pipeline_state_ma
 
    /* Inactive states are shader states not used by shaders at the moment. */
    st_state_bitset dirty;
-   BITSET_COPY(dirty, pipeline_state_mask);
-   BITSET_AND(dirty, dirty, ctx->NewDriverState);
-   BITSET_AND(dirty, dirty, st->active_states);
+   bool any = false;
 
-   if (!BITSET_IS_EMPTY(dirty)) {
-      BITSET_ANDNOT(ctx->NewDriverState, ctx->NewDriverState, dirty);
+   for (unsigned w = 0; w < BITSET_WORDS(ST_NUM_ATOMS); w++) {
+      dirty[w] = pipeline_state_mask[w] & ctx->NewDriverState[w] &
+                 st->active_states[w];
+      any |= dirty[w] != 0;
+   }
 
+   if (any) {
       /* Execute functions that set states that have been changed since
        * the last draw.
        */
-      unsigned i;
-      BITSET_FOREACH_SET(i, dirty, ST_NUM_ATOMS)
-         st->update_functions[i](st);
+      for (unsigned w = 0; w < BITSET_WORDS(ST_NUM_ATOMS); w++) {
+         ctx->NewDriverState[w] &= ~dirty[w];
+         u_foreach_bit(b, dirty[w])
+            st->update_functions[w * BITSET_WORDBITS + b](st);
+      }
    }
 }
 

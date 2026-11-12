@@ -20,8 +20,10 @@ Capability about the features and limits of the driver/GPU.
 
 * ``pipe_caps.graphics``: Whether graphics is supported. If not, contexts can
   only be created with PIPE_CONTEXT_COMPUTE_ONLY.
-* ``pipe_caps.npot_textures``: Whether :term:`NPOT` textures may have repeat modes,
-  normalized coordinates, and mipmaps.
+* ``pipe_caps.npot_textures``: Whether :term:`NPOT` textures may be sampled
+  with mipmap filtering and wrap modes other than clamp-to-edge. Sampling the
+  base level without mipmap filtering and with clamp-to-edge is always
+  supported.
 * ``pipe_caps.max_dual_source_render_targets``: How many dual-source blend RTs are support.
   :ref:`Blend` for more information.
 * ``pipe_caps.anisotropic_filter``: Whether textures can be filtered anisotropically.
@@ -234,6 +236,15 @@ Capability about the features and limits of the driver/GPU.
 * ``pipe_caps.sample_shading``: Whether there is support for per-sample
   shading. The context->set_min_samples function will be expected to be
   implemented.
+* ``pipe_caps.fs_sample_variables``: Whether fragment shaders support the
+  sample variables and per-sample interpolation needed by
+  :ext:`GL_OES_sample_variables` and
+  :ext:`GL_OES_shader_multisample_interpolation` (``gl_SampleID``,
+  ``gl_SamplePosition``, ``gl_SampleMaskIn``, ``gl_SampleMask`` and
+  ``interpolateAt*``) without requiring the rest of
+  :ext:`GL_ARB_gpu_shader5`. Drivers that expose :ext:`GL_ARB_gpu_shader5`
+  (GLSL 4.00 or ESSL 3.20 and above) must also set this. The extensions
+  additionally require ``pipe_caps.sample_shading``.
 * ``pipe_caps.texture_gather_offsets``: Whether the ``TG4`` instruction can
   accept 4 offsets.
 * ``pipe_caps.vs_window_space_position``: Whether window-space position is
@@ -590,6 +601,10 @@ Capability about the features and limits of the driver/GPU.
     fragment shader.
 * ``pipe_caps.point_size_fixed``: Driver supports point-sizes that are fixed,
   as opposed to writing gl_PointSize for every point.
+* ``pipe_caps.polygon_stipple``: Driver supports polygon stipple. If unset,
+  mesa/st emulates polygon stipple by sampling a stipple texture and doing
+  discard_if in the fragment shader, and set_polygon_stipple() will not be
+  called.
 * ``pipe_caps.two_sided_color``: Driver supports two-sided coloring.  Must be 1
     for non-NIR drivers.  If set, pipe_rasterizer_state may be set to indicate
     that back-facing primitives should use the back-side color as the FS input
@@ -612,8 +627,9 @@ Capability about the features and limits of the driver/GPU.
 * ``pipe_caps.system_svm``: True if all application memory can be shared with the GPU without explicit mapping.
 * ``pipe_caps.viewport_mask``: Whether ``TGSI_SEMANTIC_VIEWPORT_MASK`` and ``TGSI_PROPERTY_LAYER_VIEWPORT_RELATIVE`` are supported (see :ext:`GL_NV_viewport_array2`).
 * ``pipe_caps.map_unsynchronized_thread_safe``: Whether mapping a buffer as unsynchronized from any thread is safe.
+* ``pipe_caps.map_unsynchronized_texture_thread_safe``: Whether mapping a texture created with ``PIPE_RESOURCE_FLAG_MAP_UNSYNCHRONIZED`` as unsynchronized from any thread is safe.
 * ``pipe_caps.glsl_zero_init``: Choose a default zero initialization some GLSL variables. If ``1``, then all GLSL shader variables and gl_FragColor are initialized to zero. If ``2``, then shader out variables are not initialized but function out variables are.
-* ``pipe_caps.blend_equation_advanced``: Driver supports blend equation advanced without necessarily supporting FBFETCH.
+* ``pipe_caps.blend_equation_advanced``: Bitmask of ``enum pipe_advanced_blend_mode`` modes the driver blends natively through ``pipe_blend_state::advanced_blend_func``, without necessarily supporting FBFETCH. Modes not in the mask are lowered into the fragment shader, which requires FBFETCH. :ext:`GL_KHR_blend_equation_advanced` is exposed when the mask covers all its modes (``PIPE_ADVANCED_BLEND_KHR_MODES_MASK``) or FBFETCH fills the gap.
 * ``pipe_caps.nir_atomics_as_deref``: Whether NIR atomics instructions should reference atomics as NIR derefs instead of by indices.
 * ``pipe_caps.no_clip_on_copy_tex``: Driver doesn't want x/y/width/height clipped based on src size when doing a copy texture operation (e.g.: may want out-of-bounds reads that produce 0 instead of leaving the texture content undefined)
 * ``pipe_caps.max_texture_mb``: Maximum texture size in MB (default is 1024)

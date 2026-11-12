@@ -122,6 +122,19 @@ v3dv_get_compatible_tfu_format(struct v3dv_device *device,
    return format;
 }
 
+/* Host image copy goes through the v3d_tiling helpers, which work on whole
+ * texel blocks of these sizes.
+ */
+static bool
+format_supports_host_transfer(VkFormat vk_format)
+{
+   if (vk_format_get_plane_count(vk_format) != 1)
+      return false;
+
+   uint32_t bs = vk_format_get_blocksize(vk_format);
+   return bs == 1 || bs == 2 || bs == 4 || bs == 8 || bs == 16;
+}
+
 static VkFormatFeatureFlags2
 image_format_plane_features(struct v3dv_physical_device *pdevice,
                             VkFormat vk_format,
@@ -267,6 +280,10 @@ image_format_features(struct v3dv_physical_device *pdevice,
       flags |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
    }
 
+   /* Set last, and only if the format already has other features. */
+   if (flags && format_supports_host_transfer(vk_format))
+      flags |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
+
    return flags;
 }
 
@@ -357,10 +374,10 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       .bufferFeatures = vk_format_features2_to_features(buffer2),
    };
 
-   vk_foreach_struct(ext, pFormatProperties->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct(sType, ext, pFormatProperties->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
-         struct VkDrmFormatModifierPropertiesListEXT *list = (void *)ext;
+         struct VkDrmFormatModifierPropertiesListEXT *list = ext;
          VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                                 list->pDrmFormatModifierProperties,
                                 &list->drmFormatModifierCount);
@@ -385,7 +402,7 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT: {
-         struct VkDrmFormatModifierPropertiesList2EXT *list = (void *)ext;
+         struct VkDrmFormatModifierPropertiesList2EXT *list = ext;
          VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierProperties2EXT, out,
                                 list->pDrmFormatModifierProperties,
                                 &list->drmFormatModifierCount);
@@ -408,14 +425,14 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
-         VkFormatProperties3 *props = (VkFormatProperties3 *)ext;
+         VkFormatProperties3 *props = ext;
          props->linearTilingFeatures = linear2;
          props->optimalTilingFeatures = optimal2;
          props->bufferFeatures = buffer2;
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -475,6 +492,13 @@ get_image_format_properties(
        */
       if (info->type == VK_IMAGE_TYPE_1D &&
           vk_format_is_depth_or_stencil(info->format)) {
+         goto unsupported;
+      }
+   }
+
+   if (image_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT) {
+      if (!(format_feature_flags &
+            VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT)) {
          goto unsupported;
       }
    }
@@ -698,20 +722,21 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_format_mod_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
+   VkHostImageCopyDevicePerformanceQuery *hic_props = NULL;
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkImageTiling tiling = base_info->tiling;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, base_info->pNext) {
-      switch ((unsigned)s->sType) {
+   vk_foreach_struct_const(sType, s, base_info->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *) s;
+         external_info = s;
          break;
       case VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO:
          /* Do nothing, get_image_format_properties() below will handle it */;
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
-         drm_format_mod_info = (const void *) s;
+         drm_format_mod_info = s;
          switch (drm_format_mod_info->drmFormatModifier) {
          case DRM_FORMAT_MOD_LINEAR:
             tiling = VK_IMAGE_TILING_LINEAR;
@@ -727,7 +752,7 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
          /* Do nothing, v3dv_image_init will handle it */;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -736,16 +761,19 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
           tiling == VK_IMAGE_TILING_LINEAR);
 
    /* Extract output structs */
-   vk_foreach_struct(s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *) s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *) s;
+         ycbcr_props = s;
+         break;
+      case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY:
+         hic_props = s;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -756,6 +784,15 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
                                   ycbcr_props);
    if (result != VK_SUCCESS)
       goto done;
+
+   if (hic_props) {
+      /* Layouts don't affect how images are stored on V3D, and v3dv has no
+       * usage-dependent compression, so host transfer never costs device
+       * performance.
+       */
+      hic_props->optimalDeviceAccess = true;
+      hic_props->identicalMemoryLayout = true;
+   }
 
    if (external_info && external_info->handleType != 0) {
       switch (external_info->handleType) {

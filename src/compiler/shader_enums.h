@@ -1290,6 +1290,13 @@ enum gl_access_qualifier
     * one-time accesses or if the data is larger than what the memory can store.
     */
    ACCESS_ESTREAM_PAN = (1 << 22),
+
+   /**
+    * Whether a load has been speculated. This means the load may be
+    * out-of-bounds, even if the application has not enabled robustness
+    * features.
+    */
+   ACCESS_IS_SPECULATED = (1 << 23),
 };
 
 enum gl_tess_spacing
@@ -1665,9 +1672,16 @@ enum glsl_sampler_dim {
    GLSL_SAMPLER_DIM_RECT,
    GLSL_SAMPLER_DIM_BUF,
    GLSL_SAMPLER_DIM_EXTERNAL,
+   GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y,
    GLSL_SAMPLER_DIM_MS,
    GLSL_SAMPLER_DIM_SUBPASS, /* for vulkan input attachments */
    GLSL_SAMPLER_DIM_SUBPASS_MS, /* for multisampled vulkan input attachments */
+};
+
+enum yuv_csc_standard {
+   YUV_CSC_STANDARD_601,
+   YUV_CSC_STANDARD_601_FULL_RANGE,
+   YUV_CSC_STANDARD_709,
 };
 
 #ifdef __cplusplus

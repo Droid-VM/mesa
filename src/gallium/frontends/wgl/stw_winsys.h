@@ -135,6 +135,12 @@ struct stw_winsys
     */
    const char *
    (*get_name)(void);
+
+   /**
+    * Get the driconf options of the screen that was created (optional)
+    */
+   const struct driOptionDescription *
+   (*get_driconf)(unsigned *count);
 };
 
 bool

@@ -1,10 +1,12 @@
 // Copyright © 2022 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
-extern crate bitview;
+extern crate mesa_util;
 extern crate nak_ir_proc;
 
-use bitview::{BitMutView, BitMutViewable, BitView, BitViewable, SetField};
+use mesa_util::bitview::{
+    BitMutView, BitMutViewable, BitView, BitViewable, SetField,
+};
 use nak_bindings::*;
 
 pub use crate::builder::{Builder, InstrBuilder, SSABuilder, SSAInstrBuilder};
@@ -594,6 +596,10 @@ impl SrcRef {
         }
     }
 
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, SrcRef::Imm32(_))
+    }
+
     pub fn is_carry(&self) -> bool {
         match self {
             SrcRef::SSA(ssa) => ssa.file() == RegFile::Carry,
@@ -1144,6 +1150,10 @@ impl Src {
 
     pub fn is_predicate(&self) -> bool {
         self.src_ref.is_predicate()
+    }
+
+    pub fn is_immediate(&self) -> bool {
+        self.src_ref.is_immediate()
     }
 
     pub fn is_zero(&self) -> bool {
@@ -5070,7 +5080,7 @@ impl fmt::Display for PrmtMode {
             PrmtMode::Backward4Extract => write!(f, ".b4e"),
             PrmtMode::Replicate8 => write!(f, ".rc8"),
             PrmtMode::EdgeClampLeft => write!(f, ".ecl"),
-            PrmtMode::EdgeClampRight => write!(f, ".ecl"),
+            PrmtMode::EdgeClampRight => write!(f, ".ecr"),
             PrmtMode::Replicate16 => write!(f, ".rc16"),
         }
     }
@@ -7052,7 +7062,7 @@ pub struct OpMemBar {
 
 impl DisplayOp for OpMemBar {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "membar.sc.{}", self.scope)
+        write!(f, "membar.sc{}", self.scope)
     }
 }
 impl_display_for_op!(OpMemBar);
@@ -7115,7 +7125,7 @@ pub struct OpBSSy {
     #[dst_type(Bar)]
     pub bar_out: Dst,
 
-    #[src_type(Pred)]
+    #[src_type(Bar)]
     pub bar_in: Src,
 
     #[src_type(Pred)]
@@ -9374,10 +9384,12 @@ pub struct VertexShaderInfo {
 #[derive(Debug)]
 pub struct FragmentShaderInfo {
     pub uses_kill: bool,
-    pub does_interlock: bool,
+    pub reads_interlock_ticket: bool,
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,
+    pub z_min_bounded: bool,
+    pub z_max_bounded: bool,
 }
 
 #[derive(Debug)]

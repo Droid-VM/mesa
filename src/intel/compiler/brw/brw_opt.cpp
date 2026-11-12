@@ -61,13 +61,6 @@ brw_optimize(brw_shader &s)
     */
    OPT(brw_insert_load_reg);
 
-   /* Track how much non-SSA at this point. */
-   {
-      const brw_def_analysis &defs = s.def_analysis.require();
-      s.shader_stats.non_ssa_registers_after_nir =
-         defs.count() - defs.ssa_count();
-   }
-
    do {
       progress = false;
       pass_num = 0;
@@ -91,6 +84,16 @@ brw_optimize(brw_shader &s)
 
    if (OPT(brw_opt_combine_convergent_txf))
       OPT(brw_opt_copy_propagation_defs);
+
+   /* Call this before brw_opt_combine_constants because it can eliminate some
+    * cases where constants would need to be combined.
+    *
+    * Also call it before brw_lower_load_payload because that pass (and the
+    * optimizations that follow) cause there to be orders of magnitude fewer
+    * defs in the shader for brw_opt_mac to use. This results in it making
+    * quite a bit less progress.
+    */
+   OPT(brw_opt_mac);
 
    if (OPT(brw_lower_load_reg)) {
       OPT(brw_opt_copy_propagation);
@@ -135,7 +138,7 @@ brw_optimize(brw_shader &s)
    if (!OPT(brw_opt_copy_propagation_defs))
       OPT(brw_opt_copy_propagation);
 
-   if (s.devinfo->ver >= 30)
+   if (s.devinfo->ver >= 30 && !s.key->use_efficient_64bit)
       OPT(brw_opt_send_to_send_gather);
 
    OPT(brw_opt_split_sends);
@@ -212,7 +215,8 @@ brw_optimize(brw_shader &s)
    if (s.devinfo->ver >= 30)
       OPT(brw_opt_send_gather_to_send);
 
-   OPT(brw_lower_uniform_pull_constant_loads);
+   if (!s.devinfo->has_lsc)
+      OPT(brw_lower_uniform_pull_constant_loads);
 
    /* Do this before brw_lower_send_descriptors. */
    OPT(brw_workaround_memory_fence_before_eot);

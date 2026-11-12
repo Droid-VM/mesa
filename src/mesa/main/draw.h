@@ -64,19 +64,6 @@ struct _mesa_prim
    GLuint draw_id;
 };
 
-/* Would like to call this a "vbo_index_buffer", but this would be
- * confusing as the indices are not neccessarily yet in a non-null
- * buffer object.
- */
-struct _mesa_index_buffer
-{
-   GLuint count;
-   uint8_t index_size_shift; /* logbase2(index_size) */
-   struct gl_buffer_object *obj;
-   const void *ptr;
-};
-
-
 void
 _mesa_set_varying_vp_inputs(struct gl_context *ctx, GLbitfield varying_inputs);
 

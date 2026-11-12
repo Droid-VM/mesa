@@ -193,6 +193,13 @@ util_draw_max_index(
       unsigned nr_vertex_elements,
       const struct pipe_draw_info *info);
 
+void
+util_draw_vbo_buffers(struct pipe_context *pipe,
+                      const struct pipe_draw_info *info,
+                      const struct pipe_vertex_buffer *buffers,
+                      unsigned buffer_count,
+                      const struct pipe_draw_start_count_bias *draws,
+                      unsigned num_draws);
 
 #ifdef __cplusplus
 }

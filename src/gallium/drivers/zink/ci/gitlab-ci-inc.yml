@@ -89,6 +89,19 @@
     - !reference [.anv-rules, rules]
     - !reference [.zink-common-rules, rules]
 
+.zink-anv-vaapi-rules:
+  stage: layered-backends
+  rules:
+    - !reference [.enforce-hw-jobs-zink-rules, rules]
+    - !reference [.enforce-hw-jobs-anv-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.anv-rules, rules]
+    - !reference [.zink-common-rules, rules]
+    - changes: &zink_vaapi_file_list
+        - src/gallium/frontends/va/**/*
+        - src/gallium/targets/va/**/*
+      when: on_success
+
 .zink-nvk-rules:
   stage: layered-backends
   rules:
@@ -167,6 +180,18 @@
     - !reference [.radv-collabora-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
+.zink-radv-collabora-vaapi-rules:
+  stage: layered-backends
+  rules:
+    - !reference [.enforce-hw-jobs-zink-rules, rules]
+    - !reference [.enforce-hw-jobs-radv-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.radv-collabora-rules, rules]
+    - !reference [.zink-common-rules, rules]
+    - changes:
+        *zink_vaapi_file_list
+      when: on_success
+
 .zink-radv-valve-rules:
   stage: layered-backends
   rules:
@@ -186,11 +211,33 @@
     - !reference [.radv-valve-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
+.zink-radv-rusticl-valve-rules:
+  extends: .zink-radv-valve-rules
+  rules:
+    - !reference [.enforce-hw-jobs-zink-rules, rules]
+    - !reference [.enforce-hw-jobs-radv-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.radv-valve-rules, rules]
+    - !reference [.zink-common-rules, rules]
+    - !reference [.rusticl-rules, rules]
+
+.zink-radv-rusticl-valve-manual-rules:
+  stage: layered-backends-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.enforce-hw-jobs-zink-rules, rules]
+    - !reference [.enforce-hw-jobs-radv-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.radv-valve-manual-rules, rules]
+    - !reference [.zink-common-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
+
 .zink-test:
   variables:
     MESA_LOADER_DRIVER_OVERRIDE: "zink"
     FLAKES_CHANNEL: "#zink-ci"
     MESA_VK_ABORT_ON_DEVICE_LOSS: 0
+    LIBVA_DRIVER_NAME: "zink"
 
 .zink-trace-test:
   extends:
@@ -303,6 +350,12 @@
     DEQP_SUITE: zink-radv
     # Disable reporting, since DUTs don't have internet access
     FLAKES_CHANNEL: ""
+
+.radv-zink-test-valve-nocl:
+  extends:
+    - .radv-zink-test-valve
+  variables:
+    DEQP_SUITE: zink-radv-nocl
 
 .radv-zink-test-valve-asan:
   extends:

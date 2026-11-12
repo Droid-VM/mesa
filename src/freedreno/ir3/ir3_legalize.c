@@ -587,6 +587,10 @@ delay_update(struct ir3_compiler *compiler,
 
          for (unsigned consumer_alu = 0; consumer_alu < 2; consumer_alu++) {
             for (unsigned matching_size = 0; matching_size < 2; matching_size++) {
+               /* half and full registers only alias with merged register files */
+               if (!matching_size && !compiler->mergedregs)
+                  continue;
+
                unsigned *ready_slot =
                   get_ready_slot(state, dst, num, consumer_alu, matching_size);
 
@@ -874,7 +878,12 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
              * results before releasing the varying memory.
              */
             struct ir3_instruction *last_input = n;
-            if (n->opc == OPC_LDLV) {
+            bool need_fake_bary_f = n->opc == OPC_LDLV;
+            if ((n->opc == OPC_FLAT_B) &&
+                IR3_QUIRK(ctx->compiler, QCTDD10204462_flat_ei))
+               need_fake_bary_f = true;
+
+            if (need_fake_bary_f) {
                struct ir3_instruction *baryf;
 
                /* (ss)bary.f (ei)r63.x, 0, r0.x */
@@ -985,7 +994,7 @@ apply_push_consts_load_macro(struct ir3_legalize_ctx *ctx,
          stsc->cat6.iim_val = n->push_consts.src_size;
          stsc->cat6.type = TYPE_U32;
 
-         if (ctx->compiler->info->props.stsc_duplication_quirk) {
+         if (IR3_QUIRK(ctx->compiler, QCTDD08901551_stsc_ss)) {
             struct ir3_builder build = ir3_builder_at(ir3_after_instr(stsc));
             struct ir3_instruction *nop = ir3_NOP(&build);
             nop->flags |= IR3_INSTR_SS;
@@ -1621,13 +1630,25 @@ dbg_expand_rpt(struct ir3 *ir)
    }
 }
 
+bool
+ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
+                               struct ir3_instruction *sam)
+{
+   assert(sam->opc == OPC_SAM);
+   assert(has_dummy_dst(sam));
+
+   return compiler->info->props.prefetch_sam_helpers_quirk &&
+          (sam->flags & IR3_INSTR_S2EN);
+}
+
 struct ir3_mark_helpers_data {
    bool valid;
    regmask_t needs_helpers;
 };
 
 static void
-instr_mark_helpers(struct ir3_mark_helpers_data *bd,
+instr_mark_helpers(struct ir3_compiler *compiler,
+                   struct ir3_mark_helpers_data *bd,
                    struct ir3_instruction *instr)
 {
    if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
@@ -1668,6 +1689,17 @@ instr_mark_helpers(struct ir3_mark_helpers_data *bd,
    case OPC_DSXPP_1:
    case OPC_DSYPP_1: {
       if (instr->opc == OPC_SAM && has_dummy_dst(instr)) {
+         if (ir3_prefetch_sam_needs_helpers(compiler, instr)) {
+            /* Prefetch sam.s2en erroneously reads it src2 from fiber 0. To
+             * ensure its src2 is available even when fiber 0 is a helper, we
+             * should keep helpers enabled. We could try to track src2 here but
+             * this complicates the code below. Just mark the instruction
+             * itself. Since (eq) is illegal in the preamble it will propagate
+             * to the start of the main shader anyway.
+             */
+            instr->flags |= IR3_INSTR_NEEDS_HELPERS;
+         }
+
          /* sam requires helper invocations except for dummy prefetch
           * instructions.
           */
@@ -1776,7 +1808,7 @@ mark_helpers(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
          }
 
          foreach_instr_rev (instr, &block->instr_list) {
-            instr_mark_helpers(bd, instr);
+            instr_mark_helpers(ctx->compiler, bd, instr);
 
             /* We only care about the last instruction needing helpers. */
             if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
@@ -2454,7 +2486,8 @@ align_aliases(struct ir3 *ir)
 }
 
 bool
-ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
+ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary,
+             bool can_speculate_preamble)
 {
    struct ir3_legalize_ctx *ctx = rzalloc(ir, struct ir3_legalize_ctx);
    bool progress;
@@ -2534,10 +2567,14 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
       }
    }
 
-   so->early_preamble = has_preamble && !gpr_in_preamble &&
-      !pred_in_preamble && !relative_in_preamble &&
+   so->early_preamble = can_speculate_preamble && has_preamble && !gpr_in_preamble &&
+      !pred_in_preamble &&
       ir->compiler->info->props.has_early_preamble &&
       !(ir3_shader_debug & IR3_DBG_NOEARLYPREAMBLE);
+
+   if (relative_in_preamble && so->early_preamble &&
+       IR3_QUIRK(ctx->compiler, QCTDD10789828_no_a0_ep))
+      so->early_preamble = false;
 
    /* On a7xx, sync behavior for a1.x is different in the early preamble. RaW
     * dependencies must be synchronized with (ss) there must be an extra

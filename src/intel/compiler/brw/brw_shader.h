@@ -52,11 +52,10 @@ enum brw_shader_phase {
 struct brw_shader_params
 {
    const struct brw_compiler *compiler;
-   void *mem_ctx;
+   const struct brw_compile_params *compile_params;
 
+   /* This is the NIR specific to the variant being compiled. */
    const nir_shader *nir;
-   const brw_base_prog_key *key;
-   brw_stage_prog_data *prog_data;
    unsigned dispatch_width;
 
    /* Fragment shader. */
@@ -64,10 +63,7 @@ struct brw_shader_params
    const int *per_primitive_offsets;
 
    bool needs_register_pressure;
-   void *log_data;
    bool debug_enabled;
-
-   debug_archiver *archiver;
 };
 
 struct brw_shader
@@ -94,7 +90,11 @@ public:
    void emit_cs_terminate();
 
    const struct brw_compiler *compiler;
-   void *log_data; /* Passed to compiler->*_log functions */
+
+   /* Parameters for the whole compilation, shared by all the variants.
+    * Valid during the lifetime of this shader.
+    */
+   const struct brw_compile_params * const compile_params;
 
    const struct intel_device_info * const devinfo;
    const nir_shader *nir;
@@ -143,11 +143,6 @@ public:
    /** Byte-offset for the next logical, non-reused spill slot. */
    unsigned last_logical_scratch;
 
-   brw_reg frag_depth;
-   brw_reg frag_stencil;
-   brw_reg sample_mask;
-   brw_reg outputs[VARYING_SLOT_MAX];
-   brw_reg dual_src_output;
    brw_reg subgroup_barrier_index;
    /* This includes HW thread payload + push constants + URB(after brw_assign_xs_urb_setup()) */
    int first_non_payload_grf;
@@ -198,6 +193,9 @@ public:
    brw_reg final_gs_vertex_count;
    brw_reg control_data_bits;
 
+   /* Only used in efficient 64-bit mode */
+   brw_reg scratch64_surface;
+
    struct {
       unsigned control_data_bits_per_vertex;
       unsigned control_data_header_size_bits;
@@ -207,6 +205,9 @@ public:
       /* Offset of per-primitive locations in bytes */
       int per_primitive_offsets[VARYING_SLOT_MAX];
    } fs;
+
+   /* Whether we've seen an RT write already */
+   bool seen_rt_write;
 
    unsigned grf_used;
    bool spilled_any_registers;
@@ -226,8 +227,6 @@ public:
    unsigned next_address_register_nr;
 
    struct brw_shader_stats shader_stats;
-
-   debug_archiver *archiver;
 
    void debug_optimizer(const nir_shader *nir,
                         const char *pass_name,
@@ -278,15 +277,6 @@ brw_dynamic_fs_config(struct brw_fs_prog_data *fs_prog_data)
       brw_uniform_reg(
          fs_prog_data->fs_config_param / REG_SIZE, BRW_TYPE_UD),
       fs_prog_data->fs_config_param % REG_SIZE);
-}
-
-inline brw_reg
-brw_dynamic_per_primitive_remap(const struct brw_fs_prog_data *fs_prog_data)
-{
-   return byte_offset(
-      brw_uniform_reg(
-         fs_prog_data->per_primitive_remap_param / REG_SIZE, BRW_TYPE_UW),
-      fs_prog_data->per_primitive_remap_param % REG_SIZE);
 }
 
 enum intel_barycentric_mode
@@ -354,6 +344,7 @@ bool brw_lower_scalar_fp64_MAD(brw_shader &s);
 bool brw_lower_scoreboard(brw_shader &s);
 bool brw_lower_send_descriptors(brw_shader &s);
 bool brw_lower_send_gather(brw_shader &s);
+bool brw_lower_sendg_ind_desc_to_arf(brw_shader &s);
 bool brw_lower_sends_overlapping_payload(brw_shader &s);
 bool brw_lower_simd_width(brw_shader &s);
 bool brw_lower_src_modifiers(brw_shader &s, brw_inst *inst, unsigned i);
@@ -379,6 +370,7 @@ bool brw_opt_cse_defs(brw_shader &s);
 bool brw_opt_dead_code_eliminate(brw_shader &s);
 bool brw_opt_eliminate_find_live_channel(brw_shader &s);
 bool brw_opt_fill_and_spill(brw_shader &s);
+bool brw_opt_mac(brw_shader &s);
 bool brw_opt_predicate_logic(brw_shader &s);
 bool brw_opt_register_coalesce(brw_shader &s);
 bool brw_opt_remove_extra_rounding_modes(brw_shader &s);
@@ -460,3 +452,5 @@ struct brw_to_binary_params {
 };
 
 const unsigned *brw_to_binary(const brw_to_binary_params *p);
+
+brw_reg brw_get_scratch64_surface_state_addr(brw_shader *shader);

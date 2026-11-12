@@ -143,6 +143,7 @@ try_pbo_readpixels(struct st_context *st, struct gl_renderbuffer *rb,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -290,9 +291,14 @@ blit_to_staging(struct st_context *st, struct gl_renderbuffer *rb,
    struct pipe_resource *dst;
    struct pipe_blit_info blit;
 
-   /* We are creating a texture of the size of the region being read back.
-    * Need to check for NPOT texture support. */
-   if (!screen->caps.npot_textures &&
+   /* This only needs a level-zero NPOT resource, which is required by desktop
+    * GL 2.0 and GLES2 even without an NPOT extension. */
+   const bool allow_npot_staging =
+      screen->caps.npot_textures ||
+      _mesa_is_gles2(st->ctx) ||
+      (_mesa_is_desktop_gl(st->ctx) && st->ctx->Version >= 20);
+
+   if (!allow_npot_staging &&
        (!util_is_power_of_two_or_zero(width) ||
         !util_is_power_of_two_or_zero(height)))
       return NULL;

@@ -104,7 +104,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
    case TGSI_OPCODE_UP4B:
    case TGSI_OPCODE_UP4UB:
    case TGSI_OPCODE_MEMBAR:
-   case TGSI_OPCODE_BALLOT:
       read_mask = TGSI_WRITEMASK_X;
       break;
 
@@ -162,13 +161,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
             (write_mask & TGSI_WRITEMASK_XY ? TGSI_WRITEMASK_X : 0) |
             (write_mask & TGSI_WRITEMASK_ZW ? TGSI_WRITEMASK_Z : 0);
       }
-      break;
-
-   case TGSI_OPCODE_READ_INVOC:
-      if (src_idx == 0)
-         read_mask = write_mask;
-      else
-         read_mask = TGSI_WRITEMASK_X;
       break;
 
    case TGSI_OPCODE_FBFETCH:

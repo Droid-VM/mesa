@@ -40,6 +40,12 @@ struct gl_renderbuffer;
 extern void
 _mesa_init_renderbuffer(struct gl_renderbuffer *rb, GLuint name);
 
+extern GLboolean
+_mesa_renderbuffer_alloc_storage(struct gl_context *ctx,
+                                 struct gl_renderbuffer *rb,
+                                 GLenum internalFormat,
+                                 GLuint width, GLuint height);
+
 extern void
 _mesa_attach_and_own_rb(struct gl_framebuffer *fb,
                         gl_buffer_index bufferName,

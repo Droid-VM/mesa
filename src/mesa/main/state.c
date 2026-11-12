@@ -198,6 +198,12 @@ _mesa_set_active_states(struct gl_context *ctx)
       ST_SET_STATES(ctx->st->active_states, mp->affected_states);
 }
 
+static bool
+writes_clip_dist(const struct gl_program *prog)
+{
+   return prog && (prog->info.outputs_written & VARYING_BIT_CLIP_DIST0);
+}
+
 /**
  * Update the ctx->*Program._Current pointers to point to the
  * current/active programs.
@@ -376,6 +382,20 @@ update_program(struct gl_context *ctx)
 
       if (!ctx->st->screen->caps.tgsi_texcoord)
          ST_SET_STATE(dirty, ST_NEW_RASTERIZER);
+   }
+
+   /* st_common_variant_key::drop_clip_dist depends on the later stages */
+   if (!ctx->st->screen->caps.clip_planes &&
+       !ctx->Transform.ClipPlanesEnabled &&
+       (fp_changed || tep_changed || gp_changed)) {
+      if (writes_clip_dist(ctx->VertexProgram._Current))
+         ST_SET_STATE(dirty, ST_NEW_VS_STATE);
+
+      if (writes_clip_dist(ctx->TessEvalProgram._Current))
+         ST_SET_STATE(dirty, ST_NEW_TES_STATE);
+
+      if (writes_clip_dist(ctx->GeometryProgram._Current))
+         ST_SET_STATE(dirty, ST_NEW_GS_STATE);
    }
 
    if (cp_changed) {

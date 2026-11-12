@@ -47,29 +47,38 @@ int csc_api_gen_3dlut(struct s_csc_api_opts *ptr_csc_api_opts, struct s_csc_map 
 {
     int index = 0;
     int value_max = (1 << ptr_csc_api_opts->bitwidth_3dlut) - 1;
-    int nir, nig, nib;
+    int nir = 0;
+    int nig = 0;
+    int nib = 0;
+    unsigned short rgb[3];
+    MATFLOAT rgb_inp[3], rgb_out[3];
 
     if (ptr_csc_api_opts->ptr_3dlut_rgb == 0)
         return -1;    /* something wrong */
 
-    for (nir = 0; nir < ptr_csc_api_opts->num_pnts_3dlut; nir++)
-        for (nig = 0; nig < ptr_csc_api_opts->num_pnts_3dlut; nig++)
+    for (nir = 0; nir < ptr_csc_api_opts->num_pnts_3dlut; nir++) {
+        index = ptr_csc_api_opts->num_pnts_3dlut * ptr_csc_api_opts->num_pnts_3dlut * nir * 3;
+        if (!ptr_csc_api_opts->en_merge_3dlut)
+            rgb[0] = (nir * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
+
+        for (nig = 0; nig < ptr_csc_api_opts->num_pnts_3dlut; nig++) {
+            if (!ptr_csc_api_opts->en_merge_3dlut)
+                rgb[1] = (nig * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
+
             for (nib = 0; nib < ptr_csc_api_opts->num_pnts_3dlut; nib++) {
-                unsigned short rgb[3];
-                MATFLOAT rgb_inp[3], rgb_out[3];
-
-                rgb[0] = ptr_csc_api_opts->en_merge_3dlut ? ptr_csc_api_opts->ptr_3dlut_rgb[index + 0] :
-                    (nir * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
-                rgb[1] = ptr_csc_api_opts->en_merge_3dlut ? ptr_csc_api_opts->ptr_3dlut_rgb[index + 1] :
-                    (nig * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
-                rgb[2] = ptr_csc_api_opts->en_merge_3dlut ? ptr_csc_api_opts->ptr_3dlut_rgb[index + 2] :
-                    (nib * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
-
+                if (!ptr_csc_api_opts->en_merge_3dlut)
+	                rgb[2] = (nib * value_max) / (ptr_csc_api_opts->num_pnts_3dlut - 1);
+                else { // En_Merge_3DLUT = True, Matrix already Pre-generated
+                    rgb[0] = ptr_csc_api_opts->ptr_3dlut_rgb[index + 0];
+                    rgb[1] = ptr_csc_api_opts->ptr_3dlut_rgb[index + 1];
+                    rgb[2] = ptr_csc_api_opts->ptr_3dlut_rgb[index + 2];
+                }
                 cs_short2flt_rgb(rgb, rgb_inp, value_max);
                 csc_rgb_to_rgb(ptr_csc_map, rgb_inp, rgb_out);
                 cs_flt2short_rgb(rgb_out, &ptr_csc_api_opts->ptr_3dlut_rgb[index], value_max);
                 index += 3;
             }
-
+        }
+    }
     return 0;
 }

@@ -31,6 +31,9 @@ def declare_options():
         B("tu_allow_concurrent_binning", False,
           "Allow concurrent binning on A7XX+, the CB is disabled by default because it regresses performance on desktop games",
           c_name="allow_concurrent_binning"),
+        B("tu_independent_icache_miss", False,
+          "On A750, let each wave handle its instruction cache misses independently instead of stalling all waves together, which helps when waves fetch divergent code and hurts when they would take the same miss",
+          c_name="independent_icache_miss"),
         S("tu_autotune_algorithm",
           description="Set the preferred autotune algorithm",
           c_name="autotune_algo"),
@@ -96,6 +99,9 @@ def declare_options():
         B("tu_override_uncached_as_cache_coherent", False,
           "Replaces uncached-host allocations with cached-coherent-host when possible. Only useful under x86 emulation where memory accesses tend to be atomic",
           c_name="override_uncached_as_cache_coherent"),
+        B("tu_expose_device_local_only_memory_type", False,
+          "Expose an extra DEVICE_LOCAL-only memory type. Some applications may unconditionally expect non-HOST_VISIBLE memory available, also its presence signals vkd3d-proton that device is non-UMA, which we may need to force for d3d12 traces compatibility purpose.",
+          c_name="expose_device_local_only_memory_type"),
         B("tu_restrict_subgroup_size_64", False,
           "Restrict subgroup size to 64 (instead of a max of 128) to work around games assuming desktop GPU 32/64 sizes",
           c_name="restrict_subgroup_size_64"),
@@ -116,6 +122,10 @@ def declare_options():
         B("tu_enable_ssbo_emulation", False,
           "Emulate SSBOs to allow a higher limit for elements that is in line with what some D3D12 games expect",
           c_name="enable_ssbo_emulation"),
+
+        B("tu_disable_conservative_fdm_binning", False,
+          "Don't enable conservative rasterization during binning of a renderpass with FDM, for non-identity FDM tiles may result in tiny see-through gaps in the geometry in places with dense geometry. Improves performance up to 4% on A7XX.",
+          c_name="disable_conservative_fdm_binning"),
     ]
 
     features_options = []

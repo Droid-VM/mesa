@@ -24,7 +24,8 @@ mme_sim_core(const struct nv_device_info *devinfo,
       struct mme_tu104_inst *insts =
          malloc(inst_count * sizeof(struct mme_tu104_inst));
       mme_tu104_decode(insts, macro, inst_count);
-      mme_tu104_sim_core(inst_count, insts, state_ops, state_handler);
+      mme_tu104_sim_core(inst_count, insts, state_ops, state_handler,
+                         devinfo->cls_eng3d);
       free(insts);
    } else if (devinfo->cls_eng3d >= MME_CLS_FERMI) {
       assert(macro_size % 4 == 0);

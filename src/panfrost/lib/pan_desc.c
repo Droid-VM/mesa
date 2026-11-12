@@ -97,17 +97,16 @@ pan_warn_on_afbc_reverse_issue_order(const struct pan_attachment_info *att,
 }
 #endif
 
-static bool
-pan_fb_color_attachment_should_crc(const struct pan_fb_color_attachment *rt,
-                                   unsigned tile_size)
+bool
+GENX(pan_image_view_can_crc)(const struct pan_image_view *view,
+                             unsigned tile_size_px)
 {
    uint64_t mod;
 
-   if (!rt->view || rt->discard || !rt->crc_state ||
-       !pan_image_view_has_crc(rt->view))
+   if (!view || !pan_image_view_has_crc(view))
       return false;
 
-   mod = pan_image_view_get_first_plane(rt->view).image->props.modifier;
+   mod = pan_image_view_get_first_plane(view).image->props.modifier;
 
    if (!drm_is_afbc(mod))
       return true;
@@ -120,10 +119,18 @@ pan_fb_color_attachment_should_crc(const struct pan_fb_color_attachment *rt,
    assert(mod & AFBC_FORMAT_MOD_SPARSE);
 
    /* AFBC render block size must fit in a single pass. */
-   if (pan_afbc_superblock_exceeds_tile_size(mod, tile_size))
+   if (pan_afbc_superblock_exceeds_tile_size(mod, tile_size_px))
       return false;
 
    return true;
+}
+
+static bool
+pan_fb_color_attachment_should_crc(const struct pan_fb_color_attachment *rt,
+                                   unsigned tile_size)
+{
+   return !rt->discard && rt->crc_state &&
+          GENX(pan_image_view_can_crc)(rt->view, tile_size);
 }
 
 int
@@ -630,12 +637,16 @@ GENX(pan_select_tile_size)(struct pan_fb_info *fb)
 
 #if PAN_ARCH != 6
    /* Check if we're using too much tile-memory; if we are, try disabling
-    * pipelining. This works because we're starting with an optimistic half
-    * of the tile-budget, so we actually have another half that can be used.
+    * pipelining (the tile buffer should ideally be double-buffered to
+    * increase fragment shading perf). This works because we're starting with
+    * an optimistic half of the tile-budget, so we actually have another half
+    * that can be used. This is also sometimes needed for downscaling (mipmap
+    * gen) which requires the highest square effective tile sizes.
     *
     * On v6 GPUs, doing this is not allowed; they *have* to pipeline.
     */
-    if (fb->tile_size < 4 * 4)
+    if (fb->tile_size < 4 * 4 ||
+        (fb->downscale_rts && fb->tile_size < 32 * 32))
        fb->tile_size *= 2;
 #endif
 
@@ -715,6 +726,78 @@ get_rt_formats(enum pipe_format pfmt, uint32_t *writeback, uint32_t *internal,
    }
 
    *pswizzle = pan_translate_swizzle_4(swizzle);
+}
+
+static void
+get_yuv_rt_formats(enum pipe_format pfmt, uint32_t *writeback,
+                   uint32_t *internal, uint32_t *pswizzle,
+                   uint32_t *yuv_swizzle)
+{
+   assert(pan_format_is_yuv(pfmt));
+
+   const unsigned char swizzle[4] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
+                                     PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W};
+   *pswizzle = pan_translate_swizzle_4(swizzle);
+
+   switch (pfmt) {
+#if PAN_ARCH >= 9
+   case PIPE_FORMAT_G8_B8R8_420_UNORM:
+      *internal = MALI_COLOR_BUFFER_INTERNAL_FORMAT_R8G8B8A8;
+      *writeback = MALI_YUV_WRITEBACK_FORMAT_Y8_U8V8_420;
+      *yuv_swizzle = MALI_YUV_SWIZZLE_UVYA;
+      break;
+   case PIPE_FORMAT_G8_B8_R8_420_UNORM:
+      *internal = MALI_COLOR_BUFFER_INTERNAL_FORMAT_R8G8B8A8;
+      *writeback = MALI_YUV_WRITEBACK_FORMAT_Y8_U8_V8_420;
+      *yuv_swizzle = MALI_YUV_SWIZZLE_UVYA;
+      break;
+   case PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM:
+      *internal = MALI_COLOR_BUFFER_INTERNAL_FORMAT_R10G10B10A2;
+      *writeback = MALI_YUV_WRITEBACK_FORMAT_Y10X6_U10X6V10X6_420;
+      *yuv_swizzle = MALI_YUV_SWIZZLE_UVYA;
+      break;
+#endif
+   default:
+      UNREACHABLE("invalid yuv pipe format");
+   }
+}
+
+static void
+emit_yuv_color_attachment(const struct pan_attachment_info *att, void *payload)
+{
+#if PAN_ARCH >= 10
+   const struct pan_image_view *iview = att->iview;
+   assert(pan_format_is_yuv(iview->format));
+
+   uint64_t base[3] = {0};
+   uint64_t row_stride[2] = {0};
+   uint64_t dummy_stride;
+
+   for (unsigned p = 0; p < util_format_get_num_planes(iview->format); p++) {
+      get_tiled_or_linear_att_mem_props(
+         pan_image_view_get_plane(iview, p), iview->first_level,
+         att->layer_or_z_slice, &base[p],
+         p < 2 ? &row_stride[p] : &dummy_stride, &dummy_stride);
+   }
+
+   pan_cast_and_pack(payload, YUV_RENDER_TARGET, cfg) {
+      cfg.write_enable = true;
+      cfg.writeback_block_format = MALI_BLOCK_FORMAT_LINEAR;
+      get_yuv_rt_formats(iview->format, &cfg.writeback_format,
+                         &cfg.internal_format, &cfg.swizzle, &cfg.yuv_swizzle);
+      cfg.conversion_mode = MALI_YUV_CONVERSION_MODE_NO_CONVERSION;
+      cfg.full_range = true;
+      cfg.unsigned_cr_range = true;
+      cfg.cr_siting = MALI_YUV_CR_SITING_CENTER;
+      cfg.plane_0_base = base[0];
+      cfg.plane_1_base = base[1];
+      cfg.plane_2_base = base[2];
+      cfg.plane_0_stride = row_stride[0];
+      cfg.plane_1_2_stride = row_stride[1];
+   }
+#else
+   UNREACHABLE("Unsupported YUV RT");
+#endif
 }
 
 void
@@ -826,13 +909,17 @@ GENX(pan_emit_linear_color_attachment)(const struct pan_attachment_info *att,
                                        void *payload)
 {
    const struct pan_image_view *iview = att->iview;
+   if (pan_format_is_yuv(iview->format)) {
+      emit_yuv_color_attachment(att, payload);
+      return;
+   }
+
    uint64_t base, row_stride, surf_stride;
 
    get_tiled_or_linear_att_mem_props(pan_image_view_get_color_plane(iview),
                                      iview->first_level, att->layer_or_z_slice,
                                      &base, &row_stride, &surf_stride);
 
-   /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, RGB_RENDER_TARGET, cfg) {
       cfg.write_enable = true;
@@ -1035,6 +1122,10 @@ pan_emit_rt(const struct pan_fb_info *fb, unsigned layer_idx, unsigned idx,
       cfg.clear = rt_clear(&fb->rts[idx]);
       cfg.dithering_enable = true;
       cfg.writeback_msaa = mali_sampling_mode(fb->rts[idx].view);
+#if PAN_ARCH >= 10
+      if (fb->downscale_rts && idx == 1)
+         cfg.downscale_mode = MALI_RT_DOWNSCALE_2X;
+#endif
    }
 
    struct pan_image_plane_ref pref = pan_image_view_get_color_plane(rt);
@@ -1108,11 +1199,6 @@ pan_crc_maybe_enable_flushed(struct pan_crc *crc, struct pan_crc_state *state,
 static uint64_t
 pan_crc_clear_color(const struct pan_fb_info *fb)
 {
-   uint64_t base[PAN_MAX_RTS] = { 0, }; /* Compiler auto-vectorization hint */
-   uint64_t crc_clear_flag = 0;
-   uint64_t crc_clear_base = 1ull << 46;
-   uint64_t crc_init = 0;
-
    /* When a tile is clear (i.e. no polygons intersect it), the configured
     * crc_clear_color is written as is as CRC value by the GPU if both CRC
     * write (crc_write_enable flag) and Empty Tile Elimination write
@@ -1141,21 +1227,17 @@ pan_crc_clear_color(const struct pan_fb_info *fb)
     * hash. Clear values in pan_fb_info struct are expected to be packed with
     * respect to the format and dithering of the underlying RTs so that a
     * change of format (without a clear color change) can generate a different
-    * hash. The prime number 16381 is carefully selected so that the 32 bits
-    * of each clear color channel take at most 46 bits after the mul (the next
-    * prime number 16411 takes at most 47 bits). The resulting hash value is
-    * guaranteed not to overflow and can safely be packed. */
+    * hash. */
+   uint64_t base[PAN_MAX_RTS] = {0}; /* Compiler auto-vectorization hint */
 
-   static const uint64_t primes[4] = { 16381ULL, 16369ULL, 16363ULL, 16361ULL };
    for (unsigned i = 0; i < fb->rt_count; ++i)
       if (fb->rts[i].clear)
-         for (unsigned j = 0; j < 4; ++j)
-            base[i] ^= primes[j] * fb->rts[i].clear_value[j] * (i + 1);
+         base[i] = pan_crc_clear_color_hash_rt(i, fb->rts[i].clear_value);
 
-   crc_clear_base |= (base[0] ^ base[1]) ^ (base[2] ^ base[3]) ^
-      (base[4] ^ base[5]) ^ (base[6] ^ base[7]);
+   uint64_t hash = (base[0] ^ base[1]) ^ (base[2] ^ base[3]) ^
+                   (base[4] ^ base[5]) ^ (base[6] ^ base[7]);
 
-   return (crc_clear_flag << 63) | (crc_clear_base << 16) | crc_init;
+   return pan_crc_clear_color_pack(hash);
 }
 #endif
 
@@ -1320,6 +1402,17 @@ check_fb_attachments(const struct pan_fb_info *fb)
    }
    if (fb->zs.view.s)
       pan_image_view_check(fb->zs.view.s);
+
+#if PAN_ARCH >= 10
+   if (fb->downscale_rts) {
+      assert(fb->rt_count == 2);
+#if PAN_ARCH < 12
+      assert(fb->tile_size == 32 * 32);
+#else
+      assert((fb->tile_size == 32 * 32) || (fb->tile_size == 64 * 64));
+#endif
+   }
+#endif
 #endif
 }
 
@@ -1337,9 +1430,12 @@ pan_emit_rts(const struct pan_fb_info *fb, unsigned layer_idx, int crc_rt,
       if (!fb->rts[i].view)
          continue;
 
-      cbuf_offset += pan_bytes_per_pixel_tib(fb->rts[i].view->format) *
-                     fb->tile_size *
-                     pan_image_view_get_nr_samples(fb->rts[i].view);
+      /* The internal buffer offset must be the same for all RTs when
+       * downscaling is enabled. */
+      if (!fb->downscale_rts)
+         cbuf_offset += pan_bytes_per_pixel_tib(fb->rts[i].view->format) *
+            fb->tile_size *
+            pan_image_view_get_nr_samples(fb->rts[i].view);
 
    }
 }

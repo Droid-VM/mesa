@@ -582,8 +582,8 @@ union packed_instr {
    struct {
       unsigned instr_type : 4;
       unsigned num_srcs : 4;
-      unsigned op : 5;
-      unsigned _pad : 11;
+      unsigned op : 6;
+      unsigned _pad : 10;
       unsigned def : 8;
    } tex;
    struct {
@@ -1375,12 +1375,24 @@ union packed_tex_data {
       unsigned component : 2;
       unsigned texture_non_uniform : 1;
       unsigned sampler_non_uniform : 1;
-      unsigned offset_non_uniform : 1;
       unsigned embedded_sampler : 1;
       unsigned array_is_lowered_cube : 1;
       unsigned is_gather_implicit_lod : 1;
       unsigned can_speculate : 1;
+      unsigned input_attachment_index : 1;
+      unsigned input_attachment_depth : 1;
+      unsigned input_attachment_stencil : 1;
       unsigned unused : 2; /* Mark unused for valgrind. */
+   } u;
+};
+
+union packed_tex2_data {
+   uint32_t u32;
+   struct {
+      unsigned texture_2_non_uniform : 1;
+      unsigned sampler_2_non_uniform : 1;
+      unsigned embedded_sampler_2 : 1;
+      unsigned unused : 29; /* Mark unused for valgrind. */
    } u;
 };
 
@@ -1388,7 +1400,7 @@ static void
 write_tex(write_ctx *ctx, const nir_tex_instr *tex)
 {
    assert(tex->num_srcs < 16);
-   assert(tex->op < 32);
+   assert(tex->op < 64);
 
    union packed_instr header;
    header.u32 = 0;
@@ -1400,7 +1412,10 @@ write_tex(write_ctx *ctx, const nir_tex_instr *tex)
    write_def(ctx, &tex->def, header, tex->instr.type);
 
    blob_write_uint32(ctx->blob, tex->texture_index);
+   blob_write_uint32(ctx->blob, tex->texture_array_size);
    blob_write_uint32(ctx->blob, tex->sampler_index);
+   if (nir_tex_instr_need_texture_2(tex))
+      blob_write_uint32(ctx->blob, tex->sampler_2_index);
    blob_write_uint32(ctx->blob, tex->backend_flags);
    if (tex->op == nir_texop_tg4)
       blob_write_bytes(ctx->blob, tex->tg4_offsets, sizeof(tex->tg4_offsets));
@@ -1417,13 +1432,25 @@ write_tex(write_ctx *ctx, const nir_tex_instr *tex)
       .u.component = tex->component,
       .u.texture_non_uniform = tex->texture_non_uniform,
       .u.sampler_non_uniform = tex->sampler_non_uniform,
-      .u.offset_non_uniform = tex->offset_non_uniform,
       .u.embedded_sampler = tex->embedded_sampler,
       .u.array_is_lowered_cube = tex->array_is_lowered_cube,
       .u.is_gather_implicit_lod = tex->is_gather_implicit_lod,
       .u.can_speculate = tex->can_speculate,
+      .u.input_attachment_index = tex->input_attachment_index,
+      .u.input_attachment_depth = tex->input_attachment_depth,
+      .u.input_attachment_stencil = tex->input_attachment_stencil,
    };
    blob_write_uint32(ctx->blob, packed.u32);
+
+   if (nir_tex_instr_need_texture_2(tex)) {
+      STATIC_ASSERT(sizeof(union packed_tex2_data) == sizeof(uint32_t));
+      union packed_tex2_data packed = {
+         .u.embedded_sampler_2 = tex->embedded_sampler_2,
+         .u.texture_2_non_uniform = tex->texture_2_non_uniform,
+         .u.sampler_2_non_uniform = tex->sampler_2_non_uniform,
+      };
+      blob_write_uint32(ctx->blob, packed.u32);
+   }
 
    for (unsigned i = 0; i < tex->num_srcs; i++) {
       union packed_src src;
@@ -1442,7 +1469,10 @@ read_tex(read_ctx *ctx, union packed_instr header)
 
    tex->op = header.tex.op;
    tex->texture_index = blob_read_uint32(ctx->blob);
+   tex->texture_array_size = blob_read_uint32(ctx->blob);
    tex->sampler_index = blob_read_uint32(ctx->blob);
+   if (nir_tex_instr_need_texture_2(tex))
+      tex->sampler_2_index = blob_read_uint32(ctx->blob);
    tex->backend_flags = blob_read_uint32(ctx->blob);
    if (tex->op == nir_texop_tg4)
       blob_copy_bytes(ctx->blob, tex->tg4_offsets, sizeof(tex->tg4_offsets));
@@ -1459,11 +1489,21 @@ read_tex(read_ctx *ctx, union packed_instr header)
    tex->component = packed.u.component;
    tex->texture_non_uniform = packed.u.texture_non_uniform;
    tex->sampler_non_uniform = packed.u.sampler_non_uniform;
-   tex->offset_non_uniform = packed.u.offset_non_uniform;
    tex->embedded_sampler = packed.u.embedded_sampler;
    tex->array_is_lowered_cube = packed.u.array_is_lowered_cube;
    tex->is_gather_implicit_lod = packed.u.is_gather_implicit_lod;
    tex->can_speculate = packed.u.can_speculate;
+   tex->input_attachment_index = packed.u.input_attachment_index;
+   tex->input_attachment_depth = packed.u.input_attachment_depth;
+   tex->input_attachment_stencil = packed.u.input_attachment_stencil;
+
+   if (nir_tex_instr_need_texture_2(tex)) {
+      union packed_tex2_data packed;
+      packed.u32 = blob_read_uint32(ctx->blob);
+      tex->embedded_sampler_2 = packed.u.embedded_sampler_2;
+      tex->texture_2_non_uniform = packed.u.texture_2_non_uniform;
+      tex->sampler_2_non_uniform = packed.u.sampler_2_non_uniform;
+   }
 
    for (unsigned i = 0; i < tex->num_srcs; i++) {
       union packed_src src = read_src(ctx, &tex->src[i].src);
@@ -1624,6 +1664,10 @@ write_cmat_call(write_ctx *ctx, const nir_cmat_call_instr *call)
    else
       blob_write_uint32(ctx->blob, 0);
 
+   if (call->decode_vec_fn)
+      blob_write_uint32(ctx->blob, write_lookup_object(ctx, call->decode_vec_fn));
+   else
+      blob_write_uint32(ctx->blob, 0);
    blob_write_uint32(ctx->blob, call->op);
 
    for (unsigned i = 0; i < call->num_params; i++)
@@ -1640,8 +1684,13 @@ read_cmat_call(read_ctx *ctx)
    nir_function *callee = NULL;
    if (callee_int)
       callee = read_lookup_object(ctx, callee_int);
+   uint32_t decode_int = blob_read_uint32(ctx->blob);
+   nir_function *decode_vec_fn = NULL;
+   if (decode_int)
+      decode_vec_fn = read_lookup_object(ctx, decode_int);
    nir_cmat_call_op op = blob_read_uint32(ctx->blob);
-   nir_cmat_call_instr *call = nir_cmat_call_instr_create(ctx->nir, op, callee);
+
+   nir_cmat_call_instr *call = nir_cmat_call_instr_create(ctx->nir, op, callee, decode_vec_fn);
 
    for (unsigned i = 0; i < call->num_params; i++)
       read_src(ctx, &call->params[i]);
@@ -2080,7 +2129,7 @@ write_function(write_ctx *ctx, const nir_function *fxn)
          blob_write_string(ctx->blob, fxn->params[i].name);
 
       encode_type_to_blob(ctx->blob, fxn->params[i].type);
-      blob_write_uint32(ctx->blob, encode_deref_modes(fxn->params[i].mode));
+      blob_write_uint32(ctx->blob, fxn->params[i].mode);
       blob_write_uint32(ctx->blob, fxn->params[i].driver_attributes);
    }
 
@@ -2131,7 +2180,7 @@ read_function(read_ctx *ctx)
       fxn->params[i].is_return = val & (1u << 17);
       fxn->params[i].is_uniform = val & (1u << 18);
       fxn->params[i].type = decode_type_from_blob(ctx->blob);
-      fxn->params[i].mode = decode_deref_modes(blob_read_uint32(ctx->blob));
+      fxn->params[i].mode = blob_read_uint32(ctx->blob);
       fxn->params[i].driver_attributes = blob_read_uint32(ctx->blob);
    }
 
@@ -2235,7 +2284,7 @@ serialize_internal(struct blob *blob, const nir_shader *nir, bool strip, bool se
       blob_write_string(blob, info.label);
    if (!strip && info.spec)
       blob_write_string(blob, info.spec);
-   info.name = info.label = NULL;
+   info.name = info.label = info.spec = NULL;
    blob_write_bytes(blob, (uint8_t *)&info, sizeof(info));
 
    write_var_list(&ctx, &nir->variables);

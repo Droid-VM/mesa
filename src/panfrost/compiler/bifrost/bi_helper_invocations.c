@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2019-2021 Collabora, Ltd.
+ * Copyright (C) 2026 Arm Ltd.
  * SPDX-License-Identifier: MIT
  */
 
@@ -237,6 +238,13 @@ bi_helper_block_update(BITSET_WORD *deps, bi_block *block)
    return progress;
 }
 
+static bool
+bi_is_tls_store(const bi_instr *I)
+{
+   return bi_get_opcode_props(I)->message == BIFROST_MESSAGE_STORE &&
+          I->seg == BI_SEG_TL;
+}
+
 void
 bi_analyze_helper_requirements(bi_context *ctx)
 {
@@ -246,7 +254,7 @@ bi_analyze_helper_requirements(bi_context *ctx)
     * derivatives and the sources of conditional branch instructions */
 
    bi_foreach_instr_global(ctx, I) {
-      if (bi_instr_uses_helpers(I)) {
+      if (bi_instr_uses_helpers(I) || bi_is_tls_store(I)) {
          bi_foreach_ssa_src(I, s)
             BITSET_SET(deps, I->src[s].value);
       } else {

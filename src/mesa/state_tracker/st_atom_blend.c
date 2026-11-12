@@ -236,6 +236,11 @@ st_update_blend( struct st_context *st )
 
    blend->max_rt = MAX2(1, num_cb) - 1;
 
+   /* Whether we're rendering to a YUV target (GL_EXT_YUV_target) is computed
+    * when the framebuffer changes; see st_update_framebuffer_state().
+    */
+   blend->is_yuv = st->state.fb_is_yuv;
+
    bool need_independent_blend = num_cb > 1 &&
       (blend_per_rt(st, num_cb) || colormask_per_rt(ctx, num_cb));
 
@@ -272,7 +277,8 @@ st_update_blend( struct st_context *st )
       blend->logicop_func = ctx->Color._LogicOp;
    }
    else if (ctx->Color.BlendEnabled &&
-            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE) {
+            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE &&
+            _mesa_advanced_blend_mode_is_native(ctx, ctx->Color._AdvancedBlendMode)) {
       blend->advanced_blend_func = ctx->Color._AdvancedBlendMode;
    }
    else if (ctx->Color.BlendEnabled &&

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 files_libgallium = files(
-  'driver_ddebug/dd_draw.c',
+  'driver_ddebug/dd_util.c',
   'driver_ddebug/dd_util.h',
   'pipebuffer/pb_buffer_fenced.c',
   'pipebuffer/pb_buffer_fenced.h',
@@ -138,7 +138,6 @@ if with_gfx_compute
     'draw/draw_pipe_cull.c',
     'draw/draw_pipe_flatshade.c',
     'draw/draw_pipe_offset.c',
-    'draw/draw_pipe_pstipple.c',
     'draw/draw_pipe_stipple.c',
     'draw/draw_pipe_twoside.c',
     'draw/draw_pipe_unfilled.c',
@@ -178,6 +177,7 @@ if with_gfx_compute
     'draw/draw_vs.h',
     'draw/draw_vs_variant.c',
     'driver_ddebug/dd_context.c',
+    'driver_ddebug/dd_draw.c',
     'driver_ddebug/dd_pipe.h',
     'driver_ddebug/dd_public.h',
     'driver_ddebug/dd_screen.c',
@@ -447,9 +447,7 @@ if with_gallium_zink
   files_libgalliumvlwinsys += files('vl/vl_winsys_kopper.c')
 endif
 
-if with_glx == 'xlib'
-  files_libgalliumvlwinsys += files('vl/vl_winsys_xlib_swrast.c')
-elif with_gallium_drisw_kms
+if with_gallium_drisw_kms
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri_vgem.c')
 endif
 

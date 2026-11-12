@@ -18,14 +18,12 @@ struct radv_device;
 struct radv_cmd_stream;
 struct radv_cmd_buffer;
 
-void radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radv_cmd_stream *cs, uint64_t va, unsigned size,
-                             bool predicating);
-
-void radv_cp_dma_prefetch(struct radv_cmd_buffer *cmd_buffer, uint64_t va, unsigned size);
+void radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radv_cmd_stream *cs, uint64_t va, unsigned size);
 
 void radv_cp_dma_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dest_va, uint64_t size);
 
-void radv_cp_dma_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, unsigned value);
+void radv_cp_dma_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, unsigned value,
+                             bool cb_db_cp_coherent);
 
 void radv_cp_dma_wait_for_idle(struct radv_cmd_buffer *cmd_buffer);
 

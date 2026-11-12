@@ -20,7 +20,6 @@
 #include "coord.h"
 #include "gfx12SwizzlePattern.h"
 
-
 namespace Addr
 {
 namespace V3

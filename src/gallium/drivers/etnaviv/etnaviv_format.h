@@ -27,13 +27,14 @@
 #ifndef ETNAVIV_FORMAT_H_
 #define ETNAVIV_FORMAT_H_
 
+#include "layout/eil_format.h"
 #include "util/format/u_format.h"
 #include "pipe/p_state.h"
 #include <stdint.h>
 
 #define ETNA_NO_MATCH (~0)
-#define EXT_FORMAT (1 << 31)
-#define ASTC_FORMAT (1 << 30)
+#define EXT_FORMAT (1u << 31)
+#define ASTC_FORMAT (1u << 30)
 
 struct etna_screen;
 
@@ -45,72 +46,26 @@ texture_use_int_filter(const struct pipe_sampler_view *sv,
                        const struct pipe_sampler_state *ss,
                        bool tex_desc);
 
-bool
-texture_format_needs_swiz(enum pipe_format fmt);
-
 uint32_t
 get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
                  unsigned swizzle_g, unsigned swizzle_b, unsigned swizzle_a);
 
 uint32_t
-translate_pe_format(enum pipe_format fmt);
+translate_pe_format(enum pipe_format fmt, const struct etna_screen *screen);
 
 int
-translate_pe_format_rb_swap(enum pipe_format fmt);
+translate_pe_format_rb_swap(enum pipe_format fmt, const struct etna_screen *screen);
 
 uint32_t
 remap_texture_format_rb_swap(uint32_t format);
 
 enum pipe_format
-translate_pe_internal_format(enum pipe_format fmt);
-
-uint32_t
-translate_vertex_format_type(enum pipe_format fmt);
-
-static inline enum pipe_format
-translate_format_128bit_to_64bit(enum pipe_format fmt)
-{
-    switch (fmt) {
-    case PIPE_FORMAT_R32G32B32A32_FLOAT:
-        return PIPE_FORMAT_R32G32_FLOAT;
-    case PIPE_FORMAT_R32G32B32A32_SINT:
-        return PIPE_FORMAT_R32G32_SINT;
-    case PIPE_FORMAT_R32G32B32A32_UINT:
-        return PIPE_FORMAT_R32G32_UINT;
-    default:
-        return fmt;
-    }
-}
+translate_pe_internal_format(enum pipe_format fmt, const struct etna_screen *screen);
 
 static inline bool
-format_is_128bit(enum pipe_format fmt)
+resolve_copies_one_sample(enum pipe_format format)
 {
-    switch (fmt) {
-    case PIPE_FORMAT_R32G32B32A32_FLOAT:
-    case PIPE_FORMAT_R32G32B32A32_SINT:
-    case PIPE_FORMAT_R32G32B32A32_UINT:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static inline bool
-format_is_emulated_z32f(enum pipe_format fmt)
-{
-    return fmt == PIPE_FORMAT_Z32_FLOAT ||
-           fmt == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT;
-}
-
-/* The emulated depth32f formats are physically stored as D24S8; map them to
- * that format and leave everything else unchanged. */
-static inline enum pipe_format
-translate_emulated_format_z32f(enum pipe_format fmt)
-{
-    if (format_is_emulated_z32f(fmt))
-        return PIPE_FORMAT_S8_UINT_Z24_UNORM;
-
-    return fmt;
+   return util_format_is_pure_integer(format);
 }
 
 #endif /* ETNAVIV_FORMAT_H_ */

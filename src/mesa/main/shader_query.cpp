@@ -738,9 +738,9 @@ _mesa_program_resource_find_name(struct gl_shader_program *shProg,
        *    string would exactly match the name of the variable if the suffix
        *    "[0]" were appended to the string; [...]"
        */
-      /* Remove array's index from interface block name comparison only if
-       * array's index is zero and the resulting string length is the same
-       * than the provided name's length.
+      /* Also match a name that equals the resource name without its
+       * trailing "[0]", unless that resource is reported with another "[0]"
+       * appended: "a[0]" of "a[2][2]" is reported as "a[0][0]".
        */
       int length_without_array_index =
          rname.last_square_bracket >= 0 ? rname.last_square_bracket : rname.length;
@@ -750,16 +750,16 @@ _mesa_program_resource_find_name(struct gl_shader_program *shProg,
       if (len >= rname.length && strncmp(rname.string, name, rname.length) == 0)
          found = true;
       else if (rname_has_array_index_zero &&
-               strncmp(rname.string, name, length_without_array_index) == 0)
-         found = true;
+               strncmp(rname.string, name, length_without_array_index) == 0 &&
+               (int)_mesa_program_resource_name_length_array(res) == rname.length)
+         return res;
 
       if (found) {
          switch (programInterface) {
          case GL_UNIFORM_BLOCK:
          case GL_SHADER_STORAGE_BLOCK:
             /* Basename match, check if array or struct. */
-            if (rname_has_array_index_zero ||
-                name[rname.length] == '\0' ||
+            if (name[rname.length] == '\0' ||
                 name[rname.length] == '[' ||
                 name[rname.length] == '.') {
                return res;
@@ -1919,6 +1919,14 @@ _mesa_get_program_interfaceiv(struct gl_shader_program *shProg,
    }
 }
 
+static inline bool
+is_gl_builtin_from_spirv(const struct gl_shader_variable *var)
+{
+   /* All variables from SPIR-V do not have a name, and 7.4.2 guarantees that
+    * built-ins do not have Location decorations. */
+   return !var->name.string && !var->explicit_location;
+}
+
 static bool
 validate_io(struct gl_program *producer, struct gl_program *consumer)
 {
@@ -1972,7 +1980,7 @@ validate_io(struct gl_program *producer, struct gl_program *consumer)
        *
        *    Built-in inputs or outputs do not affect interface matching.
        */
-      if (is_gl_identifier(var->name.string))
+      if (is_gl_identifier(var->name.string) || is_gl_builtin_from_spirv(var))
          continue;
 
       outputs[num_outputs++] = var;
@@ -1989,7 +1997,8 @@ validate_io(struct gl_program *producer, struct gl_program *consumer)
       gl_shader_variable const *const consumer_var = RESOURCE_VAR(res);
       gl_shader_variable const *producer_var = NULL;
 
-      if (is_gl_identifier(consumer_var->name.string))
+      if (is_gl_identifier(consumer_var->name.string) ||
+          is_gl_builtin_from_spirv(consumer_var))
          continue;
 
       /* Inputs with explicit locations match other outputs with explicit

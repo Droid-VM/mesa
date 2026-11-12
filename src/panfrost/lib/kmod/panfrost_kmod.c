@@ -16,15 +16,20 @@
 #include "util/macros.h"
 #include "util/stack_array.h"
 #include "util/timespec.h"
+#include "util/u_sync_provider.h"
 
 #include "drm-uapi/panfrost_drm.h"
 
 #include "pan_kmod_backend.h"
+#include "panfrost_kmod.h"
 
 #include "pan_props.h"
 
 /* Maximum kmod BO label length, including NUL-terminator */
 #define PANFROST_BO_LABEL_MAXLEN 4096
+
+#define pan_bo_to_panfrost_bo(bo_pointer) \
+      container_of(bo_pointer, struct panfrost_kmod_bo, base)
 
 const struct pan_kmod_ops panfrost_kmod_ops;
 
@@ -32,9 +37,20 @@ struct panfrost_kmod_vm {
    struct pan_kmod_vm base;
 };
 
+struct panfrost_kmod_ops {
+   int (*get_param)(const struct pan_kmod_dev *dev,
+                    struct drm_panfrost_get_param *get_param);
+   int (*submit_job)(const struct pan_kmod_dev *dev,
+                     struct drm_panfrost_submit *submit_info);
+   struct pan_kmod_bo *(*bo_import)(struct pan_kmod_dev *dev, uint32_t handle,
+                                    uint64_t size);
+   int (*prime_fd_to_handle)(struct pan_kmod_dev *dev, int fd, uint32_t *handle);
+};
+
 struct panfrost_kmod_dev {
    struct pan_kmod_dev base;
    struct panfrost_kmod_vm *vm;
+   struct panfrost_kmod_ops ops;
 };
 
 struct panfrost_kmod_bo {
@@ -77,15 +93,16 @@ struct panfrost_kmod_perf_session {
  * information about devices.
  */
 static __u64
-panfrost_query_raw(int fd, enum drm_panfrost_param param, bool required,
+panfrost_query_raw(const struct pan_kmod_dev *dev,
+                   enum drm_panfrost_param param, bool required,
                    unsigned default_value)
 {
-   struct drm_panfrost_get_param get_param = {};
+   struct drm_panfrost_get_param get_param = { .param = param };
+   struct panfrost_kmod_dev *panfrost_dev =
+      container_of(dev, struct panfrost_kmod_dev, base);
    ASSERTED int ret;
 
-   get_param.param = param;
-   ret = pan_kmod_ioctl(fd, DRM_IOCTL_PANFROST_GET_PARAM, &get_param);
-
+   ret = panfrost_dev->ops.get_param(dev, &get_param);
    if (ret) {
       assert(!required);
       return default_value;
@@ -94,15 +111,83 @@ panfrost_query_raw(int fd, enum drm_panfrost_param param, bool required,
    return get_param.value;
 }
 
-static void
-panfrost_dev_query_thread_props(struct panfrost_kmod_dev *panfrost_dev)
+int
+panfrost_kmod_submit(struct pan_kmod_dev *pan_kdev,
+                     struct drm_panfrost_submit *submit)
 {
-   struct pan_kmod_dev_props *props = &panfrost_dev->base.props;
-   const struct pan_kmod_dev *dev = &panfrost_dev->base;
-   int fd = dev->fd;
+   struct panfrost_kmod_dev *panfrost_dev =
+      container_of(pan_kdev, struct panfrost_kmod_dev, base);
 
+   return panfrost_dev->ops.submit_job(pan_kdev, submit);
+}
+
+static struct pan_kmod_bo *
+panfrost_kmod_bo_import_handle(struct pan_kmod_dev *dev, uint32_t handle,
+                               uint64_t size)
+{
+   struct panfrost_kmod_bo *panfrost_bo =
+      pan_kmod_dev_alloc(dev, sizeof(*panfrost_bo));
+   if (!panfrost_bo) {
+      mesa_loge("failed to allocate a panfrost_kmod_bo object");
+      return NULL;
+   }
+
+   struct drm_panfrost_get_bo_offset get_bo_offset = {.handle = handle, 0};
+   int ret =
+      pan_kmod_ioctl(dev->fd, DRM_IOCTL_PANFROST_GET_BO_OFFSET,
+                     &get_bo_offset);
+   if (ret) {
+      mesa_loge("DRM_IOCTL_PANFROST_GET_BO_OFFSET failed (err=%d)", errno);
+      goto err_free_bo;
+   }
+
+   panfrost_bo->offset = get_bo_offset.offset;
+
+   uint32_t flags = PAN_KMOD_BO_FLAG_IMPORTED;
+   if (pan_kmod_driver_version_at_least(&dev->driver, 1, 6)) {
+      struct drm_panfrost_query_bo_info args = {
+         .handle = handle,
+      };
+
+      ret = drmIoctl(dev->fd, DRM_IOCTL_PANFROST_QUERY_BO_INFO, &args);
+      if (ret) {
+         mesa_loge("PANFROST_BO_QUERY_INFO failed (err=%d)", errno);
+         goto err_free_bo;
+      }
+
+      /* FIXME: If the BO comes from a different subsystem
+       * (args.extra_flags & DRM_PANTHOR_BO_IS_IMPORTED), we should normally
+       * add extra DMA_BUF_IOCTL_SYNC calls around CPU accesses to ensure the
+       * CPU mapping consistency, but this is something we never worried about
+       * (we've always assumed exporters were exposing uncached mappings with
+       * NOP {begin,end}_cpu_access() implementations), and it worked fine until
+       * now.
+       * The long term plan is to hook up DMA_BUF_IOCTL_SYNC, but this requires
+       * more work.
+       */
+   }
+
+   pan_kmod_bo_init(&panfrost_bo->base, dev, NULL, size, flags, handle);
+   return &panfrost_bo->base;
+
+err_free_bo:
+   pan_kmod_dev_free(dev, panfrost_bo);
+   return NULL;
+}
+
+static inline int
+panfrost_kmod_prime_fd_to_handle(struct pan_kmod_dev *dev, int fd,
+                                 uint32_t *handle)
+{
+   return drmPrimeFDToHandle(dev->fd, fd, handle);
+}
+
+static inline void
+panfrost_dev_query_thread_props(struct pan_kmod_dev *dev,
+                                struct pan_kmod_dev_props *props)
+{
    props->max_threads_per_core =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_MAX_THREADS, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_MAX_THREADS, true, 0);
    if (!props->max_threads_per_core) {
       switch (pan_arch(props->gpu_id)) {
       case 4:
@@ -131,12 +216,12 @@ panfrost_dev_query_thread_props(struct panfrost_kmod_dev *panfrost_dev)
    }
 
    props->max_threads_per_wg = panfrost_query_raw(
-      fd, DRM_PANFROST_PARAM_THREAD_MAX_WORKGROUP_SZ, true, 0);
+      dev, DRM_PANFROST_PARAM_THREAD_MAX_WORKGROUP_SZ, true, 0);
    if (!props->max_threads_per_wg)
       props->max_threads_per_wg = props->max_threads_per_core;
 
    uint32_t thread_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_THREAD_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_THREAD_FEATURES, true, 0);
    props->max_tasks_per_core = MAX2(thread_features >> 24, 1);
    props->num_registers_per_core = thread_features & 0xffff;
    if (!props->num_registers_per_core) {
@@ -170,47 +255,45 @@ panfrost_dev_query_thread_props(struct panfrost_kmod_dev *panfrost_dev)
    }
 
    props->max_tls_instance_per_core =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_THREAD_TLS_ALLOC, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_THREAD_TLS_ALLOC, true, 0);
    if (!props->max_tls_instance_per_core)
       props->max_tls_instance_per_core = props->max_threads_per_core;
 }
 
-static void
-panfrost_dev_query_props(struct panfrost_kmod_dev *panfrost_dev)
+static inline void
+panfrost_dev_query_props(struct pan_kmod_dev *dev)
 {
-   struct pan_kmod_dev_props *props = &panfrost_dev->base.props;
-   const struct pan_kmod_dev *dev = &panfrost_dev->base;
-   int fd = dev->fd;
+   struct pan_kmod_dev_props *props = &dev->props;
 
    memset(props, 0, sizeof(*props));
    props->gpu_id =
-      (panfrost_query_raw(fd, DRM_PANFROST_PARAM_GPU_PROD_ID, true, 0) << 16) |
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_GPU_REVISION, true, 0);
+      (panfrost_query_raw(dev, DRM_PANFROST_PARAM_GPU_PROD_ID, true, 0) << 16) |
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_GPU_REVISION, true, 0);
    props->shader_present =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_SHADER_PRESENT, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_SHADER_PRESENT, true, 0);
    props->tiler_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_TILER_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_TILER_FEATURES, true, 0);
    props->mem_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_MEM_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_MEM_FEATURES, true, 0);
    props->mmu_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_MMU_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_MMU_FEATURES, true, 0);
    props->l2_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_L2_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_L2_FEATURES, true, 0);
 
    for (unsigned i = 0; i < ARRAY_SIZE(props->texture_features); i++) {
       props->texture_features[i] = panfrost_query_raw(
-         fd, DRM_PANFROST_PARAM_TEXTURE_FEATURES0 + i, true, 0);
+         dev, DRM_PANFROST_PARAM_TEXTURE_FEATURES0 + i, true, 0);
    }
 
    props->afbc_features =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_AFBC_FEATURES, true, 0);
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_AFBC_FEATURES, true, 0);
 
-   panfrost_dev_query_thread_props(panfrost_dev);
+   panfrost_dev_query_thread_props(dev, props);
 
    if (pan_kmod_driver_version_at_least(&dev->driver, 1, 3)) {
       props->gpu_can_query_timestamp = true;
       props->timestamp_frequency = panfrost_query_raw(
-         fd, DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP_FREQUENCY, true, 0);
+         dev, DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP_FREQUENCY, true, 0);
 
       if (props->timestamp_frequency) {
          props->timestamp_cycles_to_ns_factor =
@@ -224,7 +307,7 @@ panfrost_dev_query_props(struct panfrost_kmod_dev *panfrost_dev)
    /* Support for priorities was added in panfrost 1.5, assumes default
     * priority as medium if the param doesn't exist. */
    uint64_t prios =
-      panfrost_query_raw(fd, DRM_PANFROST_PARAM_ALLOWED_JM_CTX_PRIORITIES,
+      panfrost_query_raw(dev, DRM_PANFROST_PARAM_ALLOWED_JM_CTX_PRIORITIES,
                          false, BITFIELD_BIT(PANFROST_JM_CTX_PRIORITY_MEDIUM));
 
    if (prios & BITFIELD_BIT(PANFROST_JM_CTX_PRIORITY_LOW))
@@ -242,7 +325,7 @@ panfrost_dev_query_props(struct panfrost_kmod_dev *panfrost_dev)
 
    if (pan_kmod_driver_version_at_least(&dev->driver, 1, 6)) {
       uint32_t selected_coherency =
-         panfrost_query_raw(fd, DRM_PANFROST_PARAM_SELECTED_COHERENCY, true,
+         panfrost_query_raw(dev, DRM_PANFROST_PARAM_SELECTED_COHERENCY, true,
                             DRM_PANFROST_GPU_COHERENCY_NONE);
 
       props->supported_bo_flags |= PAN_KMOD_BO_FLAG_WB_MMAP;
@@ -253,14 +336,32 @@ panfrost_dev_query_props(struct panfrost_kmod_dev *panfrost_dev)
    props->pgsize_bitmap = PAN_PGSIZE_4K | PAN_PGSIZE_2M;
 }
 
+static int
+panfrost_kmod_get_param(const struct pan_kmod_dev *dev,
+                        struct drm_panfrost_get_param *get_param)
+{
+   return pan_kmod_ioctl(dev->fd, DRM_IOCTL_PANFROST_GET_PARAM, get_param);
+}
+
+static int
+panfrost_kmod_submit_job(const struct pan_kmod_dev *dev,
+                         struct drm_panfrost_submit *submit_info)
+{
+   return pan_kmod_ioctl(dev->fd, DRM_IOCTL_PANFROST_SUBMIT, submit_info);
+}
+
 static struct pan_kmod_dev *
 panfrost_kmod_dev_create(int fd, uint32_t flags,
-                         const struct pan_kmod_driver *drv_info,
                          const struct pan_kmod_allocator *allocator)
 {
-   if (!pan_kmod_driver_version_at_least(drv_info, 1, 1)) {
+   struct pan_kmod_driver drv_info;
+
+   if (!pan_kmod_drm_drv_match(fd, "panfrost", &drv_info))
+       return NULL;
+
+   if (!pan_kmod_driver_version_at_least(&drv_info, 1, 1)) {
       mesa_loge("kernel driver is too old (requires at least 1.1, found %d.%d)",
-                drv_info->version.major, drv_info->version.minor);
+                drv_info.version.major, drv_info.version.minor);
       return NULL;
    }
 
@@ -271,11 +372,26 @@ panfrost_kmod_dev_create(int fd, uint32_t flags,
       return NULL;
    }
 
-   pan_kmod_dev_init(&panfrost_dev->base, fd, flags, drv_info,
-                     &panfrost_kmod_ops, allocator);
-   panfrost_dev_query_props(panfrost_dev);
+   panfrost_dev->ops = (struct panfrost_kmod_ops){
+      .get_param = panfrost_kmod_get_param,
+      .submit_job = panfrost_kmod_submit_job,
+      .bo_import = panfrost_kmod_bo_import_handle,
+      .prime_fd_to_handle = panfrost_kmod_prime_fd_to_handle,
+   };
+
+   int ret = pan_kmod_dev_init(&panfrost_dev->base, fd, flags, &drv_info,
+                               allocator, &panfrost_kmod_ops,
+                               util_sync_provider_drm(fd));
+   if (ret)
+      goto kmod_init_fail;
+
+   panfrost_dev_query_props(&panfrost_dev->base);
 
    return &panfrost_dev->base;
+
+kmod_init_fail:
+   free(panfrost_dev);
+   return NULL;
 }
 
 static void
@@ -358,62 +474,66 @@ panfrost_kmod_bo_free(struct pan_kmod_bo *bo)
 }
 
 static struct pan_kmod_bo *
-panfrost_kmod_bo_import(struct pan_kmod_dev *dev, uint32_t handle,
-                        uint64_t size)
+panfrost_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
 {
-   struct panfrost_kmod_bo *panfrost_bo =
-      pan_kmod_dev_alloc(dev, sizeof(*panfrost_bo));
-   if (!panfrost_bo) {
-      mesa_loge("failed to allocate a panfrost_kmod_bo object");
-      return NULL;
+    struct panfrost_kmod_dev *panfrost_dev =
+       container_of(dev, struct panfrost_kmod_dev, base);
+    struct pan_kmod_bo *bo = NULL;
+    struct pan_kmod_bo **slot;
+    uint32_t handle;
+
+    if (drmPrimeFDToHandle(dev->fd, fd, &handle))
+        return NULL;
+
+    slot = util_sparse_array_get(&dev->handle_to_bo.array, handle);
+    if (!slot)
+        goto err_close_handle;
+
+    if (*slot) {
+        bo = *slot;
+
+        p_atomic_inc(&bo->refcnt);
+    } else {
+        size_t size = lseek(fd, 0, SEEK_END);
+        if (size == 0 || size == (size_t)-1) {
+            mesa_loge("invalid dmabuf size");
+            goto err_close_handle;
+        }
+
+        bo = panfrost_dev->ops.bo_import(dev, handle, size);
+        if (!bo)
+            goto err_close_handle;
+
+        *slot = bo;
+    }
+
+    return bo;
+
+err_close_handle:
+    drmCloseBufferHandle(dev->fd, handle);
+    return NULL;
+}
+
+static inline int
+panfrost_kmod_bo_export(struct pan_kmod_bo *bo)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+   int fd;
+
+   if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
+                          &fd)) {
+      mesa_loge("drmPrimeHandleToFD() failed (err=%d)", errno);
+      return -1;
    }
 
-   struct drm_panfrost_get_bo_offset get_bo_offset = {.handle = handle, 0};
-   int ret =
-      pan_kmod_ioctl(dev->fd, DRM_IOCTL_PANFROST_GET_BO_OFFSET,
-                     &get_bo_offset);
-   if (ret) {
-      mesa_loge("DRM_IOCTL_PANFROST_GET_BO_OFFSET failed (err=%d)", errno);
-      goto err_free_bo;
-   }
-
-   panfrost_bo->offset = get_bo_offset.offset;
-
-   uint32_t flags = PAN_KMOD_BO_FLAG_IMPORTED;
-   if (pan_kmod_driver_version_at_least(&dev->driver, 1, 6)) {
-      struct drm_panfrost_query_bo_info args = {
-         .handle = handle,
-      };
-
-      ret = drmIoctl(dev->fd, DRM_IOCTL_PANFROST_QUERY_BO_INFO, &args);
-      if (ret) {
-         mesa_loge("PANFROST_BO_QUERY_INFO failed (err=%d)", errno);
-         goto err_free_bo;
-      }
-
-      /* FIXME: If the BO comes from a different subsystem
-       * (args.extra_flags & DRM_PANTHOR_BO_IS_IMPORTED), we should normally
-       * add extra DMA_BUF_IOCTL_SYNC calls around CPU accesses to ensure the
-       * CPU mapping consistency, but this is something we never worried about
-       * (we've always assumed exporters were exposing uncached mappings with
-       * NOP {begin,end}_cpu_access() implementations), and it worked fine until
-       * now.
-       * The long term plan is to hook up DMA_BUF_IOCTL_SYNC, but this requires
-       * more work.
-       */
-   }
-
-   pan_kmod_bo_init(&panfrost_bo->base, dev, NULL, size, flags, handle);
-   return &panfrost_bo->base;
-
-err_free_bo:
-   pan_kmod_dev_free(dev, panfrost_bo);
-   return NULL;
+   bo->flags |= PAN_KMOD_BO_FLAG_EXPORTED;
+   return fd;
 }
 
 static off_t
 panfrost_kmod_bo_get_mmap_offset(struct pan_kmod_bo *bo)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
    struct drm_panfrost_mmap_bo mmap_bo = {.handle = bo->handle};
    int ret = pan_kmod_ioctl(bo->dev->fd, DRM_IOCTL_PANFROST_MMAP_BO,
                             &mmap_bo);
@@ -423,6 +543,19 @@ panfrost_kmod_bo_get_mmap_offset(struct pan_kmod_bo *bo)
    }
 
    return mmap_bo.offset;
+}
+
+static inline void *
+panfrost_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags,
+                      void *host_addr)
+{
+   off_t mmap_offset;
+
+   mmap_offset = panfrost_kmod_bo_get_mmap_offset(bo);
+   if (mmap_offset < 0)
+      return MAP_FAILED;
+
+   return os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
 }
 
 static bool
@@ -623,7 +756,7 @@ panfrost_kmod_vm_bind(struct pan_kmod_vm *vm, enum pan_kmod_vm_op_mode mode,
 static uint64_t
 panfrost_kmod_query_timestamp(const struct pan_kmod_dev *dev)
 {
-   return panfrost_query_raw(dev->fd, DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP,
+   return panfrost_query_raw(dev, DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP,
                              false, 0);
 }
 
@@ -792,7 +925,10 @@ panfrost_kmod_perf_thread(void *data)
       if (fds[1].revents & POLLIN) {
          uint64_t expired = 0;
 
-         read(session->timerfd, &expired, sizeof(expired));
+         ret = read(session->timerfd, &expired, sizeof(expired));
+         if (ret < 0)
+            goto err;
+
          pthread_mutex_lock(&session->lock);
          panfrost_kmod_perf_sample_locked(session);
          pthread_mutex_unlock(&session->lock);
@@ -973,7 +1109,8 @@ const struct pan_kmod_ops panfrost_kmod_ops = {
    .bo_alloc = panfrost_kmod_bo_alloc,
    .bo_free = panfrost_kmod_bo_free,
    .bo_import = panfrost_kmod_bo_import,
-   .bo_get_mmap_offset = panfrost_kmod_bo_get_mmap_offset,
+   .bo_export = panfrost_kmod_bo_export,
+   .bo_mmap = panfrost_kmod_bo_mmap,
    .bo_wait = panfrost_kmod_bo_wait,
    .flush_bo_map_syncs = panfrost_kmod_flush_bo_map_syncs,
    .bo_make_evictable = panfrost_kmod_bo_make_evictable,
@@ -989,3 +1126,484 @@ const struct pan_kmod_ops panfrost_kmod_ops = {
    .perf_disable = panfrost_kmod_perf_disable,
    .perf_dump = panfrost_kmod_perf_dump,
 };
+
+
+#ifdef HAVE_PANFROST_VDRM
+#include "drm-uapi/virtgpu_drm.h"
+
+#include "panfrost_proto.h"
+
+#define panfrost_dev_to_vdrm_dev(dev) backend_dev_to_backend_vdrm_dev(panfrost, dev)
+#define pan_dev_to_vdrm_dev(dev)      pan_dev_to_backend_vdrm_dev(panfrost, dev)
+#define pan_bo_to_vdrm_bo(bo)         pan_bo_to_backend_vdrm_bo(panfrost, bo)
+#define PANFROST_CCMD(cmd, len)       PAN_CCMD(PANFROST, cmd, len)
+#define PANFROST_VDRM_SEND_REQ(dev, CMD, cmd, rsp, ...)         \
+           PAN_KMOD_VDRM_SEND_REQ(PANFROST, panfrost, dev, CMD, cmd, rsp, __VA_ARGS__)
+
+struct panfrost_vdrm_device {
+   struct panfrost_kmod_dev panfrost_dev;
+   struct vdrm_device *vdrm;
+   uint32_t next_blob_id;
+};
+
+struct panfrost_vdrm_bo {
+   struct panfrost_kmod_bo panfrost_bo;
+   /* Blob id used to create the blob on the host */
+   uint32_t blob_id;
+   /* Resource identification on host */
+   uint32_t res_id;
+};
+
+const struct pan_kmod_ops panfrost_virtio_gpu_ops;
+const struct pan_kmod_ops panfrost_vpipe_ops;
+
+
+// Panfrost Vdrm common functions
+static int
+panfrost_vdrm_get_param(const struct pan_kmod_dev *dev,
+                        struct drm_panfrost_get_param *get_param)
+{
+   struct panfrost_ccmd_get_param_rsp *rsp;
+   int ret = PANFROST_VDRM_SEND_REQ(dev, GET_PARAM, get_param, rsp,
+                                    .param = get_param->param);
+
+   if (ret)
+      return ret;
+   if (!rsp->ret)
+      get_param->value = rsp->value;
+
+   return rsp->ret;
+}
+
+static int
+panfrost_vdrm_submit_job(const struct pan_kmod_dev *dev,
+                         struct drm_panfrost_submit *submit)
+{
+   unsigned req_len = sizeof(struct panfrost_ccmd_submit_req)
+                    + sizeof(uint32_t) * submit->bo_handle_count;
+   uint32_t *blob_handles = (uint32_t *)submit->bo_handles;
+   uint32_t *sync_handles = (uint32_t *)submit->in_syncs;
+   struct drm_virtgpu_execbuffer_syncobj *in_syncobjs = NULL;
+   struct drm_virtgpu_execbuffer_syncobj out_syncobjs;
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(dev);
+   struct vdrm_device *vdrm = pan_vdrm->vdrm;
+   int ret = -ENOMEM;
+
+   struct panfrost_ccmd_submit_req *req = malloc(req_len);
+   if (!req)
+      return ret;
+
+   if (submit->in_sync_count) {
+      in_syncobjs = calloc(sizeof(*in_syncobjs), submit->in_sync_count);
+      if (!in_syncobjs)
+         goto syncobjs_alloc_error;
+
+      for (size_t i = 0; i < submit->in_sync_count; i++)
+         in_syncobjs[i].handle = sync_handles[i];
+   }
+
+   *req = (struct panfrost_ccmd_submit_req) {
+      .hdr = PANFROST_CCMD(SUBMIT, req_len),
+      .jc = submit->jc,
+      .requirements = submit->requirements,
+      .res_id_count = submit->bo_handle_count,
+   };
+
+   uint32_t *req_res_ids = (uint32_t *)req->payload;
+   for (size_t i = 0; i < submit->bo_handle_count; i++)
+      req_res_ids[i] = vdrm_handle_to_res_id(vdrm, blob_handles[i]);
+
+   if (submit->out_sync)
+      out_syncobjs = (struct drm_virtgpu_execbuffer_syncobj) {
+         .handle = submit->out_sync
+      };
+
+   struct vdrm_execbuf_params execbuf_param = {
+      .req = &req->hdr,
+      .handles = (uint32_t *)submit->bo_handles,
+      .num_handles = submit->bo_handle_count,
+      .in_syncobjs = in_syncobjs,
+      .num_in_syncobjs = submit->in_sync_count,
+      .out_syncobjs = &out_syncobjs,
+      .num_out_syncobjs = submit->out_sync ? 1 : 0,
+      .ring_idx = 0,
+   };
+
+   ret = vdrm_execbuf(vdrm, &execbuf_param);
+
+   free(in_syncobjs);
+syncobjs_alloc_error:
+   free(req);
+   return ret;
+}
+
+static struct pan_kmod_bo *
+panfrost_vdrm_bo_import(struct pan_kmod_dev *dev, uint32_t handle, size_t size)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(dev);
+   struct panfrost_ccmd_get_bo_offset_rsp *rsp;
+
+   struct panfrost_vdrm_bo *vdrm_bo = malloc(sizeof(*vdrm_bo));
+   if (!vdrm_bo)
+      return NULL;
+
+   vdrm_bo->res_id = vdrm_handle_to_res_id(pan_vdrm->vdrm, handle);
+
+   int ret = PANFROST_VDRM_SEND_REQ(dev, GET_BO_OFFSET, get_bo_offset, rsp,
+                                    .res_id = vdrm_bo->res_id);
+   if (ret || rsp->ret) {
+      mesa_loge("DRM_IOCTL_PANFROST_GET_BO_OFFSET failed: %m\n");
+      free(vdrm_bo);
+      return NULL;
+   }
+
+   vdrm_bo->panfrost_bo.offset = rsp->offset;
+   pan_kmod_bo_init(&vdrm_bo->panfrost_bo.base, dev, NULL, size, 0, handle);
+
+   return &vdrm_bo->panfrost_bo.base;
+}
+
+static inline int
+panfrost_vdrm_prime_fd_to_handle(struct pan_kmod_dev *dev, int fd,
+                                 uint32_t *handle)
+{
+   *handle = vdrm_dmabuf_to_handle(pan_dev_to_vdrm_dev(dev)->vdrm, fd);
+   if (!*handle) {
+      errno = EINVAL;
+      return errno;
+   }
+
+   return 0;
+}
+
+static void
+panfrost_vdrm_dev_destroy(struct pan_kmod_dev *dev)
+{
+   struct panfrost_kmod_dev *pan_dev =
+      container_of(dev, struct panfrost_kmod_dev, base);
+   struct panfrost_vdrm_device *pan_vdrm = panfrost_dev_to_vdrm_dev(pan_dev);
+
+   vdrm_device_close(pan_vdrm->vdrm);
+   pan_kmod_dev_cleanup(dev);
+   pan_kmod_free(dev->allocator, pan_dev);
+}
+
+static void
+panfrost_vdrm_bo_free(struct pan_kmod_bo *bo)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(bo->dev);
+   struct panfrost_vdrm_bo *vdrm_bo = pan_bo_to_vdrm_bo(bo);
+
+   vdrm_bo_close(pan_vdrm->vdrm, bo->handle);
+   pan_kmod_dev_free(bo->dev, vdrm_bo);
+}
+
+static struct pan_kmod_bo *
+panfrost_vdrm_bo_alloc(struct pan_kmod_dev *dev,
+                       struct pan_kmod_vm *exclusive_vm, size_t size,
+                       uint32_t flags)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(dev);
+   struct vdrm_device *vdrm = pan_vdrm->vdrm;
+   uint32_t blob_flags = 0;
+
+   /* We can't map GPU uncached. */
+   if (flags & PAN_KMOD_BO_FLAG_GPU_UNCACHED)
+      return NULL;
+
+   if (!(flags & PAN_KMOD_BO_FLAG_NO_MMAP))
+      blob_flags |= VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
+
+   /* If non-NULL, the buffer object can only by mapped on this VM. Typical
+    * the case for all internal/non-shareable buffers
+    */
+   if (!exclusive_vm) {
+      blob_flags |= VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+      if (vdrm->supports_cross_device)
+         blob_flags |= VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
+   }
+
+   struct panfrost_vdrm_bo *vdrm_bo = pan_kmod_dev_alloc(dev, sizeof(*vdrm_bo));
+   if (!vdrm_bo)
+      return NULL;
+
+   uint32_t blob_id = p_atomic_inc_return(&pan_vdrm->next_blob_id);
+   struct panfrost_ccmd_create_bo_req req = {
+      .hdr = PANFROST_CCMD(CREATE_BO, sizeof(struct panfrost_ccmd_create_bo_req)),
+      .size = size,
+      .blob_id = blob_id,
+      .flags = to_panfrost_bo_flags(dev, flags)
+   };
+
+   uint32_t handle = vdrm_bo_create(vdrm, size, blob_flags, blob_id, 0, &req.hdr);
+   if (!handle) {
+      pan_kmod_dev_free(dev, vdrm_bo);
+      return NULL;
+   }
+
+   struct panfrost_ccmd_get_bo_offset_rsp *rsp;
+   vdrm_bo->res_id = vdrm_handle_to_res_id(vdrm, handle);
+   int ret = PANFROST_VDRM_SEND_REQ(dev, GET_BO_OFFSET, get_bo_offset, rsp,
+                                    .res_id = vdrm_bo->res_id);
+   if (ret && rsp->ret) {
+      panfrost_vdrm_bo_free(&vdrm_bo->panfrost_bo.base);
+      return NULL;
+   }
+
+   pan_kmod_bo_init(&vdrm_bo->panfrost_bo.base, dev, exclusive_vm, size,
+                    flags, handle);
+   vdrm_bo->res_id = vdrm_handle_to_res_id(vdrm, handle);
+   vdrm_bo->blob_id = blob_id;
+   vdrm_bo->panfrost_bo.offset = rsp->offset;
+
+   return &vdrm_bo->panfrost_bo.base;
+}
+
+static inline int
+panfrost_vdrm_bo_export(struct pan_kmod_bo *bo)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(bo->dev);
+   int fd = vdrm_bo_export_dmabuf(pan_vdrm->vdrm, bo->handle);
+   if (fd < 0) {
+      errno = EINVAL;
+      return errno;
+   }
+
+   bo->flags |= PAN_KMOD_BO_FLAG_EXPORTED;
+
+   return fd;
+}
+
+static void *
+panfrost_vdrm_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags,
+                      void *host_addr)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(bo->dev);
+
+   return vdrm_bo_map(pan_vdrm->vdrm, bo->handle, bo->size, host_addr);
+}
+
+static uint64_t
+panfrost_vdrm_query_timestamp(const struct pan_kmod_dev *dev)
+{
+   struct panfrost_ccmd_get_param_rsp *rsp;
+   int ret = PANFROST_VDRM_SEND_REQ(dev, GET_PARAM, get_param, rsp,
+                                    .param = DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP);
+
+   if (ret || rsp->ret)
+      return 0;
+
+   return rsp->value;
+}
+
+static inline int
+vdrm_kmod_dev_init(int fd, uint32_t flags,
+                   struct panfrost_vdrm_device *pan_vdrm_dev,
+                   const struct pan_kmod_allocator *allocator,
+                   const struct pan_kmod_ops *kmod_ops,
+                   struct util_sync_provider *sync_ops)
+{
+   const struct pan_kmod_driver drv_info = {
+      .version = {
+         .major = pan_vdrm_dev->vdrm->caps.version_major,
+         .minor = pan_vdrm_dev->vdrm->caps.version_minor,
+      },
+   };
+
+   if (!pan_kmod_driver_version_at_least(&drv_info, 1, 1)) {
+      mesa_loge("kernel driver is too old (requires at least 1.1, found %d.%d)",
+                drv_info.version.major, drv_info.version.minor);
+      return -1;
+   }
+
+   pan_vdrm_dev->panfrost_dev.ops = (struct panfrost_kmod_ops) {
+      .get_param = panfrost_vdrm_get_param,
+      .submit_job = panfrost_vdrm_submit_job,
+      .bo_import = panfrost_vdrm_bo_import,
+      .prime_fd_to_handle = panfrost_vdrm_prime_fd_to_handle
+   };
+   return pan_kmod_dev_init(&pan_vdrm_dev->panfrost_dev.base, fd, flags,
+                            &drv_info, allocator, kmod_ops, sync_ops);
+}
+
+
+// Virtio_gpu specific functions
+static struct pan_kmod_dev *
+panfrost_virtio_gpu_dev_create(int fd, uint32_t flags,
+                               const struct pan_kmod_allocator *allocator)
+{
+   struct panfrost_vdrm_device *pan_vdrm_dev =
+      pan_kmod_alloc(allocator, sizeof(*pan_vdrm_dev));
+   if (!pan_vdrm_dev) {
+      mesa_loge("failed to allocate a panfrost_vdrm_device object");
+      goto alloc_fail;
+   }
+
+   pan_vdrm_dev->vdrm = pan_kmod_vdrm_virtio_gpu_connect(fd, VIRTGPU_DRM_CONTEXT_PANFROST);
+   if (!pan_vdrm_dev->vdrm) {
+      mesa_logw("failed to connect to vdrm backend");
+      goto vdrm_connect_fail;
+   }
+
+   int ret = vdrm_kmod_dev_init(fd, flags, pan_vdrm_dev, allocator,
+                                &panfrost_virtio_gpu_ops,
+                                util_sync_provider_drm(fd));
+
+   if (ret)
+      goto kmod_init_fail;
+
+   panfrost_dev_query_props(&pan_vdrm_dev->panfrost_dev.base);
+
+   return &pan_vdrm_dev->panfrost_dev.base;
+
+kmod_init_fail:
+   vdrm_device_close(pan_vdrm_dev->vdrm);
+vdrm_connect_fail:
+   pan_kmod_free(allocator, pan_vdrm_dev);
+alloc_fail:
+   return NULL;
+}
+
+static bool
+panfrost_virtio_gpu_bo_wait(struct pan_kmod_bo *bo, int64_t timeout_ns,
+                            bool for_read_only_access)
+{
+   struct panfrost_vdrm_device *pan_vdrm = pan_dev_to_vdrm_dev(bo->dev);
+
+   return !vdrm_bo_wait(pan_vdrm->vdrm, bo->handle);
+}
+
+static void
+panfrost_virtio_gpu_bo_make_evictable(UNUSED struct pan_kmod_bo *bo)
+{
+   // Skip this operation for Vitio-GPU as the guest kernel doesn't support it
+   return;
+}
+
+static bool
+panfrost_virtio_gpu_bo_make_unevictable(UNUSED struct pan_kmod_bo *bo)
+{
+   // Same here
+   return true;
+}
+
+const struct pan_kmod_ops panfrost_virtio_gpu_ops = {
+   .dev_create = panfrost_virtio_gpu_dev_create,
+   .dev_destroy = panfrost_vdrm_dev_destroy,
+   .dev_query_user_va_range = panfrost_kmod_dev_query_user_va_range,
+   .bo_alloc = panfrost_vdrm_bo_alloc,
+   .bo_free = panfrost_vdrm_bo_free,
+   .bo_import = panfrost_kmod_bo_import,
+   .bo_export = panfrost_vdrm_bo_export,
+   .bo_mmap = panfrost_vdrm_bo_mmap,
+   .bo_wait = panfrost_virtio_gpu_bo_wait,
+   .bo_make_evictable = panfrost_virtio_gpu_bo_make_evictable,
+   .bo_make_unevictable = panfrost_virtio_gpu_bo_make_unevictable,
+   .vm_create = panfrost_kmod_vm_create,
+   .vm_destroy = panfrost_kmod_vm_destroy,
+   .vm_bind = panfrost_kmod_vm_bind,
+   .query_timestamp = panfrost_vdrm_query_timestamp,
+};
+
+
+// Vpipe specific functions
+static struct pan_kmod_dev *
+panfrost_vpipe_dev_create(int fd, uint32_t flags,
+                          const struct pan_kmod_allocator *allocator)
+{
+   struct panfrost_vdrm_device *pan_vdrm_dev =
+      pan_kmod_alloc(allocator, sizeof(*pan_vdrm_dev));
+   if (!pan_vdrm_dev) {
+      mesa_loge("failed to allocate a panfrost_vdrm_device object");
+      goto alloc_fail;
+   }
+
+   pan_vdrm_dev->vdrm = vdrm_device_connect(-1, VIRTGPU_DRM_CONTEXT_PANFROST);
+   if (!pan_vdrm_dev->vdrm) {
+      mesa_loge("failed to connect to vdrm backend");
+      goto vdrm_connect_fail;
+   }
+
+   int ret = vdrm_kmod_dev_init(fd, flags, pan_vdrm_dev, allocator,
+                                &panfrost_vpipe_ops,
+                                vdrm_vpipe_get_sync(pan_vdrm_dev->vdrm));
+   if (ret)
+      goto kmod_init_fail;
+
+   panfrost_dev_query_props(&pan_vdrm_dev->panfrost_dev.base);
+
+   return &pan_vdrm_dev->panfrost_dev.base;
+
+kmod_init_fail:
+   vdrm_device_close(pan_vdrm_dev->vdrm);
+vdrm_connect_fail:
+   pan_kmod_free(allocator, pan_vdrm_dev);
+alloc_fail:
+   return NULL;
+}
+
+static bool
+panfrost_vpipe_bo_wait(struct pan_kmod_bo *bo, int64_t timeout_ns,
+                       bool for_read_only_access)
+{
+   struct panfrost_vdrm_bo *vdrm_bo = pan_bo_to_vdrm_bo(bo);
+   struct panfrost_ccmd_wait_bo_rsp *rsp;
+
+   int ret = PANFROST_VDRM_SEND_REQ(bo->dev, WAIT_BO, wait_bo, rsp,
+                                    .res_id = vdrm_bo->res_id,
+                                    .timeout_ns = timeout_ns);
+
+   /* The ioctl returns >= 0 value when the BO we are waiting for is ready
+    * -1 otherwise.
+    */
+   if (ret == 0 && rsp->ret != -1)
+      return true;
+
+   return false;
+}
+
+static void
+panfrost_vpipe_bo_make_evictable(struct pan_kmod_bo *bo)
+{
+   struct panfrost_vdrm_bo *vdrm_bo = pan_bo_to_vdrm_bo(bo);
+   UNUSED struct panfrost_ccmd_madvise_rsp *rsp;
+
+   PANFROST_VDRM_SEND_REQ(bo->dev, MADVISE, madvise, rsp,
+                          .res_id = vdrm_bo->res_id,
+                          .madv = PANFROST_MADV_DONTNEED);
+}
+
+static bool
+panfrost_vpipe_bo_make_unevictable(struct pan_kmod_bo *bo)
+{
+   struct panfrost_vdrm_bo *vdrm_bo = pan_bo_to_vdrm_bo(bo);
+   struct panfrost_ccmd_madvise_rsp *rsp;
+
+   int ret = PANFROST_VDRM_SEND_REQ(bo->dev, MADVISE, madvise, rsp,
+                                    .res_id = vdrm_bo->res_id,
+                                    .madv = PANFROST_MADV_WILLNEED);
+
+   if (ret && rsp->ret && rsp->retained == 0)
+      return false;
+
+   return true;
+}
+
+const struct pan_kmod_ops panfrost_vpipe_ops = {
+   .dev_create = panfrost_vpipe_dev_create,
+   .dev_destroy = panfrost_vdrm_dev_destroy,
+   .dev_query_user_va_range = panfrost_kmod_dev_query_user_va_range,
+   .bo_alloc = panfrost_vdrm_bo_alloc,
+   .bo_free = panfrost_vdrm_bo_free,
+   .bo_import = panfrost_kmod_bo_import,
+   .bo_export = panfrost_vdrm_bo_export,
+   .bo_mmap = panfrost_vdrm_bo_mmap,
+   .bo_wait = panfrost_vpipe_bo_wait,
+   .bo_make_evictable = panfrost_vpipe_bo_make_evictable,
+   .bo_make_unevictable = panfrost_vpipe_bo_make_unevictable,
+   .vm_create = panfrost_kmod_vm_create,
+   .vm_destroy = panfrost_kmod_vm_destroy,
+   .vm_bind = panfrost_kmod_vm_bind,
+   .query_timestamp = panfrost_vdrm_query_timestamp,
+};
+#endif /* HAVE_PANFROST_VDRM */

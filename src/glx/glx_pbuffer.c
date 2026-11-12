@@ -325,6 +325,24 @@ __glXQueryDrawable(Display * dpy, GLXDrawable drawable,
    }
 #endif
 
+#if defined(GLX_DIRECT_RENDERING) && !defined(GLX_USE_APPLEGL) && !defined(GLX_USE_WINDOWSGL)
+   /* The server has no GLX drawable to query: the size comes from the X
+    * drawable, and nothing else is available.
+    */
+   if (pdraw && pdraw->psc->client_side_glx_window) {
+      if (attribute == GLX_WIDTH || attribute == GLX_HEIGHT) {
+         Window root;
+         int x, y;
+         unsigned int w, h, bw, depth;
+         if (XGetGeometry(dpy, pdraw->xDrawable, &root, &x, &y, &w, &h, &bw, &depth)) {
+            *value = attribute == GLX_WIDTH ? w : h;
+            return 1;
+         }
+      }
+      return 0;
+   }
+#endif
+
    LockDisplay(dpy);
 
    xGLXGetDrawableAttributesReq *req;
@@ -494,6 +512,32 @@ CreateDrawable(Display *dpy, struct glx_config *config,
          return None;
    }
 
+   struct glx_screen *psc = GetGLXScreenConfigs(dpy, config->screen);
+   bool client_side_window = psc && psc->client_side_glx_window;
+
+   /* Without a server-side pbuffer, a pixmap of the requested size stands in
+    * as the X drawable behind the DRI drawable, the way the pbuffer's own
+    * pixmap does on servers that bind one to the pbuffer XID.
+    */
+   if (type == GLX_PBUFFER_BIT && client_side_window) {
+      if (size_in_attribs) {
+         for (unsigned j = 0; j < i; j++) {
+            if (attrib_list[j * 2] == GLX_PBUFFER_WIDTH)
+               width = attrib_list[j * 2 + 1];
+            else if (attrib_list[j * 2] == GLX_PBUFFER_HEIGHT)
+               height = attrib_list[j * 2 + 1];
+         }
+      }
+      xid = XCreatePixmap(dpy, RootWindow(dpy, config->screen),
+                          MAX2(width, 1), MAX2(height, 1),
+                          DefaultDepth(dpy, config->screen));
+      if (!CreateDRIDrawable(dpy, config, xid, xid, type, attrib_list, i)) {
+         XFreePixmap(dpy, xid);
+         xid = None;
+      }
+      return xid;
+   }
+
    LockDisplay(dpy);
 
    if (type == GLX_PBUFFER_BIT) {
@@ -520,6 +564,11 @@ CreateDrawable(Display *dpy, struct glx_config *config,
       }
 
       destroyCode = X_GLXDestroyPbuffer;
+   } else if (type == GLX_WINDOW_BIT && client_side_window) {
+      /* no request is sent: the GLX window is only an XID in drawHash */
+      xid = XAllocID(dpy);
+      destroyCode = X_GLXDestroyWindow;
+      data = NULL;
    } else {
       xGLXCreateWindowReq *req;
 
@@ -542,7 +591,7 @@ CreateDrawable(Display *dpy, struct glx_config *config,
       }
    }
 
-   if (attrib_list)
+   if (attrib_list && data)
       memcpy(data, attrib_list, 8 * i);
 
    UnlockDisplay(dpy);
@@ -558,7 +607,8 @@ CreateDrawable(Display *dpy, struct glx_config *config,
    if (!CreateDRIDrawable(dpy, config,
                           (type == GLX_PBUFFER_BIT) ? xid : xDrawable,
                           xid, type, attrib_list, i)) {
-      protocolDestroyDrawable(dpy, xid, destroyCode);
+      if (!(type == GLX_WINDOW_BIT && client_side_window))
+         protocolDestroyDrawable(dpy, xid, destroyCode);
       if (glxDraw)
          DestroyGLXDrawable(dpy, xid);
       xid = None;
@@ -578,7 +628,18 @@ CreateDrawable(Display *dpy, struct glx_config *config,
 static void
 DestroyDrawable(Display * dpy, GLXDrawable drawable, CARD32 glxCode)
 {
-   protocolDestroyDrawable(dpy, drawable, glxCode);
+   struct glx_display *priv = __glXInitialize(dpy);
+
+   bool client_side = priv && priv->screens[0] &&
+                      priv->screens[0]->client_side_glx_window;
+
+   /* client-side pbuffers are pixmaps, and client-side windows have nothing
+    * on the server to destroy
+    */
+   if (client_side && glxCode == X_GLXDestroyPbuffer)
+      XFreePixmap(dpy, drawable);
+   else if (!client_side || glxCode != X_GLXDestroyWindow)
+      protocolDestroyDrawable(dpy, drawable, glxCode);
 
    DestroyGLXDrawable(dpy, drawable);
    DestroyDRIDrawable(dpy, drawable);

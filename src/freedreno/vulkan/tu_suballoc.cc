@@ -92,6 +92,7 @@ tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo,
    VkResult result = tu_bo_map(suballoc->dev, suballoc->bo, NULL);
    if (result != VK_SUCCESS) {
       tu_bo_finish(suballoc->dev, suballoc->bo);
+      suballoc->bo = NULL;
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
@@ -124,5 +125,5 @@ tu_suballoc_bo_free(struct tu_suballocator *suballoc, struct tu_suballoc_bo *bo)
 void *
 tu_suballoc_bo_map(struct tu_suballoc_bo *bo)
 {
-   return (char *)bo->bo->map + (bo->iova - bo->bo->iova);
+   return static_cast<char *>(bo->bo->map) + (bo->iova - bo->bo->iova);
 }

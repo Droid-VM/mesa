@@ -259,6 +259,8 @@ static inline enum ROGUE_PBESTATE_PACKMODE
 pvr_spm_get_pbe_packmode(uint32_t dword_count)
 {
    switch (dword_count) {
+   case 0:
+      FALLTHROUGH;  /* No output regs (no attachments), just choose a value */
    case 1:
       return ROGUE_PBESTATE_PACKMODE_U32;
    case 2:
@@ -624,6 +626,8 @@ VkResult pvr_arch_spm_init_eot_state(
 static VkFormat pvr_get_format_from_dword_count(uint32_t dword_count)
 {
    switch (dword_count) {
+   case 0:
+      FALLTHROUGH;  /* No output regs (no attachments), just choose a value */
    case 1:
       return VK_FORMAT_R32_UINT;
    case 2:
@@ -790,6 +794,10 @@ VkResult pvr_arch_spm_init_bgobj_state(
       .tile_buffer_count = hw_render->tile_buffers_count,
       .is_multisampled = hw_render->sample_count > 1,
    };
+
+   /* If there are no output registers, just use the shader for 1 output reg */
+   if (!props.output_reg_count)
+      props.output_reg_count = 1;
 
    const uint32_t spm_load_program_idx = pvr_uscgen_spm_load_index(&props);
 

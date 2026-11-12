@@ -19,6 +19,8 @@ struct GenParseTest : public ::testing::Test {
    void *mem_ctx = ralloc_context(NULL);
    gen_inst *insts = nullptr;
    int num_insts = 0;
+   bool *compacted = nullptr;
+   bool collect_compacted = false;
    gen_error *errors = nullptr;
    int num_errors = 0;
 
@@ -43,11 +45,13 @@ struct GenParseTest : public ::testing::Test {
       params.devinfo = &devinfo;
       params.text = text;
       params.text_size = text_size < 0 ? (int)strlen(text) : text_size;
+      params.collect_compacted = collect_compacted;
       params.mem_ctx = mem_ctx;
 
       const bool ok = gen_parse(&params);
       insts = params.insts;
       num_insts = params.num_insts;
+      compacted = params.compacted;
       errors = params.errors;
       num_errors = params.num_errors;
       return ok;
@@ -70,6 +74,67 @@ TEST_F(GenParseTest, ParsesEmptyAnnotation)
 
    ASSERT_EQ(num_insts, 1);
    EXPECT_EQ(insts[0].opcode, GEN_OP_MOV);
+}
+
+TEST_F(GenParseTest, ParsesCompactedAnnotations)
+{
+   set_devinfo("tgl");
+   collect_compacted = true;
+
+   ASSERT_TRUE(parse(
+      "mov (8) r1:f r2:f\n"
+      "mov (8) r1:f r2:f {Compacted}\n"
+      "label:\n"
+      "// {Compacted}\n"
+      "mov (8) r1:f r2:f { Compacted , AccWrEn }\n"
+      "mov (8) r1:f r2:f {AccWrEn,Compacted,Breakpoint}\n"
+      "mov (8) r1:f r2:f {AccWrEn,Compacted}\n"
+      "mov (8) r1:f r2:f {} // {Compacted}\n")) << first_error();
+
+   ASSERT_EQ(num_insts, 6);
+   ASSERT_NE(compacted, nullptr);
+   EXPECT_FALSE(compacted[0]);
+   EXPECT_TRUE(compacted[1]);
+   EXPECT_TRUE(compacted[2]);
+   EXPECT_TRUE(compacted[3]);
+   EXPECT_TRUE(compacted[4]);
+   EXPECT_FALSE(compacted[5]);
+   EXPECT_TRUE(insts[2].acc_wr_control);
+   EXPECT_TRUE(insts[3].acc_wr_control);
+   EXPECT_TRUE(insts[3].debug_control);
+   EXPECT_TRUE(insts[4].acc_wr_control);
+}
+
+TEST_F(GenParseTest, ParsesCompactedAnnotationWithoutOutput)
+{
+   set_devinfo("tgl");
+
+   ASSERT_TRUE(parse("mov (8) r1:f r2:f {Compacted,AccWrEn}\n")) << first_error();
+
+   ASSERT_EQ(num_insts, 1);
+   EXPECT_EQ(compacted, nullptr);
+   EXPECT_TRUE(insts[0].acc_wr_control);
+}
+
+TEST_F(GenParseTest, CollectsCompactedForEmptyInput)
+{
+   set_devinfo("tgl");
+   collect_compacted = true;
+
+   ASSERT_TRUE(parse("// {Compacted}\n")) << first_error();
+
+   EXPECT_EQ(num_insts, 0);
+   EXPECT_EQ(compacted, nullptr);
+}
+
+TEST_F(GenParseTest, RejectsMalformedCompactedAnnotation)
+{
+   set_devinfo("tgl");
+   collect_compacted = true;
+
+   EXPECT_FALSE(parse("mov (8) r1:f r2:f {Compacted Breakpoint}\n"));
+   EXPECT_NE(first_error().find("expected ',' or '}'"), std::string::npos);
+   EXPECT_EQ(compacted, nullptr);
 }
 
 TEST_F(GenParseTest, ParsesDpasFunctionControl)

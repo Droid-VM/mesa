@@ -13,7 +13,6 @@
 #include "tu_common.h"
 #include "perfcntrs/freedreno_perfcntr.h"
 
-#include "radix_sort/radix_sort_vk.h"
 #include "util/rwlock.h"
 #include "util/u_vector.h"
 #include "util/vma.h"
@@ -50,7 +49,13 @@ enum global_shader {
    GLOBAL_SH_VS_CLEAR,
    GLOBAL_SH_FS_BLIT,
    GLOBAL_SH_FS_BLIT_ZSCALE,
+   GLOBAL_SH_FS_BLIT_SWAP_COORDS,
+   GLOBAL_SH_FS_BLIT_ZSCALE_SWAP_COORDS,
    GLOBAL_SH_FS_COPY_MS,
+   GLOBAL_SH_FS_COPY_MS_HALF,
+   GLOBAL_SH_FS_RESOLVE_MS2,
+   GLOBAL_SH_FS_RESOLVE_MS4,
+   GLOBAL_SH_FS_RESOLVE_MS8,
    GLOBAL_SH_FS_CLEAR0,
    GLOBAL_SH_FS_CLEAR_MAX = GLOBAL_SH_FS_CLEAR0 + MAX_RTS,
    GLOBAL_SH_COUNT,
@@ -132,6 +137,10 @@ struct tu_physical_device
    bool has_sparse_prr;
    /* Whether lazy allocations are supported. */
    bool has_lazy_bos;
+   /* Whether allocations can be aligned. */
+   bool has_iova_align;
+   /* Whether the kernel can read the GPU timestamp. */
+   bool has_gpu_timestamp;
    uint64_t va_start;
    uint64_t va_size;
 
@@ -339,9 +348,6 @@ struct tu_device
    struct nir_shader *float64_shader;
    mtx_t softfloat_mutex;
 
-   radix_sort_vk_t *radix_sort;
-   mtx_t radix_sort_mutex;
-
 #define MIN_SCRATCH_BO_SIZE_LOG2 12 /* A page */
 
    /* Currently the kernel driver uses a 32-bit GPU address space, but it
@@ -449,7 +455,7 @@ struct tu_device
    /* Command streams to set pass index to a scratch reg */
    struct tu_cs_entry *perfcntrs_pass_cs_entries;
 
-   struct tu_cs_entry cmdbuf_start_a725_quirk_entry;
+   struct tu_cs_entry cmdbuf_QCTDD09112208_cmdbuf_start_cs_entry;
 
    struct tu_cs_entry bin_preamble_entry, bin_preamble_bv_entry;
 
@@ -737,13 +743,25 @@ tu_bo_init_new_cached(struct tu_device *dev, struct vk_object_base *base,
                       enum tu_bo_alloc_flags flags, const char *name)
 {
    return tu_bo_init_new_explicit_iova(
-      dev, base, out_bo, size, 0,
+      dev, base, out_bo, size, 0, 0,
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
          (dev->physical_device->has_cached_coherent_memory ? 
           VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0),
       flags, NULL, name);
+}
+
+/* Return BO flags necessary for IBs */
+static inline enum tu_bo_alloc_flags
+tu_bo_ib_flags(struct tu_device *dev)
+{
+   (void)dev; /* TODO don't do this workaround when newer FW comes out */
+   /* All known firmwares have a bug where preemption can cause the wrong IB
+    * contents to be fetched if there is 32B rollover (i.e. the IB crosses a
+    * 4GB boundary). Avoid rollover here to workaround it.
+    */
+   return TU_BO_ALLOC_NO_32B_ROLLOVER;
 }
 
 #endif /* TU_DEVICE_H */

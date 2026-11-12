@@ -52,6 +52,18 @@ bool v3dX(tfu)(struct pipe_context *pctx,
                unsigned int src_layer,
                unsigned int dst_layer,
                bool for_mipmap);
+bool v3dX(tfu_clear_buffer)(struct pipe_context *pctx,
+                            struct pipe_resource *prsc,
+                            unsigned offset,
+                            unsigned size,
+                            const void *clear_value,
+                            int clear_value_size);
+
+bool v3dX(tfu_sand)(struct pipe_context *pctx,
+                    struct pipe_resource *pdst,
+                    unsigned int dst_level,
+                    struct pipe_resource *psrc,
+                    unsigned int src_level);
 
 struct pipe_query *v3dX(create_batch_query_perfcnt)(struct v3d_context *v3d,
                                                     unsigned num_queries,

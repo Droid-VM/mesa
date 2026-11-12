@@ -30,6 +30,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/hash_table.h"
+#include "util/u_dynarray.h"
 
 #define SLOT_UNSET ((unsigned char) -1)
 
@@ -41,6 +42,16 @@ static const SpvFPFastMathModeMask default_fp_mode =
    SpvFPFastMathModeAllowContractMask |
    SpvFPFastMathModeAllowReassocMask |
    SpvFPFastMathModeAllowTransformMask;
+
+/* phi srcs cast to the phi type, queued with parent labels until the OpPhi is emitted */
+struct ntv_phi {
+   SpvId type;
+   nir_alu_type atype;
+   struct util_dynarray srcs;
+   /* where a loop header phi takes its value from the continue block */
+   size_t position;
+   unsigned cont_index;
+};
 
 struct ntv_context {
    void *mem_ctx;
@@ -83,12 +94,14 @@ struct ntv_context {
    nir_alu_type *def_types;
    SpvId *resident_defs;
    size_t num_defs;
+   struct ntv_phi **phis; /* indexed by the phi def index */
 
    struct hash_table *vars; /* nir_variable -> SpvId */
 
    const SpvId *block_ids;
    size_t num_blocks;
    bool block_started;
+   SpvId block_id; /* label of the SPIR-V block being emitted */
    SpvId loop_break, loop_cont;
 
    SpvId shared_block_var[5]; //8, 16, 32, unused, 64
@@ -1501,6 +1514,9 @@ emit_bo(struct ntv_context *ctx, struct nir_variable *var, bool aliased)
    if (aliased)
       spirv_builder_emit_decoration(&ctx->builder, var_id, SpvDecorationAliased);
 
+   if (ssbo)
+      spirv_builder_emit_storage_int_caps(&ctx->builder, bitsize);
+
    unsigned idx = bitsize >> 4;
    assert(idx < ARRAY_SIZE(ctx->ssbos));
    if (ssbo && !ctx->sinfo->is_native_vulkan) {
@@ -1534,27 +1550,6 @@ get_src_ssa(struct ntv_context *ctx, const nir_def *ssa, nir_alu_type *atype)
    assert(ctx->defs[ssa->index] != 0);
    *atype = ctx->def_types[ssa->index];
    return ctx->defs[ssa->index];
-}
-
-static void
-init_reg(struct ntv_context *ctx, nir_intrinsic_instr *decl, nir_alu_type atype)
-{
-   unsigned index = decl->def.index;
-   unsigned num_components = nir_intrinsic_num_components(decl);
-   unsigned bit_size = nir_intrinsic_bit_size(decl);
-
-   if (ctx->defs[index])
-      return;
-
-   SpvId type = get_alu_type(ctx, atype, num_components, bit_size);
-   SpvId pointer_type = spirv_builder_type_pointer(&ctx->builder,
-                                                   SpvStorageClassFunction,
-                                                   type);
-   SpvId var = spirv_builder_emit_var(&ctx->builder, pointer_type,
-                                       SpvStorageClassFunction);
-
-   ctx->defs[index] = var;
-   ctx->def_types[index] = nir_alu_type_get_base_type(atype);
 }
 
 static SpvId
@@ -2002,6 +1997,13 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       atype = nir_type_float; \
       break;
 
+#define BUILTIN_UNOPU(nir_op, spirv_op) \
+   case nir_op: \
+      assert(nir_op_infos[alu->op].num_inputs == 1); \
+      result = emit_builtin_unop(ctx, spirv_op, get_def_type(ctx, &alu->def, nir_type_uint), src[0]); \
+      atype = nir_type_uint; \
+      break;
+
    BUILTIN_UNOP(nir_op_iabs, GLSLstd450SAbs)
    BUILTIN_UNOP(nir_op_fabs, GLSLstd450FAbs)
    BUILTIN_UNOP(nir_op_fsqrt, GLSLstd450Sqrt)
@@ -2021,13 +2023,18 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
    BUILTIN_UNOP(nir_op_find_lsb, GLSLstd450FindILsb)
    BUILTIN_UNOP(nir_op_ifind_msb, GLSLstd450FindSMsb)
 
-   case nir_op_pack_half_2x16:
-      assert(nir_op_infos[alu->op].num_inputs == 1);
-      result = emit_builtin_unop(ctx, GLSLstd450PackHalf2x16, get_def_type(ctx, &alu->def, nir_type_uint), src[0]);
-      break;
-
+   BUILTIN_UNOPU(nir_op_pack_half_2x16, GLSLstd450PackHalf2x16)
+   BUILTIN_UNOPU(nir_op_pack_snorm_2x16, GLSLstd450PackSnorm2x16)
+   BUILTIN_UNOPU(nir_op_pack_unorm_2x16, GLSLstd450PackUnorm2x16)
+   BUILTIN_UNOPU(nir_op_pack_snorm_4x8, GLSLstd450PackSnorm4x8)
+   BUILTIN_UNOPU(nir_op_pack_unorm_4x8, GLSLstd450PackUnorm4x8)
+   BUILTIN_UNOPF(nir_op_unpack_snorm_2x16, GLSLstd450UnpackSnorm2x16)
+   BUILTIN_UNOPF(nir_op_unpack_unorm_2x16, GLSLstd450UnpackUnorm2x16)
+   BUILTIN_UNOPF(nir_op_unpack_snorm_4x8, GLSLstd450UnpackSnorm4x8)
+   BUILTIN_UNOPF(nir_op_unpack_unorm_4x8, GLSLstd450UnpackUnorm4x8)
    BUILTIN_UNOPF(nir_op_unpack_half_2x16, GLSLstd450UnpackHalf2x16)
 #undef BUILTIN_UNOP
+#undef BUILTIN_UNOPU
 #undef BUILTIN_UNOPF
 
    case nir_op_frcp:
@@ -2703,50 +2710,6 @@ emit_store_global(struct ntv_context *ctx, nir_intrinsic_instr *intr)
       spirv_builder_emit_atomic_store(&ctx->builder, ptr, SpvScopeDevice, 0, param);
    else
       spirv_builder_emit_store_aligned(&ctx->builder, ptr, param, bit_size / 8, coherent);
-}
-
-static void
-emit_load_reg(struct ntv_context *ctx, nir_intrinsic_instr *intr)
-{
-   assert(nir_intrinsic_base(intr) == 0 && "no array registers");
-
-   nir_intrinsic_instr *decl = nir_reg_get_decl(intr->src[0].ssa);
-   unsigned num_components = nir_intrinsic_num_components(decl);
-   unsigned bit_size = nir_intrinsic_bit_size(decl);
-   unsigned index = decl->def.index;
-   assert(index < ctx->num_defs);
-
-   init_reg(ctx, decl, nir_type_uint);
-   assert(ctx->defs[index] != 0);
-
-   nir_alu_type atype = ctx->def_types[index];
-   SpvId var = ctx->defs[index];
-   SpvId type = get_alu_type(ctx, atype, num_components, bit_size);
-   SpvId result = spirv_builder_emit_load(&ctx->builder, type, var, false);
-   store_def(ctx, intr->def.index, result, atype);
-}
-
-static void
-emit_store_reg(struct ntv_context *ctx, nir_intrinsic_instr *intr)
-{
-   nir_alu_type atype;
-   SpvId param = get_src(ctx, &intr->src[0], &atype);
-
-   nir_intrinsic_instr *decl = nir_reg_get_decl(intr->src[1].ssa);
-   unsigned index = decl->def.index;
-   unsigned num_components = nir_intrinsic_num_components(decl);
-   unsigned bit_size = nir_intrinsic_bit_size(decl);
-
-   atype = nir_alu_type_get_base_type(atype);
-   init_reg(ctx, decl, atype);
-   SpvId var = ctx->defs[index];
-   nir_alu_type vtype = ctx->def_types[index];
-   if (atype != vtype) {
-      assert(vtype != nir_type_bool);
-      param = emit_bitcast(ctx, get_alu_type(ctx, vtype, num_components, bit_size), param);
-   }
-   assert(var);
-   spirv_builder_emit_store(&ctx->builder, var, param, false);
 }
 
 static SpvId
@@ -3598,6 +3561,7 @@ emit_subgroup_rotate(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    SpvOp op = SpvOpGroupNonUniformRotateKHR;
    spirv_builder_emit_cap(&ctx->builder, SpvCapabilityGroupNonUniformRotateKHR);
+   spirv_builder_emit_extension(&ctx->builder, "SPV_KHR_subgroup_rotate");
 
    nir_alu_type atype, unused;
    SpvId src0 = get_src(ctx, &intr->src[0], &atype);
@@ -3642,9 +3606,14 @@ emit_shuffle(struct ntv_context *ctx, nir_intrinsic_instr *intr)
               nir_intrinsic_infos[intr->intrinsic].name);
       UNREACHABLE("unhandled intrinsic");
    }
-   nir_alu_type atype, unused;
+   nir_alu_type atype, btype;
    SpvId src0 = get_src(ctx, &intr->src[0], &atype);
-   SpvId src1 = get_src(ctx, &intr->src[1], &unused);
+   SpvId src1 = get_src(ctx, &intr->src[1], &btype);
+
+   if (btype != nir_type_uint) {
+      SpvId uint_type = get_uvec_type(ctx, intr->src[1].ssa->bit_size, 1);
+      src1 = emit_bitcast(ctx, uint_type, src1);
+   }
 
    SpvId result = spirv_builder_emit_binop_subgroup(&ctx->builder, op, get_def_type(ctx, intr->src[0].ssa, atype), src0, src1);
    store_def(ctx, intr->def.index, result, atype);
@@ -3791,18 +3760,6 @@ static void
 emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
-   case nir_intrinsic_decl_reg:
-      /* Nothing to do */
-      break;
-
-   case nir_intrinsic_load_reg:
-      emit_load_reg(ctx, intr);
-      break;
-
-   case nir_intrinsic_store_reg:
-      emit_store_reg(ctx, intr);
-      break;
-
    case nir_intrinsic_vulkan_resource_index:
       emit_vulkan_resource_index(ctx, intr);
       break;
@@ -4560,6 +4517,7 @@ start_block(struct ntv_context *ctx, SpvId label)
    /* start new block */
    spirv_builder_label(&ctx->builder, label);
    ctx->block_started = true;
+   ctx->block_id = label;
 }
 
 static void
@@ -4762,10 +4720,114 @@ emit_deref(struct ntv_context *ctx, nir_deref_instr *deref)
    }
 }
 
+/* the first queued src picks the phi type, uint if there is none */
+static struct ntv_phi *
+get_phi(struct ntv_context *ctx, nir_phi_instr *phi, nir_alu_type atype)
+{
+   struct ntv_phi **pp = &ctx->phis[phi->def.index];
+   if (*pp)
+      return *pp;
+
+   struct ntv_phi *p = rzalloc(ctx->mem_ctx, struct ntv_phi);
+   p->atype = phi->def.bit_size == 1 ? nir_type_bool : nir_alu_type_get_base_type(atype);
+   p->type = get_alu_type(ctx, p->atype, phi->def.num_components, phi->def.bit_size);
+   util_dynarray_init(&p->srcs, ctx->mem_ctx);
+   *pp = p;
+   return p;
+}
+
+/* queue this block's values for the phis of its successors, before its terminator */
+static void
+emit_phi_srcs(struct ntv_context *ctx, nir_block *block)
+{
+   /* a terminator (e.g. OpEmitMeshTasksEXT) leaves no edge to the successors */
+   if (!ctx->block_started)
+      return;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(block->successors); i++) {
+      if (!block->successors[i])
+         continue;
+
+      nir_foreach_phi(phi, block->successors[i]) {
+         nir_phi_src *src = nir_phi_get_src_from_block(phi, block);
+         nir_alu_type atype;
+         SpvId value = get_src(ctx, &src->src, &atype);
+         struct ntv_phi *p = get_phi(ctx, phi, atype);
+         if (nir_alu_type_get_base_type(atype) != p->atype)
+            value = emit_bitcast(ctx, p->type, value);
+         util_dynarray_append(&p->srcs, value);
+         util_dynarray_append(&p->srcs, ctx->block_id);
+      }
+   }
+}
+
+/* OpPhi from the queued srcs, with num_extra operands left to set later */
+static SpvId
+emit_queued_phi(struct ntv_context *ctx, struct ntv_phi *p, unsigned num_extra,
+                size_t *position)
+{
+   unsigned num_srcs = util_dynarray_num_elements(&p->srcs, SpvId) / 2;
+   size_t pos;
+   SpvId result = spirv_builder_emit_phi(&ctx->builder, p->type,
+                                         num_srcs + num_extra, &pos);
+   for (unsigned i = 0; i < num_srcs; i++) {
+      spirv_builder_set_phi_operand(&ctx->builder, pos, i,
+                                    *util_dynarray_element(&p->srcs, SpvId, i * 2),
+                                    *util_dynarray_element(&p->srcs, SpvId, i * 2 + 1));
+   }
+   if (position)
+      *position = pos;
+   return result;
+}
+
+/* an OpPhi per phi with srcs, then an OpUndef per phi without any */
+static void
+emit_merged_phis(struct ntv_context *ctx, nir_block *block, bool loop_cont)
+{
+   for (unsigned pass = 0; pass < 2; pass++) {
+      nir_foreach_phi(phi, block) {
+         struct ntv_phi *p = get_phi(ctx, phi, nir_type_uint);
+         bool has_srcs = util_dynarray_num_elements(&p->srcs, SpvId) > 0;
+         if (has_srcs != (pass == 0))
+            continue;
+
+         SpvId value = has_srcs ? emit_queued_phi(ctx, p, 0, NULL) :
+                                  spirv_builder_emit_undef(&ctx->builder, p->type);
+         if (loop_cont)
+            spirv_builder_set_phi_operand(&ctx->builder, p->position, p->cont_index,
+                                          value, ctx->block_id);
+         else
+            store_def(ctx, phi->def.index, value, p->atype);
+      }
+   }
+}
+
+/* loop phis go in the SPIR-V header, back edges arrive through the continue block */
+static void
+emit_loop_header_phis(struct ntv_context *ctx, nir_block *block)
+{
+   nir_foreach_phi(phi, block) {
+      struct ntv_phi *p = get_phi(ctx, phi, nir_type_uint);
+      p->cont_index = util_dynarray_num_elements(&p->srcs, SpvId) / 2;
+      store_def(ctx, phi->def.index, emit_queued_phi(ctx, p, 1, &p->position), p->atype);
+      /* the back edge srcs are queued from here on */
+      util_dynarray_clear(&p->srcs);
+   }
+}
+
+static bool
+is_loop_header(nir_block *block)
+{
+   return block->cf_node.parent->type == nir_cf_node_loop &&
+          nir_cf_node_is_first(&block->cf_node);
+}
+
 static void
 emit_block(struct ntv_context *ctx, struct nir_block *block)
 {
    start_block(ctx, block_label(ctx, block));
+   if (!is_loop_header(block))
+      emit_merged_phis(ctx, block, false);
    nir_foreach_instr(instr, block) {
       switch (instr->type) {
       case nir_instr_type_alu:
@@ -4784,9 +4846,10 @@ emit_block(struct ntv_context *ctx, struct nir_block *block)
          emit_tex(ctx, nir_instr_as_tex(instr));
          break;
       case nir_instr_type_phi:
-         UNREACHABLE("nir_instr_type_phi not supported");
+         /* emitted by emit_merged_phis() or emit_loop_header_phis() */
          break;
       case nir_instr_type_jump:
+         emit_phi_srcs(ctx, block);
          emit_jump(ctx, nir_instr_as_jump(instr));
          break;
       case nir_instr_type_call:
@@ -4800,6 +4863,8 @@ emit_block(struct ntv_context *ctx, struct nir_block *block)
          break;
       }
    }
+   /* the fallthrough edge, a no-op after a jump */
+   emit_phi_srcs(ctx, block);
 }
 
 static void
@@ -4813,6 +4878,13 @@ get_src_bool(struct ntv_context *ctx, nir_src *src)
    return get_src(ctx, src, &atype);
 }
 
+/* the next NIR block is the merge block, so its phis see the real predecessors */
+static SpvId
+merge_block_label(struct ntv_context *ctx, nir_cf_node *cf)
+{
+   return block_label(ctx, nir_cf_node_cf_tree_next(cf));
+}
+
 static void
 emit_if(struct ntv_context *ctx, nir_if *if_stmt)
 {
@@ -4820,7 +4892,7 @@ emit_if(struct ntv_context *ctx, nir_if *if_stmt)
 
    SpvId header_id = spirv_builder_new_id(&ctx->builder);
    SpvId then_id = block_label(ctx, nir_if_first_then_block(if_stmt));
-   SpvId endif_id = spirv_builder_new_id(&ctx->builder);
+   SpvId endif_id = merge_block_label(ctx, &if_stmt->cf_node);
    SpvId else_id = endif_id;
 
    bool has_else = !exec_list_is_empty(&if_stmt->else_list);
@@ -4844,20 +4916,22 @@ emit_if(struct ntv_context *ctx, nir_if *if_stmt)
       emit_cf_list(ctx, &if_stmt->else_list);
    }
 
-   start_block(ctx, endif_id);
+   /* the merge block is started by emitting the next NIR block */
 }
 
 static void
 emit_loop(struct ntv_context *ctx, nir_loop *loop)
 {
    assert(!nir_loop_has_continue_construct(loop));
+   nir_block *first = nir_loop_first_block(loop);
    SpvId header_id = spirv_builder_new_id(&ctx->builder);
-   SpvId begin_id = block_label(ctx, nir_loop_first_block(loop));
-   SpvId break_id = spirv_builder_new_id(&ctx->builder);
+   SpvId begin_id = block_label(ctx, first);
+   SpvId break_id = merge_block_label(ctx, &loop->cf_node);
    SpvId cont_id = spirv_builder_new_id(&ctx->builder);
 
    /* create a header-block */
    start_block(ctx, header_id);
+   emit_loop_header_phis(ctx, first);
    spirv_builder_loop_merge(&ctx->builder, break_id, cont_id, SpvLoopControlMaskNone);
    branch(ctx, begin_id);
 
@@ -4875,9 +4949,10 @@ emit_loop(struct ntv_context *ctx, nir_loop *loop)
    if (ctx->block_started)
       branch(ctx, cont_id);
    start_block(ctx, cont_id);
+   emit_merged_phis(ctx, first, true);
    branch(ctx, header_id);
 
-   start_block(ctx, break_id);
+   /* the merge block is started by emitting the next NIR block */
 }
 
 static void
@@ -5530,7 +5605,8 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
                                  sizeof(SpvId), entry->ssa_alloc);
    ctx.def_types = ralloc_array_size(ctx.mem_ctx,
                                      sizeof(nir_alu_type), entry->ssa_alloc);
-   if (!ctx.defs || !ctx.def_types)
+   ctx.phis = rzalloc_array(ctx.mem_ctx, struct ntv_phi *, entry->ssa_alloc);
+   if (!ctx.defs || !ctx.def_types || !ctx.phis)
       goto fail;
 
    ctx.num_defs = entry->ssa_alloc;
@@ -5549,11 +5625,6 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
    /* emit a block only for the variable declarations */
    start_block(&ctx, spirv_builder_new_id(&ctx.builder));
    spirv_builder_begin_local_vars(&ctx.builder);
-
-   nir_foreach_reg_decl(reg, entry) {
-      if (nir_intrinsic_bit_size(reg) == 1)
-         init_reg(&ctx, reg, nir_type_bool);
-   }
 
    nir_foreach_variable_with_modes(var, s, nir_var_shader_temp)
       emit_shader_temp(&ctx, var);
@@ -5690,17 +5761,21 @@ lower_vri_to_var_instr(nir_builder *b, nir_instr *instr, void *data)
    int binding = nir_intrinsic_binding(vri);
    nir_variable *var = NULL;
    nir_foreach_variable_with_modes(i, b->shader, deref->modes) {
-      if (i->data.descriptor_set == desc_set && i->data.binding == binding) {
+      if (i->data.descriptor_set == desc_set && i->data.binding == binding &&
+          glsl_without_array(i->type) == deref->type) {
          var = i;
          break;
       }
    }
+
    if (!var)
       return false;
 
    b->cursor = nir_after_instr(instr);
    nir_deref_instr *var_deref = nir_build_deref_var(b, var);
    fixup_deref_components(deref);
+   if (glsl_type_is_array(var->type))
+      var_deref = nir_build_deref_array(b, var_deref, vri->src[0].ssa);
    nir_def_rewrite_uses_after_instr(&deref->def, &var_deref->def, instr);
 
    return true;
@@ -5746,8 +5821,6 @@ ntv_shader_prepare(nir_shader *nir)
    optimize_nir(nir);
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_shader_temp);
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_temp, NULL);
-   /* required until phi support is complete */
-   NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
    nir_foreach_variable_in_shader(var, nir) {
       if (nir->info.stage == MESA_SHADER_VERTEX && var->data.mode & nir_var_shader_in) {
          if (var->data.location >= VERT_ATTRIB_GENERIC0)

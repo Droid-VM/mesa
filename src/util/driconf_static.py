@@ -60,6 +60,7 @@ class Engine(object):
         self.cname = cname('engine')
         self.engine_name_match = xml.attrib['engine_name_match']
         self.engine_versions = xml.attrib.get('engine_versions', None)
+        self.application_versions = xml.attrib.get('application_versions', None)
         self.options = []
 
         for option in xml.findall('option'):
@@ -131,6 +132,7 @@ struct driconf_application {
 struct driconf_engine {
     const char *engine_name_match;
     const char *engine_versions;
+    const char *application_versions;
     unsigned num_options;
     const struct driconf_option *options;
 };
@@ -163,6 +165,9 @@ static const struct driconf_engine ${device.cname}_engines[] = {
     { .engine_name_match = "${engine.engine_name_match}",
 %        if engine.engine_versions:
       .engine_versions = "${engine.engine_versions}",
+%        endif
+%        if engine.application_versions:
+      .application_versions = "${engine.application_versions}",
 %        endif
       .num_options = ${len(engine.options)},
       .options = ${engine.cname + '_options'},

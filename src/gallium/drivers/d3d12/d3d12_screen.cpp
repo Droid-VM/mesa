@@ -52,10 +52,6 @@
 
 #include "git_sha1.h"
 
-#ifndef _GAMING_XBOX
-#include <directx/d3d12sdklayers.h>
-#endif
-
 #if defined(_WIN32) && defined(_WIN64) && !defined(_GAMING_XBOX)
 #include <filesystem>
 #include <shlobj.h>
@@ -293,6 +289,7 @@ d3d12_init_screen_caps(struct d3d12_screen *screen)
    caps->glsl_feature_level = 460;
    caps->glsl_feature_level_compatibility = 460;
    caps->essl_feature_level = 310;
+   caps->fs_sample_variables = true;
 
    caps->compute = true;
 

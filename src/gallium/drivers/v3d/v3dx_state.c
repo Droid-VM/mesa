@@ -30,6 +30,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/half_float.h"
+#include "util/format/format_utils.h"
 #include "util/u_helpers.h"
 #include "util/u_upload_mgr.h"
 
@@ -97,6 +98,13 @@ v3d_create_rasterizer_state(struct pipe_context *pctx,
         v3dx_pack(&so->depth_offset, DEPTH_OFFSET, depth) {
                 depth.depth_offset_factor = cso->offset_scale;
                 depth.depth_offset_units = cso->offset_units;
+                depth.limit = cso->offset_clamp;
+        }
+
+        /* Scale polygon offset units by 2 for Z24 buffer */
+        v3dx_pack(&so->depth_offset_z24, DEPTH_OFFSET, depth) {
+                depth.depth_offset_factor = cso->offset_scale;
+                depth.depth_offset_units = cso->offset_units * 2.0;
                 depth.limit = cso->offset_clamp;
         }
 
@@ -666,6 +674,9 @@ v3d_upload_sampler_state_variant(void *map,
                         case V3D_SAMPLER_STATE_F16_LA:
                         case V3D_SAMPLER_STATE_F16_LA_UNORM:
                         case V3D_SAMPLER_STATE_F16_LA_SNORM:
+                        case V3D_SAMPLER_STATE_32_LA:
+                        case V3D_SAMPLER_STATE_32_LA_UNORM:
+                        case V3D_SAMPLER_STATE_32_LA_SNORM:
                                 border.i[0] = cso->border_color.i[0];
                                 border.i[1] = cso->border_color.i[3];
                                 border.i[2] = 0;
@@ -684,6 +695,8 @@ v3d_upload_sampler_state_variant(void *map,
                         case V3D_SAMPLER_STATE_F16_LA_UNORM:
                         case V3D_SAMPLER_STATE_32_UNORM:
                         case V3D_SAMPLER_STATE_32_A_UNORM:
+                        case V3D_SAMPLER_STATE_32_LA_UNORM:
+                        case V3D_SAMPLER_STATE_32_DEPTH_UNORM:
                                 for (int i = 0; i < 4; i++)
                                         border.f[i] = CLAMP(border.f[i], 0, 1);
                                 break;
@@ -694,6 +707,7 @@ v3d_upload_sampler_state_variant(void *map,
                         case V3D_SAMPLER_STATE_F16_LA_SNORM:
                         case V3D_SAMPLER_STATE_32_SNORM:
                         case V3D_SAMPLER_STATE_32_A_SNORM:
+                        case V3D_SAMPLER_STATE_32_LA_SNORM:
                                 for (int i = 0; i < 4; i++)
                                         border.f[i] = CLAMP(border.f[i], -1, 1);
                                 break;
@@ -747,6 +761,30 @@ v3d_upload_sampler_state_variant(void *map,
                                 border.ui[1] = _mesa_float_to_half(border.f[1]);
                                 border.ui[2] = _mesa_float_to_half(border.f[2]);
                                 border.ui[3] = _mesa_float_to_half(border.f[3]);
+                        } else {
+                                /* With a 32-bit return, the 16-bit
+                                 * normalized formats expect the border
+                                 * color in the texture's native 16-bit
+                                 * integer encoding. Unorm depth formats
+                                 * (V3D_SAMPLER_STATE_32_DEPTH_UNORM) keep
+                                 * it as a 32-bit float.
+                                 */
+                                switch (variant) {
+                                case V3D_SAMPLER_STATE_32_UNORM:
+                                case V3D_SAMPLER_STATE_32_A_UNORM:
+                                case V3D_SAMPLER_STATE_32_LA_UNORM:
+                                        for (int i = 0; i < 4; i++)
+                                                border.ui[i] = _mesa_float_to_unorm(border.f[i], 16);
+                                        break;
+                                case V3D_SAMPLER_STATE_32_SNORM:
+                                case V3D_SAMPLER_STATE_32_A_SNORM:
+                                case V3D_SAMPLER_STATE_32_LA_SNORM:
+                                        for (int i = 0; i < 4; i++)
+                                                border.i[i] = _mesa_float_to_snorm(border.f[i], 16);
+                                        break;
+                                default:
+                                        break;
+                                }
                         }
 #endif
                         sampler.border_color_word_0 = border.ui[0];
@@ -873,7 +911,12 @@ v3d_setup_texture_shader_state_from_buffer(struct V3DX(TEXTURE_SHADER_STATE) *te
         struct v3d_resource *rsc = v3d_resource(prsc);
 
         tex->image_depth = 1;
-        tex->image_width = size / util_format_get_blocksize(format);
+        /* RGB32 buffers are sampled as R32, three texels per RGB32 texel; only
+         * whole RGB32 texels are addressable.
+         */
+        unsigned texels = size / util_format_get_blocksize(format);
+        tex->image_width = v3d_format_is_rgb32(format) ?
+                           texels * 3 : texels;
 
         /* On 4.x, the height of a 1D texture is redefined to be the
          * upper 14 bits of the width (which is only usable with txf).
@@ -1115,7 +1158,9 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                 }
         } else {
                 if (v3d_get_tex_return_size(&screen->devinfo, sample_format) == 32) {
-                        if (util_format_is_alpha(sample_format))
+                        if (util_format_is_luminance_alpha(sample_format))
+                                so->sampler_variant = V3D_SAMPLER_STATE_32_LA;
+                        else if (util_format_is_alpha(sample_format))
                                 so->sampler_variant = V3D_SAMPLER_STATE_32_A;
                         else
                                 so->sampler_variant = V3D_SAMPLER_STATE_32;
@@ -1138,6 +1183,17 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         so->sampler_variant += (V3D_SAMPLER_STATE_F16_SNORM -
                                                 V3D_SAMPLER_STATE_F16);
                 }
+
+#if V3D_VERSION == 42
+                /* Unorm depth formats need their border color kept as a
+                 * float on V3D 4.2, so they can't share the 16-bit unorm
+                 * color variant.
+                 */
+                if (so->sampler_variant == V3D_SAMPLER_STATE_32_UNORM &&
+                    util_format_has_depth(desc)) {
+                        so->sampler_variant = V3D_SAMPLER_STATE_32_DEPTH_UNORM;
+                }
+#endif
         }
 
         /* V3D still doesn't support sampling from raster textures, so we will

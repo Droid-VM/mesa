@@ -71,6 +71,9 @@ dl.citation > dd > p:last-of-type {
 
 {%- else %}
 
+aside.footnote-list {
+  margin-bottom: 1rem;
+}
 aside.footnote > span,
 div.citation > span {
   float: left;

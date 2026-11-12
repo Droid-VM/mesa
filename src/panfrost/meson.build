@@ -34,14 +34,14 @@ endif
 subdir('shared')
 subdir('model')
 
-if with_gallium_panfrost or with_panfrost_vk or with_tools.contains('panfrost')
+if with_any_panfrost
    subdir('genxml')
    subdir('lib')
 endif
 
 subdir('compiler')
 
-if with_gallium_panfrost or with_panfrost_vk or with_tools.contains('panfrost')
+if with_any_panfrost
   subdir('clc')
 endif
 

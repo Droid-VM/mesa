@@ -26,7 +26,7 @@ vn_sync_payload_release_internal(struct vn_device *dev,
       vn_renderer_sync_destroy(dev->renderer, payload->sync);
       break;
    case VN_SYNC_TYPE_TIMELINE_SYNC:
-      for (uint32_t i = 0; i < dev->queue_count; i++)
+      for (uint32_t i = 0; i < dev->queue_count + 1; i++)
          vn_renderer_sync_destroy(dev->renderer, payload->syncs[i]);
       vk_free2(&dev->base.vk.alloc, alloc, payload->syncs);
       break;
@@ -214,7 +214,7 @@ vn_WaitForFences(VkDevice device,
       if (payload->type == VN_SYNC_TYPE_IMPORTED_SYNC_FD) {
          const int poll_timeout = vn_timeout_to_poll_timeout(timeout);
          if (payload->fd >= 0 && sync_wait(payload->fd, poll_timeout)) {
-            result = errno == ETIME ? VK_NOT_READY : VK_ERROR_DEVICE_LOST;
+            result = errno == ETIME ? VK_TIMEOUT : VK_ERROR_DEVICE_LOST;
             goto out_stack_arr_fini;
          } else if (waitAll == VK_FALSE) {
             goto out_stack_arr_fini;
@@ -610,8 +610,10 @@ vn_SignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *pSignalInfo)
    vn_async_vkSignalSemaphore(dev->primary_ring, device, pSignalInfo);
 
    if (payload->type != VN_SYNC_TYPE_TIMELINE_SYNC) {
-      if (vn_sync_feedback_enabled(&sem->feedback))
+      if (vn_sync_feedback_enabled(&sem->feedback)) {
          vn_sync_feedback_write(&sem->feedback, pSignalInfo->value);
+         vn_sync_feedback_cmd_recycle(dev, &sem->feedback);
+      }
       return VK_SUCCESS;
    }
 
@@ -651,8 +653,11 @@ vn_remove_signaled_semaphores(VkDevice device,
                                                        relax_state, &val);
       if (result != VK_SUCCESS)
          return result;
-      if (val < values[i])
-         semaphores[cur++] = semaphores[i];
+      if (val < values[i]) {
+         semaphores[cur] = semaphores[i];
+         values[cur] = values[i];
+         cur++;
+      }
    }
 
    *count = cur;
@@ -720,7 +725,7 @@ vn_WaitSemaphores(VkDevice device,
       return vn_wait_semaphores_legacy(device, pWaitInfo, timeout);
 
    const uint32_t sem_sync_count = dev->queue_count + 1;
-   VkResult result;
+   VkResult result = VK_SUCCESS;
 
    if (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) {
       const uint32_t total_count = sem_sync_count * pWaitInfo->semaphoreCount;
@@ -735,8 +740,10 @@ vn_WaitSemaphores(VkDevice device,
          VK_FROM_HANDLE(vn_semaphore, sem, pWaitInfo->pSemaphores[i]);
 
          /* skip wait for zero since syncobj api doesn't like it */
-         if (!pWaitInfo->pValues[i])
-            continue;
+         if (!pWaitInfo->pValues[i]) {
+            sync_count = 0;
+            break;
+         }
 
          typed_memcpy(dst_syncs, sem->payload->syncs, sem_sync_count);
          dst_syncs += sem_sync_count;
@@ -747,14 +754,16 @@ vn_WaitSemaphores(VkDevice device,
          sync_count += sem_sync_count;
       }
 
-      const struct vn_renderer_wait wait = {
-         .wait_any = true,
-         .timeout = timeout,
-         .syncs = syncs,
-         .sync_values = sync_vals,
-         .sync_count = sync_count,
-      };
-      result = vn_renderer_wait(dev->renderer, &wait);
+      if (sync_count) {
+         const struct vn_renderer_wait wait = {
+            .wait_any = true,
+            .timeout = timeout,
+            .syncs = syncs,
+            .sync_values = sync_vals,
+            .sync_count = sync_count,
+         };
+         result = vn_renderer_wait(dev->renderer, &wait);
+      }
 
       STACK_ARRAY_FINISH(sync_vals);
       STACK_ARRAY_FINISH(syncs);
@@ -836,7 +845,8 @@ vn_GetSemaphoreFdKHR(VkDevice device,
                                            sync_file);
       vn_renderer_sync_reset(dev->renderer, payload->sync);
 
-      vn_wsi_sync_wait(dev, fd);
+      if (fd >= 0)
+         vn_wsi_sync_wait(dev, fd);
    } else {
       assert(payload->type == VN_SYNC_TYPE_IMPORTED_SYNC_FD);
 
@@ -902,8 +912,11 @@ vn_CreateEvent(VkDevice device,
    /* feedback is only needed to speed up host operations */
    if (!(pCreateInfo->flags & VK_EVENT_CREATE_DEVICE_ONLY_BIT)) {
       VkResult result = vn_event_feedback_init(dev, ev);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
+         vn_object_base_fini(&ev->base);
+         vk_free(alloc, ev);
          return vn_error(dev->instance, result);
+      }
    }
 
    VkEvent ev_handle = vn_event_to_handle(ev);

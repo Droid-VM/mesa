@@ -82,12 +82,6 @@ struct fd_dev_info {
    uint32_t num_slices;    /* gen8+ */
 
    struct {
-      uint32_t RB_DBG_ECO_CNTL;
-      uint32_t RB_DBG_ECO_CNTL_blit;
-      uint32_t RB_RBP_CNTL;
-   } magic;
-
-   struct {
          uint32_t reg;
          uint32_t value;
    } magic_raw[64];
@@ -136,6 +130,33 @@ struct fd_dev_info {
        */
       bool indirect_draw_wfm_quirk;
 
+      /* The latest a630_sqe.fw can access PC_AUTO_VERTEX_STRIDE before it's
+       * being written by CP, so we have to write it manually before using
+       * CP_DRAW_AUTO.
+       *
+       * TODO: There may be newer a630_sqe.fw released in the future
+       * which fixes this, if so we should detect it and avoid this
+       * workaround.  Once we have uapi to query fw version, we can
+       * replace this with minimum fw version.
+       */
+      bool draw_auto_stale_stride_quirk;
+
+      /* Many A6XX GEN1/GEN2 devices have a newer a630_sqe.fw in which, only in CP_DRAW_INDX and
+       * CP_DRAW_INDX_OFFSET, visibility-based skipping happens *before* predication-based skipping.
+       * It seems this breaks predication, because draws skipped by predication will not be executed
+       * in the binning phase, and therefore won't have an entry in the draw stream, but the
+       * visibility-based skipping will expect it to have an entry. The result is a GPU hang when
+       * actually executing the first non-predicated draw. However, it seems that things still work
+       * if the whole renderpass is predicated. Affected tests (with hw binning) are:
+       *   dEQP-VK.conditional_rendering.draw_clear.draw.case_*_host_memory
+       *   dEQP-VK.conditional_rendering.draw_clear.draw.maintenance5
+       *
+       * linux-firmware (working) FW version: 016ee176
+       * Last known working FW version: 016ee17a
+       * Latest known broken FW version: 016ee207 (linux-firmware)
+       */
+      bool predicated_binning_quirk;
+
       /* On some GPUs, the depth test needs to be enabled when the
        * depth bounds test is enabled and the depth attachment uses UBWC.
        */
@@ -165,9 +186,6 @@ struct fd_dev_info {
        * subgroup quad and arithmetic operations.
        */
       bool has_getfiberid;
-
-      /* Whether half register shared->non-shared moves are broken. */
-      bool mov_half_shared_quirk;
 
       /* Whether movs is supported for subgroupBroadcast. */
       bool has_movs;
@@ -310,6 +328,9 @@ struct fd_dev_info {
       /* A702 cuts A LOT of things.. */
       bool is_a702;
 
+      /* Number of transform feedback streams supported. */
+      uint32_t num_xfb_streams;
+
       /* maximum number of descriptor sets */
       uint32_t max_sets;
 
@@ -347,21 +368,11 @@ struct fd_dev_info {
        * A7XX / gen7
        */
 
-      /* stsc may need to be done twice for the same range to workaround
-       * _something_, observed in blob's disassembly.
-       */
-      bool stsc_duplication_quirk;
-
       /* Whether there is CP_EVENT_WRITE7::WRITE_SAMPLE_COUNT */
       bool has_event_write_sample_count;
 
       bool has_64b_ssbo_atomics;
       bool has_64b_image_atomics;
-
-      /* Blob executes a special compute dispatch at the start of each
-       * command buffers. We copy this dispatch as is.
-       */
-      bool cmdbuf_start_a725_quirk;
 
       bool load_inline_uniforms_via_preamble_ldgk;
       bool load_shader_consts_via_preamble;
@@ -381,12 +392,6 @@ struct fd_dev_info {
        */
       bool ubwc_unorm_snorm_int_compatible;
 
-      /* Having zero consts in one FS may corrupt consts in follow up FSs,
-       * on such GPUs blob never has zero consts in FS. The mechanism of
-       * corruption is unknown.
-       */
-      bool fs_must_have_non_zero_constlen_quirk;
-
       /* On a750 there is a hardware bug where certain VPC sizes in a GS with
        * an input primitive type that is a triangle with adjacency can hang
        * with a high enough vertex count.
@@ -399,6 +404,12 @@ struct fd_dev_info {
        * best thing we could do is a toggle.
        */
       bool enable_tp_ubwc_flag_hint;
+
+      /* Whether SP_CHICKEN_BITS_2.INDEPENDENT_ICACHE_MISS exists, A750 only.
+       * It helps some workloads and hurts others, so it is only set when
+       * the tu_independent_icache_miss driconf option asks for it.
+       */
+      bool has_independent_icache_miss;
 
       bool storage_8bit;
 
@@ -413,9 +424,6 @@ struct fd_dev_info {
 
       /* Whether a single clear blit could be used for both sysmem and gmem.*/
       bool has_generic_clear;
-
-      /* Whether r8g8 UBWC fast-clear work correctly. */
-      bool r8g8_faulty_fast_clear_quirk;
 
       /* a750 has a bug where writing and then reading a UBWC-compressed UAV
        * requires flushing UCHE. This is reproducible in many CTS tests, for
@@ -443,9 +451,6 @@ struct fd_dev_info {
        */
       bool reading_shading_rate_requires_smask_quirk;
 
-      /* Is lock/unlock sequence needed at end of compute shader? */
-      bool cs_lock_unlock_quirk;
-
       /* Whether the ray_intersection instruction is present. */
       bool has_ray_intersection;
 
@@ -453,9 +458,6 @@ struct fd_dev_info {
        * just raytracing.
        */
       bool has_sw_fuse;
-
-      /* a750-specific HW bug workaround for ray tracing */
-      bool has_rt_workaround;
 
       /* Whether alias.rt is supported. */
       bool has_alias_rt;
@@ -494,14 +496,76 @@ struct fd_dev_info {
       uint32_t max_texel_buffer_range_elements;
       uint32_t max_storage_buffer_range_bytes;
 
-      /* On a7xx alias.tex may hang when in between mova and (ul). */
-      bool alias_mova_quirk;
+      /* There seems to be a HW bug where a dummy prefetch sam.s2en always
+       * reads its src2 from fiber 0. This may cause faults when fiber 0 is a
+       * helper and helpers are disabled. We work around this by keeping
+       * helpers enabled until after such sam.s2en.
+       */
+      bool prefetch_sam_helpers_quirk;
 
+      /* Whether resbase can be used. It doesn't exist on a6xx, and on
+       * a7xx gen1 it hangs the GPU, even when its result is unused.
+       */
+      bool has_resbase;
+
+      /* On a750+ SUBPASS_FENCE also implicitly does CCU_RESOLVE_CLEAN */
+      bool subpass_fence_cleans_resolve;
+   } props;
+
+#define FD_QUIRK(info, name) (info)->quirks.name
+   struct {
+      /* Set RB_DBG_ECO_CNTL b24 for 2d blits
+       */
+      bool QCTDD04536579 : 1;
+      /* movs performs half->full conversion if src_type is half, regardless
+       * of dst_type
+       */
+      bool QCTDD06363318_movs_half : 1;
+      /* On a7xx gen1/gen2, when the FS varyings in VPC take an odd number of
+       * vec4 slots (+ some conditions about number of contexts and visible
+       * prims that are impossible to detect), VPC_PS_CNTL::NUMNONPOSVAR has to
+       * be padded by one more vec4. Otherwise something goes wrong with varying
+       * storage alloc/dealloc: sometimes we get garbage in loaded varyings,
+       * unless (ei) is removed or moved much later. The padding of
+       * ::NUMNONPOSVAR is what prop driver is doing on a7xx gen1/gen2 and
+       * doesn't do on gen3.
+       */
+      bool QCTDD08049535_numnonposvar_alignment : 1;
+      /* Is lock/unlock sequence needed at end of compute shader? */
+      bool QCTDD08407086_cs_lock_unlock : 1;
+      /* Having zero consts in one FS may corrupt consts in follow up FSs,
+       * on such GPUs blob never has zero consts in FS. The mechanism of
+       * corruption is unknown.
+       */
+      bool QCTDD08517960_fs_constlen : 1;
+      /* The last stsc before a consumer should be repeated to ensure
+       * the following (ss) waits for the stsc to complete.  The inserted
+       * stsc need only have a length of 1.
+       */
+      bool QCTDD08901551_stsc_ss : 1;
+      /* Blob executes a special compute dispatch at the start of each
+       * command buffers. We copy this dispatch as is.
+       */
+      bool QCTDD09112208_cmdbuf_start_cs : 1;
+      /* Need fake bary.f for (ei) if last input is flat: */
+      bool QCTDD10204462_flat_ei : 1;
+      /* a750-specific HW bug workaround for ray tracing */
+      bool QCTDD10497382_rt_workaround;
+      /* Do not use a0 in early preamble. */
+      bool QCTDD10789828_no_a0_ep : 1;
+      /* On a7xx alias.tex may hang when in between mova and (ul). */
+      bool QCTDD11147232_alias_mova : 1;
       /* On some HW alias.tex may hang when predicated (i.e. between
        * predt/predf and prede).
        */
-      bool alias_predication_quirk;
-   } props;
+      bool QCTDD11183148_alias_pred : 1;
+      /* Whether r8g8 UBWC fast-clear work correctly. */
+      bool QCTDD12766770_r8g8_fc_alignment : 1;
+      /* When there is a main shader with single ALU instruction
+       * which has CONST access, insert dummy ALU.
+       */
+      bool QCTDD13523866_dummy_alu : 1;
+   } quirks;
 };
 
 struct fd_dev_id {

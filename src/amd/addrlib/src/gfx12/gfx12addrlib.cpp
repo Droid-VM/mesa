@@ -74,6 +74,11 @@ Gfx12Lib::Gfx12Lib(
     Lib(pClient)
 {
     memcpy(m_swizzleModeTable, SwizzleModeTable, sizeof(SwizzleModeTable));
+
+    m_maxDims.extent.width  = MaxImageDim;
+    m_maxDims.extent.height = MaxImageDim;
+    m_maxDims.extent.depth  = 16384;
+    m_maxDims.mipLevels     = MaxMipLevels;
 }
 
 /**
@@ -251,7 +256,6 @@ VOID Gfx12Lib::InitBlockDimensionTable()
 
     ADDR3_COMPUTE_SURFACE_INFO_INPUT surfaceInfo {};
 
-
     for (UINT_32 swModeIdx = 0; swModeIdx < ADDR3_MAX_TYPE; swModeIdx++)
     {
         const Addr3SwizzleMode swMode = static_cast<Addr3SwizzleMode>(swModeIdx);
@@ -294,15 +298,11 @@ VOID Gfx12Lib::GetMipOrigin(
 {
     const ADDR3_COMPUTE_SURFACE_INFO_INPUT* pSurfInfo = pIn->pSurfInfo;
     const BOOL_32        is3d             = (pSurfInfo->resourceType == ADDR_RSRC_TEX_3D);
-    const UINT_32        bytesPerPixel    = pSurfInfo->bpp >> 3;
-    const UINT_32        elementBytesLog2 = Log2(bytesPerPixel);
-    const UINT_32        samplesLog2      = Log2(pSurfInfo->numSamples);
 
     // Calculate the width/height/depth for the given microblock, because the mip offset calculation
     // is in units of microblocks but we want it in elements.
     ADDR_EXTENT3D        microBlockExtent = HwlGetMicroBlockSize(pIn);
     const ADDR_EXTENT3D  tailMaxDim       = GetMipTailDim(pIn, pOut->blockExtent);
-    const UINT_32        blockSizeLog2    = GetBlockSizeLog2(pSurfInfo->swizzleMode);
 
     UINT_32 pitch  = tailMaxDim.width;
     UINT_32 height = tailMaxDim.height;
@@ -315,13 +315,9 @@ VOID Gfx12Lib::GetMipOrigin(
         const INT_32  mipInTail = CalcMipInTail(pIn, pOut, i);
         const UINT_32 mipOffset = CalcMipOffset(pIn, mipInTail);
 
-        pOut->pMipInfo[i].offset           = mipOffset * tailMaxDepth;
+        pOut->pMipInfo[i].offset           = static_cast<UINT_64>(mipOffset) * tailMaxDepth;
         pOut->pMipInfo[i].mipTailOffset    = mipOffset;
         pOut->pMipInfo[i].macroBlockOffset = 0;
-
-        pOut->pMipInfo[i].pitch  = pitch;
-        pOut->pMipInfo[i].height = height;
-        pOut->pMipInfo[i].depth  = depth;
         if (IsLinear(pSurfInfo->swizzleMode))
         {
             pOut->pMipInfo[i].mipTailCoordX = mipOffset >> 8;
@@ -381,7 +377,6 @@ VOID Gfx12Lib::GetMipOffset(
 {
     const ADDR3_COMPUTE_SURFACE_INFO_INPUT* pSurfInfo = pIn->pSurfInfo;
     const UINT_32        bytesPerPixel    = pSurfInfo->bpp >> 3;
-    const UINT_32        elementBytesLog2 = Log2(bytesPerPixel);
     const UINT_32        blockSizeLog2    = GetBlockSizeLog2(pSurfInfo->swizzleMode);
     const UINT_32        blockSize        = 1 << blockSizeLog2;
     const ADDR_EXTENT3D  tailMaxDim       = GetMipTailDim(pIn, pOut->blockExtent);;
@@ -553,7 +548,7 @@ VOID Gfx12Lib::GetMipOffset(
                 // Mip tails are stored in "reverse" order -- i.e., the mip-tail itself is stored first, so the
                 // first mip level outside the tail has an offset that's the dimension of the tail itself, or one
                 // swizzle block in size.
-                offset         = blockSize * hwSlices;
+                offset         = static_cast<UINT_64>(blockSize * hwSlices);
                 macroBlkOffset = blockSize;
 
                 // And determine the per-mip information for everything inside the mip tail.
@@ -757,9 +752,10 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlComputeSurfaceAddrFromCoordLinear(
 
     if (returnCode == ADDR_OK)
     {
-        pOut->addr        = (surfInfoOut.sliceSize * pIn->slice) +
-                            mipInfo[pIn->mipId].offset +
-                            (pIn->y * mipInfo[pIn->mipId].pitch + pIn->x) * (pIn->bpp >> 3);
+        pOut->addr        = static_cast<UINT_64>(
+                                (surfInfoOut.sliceSize * pIn->slice) +
+                                mipInfo[pIn->mipId].offset +
+                                (pIn->y * static_cast<UINT_64>(mipInfo[pIn->mipId].pitch) + pIn->x) * (pIn->bpp >> 3));
 
         pOut->bitPosition = 0;
     }
@@ -835,7 +831,8 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlComputeSurfaceAddrFromCoordTiled(
 
             // Technically, the addition of "mipTailCoordX" is only necessary if we're in the mip-tail.
             // The "mipTailCoordXYZ" values should be zero if we're not in the mip-tail.
-            const BOOL_32 inTail = ((mipInfo[pIn->mipId].mipTailOffset != 0) && (blkSizeLog2 != Log2Size256));
+            [[maybe_unused]] const BOOL_32 inTail =
+                                ((mipInfo[pIn->mipId].mipTailOffset != 0) && (blkSizeLog2 != Log2Size256));
 
             ADDR_ASSERT((inTail == TRUE) ||
                         // If we're not in the tail, then all of these must be zero.
@@ -899,7 +896,6 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlCopyMemToSurface(
 
     if (pIn->numSamples > 1)
     {
-        // TODO: MSAA
         returnCode = ADDR_NOTIMPLEMENTED;
     }
 
@@ -951,7 +947,8 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlCopyMemToSurface(
             const ADDR3_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
             UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
             UINT_32 yBlks = pMipInfo->pitch / localOut.blockExtent.width;
-            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+            UINT_32 zBlks = static_cast<UINT_32>(localOut.sliceSize >>
+                                                 (addresser.GetBlockBits() - addresser.GetBlockZBits()));
 
             ADDR_COORD3D rawOrigin = {
                 pCurRegion->x + pMipInfo->mipTailCoordX,
@@ -1003,7 +1000,6 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlCopySurfaceToMem(
 
     if (pIn->numSamples > 1)
     {
-        // TODO: MSAA
         returnCode = ADDR_NOTIMPLEMENTED;
     }
 
@@ -1056,7 +1052,8 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlCopySurfaceToMem(
             const ADDR3_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
             UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
             UINT_32 yBlks = pMipInfo->pitch / localOut.blockExtent.width;
-            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+            UINT_32 zBlks = static_cast<UINT_32>(localOut.sliceSize >>
+                                                 (addresser.GetBlockBits() - addresser.GetBlockZBits()));
 
             ADDR_COORD3D rawOrigin = {
                 pCurRegion->x + pMipInfo->mipTailCoordX,
@@ -1806,6 +1803,7 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlGetPossibleSwizzleModes(
         pOut->validModes.sw2d64kB  = 1;
         pOut->validModes.sw2d256kB = 1;
     }
+
     // The organization of elements in the hierarchical surface is the same as any other surface, and it can support
     // any 2D swizzle mode (SW_256_2D, SW_4KB_2D, SW_64KB_2D, or SW_256KB_2D).  The swizzle mode can be selected
     // orthogonally to the underlying z or stencil surface.
@@ -1845,7 +1843,7 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlGetPossibleSwizzleModes(
              // There could be more multimedia formats that require more hw specific tiling modes...
              flags.nv12                            || flags.p010)
     {
-        // Linear is not allowed for VRS images.
+        // According to HW architects, Linear is not allowed for VRS images.
         if (flags.isVrsImage == 0)
         {
             pOut->validModes.swLinear = 1;
@@ -1862,7 +1860,6 @@ ADDR_E_RETURNCODE Gfx12Lib::HwlGetPossibleSwizzleModes(
     }
     else if (IsTex3d(pIn->resourceType))
     {
-        // An eventual determination would be based on pal setting of height_watermark and depth_watermark.
         // However, we just adopt the simpler logic currently.
         // For 3D images w/ view3dAs2dArray = 0, SW_3D is preferred.
         // For 3D images w/ view3dAs2dArray = 1, it should go to 2D path above.

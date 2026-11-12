@@ -31,6 +31,7 @@
 
 #include "compiler/pan_compiler.h"
 #include "compiler/nir/nir_serialize.h"
+#include "kmod/pan_kmod.h"
 #include "decode.h"
 #include "pan_blitter.h"
 #include "pan_device.h"
@@ -85,6 +86,11 @@ static void
 panfrost_texture_barrier(struct pipe_context *pipe, unsigned flags)
 {
    struct panfrost_context *ctx = pan_context(pipe);
+
+   /* Framebuffer fetch is coherent, so barriers are a no-op. */
+   if (flags == PIPE_TEXTURE_BARRIER_FRAMEBUFFER)
+      return;
+
    panfrost_flush_all_batches(ctx, "Texture barrier");
 }
 
@@ -215,14 +221,15 @@ panfrost_set_shader_images(struct pipe_context *pctx,
    struct panfrost_context *ctx = pan_context(pctx);
    ctx->dirty_shader[shader] |= PAN_DIRTY_STAGE_IMAGE;
 
-   /* Unbind start_slot...start_slot+count */
+   /* Unbind start_slot...start_slot+count+unbind_num_trailing_slots */
    if (!iviews) {
       for (int i = start_slot;
            i < start_slot + count + unbind_num_trailing_slots; i++) {
          pipe_resource_reference(&ctx->images[shader][i].resource, NULL);
       }
 
-      ctx->image_mask[shader] &= ~(BITFIELD64_MASK(count) << start_slot);
+      ctx->image_mask[shader] &=
+         ~BITFIELD64_RANGE(start_slot, count + unbind_num_trailing_slots);
       return;
    }
 
@@ -415,7 +422,7 @@ panfrost_set_framebuffer_state(struct pipe_context *pctx,
    struct panfrost_context *ctx = pan_context(pctx);
 
    util_copy_framebuffer_state(&ctx->pipe_framebuffer, fb);
-   ctx->batch = NULL;
+   ctx->batch[PANFROST_BATCH_RENDER] = NULL;
 
    /* Hot draw call path needs the mask of active render targets */
    ctx->fb_rt_mask = 0;
@@ -550,10 +557,11 @@ static const void *
 panfrost_trace_get_data(struct u_trace_context *utctx, void *buffer,
                         uint64_t offset_B, uint32_t size_B)
 {
+   struct panfrost_context *ctx = pan_context((struct pipe_context *)utctx->pctx);
    struct panfrost_resource *rsrc =
       pan_resource((struct pipe_resource *)buffer);
 
-   panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+   panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
    if (panfrost_bo_mmap(rsrc->bo))
       return NULL;
@@ -573,7 +581,7 @@ panfrost_trace_read_ts(struct u_trace_context *utctx, void *timestamps,
    if (!dev->kmod.dev->props.timestamp_frequency)
       return U_TRACE_NO_TIMESTAMP;
 
-   panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+   panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
    if (panfrost_bo_mmap(rsrc->bo))
       return U_TRACE_NO_TIMESTAMP;
@@ -624,13 +632,13 @@ panfrost_destroy(struct pipe_context *pipe)
 
    util_dynarray_fini(&panfrost->global_buffers);
 
-   drmSyncobjDestroy(panfrost_device_fd(dev), panfrost->in_sync_obj);
+   pan_kmod_sync_destroy(dev->kmod.dev, panfrost->in_sync_obj);
    if (panfrost->in_sync_fd != -1) {
       close(panfrost->in_sync_fd);
       panfrost->in_sync_fd = -1;
    }
 
-   drmSyncobjDestroy(panfrost_device_fd(dev), panfrost->syncobj);
+   pan_kmod_sync_destroy(dev->kmod.dev, panfrost->syncobj);
    ralloc_free(pipe);
 }
 
@@ -698,7 +706,8 @@ panfrost_emit_write_timestamp(struct panfrost_context *ctx,
                               const char *reason)
 {
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
-   struct panfrost_batch *batch = panfrost_get_fresh_batch_for_fbo(ctx, reason);
+   struct panfrost_batch *batch =
+      panfrost_get_fresh_render_batch(ctx, reason);
 
    screen->vtbl.emit_write_timestamp(batch, rsrc, offset);
 }
@@ -814,7 +823,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
    case PIPE_QUERY_OCCLUSION_PREDICATE:
    case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
       panfrost_flush_writer(ctx, rsrc, "Occlusion query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
       /* Read back the query results */
       uint64_t *result = (uint64_t *)rsrc->bo->ptr.cpu;
@@ -836,7 +845,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
 
    case PIPE_QUERY_TIMESTAMP: {
       panfrost_flush_writer(ctx, rsrc, "Timestamp query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
       uint64_t *timestamp = (uint64_t *)rsrc->bo->ptr.cpu;
 
       vresult->u64 = pan_gpu_time_to_ns(dev, *timestamp);
@@ -852,7 +861,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
 
    case PIPE_QUERY_TIME_ELAPSED: {
       panfrost_flush_writer(ctx, rsrc, "Time elapsed query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
       uint64_t *timestamp = (uint64_t *)rsrc->bo->ptr.cpu;
 
       vresult->u64 = pan_gpu_time_to_ns(dev, timestamp[1] - timestamp[0]);
@@ -1029,7 +1038,7 @@ panfrost_fence_server_sync(struct pipe_context *pctx,
    int fd = -1;
    assert(!value);
 
-   ret = drmSyncobjExportSyncFile(panfrost_device_fd(dev), f->syncobj, &fd);
+   ret = pan_kmod_sync_export_file(dev->kmod.dev, f->syncobj, &fd);
    assert(!ret);
 
    sync_accumulate("panfrost", &ctx->in_sync_fd, fd);
@@ -1072,8 +1081,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    /* Create a syncobj in a signaled state. Will be updated to point to the
     * last queued job out_sync every time we submit a new job.
     */
-   ret = drmSyncobjCreate(panfrost_device_fd(dev), DRM_SYNCOBJ_CREATE_SIGNALED,
-                          &ctx->syncobj);
+   ret = pan_kmod_sync_create(dev->kmod.dev, DRM_SYNCOBJ_CREATE_SIGNALED, &ctx->syncobj);
    if (ret) {
       ralloc_free(ctx);
       return NULL;
@@ -1174,11 +1182,12 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ctx->sample_mask = ~0;
    ctx->active_queries = true;
 
+   util_dynarray_init(&ctx->bo_access, ctx);
    util_dynarray_init(&ctx->global_buffers, ctx);
 
    /* Sync object/FD used for NATIVE_FENCE_FD. */
    ctx->in_sync_fd = -1;
-   ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &ctx->in_sync_obj);
+   ret = pan_kmod_sync_create(dev->kmod.dev, 0, &ctx->in_sync_obj);
    assert(!ret);
 
    ctx->printf.bo =

@@ -5,31 +5,46 @@ use std::cmp::Reverse;
 
 use crate::builder::*;
 use crate::ir::*;
-use crate::model::FAUModel;
+use crate::liveness::*;
+use crate::model::{FAUModel, RegByteSet};
+use crate::ra;
 use compiler::bitset::{BitSet, ConstBitSet};
 use compiler::enum_as_u8::EnumAsU8;
 use compiler::smallvec::SmallVec;
 use kraid_proc_macros::EnumAsU8;
 
-fn move_src_to_tmp(b: &mut impl SSABuilder, src: &mut Src) {
-    // SrcRef::bytes() isn't totally accurate for zero but that's okay since
-    // we should never copy it anyway.
-    assert!(!matches!(&src.src_ref, SrcRef::Zero));
-
-    let bytes = src.src_ref.bytes_read();
-    debug_assert!(bytes <= 8);
+fn move_src_to_tmp(b: &mut impl SSABuilder, src: &mut Src, bytes: u8) {
+    debug_assert!(bytes > 0 && bytes <= 8);
     let tmp = b.alloc_ref((bytes * 8).into());
     let src_ref = std::mem::replace(&mut src.src_ref, tmp.clone().into());
-    b.copy_to(tmp.into(), DataType::i(bytes * 8), src_ref.into());
+
+    // Make sure the Src replicates since zero and imms assume Swizzle::NONE
+    let src = Src::from(src_ref).swizzle(Swizzle::replicate_scalar(bytes * 8));
+    b.copy_to(tmp.into(), DataType::i(bytes * 8), src);
 }
 
+/// Legalizes immediate sources by ensuring the following:
+///
+///  1. For 32-bit immediates, ensure that the instruction supports it.
+///
+///  2. For 64-bit immediates, only OpCopy supports them.
 fn legalize_imm_src(b: &mut impl SSABuilder, op: &mut Op, src_idx: usize) {
     let src = &op.srcs()[src_idx];
-    let SrcRef::Imm32(imm32) = &src.src_ref else {
-        return;
-    };
-    if !b.model().op_src_supports_imm32(op, src, (*imm32).into()) {
-        move_src_to_tmp(b, &mut op.srcs_mut()[src_idx]);
+
+    match &src.src_ref {
+        SrcRef::Imm32(imm32) => {
+            if !b.model().op_src_supports_imm32(op, src, (*imm32).into()) {
+                let bytes = src.src_ref.bytes_read();
+                move_src_to_tmp(b, &mut op.srcs_mut()[src_idx], bytes);
+            }
+        }
+        SrcRef::Imm64(_) if !matches!(op, Op::Copy(_)) => {
+            // No real instruction can read 64-bit immediates.  If any
+            // instruction is left reading them, lower it into a copy.
+            let bytes = src.src_ref.bytes_read();
+            move_src_to_tmp(b, &mut op.srcs_mut()[src_idx], bytes);
+        }
+        _ => {}
     }
 }
 
@@ -64,6 +79,70 @@ impl SSAValueSet {
     }
 }
 
+/// Legalizes fixed-reg sources by ensuring the following:
+///
+///  1. For the given instruction, ensure that no SSAValue is used multiple
+///     times in fixed sources.  It's fine if an SSAValue is used in a fixed
+///     source and also in a non-fixed source as the fixed source takes
+///     priority.
+///
+///  2. For all fixed-reg sources, they must consume SSA values so we have
+///     something to fix.  Fixed-reg sources cannot consume immediates or FAU.
+///
+///  3. For any fixed-reg source which is in the clobber set, this instruction
+///     must kill the source.
+fn legalize_fixed_srcs(
+    b: &mut impl SSABuilder,
+    bl: &BlockLiveness,
+    instr: &mut Instr,
+    ip: usize,
+    ssa_used: &mut SSAValueSet,
+) {
+    debug_assert!(ssa_used.is_empty());
+
+    let mut clobbered = RegByteSet::new();
+    for reg in ra::instr_clobbered_regs(b.model(), &instr.op) {
+        clobbered.insert_range(reg.byte_range());
+    }
+    for dst in instr.dsts() {
+        if let Some(reg) = b.model().op_fixed_dst_reg(&instr.op, dst) {
+            clobbered.insert_range(reg.byte_range());
+        }
+    }
+
+    for src_idx in 0..instr.srcs().len() {
+        let src = &instr.srcs()[src_idx];
+        let src_type = instr.src_type(src);
+
+        let Some(reg) = b.model().op_fixed_src_reg(&instr.op, src) else {
+            continue;
+        };
+
+        let src = &mut instr.srcs_mut()[src_idx];
+        if let SrcRef::SSA(vec) = &mut src.src_ref {
+            for (ssa, bytes) in vec.iter_mut_zip_bytes(reg.byte_range()) {
+                let duplicate = !ssa_used.insert(*ssa);
+                if duplicate
+                    || (clobbered.contains_any_in_range(bytes)
+                        && bl.is_live_after_ip(ssa, ip))
+                {
+                    *ssa = b.copy_ssa(*ssa);
+                }
+            }
+        } else {
+            let bytes = if src_type == DataType::SR {
+                assert!(src.src_ref != SrcRef::Zero);
+                src.src_ref.bytes_read()
+            } else {
+                src_type.total_bytes()
+            };
+            move_src_to_tmp(b, src, bytes);
+        }
+    }
+
+    ssa_used.clear();
+}
+
 /// Legalizes vector sources by ensuring the following
 ///
 ///  1. For any vector source (SSARef::comps() > 1), all the SSAValues
@@ -79,7 +158,7 @@ fn legalize_vec_srcs(
     debug_assert!(ssa_used.is_empty());
     let srcs = instr.srcs_mut();
 
-    let mut duplicates = [!0_usize; 4];
+    let mut duplicates = [!0_usize; Instr::MAX_SRC_COUNT];
     debug_assert!(srcs.len() <= duplicates.len());
     for i in 0..srcs.len() {
         let (srcs_before_i, srcs_after_i) = srcs.split_at_mut(i);
@@ -158,7 +237,7 @@ impl FAUSlot {
 /// Legalizes FAU sources by ensuring the following
 ///
 ///  1. The combined amount of FAU (including small constants) is at most
-///     64 bits, not including k0.
+///     64 bits, (not including k0 for arch >= v12).
 ///
 ///  2. All FAUs come from the same page
 ///
@@ -172,6 +251,7 @@ struct LegalizeFAU<'a> {
     slots: SmallVec<FAUSlot>,
     inval_src: ConstBitSet<1, usize>,
     src64_w1: ConstBitSet<1, usize>,
+    reads_k0: bool,
 }
 
 impl LegalizeFAU<'_> {
@@ -181,19 +261,35 @@ impl LegalizeFAU<'_> {
             slots: Default::default(),
             inval_src: ConstBitSet::new(),
             src64_w1: ConstBitSet::new(),
+            reads_k0: false,
         }
     }
 
     fn extract_srcs(&mut self, model: &dyn Model, op: &Op) {
         for (src_idx, src) in op.srcs().iter().enumerate() {
+            // Fake sources don't count towards FAU bounds
+            if model.op_src_is_fake(op, src) {
+                continue;
+            }
+
+            if matches!(src.src_ref, SrcRef::Zero) {
+                self.reads_k0 = true;
+            }
             let SrcRef::FAU(fau) = src.src_ref else {
                 continue;
             };
 
+            // The hardware doesn't make a distinction between a 64-bit FAU
+            // source with a swizzle which only reads a subset of the bytes
+            // and a source which reads the whole 64-bit FAU.  If it uses
+            // SourceEncoding64 and isn't a small constant, it's 64-bit.
+            let is64 = fau.page != FAUPage::SmallConst
+                && model.op_src_is_64bit(&op, src);
+
             let idx64 = fau.idx >> 1;
             let word = fau.idx & 1;
 
-            if word == 1 && model.op_src_is_64bit(&op, src) {
+            if is64 && word == 1 {
                 self.src64_w1.insert(src_idx);
 
                 // We can't handle .w1 in most 64-bit ops.  If we can't compose
@@ -223,11 +319,7 @@ impl LegalizeFAU<'_> {
             };
 
             slot.use_count += 1;
-            slot.words_used |= if fau.load64 {
-                0b11
-            } else {
-                1 << (fau.idx & 0b1)
-            };
+            slot.words_used |= if is64 { 0b11 } else { 1 << word };
         }
     }
 
@@ -248,7 +340,7 @@ impl LegalizeFAU<'_> {
                 continue;
             };
             if self.inval_src.contains(src_idx) || !self.fau_retained(fau) {
-                move_src_to_tmp(b, src);
+                move_src_to_tmp(b, src, src.src_ref.bytes_read());
             } else if self.src64_w1.contains(src_idx) {
                 // We already checked that this swizzle is supported
                 fau.idx &= !1;
@@ -328,6 +420,13 @@ impl LegalizeFAU<'_> {
         // Instructions can only use one distinct special FAU
         let mut special_taken = false;
         let mut used_words = 0;
+
+        // On some archs (< v12) k0 counts towards the bandwidth, but we must
+        // not legalize it (it could be part of an aliased instruction, thrown
+        // away by the encoder).
+        if self.reads_k0 && !self.fau_model.is_zero_free {
+            used_words += 1;
+        }
         self.slots.retain(|fau| {
             let words = fau.words_used.count_ones();
             if used_words + words > 2 {
@@ -360,9 +459,18 @@ impl LegalizeFAU<'_> {
         self.just_one_page();
     }
 
+    fn is_trivial(&self) -> bool {
+        if self.slots.len() == 0 {
+            return true; // Nothing to legalize
+        }
+
+        // 1 slot is always legal (unless we have a 0 in v9-v10)
+        self.slots.len() == 1
+            && !(self.reads_k0 && !self.fau_model.is_zero_free)
+    }
+
     fn legalize_execution_unit(&mut self) {
-        // Fast-path, 1 FAU is always legal
-        if self.slots.len() <= 1 {
+        if self.is_trivial() {
             return;
         }
 
@@ -395,6 +503,11 @@ fn legalize_fau_srcs(
     if !ctx.slots.is_empty() {
         if b.model().op_is_message(op) {
             ctx.legalize_message();
+            // BLEND and ATEST act either as ALU or as message instructions
+            // depending on state so we have to legalize both ways.
+            if matches!(op, Op::Blend(_) | Op::BlendCall(_) | Op::ATest(_)) {
+                ctx.legalize_execution_unit();
+            }
         } else {
             ctx.legalize_execution_unit();
         }
@@ -405,18 +518,26 @@ fn legalize_fau_srcs(
 
 impl Shader<'_> {
     pub fn legalize(&mut self) {
+        let live = Liveness::for_shader(self);
+
         let model = self.model;
         let fau = model.fau();
         let mut ssa_used = SSAValueSet::new();
-        self.map_instrs(|mut instr, ssa_alloc| {
-            let mut b = SSAInstrBuilder::new(model, ssa_alloc);
-            legalize_vec_srcs(&mut b, &mut instr, &mut ssa_used);
-            for src_idx in 0..instr.srcs().len() {
-                legalize_imm_src(&mut b, &mut instr, src_idx)
-            }
-            legalize_fau_srcs(&mut b, fau, &mut instr);
-            b.push_instr(instr);
-            b.into_mapped()
-        });
+        for (bi, block) in self.blocks.iter_mut().enumerate() {
+            let bl = live.block(bi);
+            let mut count = 0..;
+            block.map_instrs(|mut instr| {
+                let ip = count.next().unwrap();
+                let mut b = SSAInstrBuilder::new(model, &mut self.ssa_alloc);
+                legalize_vec_srcs(&mut b, &mut instr, &mut ssa_used);
+                legalize_fixed_srcs(&mut b, bl, &mut instr, ip, &mut ssa_used);
+                for src_idx in 0..instr.srcs().len() {
+                    legalize_imm_src(&mut b, &mut instr, src_idx);
+                }
+                legalize_fau_srcs(&mut b, fau, &mut instr);
+                b.push_instr(instr);
+                b.into_mapped()
+            });
+        }
     }
 }

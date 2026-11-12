@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 
+#include "clcd97.h"
 #include "nv_push_clc597.h"
 
 #define PRED_TO_STR(OP) [MME_TU104_PRED_##OP] = #OP
@@ -221,8 +222,28 @@ mme_tu104_print_alu_src(FILE *fp, const struct mme_tu104_inst *inst,
    }
 }
 
+static void
+mme_tu104_print_dmem_alu_src0(FILE *fp, const struct mme_tu104_inst *inst,
+                              unsigned alu_idx, uint32_t cls_eng3d)
+{
+   if (cls_eng3d >= BLACKWELL_A) {
+      const bool has_reg_zero = inst->alu[alu_idx].src[0] == MME_TU104_REG_ZERO;
+      if (!has_reg_zero) {
+         mme_tu104_print_alu_src(fp, inst, alu_idx, 0);
+      }
+
+      if (has_reg_zero || inst->imm[alu_idx] != 0) {
+         fprintf(fp, "%s%d /* 0x%04x */", has_reg_zero ? " " : " + ",
+                 (int)(int16_t)inst->imm[alu_idx],
+                 (unsigned)inst->imm[alu_idx]);
+      }
+   } else {
+      mme_tu104_print_alu_src(fp, inst, alu_idx, 0);
+   }
+}
+
 bool
-mme_tu104_alu_op_has_implicit_imm(enum mme_tu104_alu_op op)
+mme_tu104_alu_op_has_implicit_imm(uint32_t cls_eng3d, enum mme_tu104_alu_op op)
 {
    switch (op) {
    case MME_TU104_ALU_OP_MERGE:
@@ -234,6 +255,12 @@ mme_tu104_alu_op_has_implicit_imm(enum mme_tu104_alu_op op)
    case MME_TU104_ALU_OP_BLEU:
    case MME_TU104_ALU_OP_BEQ:
       return true;
+
+   /* On Blackwell, DREAD / DWRITE uses the immediate as part of the offset
+    * computation */
+   case MME_TU104_ALU_OP_DREAD:
+   case MME_TU104_ALU_OP_DWRITE:
+      return cls_eng3d >= BLACKWELL_A;
    default:
       return false;
    }
@@ -270,6 +297,8 @@ mme_tu104_alu_op_may_depend_on_mthd(enum mme_tu104_alu_op op)
    switch (op) {
    case MME_TU104_ALU_OP_EXTENDED:
    case MME_TU104_ALU_OP_STATE:
+   case MME_TU104_ALU_OP_DREAD:
+   case MME_TU104_ALU_OP_DWRITE:
       return true;
    default:
       return false;
@@ -329,8 +358,8 @@ mme_tu104_alu_is_branch(const struct mme_tu104_inst *inst, unsigned alu_idx,
 
 static void
 mme_tu104_print_alu(FILE *fp, unsigned indent,
-                    const struct mme_tu104_inst *inst,
-                    unsigned alu_idx)
+                    const struct mme_tu104_inst *inst, unsigned alu_idx,
+                    uint32_t cls_eng3d)
 {
    const struct mme_tu104_alu *alu = &inst->alu[alu_idx];
 
@@ -414,11 +443,23 @@ mme_tu104_print_alu(FILE *fp, unsigned indent,
       fprintf(fp, "JAL (0x%04x)", (unsigned)inst->imm[alu_idx]);
       break;
    case MME_TU104_ALU_OP_LOOP:
-   case MME_TU104_ALU_OP_DREAD:
       fprintf(fp, "%s", mme_tu104_alu_op_to_str(alu->op));
       mme_tu104_print_alu_src(fp, inst, alu_idx, 0);
       assert(alu->src[1] == MME_TU104_REG_ZERO);
       break;
+
+   case MME_TU104_ALU_OP_DREAD:
+      fprintf(fp, "%s", mme_tu104_alu_op_to_str(alu->op));
+      mme_tu104_print_dmem_alu_src0(fp, inst, alu_idx, cls_eng3d);
+      assert(alu->src[1] == MME_TU104_REG_ZERO);
+      break;
+
+   case MME_TU104_ALU_OP_DWRITE:
+      fprintf(fp, "%s", mme_tu104_alu_op_to_str(alu->op));
+      mme_tu104_print_dmem_alu_src0(fp, inst, alu_idx, cls_eng3d);
+      mme_tu104_print_alu_src(fp, inst, alu_idx, 1);
+      break;
+
    default:
       fprintf(fp, "%s", mme_tu104_alu_op_to_str(alu->op));
       mme_tu104_print_alu_src(fp, inst, alu_idx, 0);
@@ -523,7 +564,8 @@ mme_tu104_print_out(FILE *fp, unsigned indent,
 
 void
 mme_tu104_print_inst(FILE *fp, unsigned indent,
-                     const struct mme_tu104_inst *inst)
+                     const struct mme_tu104_inst *inst,
+                     uint32_t cls_eng3d)
 {
    if (inst->pred_mode != MME_TU104_PRED_UUUU) {
       print_indent(fp, indent);
@@ -532,8 +574,8 @@ mme_tu104_print_inst(FILE *fp, unsigned indent,
       indent++;
    }
 
-   mme_tu104_print_alu(fp, indent, inst, 0);
-   mme_tu104_print_alu(fp, indent, inst, 1);
+   mme_tu104_print_alu(fp, indent, inst, 0, cls_eng3d);
+   mme_tu104_print_alu(fp, indent, inst, 1, cls_eng3d);
    mme_tu104_print_out(fp, indent, inst, 0);
    mme_tu104_print_out(fp, indent, inst, 1);
 
@@ -546,22 +588,23 @@ mme_tu104_print_inst(FILE *fp, unsigned indent,
 
 void
 mme_tu104_print(FILE *fp, const struct mme_tu104_inst *insts,
-                uint32_t inst_count)
+                uint32_t inst_count, uint32_t cls_eng3d)
 {
    for (uint32_t i = 0; i < inst_count; i++) {
       fprintf(fp, "%u:\n", i);
-      mme_tu104_print_inst(fp, 1, &insts[i]);
+      mme_tu104_print_inst(fp, 1, &insts[i], cls_eng3d);
    }
 }
 
 void
-mme_tu104_dump(FILE *fp, uint32_t *encoded, size_t encoded_size)
+mme_tu104_dump(FILE *fp, uint32_t *encoded, size_t encoded_size,
+               uint32_t cls_eng3d)
 {
    uint32_t inst_count = encoded_size / 12;
    for (uint32_t i = 0; i < inst_count; i++) {
       struct mme_tu104_inst inst;
       mme_tu104_decode(&inst, &encoded[i * 3], 1);
       fprintf(fp, "%u:\n", i);
-      mme_tu104_print_inst(fp, 1, &inst);
+      mme_tu104_print_inst(fp, 1, &inst, cls_eng3d);
    }
 }

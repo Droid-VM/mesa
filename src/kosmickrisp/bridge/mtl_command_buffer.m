@@ -59,3 +59,31 @@ mtl_command_resolve_counter_heap(mtl_command_buffer *command_buffer,
                       updateFence:nil];
    }
 }
+
+void
+mtl_command_buffer_set_label(mtl_command_buffer *command_buffer,
+                             const char *label)
+{
+   @autoreleasepool {
+      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)command_buffer;
+      cb.label = @(label);
+   }
+}
+
+void
+mtl_command_buffer_push_debug_group(mtl_command_buffer *command_buffer,
+                                    const char *label)
+{
+    @autoreleasepool {
+      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)command_buffer;
+      [cb pushDebugGroup:@(label)];
+    }
+}
+
+void mtl_command_buffer_pop_debug_group(mtl_command_buffer *command_buffer)
+{
+   @autoreleasepool {
+      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)command_buffer;
+      [cb popDebugGroup];
+   }
+}

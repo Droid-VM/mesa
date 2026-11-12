@@ -826,6 +826,17 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct lower_desc_ctx *ctx)
 
    b->cursor = nir_before_instr(&tex->instr);
 
+   /* Remove index for input attachments, since after this pass the index is
+    * reinterpreted to mean the HW handle.
+    */
+   if (tex->input_attachment_index) {
+      tex->texture_index = 0;
+      int offset_src =
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      if (offset_src >= 0)
+         nir_tex_instr_remove_src(tex, offset_src);
+   }
+
    lower_tex_immutable(b, tex, ctx);
 
 #if PAN_ARCH < 9
@@ -882,19 +893,28 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct lower_desc_ctx *ctx)
       struct panvk_subdesc_info subdesc =
          get_sampler_subdesc_info(bind_layout->type, plane);
       uint32_t desc_stride = get_desc_array_stride(bind_layout, subdesc.type);
-      uint32_t sampler_index = shader_desc_idx(set, binding, subdesc, ctx) + index_imm * desc_stride;
+      uint32_t sampler_index = shader_desc_idx(set, binding, subdesc, ctx) +
+                               index_imm * desc_stride;
 
+#if PAN_ARCH >= 9
+      nir_def *handle = nir_imm_int(b, sampler_index);
+      if (index_ssa != NULL)
+         handle = nir_iadd(b, handle, nir_imul_imm(b, index_ssa, desc_stride));
+      nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, handle);
+#else
+      tex->sampler_index = sampler_index;
       if (index_ssa != NULL) {
-         nir_def *offset = nir_imul_imm(b, index_ssa, desc_stride);
-         offset = nir_iadd_imm(b, offset, sampler_index);
-         nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset, offset);
-      } else {
-         tex->sampler_index = sampler_index;
+         nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset,
+                               nir_imul_imm(b, index_ssa, desc_stride));
       }
+#endif
       progress = true;
    } else {
 #if PAN_ARCH >= 9
-      tex->sampler_index = ctx->desc_info.dummy_sampler_handle;
+      const uint32_t handle = ctx->desc_info.dummy_sampler_handle;
+      nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
+                            nir_imm_int(b, handle));
+      progress = true;
 #endif
    }
 
@@ -915,16 +935,24 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct lower_desc_ctx *ctx)
       struct panvk_subdesc_info subdesc =
          get_tex_subdesc_info(bind_layout->type, plane);
       uint32_t desc_stride = get_desc_array_stride(bind_layout, subdesc.type);
-      uint32_t texture_index = shader_desc_idx(set, binding, subdesc, ctx) + index_imm * desc_stride;
+      uint32_t texture_index = shader_desc_idx(set, binding, subdesc, ctx) +
+                               index_imm * desc_stride;
 
+#if PAN_ARCH >= 9
+      nir_def *handle = nir_imm_int(b, texture_index);
+      if (index_ssa != NULL)
+         handle = nir_iadd(b, handle, nir_imul_imm(b, index_ssa, desc_stride));
+      nir_tex_instr_add_src(tex, nir_tex_src_texture_handle, handle);
+#else
+      tex->texture_index = texture_index;
       if (index_ssa != NULL) {
-         nir_def *offset = nir_imul_imm(b, index_ssa, desc_stride);
-         offset = nir_iadd_imm(b, offset, texture_index);
-         nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, offset);
-      } else {
-         tex->texture_index = texture_index;
+         nir_tex_instr_add_src(tex, nir_tex_src_texture_offset,
+                               nir_imul_imm(b, index_ssa, desc_stride));
       }
+#endif
       progress = true;
+   } else {
+      UNREACHABLE("nir_op_tex must have a texture deref");
    }
 
    return progress;
@@ -989,6 +1017,36 @@ lower_img_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
 
    nir_rewrite_image_intrinsic(intr, get_img_index(b, deref, ctx),
                                nir_image_intrinsic_type_default);
+
+   return true;
+}
+
+static bool
+lower_load_constant(nir_builder *b, nir_intrinsic_instr *intr,
+                    UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_constant)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   /* On Valhall the backend resolves load_constant_base_ptr to the inline
+    * pool's PC. Bifrost has no such pool, so point at the separate data
+    * buffer whose address is passed through a sysval.
+    */
+   nir_def *offset =
+      nir_iadd_imm(b, intr->src[0].ssa, nir_intrinsic_base(intr));
+   nir_def *base = PAN_ARCH >= 9
+                      ? nir_load_constant_base_ptr(b, 1, 64)
+                      : load_sysval(b, common, 64, constant_data);
+   nir_def *addr = nir_iadd(b, base, nir_u2u64(b, offset));
+   nir_def *val = nir_load_global_constant(
+      b, intr->def.num_components, intr->def.bit_size, addr,
+      .access = ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE,
+      .align_mul = nir_intrinsic_align_mul(intr),
+      .align_offset = nir_intrinsic_align_offset(intr));
+
+   nir_def_replace(&intr->def, val);
 
    return true;
 }
@@ -1351,20 +1409,23 @@ upload_shader_desc_info(struct panvk_device *dev,
    assert(lower_info->dyn_ubos.count <=
           ARRAY_SIZE(desc_info->dyn_ubos.map));
    desc_info->dyn_ubos.count = lower_info->dyn_ubos.count;
-   memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
-          lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
+   if (lower_info->dyn_ubos.count != 0)
+      memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
+             lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
    assert(lower_info->dyn_ssbos.count <=
           ARRAY_SIZE(desc_info->dyn_ssbos.map));
    desc_info->dyn_ssbos.count = lower_info->dyn_ssbos.count;
-   memcpy(
-      desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
-      lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
+   if (lower_info->dyn_ssbos.count != 0)
+      memcpy(
+         desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
+         lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
 #else
    assert(lower_info->dyn_bufs.count <=
           ARRAY_SIZE(desc_info->dyn_bufs.map));
    desc_info->dyn_bufs.count = lower_info->dyn_bufs.count;
-   memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
-          lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
+   if (lower_info->dyn_bufs.count != 0)
+      memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
+             lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
 #endif
 
    desc_info->used_set_mask = lower_info->used_set_mask;
@@ -1428,4 +1489,8 @@ panvk_per_arch(nir_lower_descriptors)(
 
 out:
    _mesa_hash_table_u64_destroy(ctx.ht);
+
+   if (nir->constant_data_size)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_load_constant,
+               nir_metadata_control_flow, NULL);
 }

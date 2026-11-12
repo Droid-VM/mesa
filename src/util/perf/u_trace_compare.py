@@ -102,8 +102,10 @@ def parse_with_alias(args, workload_name: str, alias: str) -> list[GPUEventAggre
     events_aggregate: list[GPUEventAggregate] = []
     loop_idx = 0
     while True:
-        frames = [[]]
-        last_frame = 0
+        # Rows from multiple trace contexts may interleave arbitrarily, so
+        # frames are accumulated keyed by (ctx, frame) rather than by row
+        # order. Values keep first-seen order.
+        frames_by_key = {}
 
         file_name = f"{args.results}/{workload_name}/trace_{workload_name}_{alias}_{loop_idx}.csv"
         try:
@@ -112,31 +114,37 @@ def parse_with_alias(args, workload_name: str, alias: str) -> list[GPUEventAggre
                 for row in reader:
                     if len(row) < 4 or not row[0].isdigit():
                         continue
-                    frame = int(row[0])
-                    if frame != last_frame:
-                        frames.append([])
-                        last_frame = frame
+                    fields = row[4:]
+                    ctx = 0
+                    if fields and fields[-1].startswith('ctx='):
+                        ctx = int(fields.pop()[4:])
+                    ctx_frame = (ctx, int(row[0]))
                     timestamp = row[2]
                     event_name = row[3]
                     params = {}
-                    for param in row[4:]:
+                    for param in fields:
                         try:
                             key, value = param.split('=', 1)
                         except ValueError:
                             break
                         params[key] = value
 
-                    frames[-1].append(ParsedEvent(timestamp, event_name, params))
+                    frames_by_key.setdefault(ctx_frame, []).append(
+                        ParsedEvent(timestamp, event_name, params))
 
         except FileNotFoundError:
             if loop_idx == 0:
                 print(f"\tZero results found for workload '{workload_name}' and alias '{alias}' (\"{file_name}\")")
             break
 
+        frames = list(frames_by_key.values())
+
         if args.loops_merged:
-            del frames[0]
-            # The last frame could be partially lost
-            del frames[-1]
+            # Drop the first and (partial) last frame, if present.
+            if frames:
+                del frames[0]
+            if frames:
+                del frames[-1]
 
         event_idx = 0
         for target_frame in reversed(frames):

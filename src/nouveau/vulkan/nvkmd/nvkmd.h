@@ -15,7 +15,6 @@
 
 #include <assert.h>
 #include <stdbool.h>
-#include <stdbool.h>
 #include <sys/types.h>
 
 struct nvkmd_ctx;
@@ -103,6 +102,7 @@ enum nvkmd_engines {
    NVKMD_ENGINE_M2MF    = 1 << 3,
    NVKMD_ENGINE_COMPUTE = 1 << 4,
    NVKMD_ENGINE_BIND    = 1 << 5,
+   NVKMD_ENGINE_VDEC    = 1 << 6,
 };
 
 enum nvkmd_bind_op {
@@ -311,7 +311,7 @@ struct nvkmd_ctx_bind {
    struct nvkmd_va *va;
    uint64_t va_offset_B;
 
-   /* Ignored if op != NVK_BIND_OP_UNBIND */
+   /* Ignored if op != NVKMD_BIND_OP_BIND */
    struct nvkmd_mem *mem;
    uint64_t mem_offset_B;
 

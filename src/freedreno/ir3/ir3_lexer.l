@@ -153,6 +153,7 @@ static int parse_reg(const char *str)
 "@pvtmem"                         return TOKEN(T_A_PVTMEM);
 "@localmem"                       return TOKEN(T_A_LOCALMEM);
 "@constlen"                       return TOKEN(T_A_CONSTLEN);
+"@wavesize"                       return TOKEN(T_A_WAVESIZE);
 "@earlypreamble"                  return TOKEN(T_A_EARLYPREAMBLE);
 "@fullnopstart"                   return TOKEN(T_A_FULLNOPSTART);
 "@fullnopend"                     return TOKEN(T_A_FULLNOPEND);
@@ -162,6 +163,7 @@ static int parse_reg(const char *str)
 "(ss)"                            return TOKEN(T_SS);
 "(absneg)"                        return TOKEN(T_ABSNEG);
 "(neg)"                           return TOKEN(T_NEG);
+"(not)"                           return TOKEN(T_NOT);
 "(abs)"                           return TOKEN(T_ABS);
 "(r)"                             return TOKEN(T_R);
 "(last)"                          return TOKEN(T_LAST);

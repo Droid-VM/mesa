@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -235,7 +235,7 @@ ADDR_E_RETURNCODE CiLib::HwlComputeDccInfo(
         }
         else
         {
-            UINT_64 dccRamSizeAlign = HwlGetPipes(&pIn->tileInfo) * m_pipeInterleaveBytes;
+            UINT_64 dccRamSizeAlign = static_cast<UINT_64>(HwlGetPipes(&pIn->tileInfo) * m_pipeInterleaveBytes);
 
             if (pOut->dccRamSize == pOut->dccFastClearSize)
             {

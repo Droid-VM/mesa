@@ -34,23 +34,6 @@
 
 #include "i915/anv_gem.h"
 
-/**
- * On error, \a timeout_ns holds the remaining time.
- */
-int
-anv_gem_wait(struct anv_device *device, uint32_t gem_handle, int64_t *timeout_ns)
-{
-   switch (device->info->kmd_type) {
-   case INTEL_KMD_TYPE_I915:
-      return anv_i915_gem_wait(device, gem_handle, timeout_ns);
-   case INTEL_KMD_TYPE_XE:
-      return -1;
-   default:
-      UNREACHABLE("missing");
-      return -1;
-   }
-}
-
 /** Return -1 on error. */
 int
 anv_gem_get_tiling(struct anv_device *device, uint32_t gem_handle)

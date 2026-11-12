@@ -8,7 +8,7 @@
 #include "genxml/gen_macros.h"
 #include "lib/pan_encoder.h"
 
-#if (PAN_ARCH >= 6 && PAN_ARCH <= 9)
+#if PAN_ARCH <= 9
 KERNEL(1)
 panlib_indirect_dispatch(constant VkDispatchIndirectCommand *cmd,
                          uint32_t size_x, uint32_t size_y, uint32_t size_z,

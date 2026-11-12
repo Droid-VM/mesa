@@ -164,14 +164,7 @@ fn enqueue_marker(command_queue: cl_command_queue, event: *mut cl_event) -> CLRe
     let q = Queue::arc_from_raw(command_queue)?;
 
     // TODO marker makes sure previous commands did complete
-    create_and_queue(
-        q,
-        CL_COMMAND_MARKER,
-        Vec::new(),
-        event,
-        false,
-        Box::new(|_, _| Ok(())),
-    )
+    create_and_queue(q, CL_COMMAND_MARKER, Vec::new(), event, false, None)
 }
 
 #[cl_entrypoint(clEnqueueMarkerWithWaitList)]
@@ -185,14 +178,7 @@ fn enqueue_marker_with_wait_list(
     let evs = event_list_from_cl(&q, num_events_in_wait_list, event_wait_list)?;
 
     // TODO marker makes sure previous commands did complete
-    create_and_queue(
-        q,
-        CL_COMMAND_MARKER,
-        evs,
-        event,
-        false,
-        Box::new(|_, _| Ok(())),
-    )
+    create_and_queue(q, CL_COMMAND_MARKER, evs, event, false, None)
 }
 
 #[cl_entrypoint(clEnqueueBarrier)]
@@ -200,7 +186,7 @@ fn enqueue_barrier(command_queue: cl_command_queue) -> CLResult<()> {
     let q = Queue::arc_from_raw(command_queue)?;
 
     // TODO barriers make sure previous commands did complete and other commands didn't start
-    let e = Event::new(&q, CL_COMMAND_BARRIER, Vec::new(), Box::new(|_, _| Ok(())));
+    let e = Event::new(&q, CL_COMMAND_BARRIER, Vec::new(), None, None)?;
     q.queue(e);
     Ok(())
 }
@@ -216,14 +202,7 @@ fn enqueue_barrier_with_wait_list(
     let evs = event_list_from_cl(&q, num_events_in_wait_list, event_wait_list)?;
 
     // TODO barriers make sure previous commands did complete and other commands didn't start
-    create_and_queue(
-        q,
-        CL_COMMAND_BARRIER,
-        evs,
-        event,
-        false,
-        Box::new(|_, _| Ok(())),
-    )
+    create_and_queue(q, CL_COMMAND_BARRIER, evs, event, false, None)
 }
 
 #[cl_entrypoint(clFlush)]

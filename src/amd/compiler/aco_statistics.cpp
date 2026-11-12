@@ -590,8 +590,7 @@ collect_preasm_stats(Program* program)
             program->statistics.vopd++;
 
          if ((instr->isVMEM() || instr->isFlatLike()) && !instr->operands.empty()) {
-            if (std::none_of(vmem_clause.begin(), vmem_clause.end(),
-                             [&](Instruction* other)
+            if (std::none_of(vmem_clause.begin(), vmem_clause.end(), [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
                program->statistics.vclause++;
             vmem_clause.insert(instr.get());
@@ -602,8 +601,7 @@ collect_preasm_stats(Program* program)
          }
 
          if (instr->isSMEM() && !instr->operands.empty()) {
-            if (std::none_of(smem_clause.begin(), smem_clause.end(),
-                             [&](Instruction* other)
+            if (std::none_of(smem_clause.begin(), smem_clause.end(), [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
                program->statistics.sclause++;
             smem_clause.insert(instr.get());
@@ -691,7 +689,10 @@ collect_preasm_stats(Program* program)
 void
 collect_postasm_stats(Program* program, const std::vector<uint32_t>& code)
 {
-   program->statistics.hash = util_hash_crc32(code.data(), code.size() * 4);
+   uint32_t code_hash = util_hash_crc32(code.data(), code.size() * 4);
+   uint32_t dwords[] = {code_hash, program->config->mem_ordered};
+
+   program->statistics.hash = util_hash_crc32(dwords, sizeof(dwords));
 }
 
 Instruction_cycle_info

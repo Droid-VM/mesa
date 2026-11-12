@@ -22,10 +22,6 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
    struct radv_descriptor_set_layout *set_layout;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
-   const VkDescriptorSetLayoutBindingFlagsCreateInfo *variable_flags =
-      vk_find_struct_const(pCreateInfo->pNext, DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
-   const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
-      vk_find_struct_const(pCreateInfo->pNext, MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
 
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -83,12 +79,14 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
    } else
       set_layout->ycbcr_sampler_offsets_offset = 0;
 
-   VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
+   struct vk_sorted_bindings *sorted;
+   VkResult result = vk_create_sorted_bindings(&device->vk, pCreateInfo, pAllocator, &sorted);
    if (result != VK_SUCCESS) {
       vk_descriptor_set_layout_unref(&device->vk, &set_layout->vk);
       return vk_error(device, result);
    }
+
+   const VkDescriptorSetLayoutBinding *bindings = sorted->bindings;
 
    set_layout->binding_count = num_bindings;
    set_layout->dynamic_shader_stages = 0;
@@ -102,9 +100,8 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
       uint32_t last_alignment = radv_descriptor_alignment(bindings[pCreateInfo->bindingCount - 1].descriptorType);
       if (bindings[pCreateInfo->bindingCount - 1].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
          uint64_t mutable_size = 0, mutable_align = 0;
-         radv_mutable_descriptor_type_size_alignment(
-            device, &mutable_info->pMutableDescriptorTypeLists[pCreateInfo->bindingCount - 1], &mutable_size,
-            &mutable_align);
+         radv_mutable_descriptor_type_size_alignment(device, &sorted->mutable_type_lists[pCreateInfo->bindingCount - 1],
+                                                     &mutable_size, &mutable_align);
          last_alignment = mutable_align;
       }
 
@@ -114,6 +111,7 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
    for (unsigned pass = 0; pass < 2; ++pass) {
       for (uint32_t j = 0; j < pCreateInfo->bindingCount; j++) {
          const VkDescriptorSetLayoutBinding *binding = bindings + j;
+         const VkDescriptorBindingFlags binding_flags = sorted->flags[j];
          uint32_t b = binding->binding;
          uint32_t alignment = radv_descriptor_alignment(binding->descriptorType);
          uint32_t descriptor_count = binding->descriptorCount;
@@ -165,8 +163,8 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
             break;
          case VK_DESCRIPTOR_TYPE_MUTABLE_EXT: {
             uint64_t mutable_size = 0, mutable_align = 0;
-            radv_mutable_descriptor_type_size_alignment(device, &mutable_info->pMutableDescriptorTypeLists[j],
-                                                        &mutable_size, &mutable_align);
+            radv_mutable_descriptor_type_size_alignment(device, &sorted->mutable_type_lists[j], &mutable_size,
+                                                        &mutable_align);
             assert(mutable_size && mutable_align);
             set_layout->binding[b].size = mutable_size;
             alignment = mutable_align;
@@ -193,8 +191,7 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
          set_layout->binding[b].dynamic_offset_offset = dynamic_offset_count;
          set_layout->binding[b].has_ycbcr_sampler = has_ycbcr_sampler;
 
-         if (variable_flags && j < variable_flags->bindingCount &&
-             (variable_flags->pBindingFlags[j] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
+         if (binding_flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) {
             assert(!binding->pImmutableSamplers); /* Terribly ill defined  how many samplers are valid */
             assert(binding->binding == num_bindings - 1);
 
@@ -232,7 +229,7 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
       }
    }
 
-   free(bindings);
+   vk_destroy_sorted_bindings(&device->vk, pAllocator, sorted);
 
    set_layout->dynamic_offset_count = dynamic_offset_count;
 
@@ -255,19 +252,17 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
    VK_FROM_HANDLE(radv_device, device, _device);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
+   struct vk_sorted_bindings *sorted;
+   VkResult result = vk_create_sorted_bindings(&device->vk, pCreateInfo, NULL, &sorted);
    if (result != VK_SUCCESS) {
       pSupport->supported = false;
       return;
    }
 
-   const VkDescriptorSetLayoutBindingFlagsCreateInfo *variable_flags =
-      vk_find_struct_const(pCreateInfo->pNext, DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
+   const VkDescriptorSetLayoutBinding *bindings = sorted->bindings;
+
    VkDescriptorSetVariableDescriptorCountLayoutSupport *variable_count =
       vk_find_struct(pSupport->pNext, DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT);
-   const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
-      vk_find_struct_const(pCreateInfo->pNext, MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
    if (variable_count) {
       variable_count->maxVariableDescriptorCount = 0;
    }
@@ -277,9 +272,8 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
       uint32_t last_alignment = radv_descriptor_alignment(bindings[pCreateInfo->bindingCount - 1].descriptorType);
       if (bindings[pCreateInfo->bindingCount - 1].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
          uint64_t mutable_size = 0, mutable_align = 0;
-         radv_mutable_descriptor_type_size_alignment(
-            device, &mutable_info->pMutableDescriptorTypeLists[pCreateInfo->bindingCount - 1], &mutable_size,
-            &mutable_align);
+         radv_mutable_descriptor_type_size_alignment(device, &sorted->mutable_type_lists[pCreateInfo->bindingCount - 1],
+                                                     &mutable_size, &mutable_align);
          last_alignment = mutable_align;
       }
 
@@ -291,6 +285,7 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
    for (unsigned pass = 0; pass < 2; ++pass) {
       for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++) {
          const VkDescriptorSetLayoutBinding *binding = bindings + i;
+         const VkDescriptorBindingFlags binding_flags = sorted->flags[i];
 
          uint64_t descriptor_size = 0;
          uint64_t descriptor_alignment = radv_descriptor_alignment(binding->descriptorType);
@@ -323,8 +318,8 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
             descriptor_count = 1;
             break;
          case VK_DESCRIPTOR_TYPE_MUTABLE_EXT:
-            if (!radv_mutable_descriptor_type_size_alignment(device, &mutable_info->pMutableDescriptorTypeLists[i],
-                                                             &descriptor_size, &descriptor_alignment)) {
+            if (!radv_mutable_descriptor_type_size_alignment(device, &sorted->mutable_type_lists[i], &descriptor_size,
+                                                             &descriptor_alignment)) {
                supported = false;
             }
             break;
@@ -353,15 +348,14 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
          if (max_count < descriptor_count) {
             supported = false;
          }
-         if (variable_flags && i < variable_flags->bindingCount && variable_count &&
-             (variable_flags->pBindingFlags[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
+         if (variable_count && (binding_flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
             variable_count->maxVariableDescriptorCount = MIN2(UINT32_MAX, max_count);
          }
          size += descriptor_count * descriptor_size;
       }
    }
 
-   free(bindings);
+   vk_destroy_sorted_bindings(&device->vk, NULL, sorted);
 
    pSupport->supported = supported;
 }
@@ -376,7 +370,7 @@ radv_alloc_descriptor_pool_entry(struct radv_device *device, struct radv_descrip
       if (set->header.size) {
          uint64_t pool_vma_offset = util_vma_heap_alloc(&pool->bo_heap, set->header.size, 32);
          if (!pool_vma_offset)
-            return VK_ERROR_FRAGMENTED_POOL;
+            return pool->bo_heap.free_size < set->header.size ? VK_ERROR_OUT_OF_POOL_MEMORY : VK_ERROR_FRAGMENTED_POOL;
 
          assert(pool_vma_offset >= RADV_POOL_HEAP_OFFSET && pool_vma_offset <= pool->size + RADV_POOL_HEAP_OFFSET);
          set->header.offset = pool_vma_offset - RADV_POOL_HEAP_OFFSET;
@@ -420,14 +414,13 @@ radv_descriptor_set_create(struct radv_device *device, struct radv_descriptor_po
 
       set = (struct radv_descriptor_set *)pool->host_memory_ptr;
       pool->host_memory_ptr += mem_size;
+      memset(set, 0, mem_size);
    } else {
-      set = vk_alloc2(&device->vk.alloc, NULL, mem_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      set = vk_zalloc2(&device->vk.alloc, NULL, mem_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 
       if (!set)
          return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
-
-   memset(set, 0, mem_size);
 
    vk_object_base_init(&device->vk, &set->header.base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
 
@@ -448,8 +441,15 @@ radv_descriptor_set_create(struct radv_device *device, struct radv_descriptor_po
    set->header.size = align(layout_size, 32);
 
    result = radv_alloc_descriptor_pool_entry(device, pool, set);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      vk_object_base_finish(&set->header.base);
+      if (pool->host_memory_base) {
+         pool->host_memory_ptr -= mem_size;
+      } else {
+         vk_free2(&device->vk.alloc, NULL, set);
+      }
       return result;
+   }
 
    if (layout->has_immutable_samplers) {
       for (unsigned i = 0; i < layout->binding_count; ++i) {

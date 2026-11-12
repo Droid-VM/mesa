@@ -69,11 +69,9 @@ blorp_alloc_dynamic_state(struct blorp_batch *batch,
                           uint32_t alignment,
                           uint32_t *offset);
 
-UNUSED static void *
-blorp_alloc_general_state(struct blorp_batch *batch,
-                          uint32_t size,
-                          uint32_t alignment,
-                          uint32_t *offset);
+UNUSED static struct blorp_address
+blorp_dynamic_state_address(struct blorp_batch *batch,
+                            uint32_t offset);
 
 static uint32_t
 blorp_get_dynamic_state(struct blorp_batch *batch,
@@ -232,6 +230,13 @@ __gen_get_batch_address(struct blorp_batch *batch, void *location)
         *_dst = blorp_alloc_dynamic_state(batch,                   \
                                           _blorp_cmd_length(state) * 4, \
                                           align, offset);               \
+        __builtin_expect(_dst != NULL, 1);                              \
+        _blorp_cmd_pack(state)(batch, (void *)_dst, &name),             \
+        blorp_flush_range(batch, _dst, _blorp_cmd_length(state) * 4),   \
+        _dst = NULL)
+
+#define blorp_pack_dynamic(batch, state, name, ptr)                     \
+   for (struct state name = STRUCT_ZERO(state), *_dst = ptr;            \
         __builtin_expect(_dst != NULL, 1);                              \
         _blorp_cmd_pack(state)(batch, (void *)_dst, &name),             \
         blorp_flush_range(batch, _dst, _blorp_cmd_length(state) * 4),   \
@@ -645,8 +650,16 @@ blorp_emit_cc_viewport(struct blorp_batch *batch)
       }
    }
 
-   blorp_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), vsp) {
-      vsp.CCViewportPointer = cc_vp_offset;
+   if (GFX_VERx10 >= 350 && batch->blorp->config.use_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      blorp_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), vsp) {
+         vsp.CCViewportPointer = blorp_dynamic_state_address(batch, cc_vp_offset);
+      }
+#endif
+   } else {
+      blorp_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), vsp) {
+         vsp.CCViewportPointer = cc_vp_offset;
+      }
    }
 
    return cc_vp_offset;
@@ -656,23 +669,47 @@ static uint32_t
 blorp_emit_sampler_state(struct blorp_batch *batch)
 {
    uint32_t offset;
-   blorp_emit_dynamic(batch, GENX(SAMPLER_STATE), sampler, 32, &offset) {
-      sampler.MipModeFilter = MIPFILTER_NONE;
-      sampler.MagModeFilter = MAPFILTER_LINEAR;
-      sampler.MinModeFilter = MAPFILTER_LINEAR;
-      sampler.MinLOD = 0;
-      sampler.MaxLOD = 0;
-      sampler.TCXAddressControlMode = TCM_CLAMP;
-      sampler.TCYAddressControlMode = TCM_CLAMP;
-      sampler.TCZAddressControlMode = TCM_CLAMP;
-      sampler.MaximumAnisotropy = RATIO21;
-      sampler.RAddressMinFilterRoundingEnable = true;
-      sampler.RAddressMagFilterRoundingEnable = true;
-      sampler.VAddressMinFilterRoundingEnable = true;
-      sampler.VAddressMagFilterRoundingEnable = true;
-      sampler.UAddressMinFilterRoundingEnable = true;
-      sampler.UAddressMagFilterRoundingEnable = true;
-      sampler.NonnormalizedCoordinateEnable = true;
+   if (GFX_VERx10 >= 350 && batch->blorp->config.use_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      blorp_emit_dynamic(batch, GENX(SAMPLER_STATE_EXTENDED), sampler, 32, &offset) {
+         sampler.MipModeFilter = MIPFILTER_NONE;
+         sampler.MagModeFilter = MAPFILTER_LINEAR;
+         sampler.MinModeFilter = MAPFILTER_LINEAR;
+         sampler.MinLOD = 0;
+         sampler.MaxLOD = 0;
+         sampler.TCXAddressControlMode = TCM_CLAMP;
+         sampler.TCYAddressControlMode = TCM_CLAMP;
+         sampler.TCZAddressControlMode = TCM_CLAMP;
+         sampler.MaximumAnisotropy = RATIO21;
+         sampler.RAddressMinFilterRoundingEnable = true;
+         sampler.RAddressMagFilterRoundingEnable = true;
+         sampler.VAddressMinFilterRoundingEnable = true;
+         sampler.VAddressMagFilterRoundingEnable = true;
+         sampler.UAddressMinFilterRoundingEnable = true;
+         sampler.UAddressMagFilterRoundingEnable = true;
+         sampler.NonnormalizedCoordinateEnable = true;
+         sampler.YCRCBBorderMode = YCRCBBM_PASSTHROUGH;
+      }
+#endif
+   } else {
+      blorp_emit_dynamic(batch, GENX(SAMPLER_STATE), sampler, 32, &offset) {
+         sampler.MipModeFilter = MIPFILTER_NONE;
+         sampler.MagModeFilter = MAPFILTER_LINEAR;
+         sampler.MinModeFilter = MAPFILTER_LINEAR;
+         sampler.MinLOD = 0;
+         sampler.MaxLOD = 0;
+         sampler.TCXAddressControlMode = TCM_CLAMP;
+         sampler.TCYAddressControlMode = TCM_CLAMP;
+         sampler.TCZAddressControlMode = TCM_CLAMP;
+         sampler.MaximumAnisotropy = RATIO21;
+         sampler.RAddressMinFilterRoundingEnable = true;
+         sampler.RAddressMagFilterRoundingEnable = true;
+         sampler.VAddressMinFilterRoundingEnable = true;
+         sampler.VAddressMagFilterRoundingEnable = true;
+         sampler.UAddressMinFilterRoundingEnable = true;
+         sampler.UAddressMagFilterRoundingEnable = true;
+         sampler.NonnormalizedCoordinateEnable = true;
+      }
    }
 
    return offset;
@@ -807,16 +844,18 @@ blorp_emit_ps_config(struct blorp_batch *batch,
    blorp_emit(batch, GENX(3DSTATE_WM), wm);
 
    blorp_emit(batch, GENX(3DSTATE_PS), ps) {
-      if (params->src.enabled) {
-         ps.SamplerCount = 1; /* Up to 4 samplers */
-         ps.BindingTableEntryCount = 2;
-      } else {
-         ps.BindingTableEntryCount = 1;
-      }
+      if (!params->use_efficient_64bit) {
+         if (params->src.enabled) {
+            ps.SamplerCount = 1; /* Up to 4 samplers */
+            ps.BindingTableEntryCount = 2;
+         } else {
+            ps.BindingTableEntryCount = 1;
+         }
 
-      /* SAMPLER_STATE prefetching is broken on Gfx11 - Wa_1606682166 */
-      if (GFX_VER == 11)
-         ps.SamplerCount = 0;
+         /* SAMPLER_STATE prefetching is broken on Gfx11 - Wa_1606682166 */
+         if (GFX_VER == 11)
+            ps.SamplerCount = 0;
+      }
 
       /* 3DSTATE_PS expects the number of threads per PSD, which is always 64
        * for pre Gfx11 and 128 for gfx11+; On gfx11+ If a programmed value is
@@ -951,6 +990,13 @@ blorp_emit_ps_config(struct blorp_batch *batch,
             batch->flags & BLORP_BATCH_FORCE_CPS_DEPENDENCY;
 #endif
 
+#if INTEL_WA_16030144090_GFX_VER
+         if (intel_needs_workaround(devinfo, 16030144090)) {
+            psx.EnablePSDependencyOnCPsizeChange =
+               prog_data->persample_dispatch;
+         }
+#endif
+
 #if GFX_VER < 20
          psx.AttributeEnable = prog_data->num_varying_inputs > 0;
 #else
@@ -1025,9 +1071,19 @@ blorp_emit_blend_state(struct blorp_batch *batch,
       offset = blorp_get_dynamic_state(batch, BLORP_DYNAMIC_STATE_BLEND);
    }
 
-   blorp_emit(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), sp) {
-      sp.BlendStatePointer = offset;
-      sp.BlendStatePointerValid = true;
+
+   if (GFX_VERx10 >= 350 && batch->blorp->config.use_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      blorp_emit(batch, GENX(3DSTATE_BLEND_STATE_POINTERS_2), sp) {
+         sp.BlendStatePointer = blorp_dynamic_state_address(batch, offset);
+         sp.BlendStatePointerValid = true;
+      }
+#endif
+   } else {
+      blorp_emit(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), sp) {
+         sp.BlendStatePointer = offset;
+         sp.BlendStatePointerValid = true;
+      }
    }
 
    blorp_emit(batch, GENX(3DSTATE_PS_BLEND), ps_blend) {
@@ -1046,9 +1102,18 @@ blorp_emit_color_calc_state(struct blorp_batch *batch,
    else
       blorp_emit_dynamic(batch, GENX(COLOR_CALC_STATE), cc, 64, &offset) {}
 
-   blorp_emit(batch, GENX(3DSTATE_CC_STATE_POINTERS), sp) {
-      sp.ColorCalcStatePointer = offset;
-      sp.ColorCalcStatePointerValid = true;
+   if (GFX_VERx10 >= 350 && batch->blorp->config.use_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      blorp_emit(batch, GENX(3DSTATE_CC_STATE_POINTERS_2), sp) {
+         sp.ColorCalcStatePointer = blorp_dynamic_state_address(batch, offset);
+         sp.ColorCalcStatePointerValid = true;
+      }
+#endif
+   } else  {
+      blorp_emit(batch, GENX(3DSTATE_CC_STATE_POINTERS), sp) {
+         sp.ColorCalcStatePointer = offset;
+         sp.ColorCalcStatePointerValid = true;
+      }
    }
 }
 
@@ -1126,23 +1191,7 @@ blorp_emit_pipeline(struct blorp_batch *batch,
    blorp_emit_color_calc_state(batch, params);
    blorp_emit_depth_stencil_state(batch, params);
 
-   UNUSED uint32_t mocs = isl_mocs(batch->blorp->isl_dev, 0, false);
-
-#if GFX_VER >= 12
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_ALL), pc) {
-      /* Update empty push constants for all stages (bitmask = 11111b) */
-      pc.ShaderUpdateEnable = 0x1f;
-      pc.MOCS = mocs;
-   }
-#else
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_VS), xs) { xs.MOCS = mocs; }
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_HS), xs) { xs.MOCS = mocs; }
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_DS), xs) { xs.MOCS = mocs; }
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_GS), xs) { xs.MOCS = mocs; }
-   blorp_emit(batch, GENX(3DSTATE_CONSTANT_PS), xs) { xs.MOCS = mocs; }
-#endif
-
-   if (params->src.enabled)
+   if (params->src.enabled && !params->use_efficient_64bit)
       blorp_emit_sampler_state_ps(batch);
 
    blorp_emit_3dstate_multisample(batch, params);
@@ -1376,26 +1425,56 @@ blorp_emit_null_surface_state(struct blorp_batch *batch,
    blorp_flush_range(batch, state, GENX(RENDER_SURFACE_STATE_length) * 4);
 }
 
-static uint32_t
-blorp_setup_binding_table(struct blorp_batch *batch,
-                          const struct blorp_params *params)
+static unsigned
+blorp_get_num_surfaces(const struct blorp_params *params)
 {
-   const struct isl_device *isl_dev = batch->blorp->isl_dev;
-   uint32_t surface_offsets[BLORP_NUM_BT_ENTRIES], bind_offset = 0;
-   void *surface_maps[BLORP_NUM_BT_ENTRIES];
-
-   /* There's nothing to bind here. */
-   if (params->op == BLORP_OP_COPY_INDIRECT)
+   if (params->use_pre_baked_binding_table)
       return 0;
 
-   if (params->use_pre_baked_binding_table) {
-      bind_offset = params->pre_baked_binding_table_offset;
-   } else {
-      unsigned num_surfaces = 1 + params->src.enabled + params->src.buffer;
-      if (!blorp_alloc_binding_table(batch, num_surfaces,
-                                     isl_dev->ss.size, isl_dev->ss.align,
-                                     &bind_offset, surface_offsets, surface_maps))
-         return 0;
+   return params->src.enabled + params->src.buffer +
+          (params->dst.enabled || params->depth.enabled ||
+           params->stencil.enabled);
+}
+
+static void
+blorp_get_efficient_64bit_io_size(struct blorp_batch *batch,
+                                  const struct blorp_params *params,
+                                  uint32_t *out_align,
+                                  uint32_t *out_size,
+                                  uint32_t *out_sampler_offset,
+                                  uint32_t *out_push_offset)
+{
+   const struct isl_device *isl_dev = batch->blorp->isl_dev;
+   const unsigned num_surfaces = blorp_get_num_surfaces(params);
+   const unsigned surfaces_size = align(num_surfaces * isl_dev->ss.size, 32);
+   const unsigned sampler_size = (params->src.enabled && !batch->blorp->config.use_cached_dynamic_states) ? 32 : 0;
+   const unsigned push_size = params->shader_pipeline == BLORP_SHADER_PIPELINE_COMPUTE ? 0 : 32;
+   const unsigned total_size = align(surfaces_size, 32) + align(sampler_size, 32) + push_size;
+
+   *out_align = 64;
+   *out_size = total_size;
+   *out_sampler_offset = sampler_size == 0 ? UINT32_MAX : align(surfaces_size, 32);
+   *out_push_offset = push_size == 0 ? UINT32_MAX : (total_size - push_size);
+}
+
+static void
+blorp_emit_efficient_64bit_io(struct blorp_batch *batch,
+                              const struct blorp_params *params,
+                              void *surfaces_ptr,
+                              void *sampler_ptr)
+{
+#if GFX_VERx10 >= 350
+   const struct isl_device *isl_dev = batch->blorp->isl_dev;
+   const unsigned num_surfaces = blorp_get_num_surfaces(params);
+
+   void *surface_maps[BLORP_NUM_BT_ENTRIES];
+   uint32_t surface_offsets[BLORP_NUM_BT_ENTRIES];
+   if (!params->use_pre_baked_binding_table) {
+      for (uint32_t i = 0; i < num_surfaces; i++) {
+         const uint32_t rel_offset = align(isl_dev->ss.size * i, isl_dev->ss.align);
+         surface_maps[i] = surfaces_ptr + rel_offset;
+         surface_offsets[i] = rel_offset;
+      }
 
       if (params->dst.enabled) {
          blorp_emit_surface_state(batch, &params->dst,
@@ -1403,21 +1482,22 @@ blorp_setup_binding_table(struct blorp_batch *batch,
                                   surface_maps[BLORP_RENDERBUFFER_BT_INDEX],
                                   surface_offsets[BLORP_RENDERBUFFER_BT_INDEX],
                                   params->color_write_disable, true);
-      } else {
-         assert(params->depth.enabled || params->stencil.enabled);
+      } else if (params->depth.enabled || params->stencil.enabled) {
          const struct blorp_surface_info *surface =
             params->depth.enabled ? &params->depth : &params->stencil;
          blorp_emit_null_surface_state(batch, surface,
                                        surface_maps[BLORP_RENDERBUFFER_BT_INDEX]);
       }
+   }
 
-      if (params->src.enabled) {
+   if (params->src.enabled) {
+      if (!params->use_pre_baked_binding_table) {
          if (params->src.surf.size_B != 0) {
             blorp_emit_surface_state(batch, &params->src,
-                                    params->fast_clear_op,
-                                    surface_maps[BLORP_TEXTURE_BT_INDEX],
-                                    surface_offsets[BLORP_TEXTURE_BT_INDEX],
-                                    0, false);
+                                     params->fast_clear_op,
+                                     surface_maps[BLORP_TEXTURE_BT_INDEX],
+                                     surface_offsets[BLORP_TEXTURE_BT_INDEX],
+                                     0, false);
          } else {
             /* Nothing to do, the entire surface got converted to a buffer */
             blorp_emit_null_surface_state(batch, &params->src,
@@ -1430,6 +1510,129 @@ blorp_setup_binding_table(struct blorp_batch *batch,
                                             surface_offsets[BLORP_TEXBUF_BT_INDEX]);
          }
       }
+
+      if (!batch->blorp->config.use_cached_dynamic_states) {
+         blorp_pack_dynamic(batch, GENX(SAMPLER_STATE_EXTENDED), sampler, sampler_ptr) {
+            sampler.MipModeFilter = MIPFILTER_NONE;
+            sampler.MagModeFilter = MAPFILTER_LINEAR;
+            sampler.MinModeFilter = MAPFILTER_LINEAR;
+            sampler.MinLOD = 0;
+            sampler.MaxLOD = 0;
+            sampler.TCXAddressControlMode = TCM_CLAMP;
+            sampler.TCYAddressControlMode = TCM_CLAMP;
+            sampler.TCZAddressControlMode = TCM_CLAMP;
+            sampler.MaximumAnisotropy = RATIO21;
+            sampler.RAddressMinFilterRoundingEnable = true;
+            sampler.RAddressMagFilterRoundingEnable = true;
+            sampler.VAddressMinFilterRoundingEnable = true;
+            sampler.VAddressMagFilterRoundingEnable = true;
+            sampler.UAddressMinFilterRoundingEnable = true;
+            sampler.UAddressMagFilterRoundingEnable = true;
+            sampler.NonnormalizedCoordinateEnable = true;
+            sampler.YCRCBBorderMode = YCRCBBM_PASSTHROUGH;
+         }
+      }
+   }
+#endif
+}
+
+static void
+blorp_emit_efficient_64bit_io_ps(struct blorp_batch *batch,
+                                 const struct blorp_params *params,
+                                 uint64_t *push_data,
+                                 uint32_t surfaces_offset,
+                                 uint32_t sampler_offset,
+                                 uint32_t push_offset)
+{
+#if GFX_VERx10 >= 350
+   push_data[0] = params->use_pre_baked_binding_table ?
+      params->pre_baked_binding_table_offset :
+      _blorp_combine_address(
+         batch, NULL, blorp_dynamic_state_address(batch, surfaces_offset), 0);
+   push_data[1] = _blorp_combine_address(
+      batch, NULL,
+      blorp_dynamic_state_address(
+         batch,
+         batch->blorp->config.use_cached_dynamic_states ?
+         blorp_get_dynamic_state(batch, BLORP_DYNAMIC_STATE_SAMPLER) :
+         sampler_offset), 0);
+
+   /* No need for 3DSTATE_PUSH_CONSTANT_ALLOC_* because since Gfx12.5+
+    * 3DSTATE_PUSH_CONSTANT_ALLOC_PS is useless (see HSD 1209977789) and that
+    * is the only stage where we use push constants.
+    */
+   uint32_t *dw = blorp_emitn(batch, GENX(3DSTATE_CONSTANT_ALL),
+                              GENX(3DSTATE_CONSTANT_ALL_length) +
+                              GENX(3DSTATE_CONSTANT_ALL_DATA_length),
+                              .ShaderUpdateEnable = BITFIELD_BIT(MESA_SHADER_FRAGMENT),
+                              .PointerBufferMask = 0x1,
+                              .MOCS = isl_mocs(batch->blorp->isl_dev, 0, false));
+   if (!dw)
+      return;
+
+   struct blorp_address push_addr =
+      blorp_dynamic_state_address(batch, push_offset);
+   GENX(3DSTATE_CONSTANT_ALL_DATA_pack)(
+      batch, dw -1 + GENX(3DSTATE_CONSTANT_ALL_length),
+      &(struct GENX(3DSTATE_CONSTANT_ALL_DATA)) {
+         .PointerToConstantBuffer = push_addr,
+         .ConstantBufferReadLength = 1,
+      });
+#endif
+}
+
+static uint32_t
+blorp_setup_binding_table(struct blorp_batch *batch,
+                          const struct blorp_params *params)
+{
+   const struct isl_device *isl_dev = batch->blorp->isl_dev;
+   uint32_t surface_offsets[BLORP_NUM_BT_ENTRIES], bind_offset = 0;
+   void *surface_maps[BLORP_NUM_BT_ENTRIES];
+   unsigned num_surfaces = blorp_get_num_surfaces(params);
+
+   if (params->use_pre_baked_binding_table)
+      return params->pre_baked_binding_table_offset;
+
+   if (num_surfaces == 0)
+      return 0;
+
+   if (!blorp_alloc_binding_table(batch, num_surfaces,
+                                  isl_dev->ss.size, isl_dev->ss.align,
+                                  &bind_offset, surface_offsets, surface_maps))
+      return 0;
+
+   if (params->dst.enabled) {
+      blorp_emit_surface_state(batch, &params->dst,
+                               params->fast_clear_op,
+                               surface_maps[BLORP_RENDERBUFFER_BT_INDEX],
+                               surface_offsets[BLORP_RENDERBUFFER_BT_INDEX],
+                               params->color_write_disable, true);
+   } else {
+      assert(params->depth.enabled || params->stencil.enabled);
+      const struct blorp_surface_info *surface =
+         params->depth.enabled ? &params->depth : &params->stencil;
+      blorp_emit_null_surface_state(batch, surface,
+                                    surface_maps[BLORP_RENDERBUFFER_BT_INDEX]);
+   }
+
+   if (params->src.enabled) {
+      if (params->src.surf.size_B != 0) {
+         blorp_emit_surface_state(batch, &params->src,
+                                 params->fast_clear_op,
+                                 surface_maps[BLORP_TEXTURE_BT_INDEX],
+                                 surface_offsets[BLORP_TEXTURE_BT_INDEX],
+                                 0, false);
+      } else {
+         /* Nothing to do, the entire surface got converted to a buffer */
+         blorp_emit_null_surface_state(batch, &params->src,
+                                       surface_maps[BLORP_TEXTURE_BT_INDEX]);
+      }
+
+      if (params->src.buffer) {
+         blorp_emit_buffer_surface_state(batch, &params->src,
+                                         surface_maps[BLORP_TEXBUF_BT_INDEX],
+                                         surface_offsets[BLORP_TEXBUF_BT_INDEX]);
+      }
    }
 
    return bind_offset;
@@ -1438,6 +1641,22 @@ blorp_setup_binding_table(struct blorp_batch *batch,
 static void
 blorp_emit_btp(struct blorp_batch *batch, uint32_t bind_offset)
 {
+   uint32_t mocs = isl_mocs(batch->blorp->isl_dev, 0, false);
+
+#if GFX_VER >= 12
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_ALL), pc) {
+      /* Update empty push constants for all stages (bitmask = 11111b) */
+      pc.ShaderUpdateEnable = 0x1f;
+      pc.MOCS = mocs;
+   }
+#else
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_VS), xs) { xs.MOCS = mocs; }
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_HS), xs) { xs.MOCS = mocs; }
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_DS), xs) { xs.MOCS = mocs; }
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_GS), xs) { xs.MOCS = mocs; }
+   blorp_emit(batch, GENX(3DSTATE_CONSTANT_PS), xs) { xs.MOCS = mocs; }
+#endif
+
    blorp_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_VS), bt);
    blorp_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_HS), bt);
    blorp_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_DS), bt);
@@ -1531,7 +1750,7 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
  * clearing operations without such information.
  * */
 static void
-blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
+blorp_emit_hiz_op(struct blorp_batch *batch,
                        const struct blorp_params *params)
 {
    /* We should be performing an operation on a depth or stencil buffer.
@@ -1564,9 +1783,16 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
     *    D32_FLOAT, then +/-DENORM values are also allowed.
     *
     * Set the bounds to match our hardware limits.
+    *
+    * On GFX35+, it is possible to skip the viewport emission.
+    * (HSD 14022502615).
     */
-   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR)
-      blorp_emit_cc_viewport(batch);
+   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR) {
+      if (batch->flags & BLORP_BATCH_NO_HIZ_EMIT_DEPTH_CLEAR_VIEWPORT)
+         assert(batch->blorp->isl_dev->info->ver >= 35);
+      else
+         blorp_emit_cc_viewport(batch);
+   }
 
    /* Make sure to disable fragment shader, a previous draw might have enabled
     * a SIMD32 shader and we could be dispatching threads here with MSAA 16x
@@ -1702,7 +1928,7 @@ static void
 blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
 {
    if (params->hiz_op != ISL_AUX_OP_NONE) {
-      blorp_emit_gfx8_hiz_op(batch, params);
+      blorp_emit_hiz_op(batch, params);
       return;
    }
 
@@ -1711,7 +1937,46 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
 
    blorp_emit_pipeline(batch, params);
 
-   blorp_emit_btp(batch, blorp_setup_binding_table(batch, params));
+   if (GFX_VERx10 >= 350 && params->use_efficient_64bit) {
+      uint32_t io_align, io_size, sampler_offset, push_offset;
+      blorp_get_efficient_64bit_io_size(batch, params,
+                                        &io_align, &io_size,
+                                        &sampler_offset,
+                                        &push_offset);
+      uint32_t push_alloc_offset;
+      void *push_const = blorp_alloc_dynamic_state(
+         batch, io_size, io_align, &push_alloc_offset);
+      if (push_const == NULL)
+         return;
+      /* push_const = {
+       *    surface_state[0] data
+       *    surface_state[1] data
+       *    surface_state[n] data
+       *    sampler_state[0] data
+       *    u64 surface_state_pointer <- address set in 3DSTATE_CONSTANT_ALL
+       *    u64 sampler_state_pointer
+       * }
+       */
+      void *surfaces_data = push_const;
+      void *sampler_data = push_const + sampler_offset;
+      void *push_data = push_const + push_offset;
+      uint32_t surfaces_offset = push_alloc_offset;
+      sampler_offset = push_alloc_offset + sampler_offset;
+      push_offset = push_alloc_offset + push_offset;
+
+      blorp_emit_efficient_64bit_io(batch,
+                                    params,
+                                    surfaces_data,
+                                    sampler_data);
+      blorp_emit_efficient_64bit_io_ps(batch,
+                                       params,
+                                       push_data,
+                                       surfaces_offset,
+                                       sampler_offset,
+                                       push_offset);
+   } else {
+      blorp_emit_btp(batch, blorp_setup_binding_table(batch, params));
+   }
 
    if (!(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
       blorp_emit_depth_stencil_config(batch, params);
@@ -1731,36 +1996,47 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
    blorp_emit_post_draw(batch, params);
 }
 
-static void
+static void *
 blorp_get_compute_push_const(struct blorp_batch *batch,
                              const struct blorp_params *params,
                              uint32_t threads,
                              uint32_t *state_offset,
-                             unsigned *state_size)
+                             uint32_t *state_size,
+                             uint32_t *state_surfaces_offset,
+                             uint32_t *state_sampler_offset)
 {
    const struct brw_cs_prog_data *cs_prog_data = params->cs_prog_data;
-   const unsigned push_const_size =
+   uint32_t push_const_size =
       align(brw_cs_push_const_total_size(cs_prog_data, threads), 64);
    assert(cs_prog_data->push.cross_thread.size +
           cs_prog_data->push.per_thread.size == sizeof(params->wm_inputs));
 
+#if GFX_VERx10 >= 350
+   const bool use_efficient_64bit = params->use_efficient_64bit;
+   uint32_t io_align, io_size, push_offset, sampler_offset;
+   if (use_efficient_64bit) {
+      blorp_get_efficient_64bit_io_size(batch, params, &io_align, &io_size,
+                                        &sampler_offset,
+                                        &push_offset);
+      push_const_size = align(push_const_size, io_align);
+      push_const_size += io_size;
+   }
+#endif
+
    if (push_const_size == 0) {
       *state_offset = 0;
       *state_size = 0;
-      return;
+      return NULL;
    }
 
    uint32_t push_const_offset;
    uint32_t *push_const =
-      GFX_VERx10 >= 125 ?
-      blorp_alloc_general_state(batch, push_const_size, 64,
-                                &push_const_offset) :
       blorp_alloc_dynamic_state(batch, push_const_size, 64,
                                 &push_const_offset);
    if (push_const == NULL) {
       *state_offset = 0;
       *state_size = 0;
-      return;
+      return NULL;
    }
    memset(push_const, 0x0, push_const_size);
 
@@ -1789,6 +2065,15 @@ blorp_get_compute_push_const(struct blorp_batch *batch,
 
    *state_offset = push_const_offset;
    *state_size = push_const_size;
+
+#if GFX_VERx10 >= 350
+   if (use_efficient_64bit) {
+      *state_surfaces_offset = push_const_size - io_size;
+      *state_sampler_offset = push_const_size - io_size + sampler_offset;
+   }
+#endif
+
+   return push_const;
 }
 
 static void
@@ -1983,198 +2268,312 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
    uint32_t group_z1 = params->num_samples * params->num_layers;
    assert(cs_prog_data->local_size[2] == 1);
    uint32_t push_const_offset;
-   unsigned push_const_size;
+   uint32_t push_const_size;
+   uint32_t surfaces_offset = 0;
+   uint32_t sampler_offset = 0;
 
-   uint32_t surfaces_offset = blorp_setup_binding_table(batch, params);
-   uint32_t samplers_offset =
-      params->src.enabled ? blorp_emit_sampler_state(batch) : 0;
-   blorp_get_compute_push_const(batch, params, dispatch.threads,
-                                &push_const_offset, &push_const_size);
+   UNUSED void *push_const_ptr =
+      blorp_get_compute_push_const(batch, params, dispatch.threads,
+                                   &push_const_offset, &push_const_size,
+                                   &surfaces_offset, &sampler_offset);
+   UNUSED const uint64_t push_addr64 = _blorp_combine_address(
+      batch, NULL, blorp_dynamic_state_address(batch, push_const_offset), 0);
 
-#if GFX_VERx10 >= 125
-   const bool has_vrt = devinfo->verx10 >= 300 && !INTEL_DEBUG(DEBUG_NO_VRT);
+   if (GFX_VERx10 >= 350 && batch->blorp->config.use_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      uint8_t pixel_async_compute_thread_limit;
+      uint8_t z_pass_async_compute_thread_limit;
+      uint8_t np_z_async_throttle_settings;
+      const bool slm_or_barrier_enabled =
+         cs_prog_data->base.total_shared != 0 ||
+         cs_prog_data->uses_barrier;
 
-   if (!has_vrt) {
-      uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
-            np_z_async_throttle_settings;
-      bool slm_or_barrier_enabled = prog_data->total_shared != 0 || cs_prog_data->uses_barrier;
+      blorp_emit_efficient_64bit_io(batch, params,
+                                    push_const_ptr + surfaces_offset,
+                                    push_const_ptr + sampler_offset);
+
+      uint64_t surfaces_addr64 = _blorp_combine_address(
+         batch, NULL, blorp_dynamic_state_address(batch, push_const_offset + surfaces_offset), 0);
+      uint64_t sampler_addr64 = _blorp_combine_address(
+         batch, NULL,
+         blorp_dynamic_state_address(
+            batch,
+            batch->blorp->config.use_cached_dynamic_states ?
+            blorp_get_dynamic_state(batch, BLORP_DYNAMIC_STATE_SAMPLER) :
+            (push_const_offset + sampler_offset)), 0);
 
       intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
-                                             slm_or_barrier_enabled,
-                                             cs_prog_data->uses_fence,
-                                             &pixel_async_compute_thread_limit,
-                                             &z_pass_async_compute_thread_limit,
-                                             &np_z_async_throttle_settings);
-      blorp_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
-#if GFX_VER >= 20
-         cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
-         cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
-         cm.AsyncComputeThreadLimitMask = 0x7;
-         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
-         cm.ZAsyncThrottlesettingsMask = 0x3;
-#else
-         cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
-         cm.PixelAsyncComputeThreadLimitMask = 0x7;
-         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
-         if (intel_device_info_is_mtl_or_arl(devinfo)) {
-            cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
-            cm.ZAsyncThrottlesettingsMask = 0x3;
-         }
-#endif
-      }
-   }
+                                               slm_or_barrier_enabled,
+                                               cs_prog_data->uses_fence,
+                                               &pixel_async_compute_thread_limit,
+                                               &z_pass_async_compute_thread_limit,
+                                               &np_z_async_throttle_settings);
 
-   struct GENX(COMPUTE_WALKER_BODY) body = {
-      .SIMDSize                       = dispatch.simd_size / 16,
-      .MessageSIMD                    = dispatch.simd_size / 16,
-      .LocalXMaximum                  = cs_prog_data->local_size[0] - 1,
-      .LocalYMaximum                  = cs_prog_data->local_size[1] - 1,
-      .LocalZMaximum                  = cs_prog_data->local_size[2] - 1,
-      .ThreadGroupIDStartingX         = group_x0,
-      .ThreadGroupIDStartingY         = group_y0,
-      .ThreadGroupIDStartingZ         = group_z0,
-      .ThreadGroupIDXDimension        = group_x1,
-      .ThreadGroupIDYDimension        = group_y1,
-      .ThreadGroupIDZDimension        = group_z1,
-      .ExecutionMask                  = dispatch.right_mask,
-      .PostSync.MOCS                  = isl_mocs(batch->blorp->isl_dev, 0, false),
+      struct GENX(POSTSYNC_DATA_2) post_sync = {
+         .MOCS = isl_mocs(batch->blorp->isl_dev, 0, false),
+      };
+      struct GENX(COMPUTE_WALKER_BODY_2) body = {
+         .MaximumNumberofThreads         = devinfo->max_cs_threads * devinfo->subslice_total,
+         .SIMDSize                       = dispatch.simd_size / 16,
+         .MessageSIMD                    = dispatch.simd_size / 16,
+         .LocalXMaximum                  = cs_prog_data->local_size[0] - 1,
+         .LocalYMaximum                  = cs_prog_data->local_size[1] - 1,
+         .LocalZMaximum                  = cs_prog_data->local_size[2] - 1,
+         .ThreadGroupIDStartingX         = group_x0,
+         .ThreadGroupIDStartingY         = group_y0,
+         .ThreadGroupIDStartingZ         = group_z0,
+         .ThreadGroupIDXDimension        = group_x1,
+         .ThreadGroupIDYDimension        = group_y1,
+         .ThreadGroupIDZDimension        = group_z1,
+         .ExecutionMask                  = dispatch.right_mask,
+         .Post_sync_opn0                 = post_sync,
+         .Post_sync_opn1                 = post_sync,
+         .Post_sync_opn2                 = post_sync,
+         .Post_sync_opn3                 = post_sync,
 
-      .IndirectDataStartAddress       = push_const_offset,
-      .IndirectDataLength             = push_const_size,
+         /* Send number of layers as inline register parameter to copy 2D MSAA
+          * array image/texture properly.
+          */
+         .EmitInlineParameter            = true,
+         .InlineData                     = {
+            [BLORP_INLINE_PARAM_PUSH_ADDRESS_LDW / 4]                = push_addr64 & 0xffffffff,
+            [BLORP_INLINE_PARAM_PUSH_ADDRESS_UDW / 4]                = push_addr64 >> 32,
+            [BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION / 4 + 0] = params->num_layers,
+            [BLORP_INLINE_PARAM_SURFACES_LDW / 4]                    = surfaces_addr64 & 0xffffffff,
+            [BLORP_INLINE_PARAM_SURFACES_UDW / 4]                    = surfaces_addr64 >> 32,
+            [BLORP_INLINE_PARAM_SAMPLER_LDW / 4]                     = sampler_addr64 & 0xffffffff,
+            [BLORP_INLINE_PARAM_SAMPLER_UDW / 4]                     = sampler_addr64 >> 32,
+         },
 
-      /* Send number of layers as inline register parameter to copy 2D MSAA
-       * array image/texture properly.
-       */
-      .EmitInlineParameter            = true,
-      .InlineData                     = {
-         [BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION / 4 + 0] = params->num_layers,
-      },
+         .GenerateLocalID                = cs_prog_data->generate_local_id != 0,
+         .EmitLocal                      = cs_prog_data->generate_local_id,
+         .WalkOrder                      = cs_prog_data->walk_order,
+         .TileLayout                     = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                                           TileY32bpe : Linear,
+         /* HSD 14016252163 */
+         .DispatchWalkOrder              = cs_prog_data->uses_sampler ? MortonWalk : LinearWalk,
+         .ThreadGroupBatchSize           = cs_prog_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
+         .StatCountDisable               = true,
 
-      .GenerateLocalID                = cs_prog_data->generate_local_id != 0,
-      .EmitLocal                      = cs_prog_data->generate_local_id,
-      .WalkOrder                      = cs_prog_data->walk_order,
-      .TileLayout = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
-                    TileY32bpe : Linear,
-#if GFX_VER >= 30
-      /* HSD 14016252163 */
-      .DispatchWalkOrder = cs_prog_data->uses_sampler ? MortonWalk : LinearWalk,
-      .ThreadGroupBatchSize = cs_prog_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
-#endif
-
-      .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-         .KernelStartPointer = params->cs_prog_kernel,
-         .SamplerStatePointer = samplers_offset,
-         .SamplerCount = params->src.enabled ? 1 : 0,
-         .BindingTableEntryCount = params->src.enabled ? 2 : 1,
-         .BindingTablePointer = surfaces_offset,
-         .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
-         .ThreadGroupDispatchSize =
-            intel_compute_threads_group_dispatch_size(dispatch.threads),
-         .SharedLocalMemorySize =
+         .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
+            .KernelStartPointer = params->cs_prog_kernel +
+               brw_cs_prog_data_prog_offset(cs_prog_data, dispatch.simd_size),
+            .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+            .ThreadGroupDispatchSize =
+               intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
+            .SharedLocalMemorySize =
             intel_compute_slm_encode_size(GFX_VER, prog_data->total_shared),
-         .PreferredSLMAllocationSize =
+            .PreferredSLMAllocationSize =
+               intel_compute_preferred_slm_calc_encode_size(devinfo,
+                                                            prog_data->total_shared,
+                                                            dispatch.group_size,
+                                                            dispatch.simd_size),
+            .NumberOfBarriers = cs_prog_data->uses_barrier,
+            .RegistersPerThread = intel_register_blocks(devinfo, prog_data->grf_used),
+            .PSAsyncThreadLimit = pixel_async_compute_thread_limit,
+            .ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit,
+            .NP_ZAsyncThrottlesettings = np_z_async_throttle_settings,
+         },
+      };
+
+      assert(cs_prog_data->push.per_thread.regs == 0);
+      blorp_emit(batch, GENX(COMPUTE_WALKER_2), cw) {
+         cw.IndirectParameterEnable = use_indirect;
+         cw.body = body;
+      }
+#endif /* GFX_VERx10 >= 350 */
+   } else {
+      uint32_t surfaces_offset = blorp_setup_binding_table(batch, params);
+      uint32_t samplers_offset =
+         params->src.enabled ? blorp_emit_sampler_state(batch) : 0;
+
+#if GFX_VERx10 >= 125
+      const bool has_vrt = devinfo->verx10 >= 300 && !INTEL_DEBUG(DEBUG_NO_VRT);
+
+      if (!has_vrt) {
+         uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
+            np_z_async_throttle_settings;
+         bool slm_or_barrier_enabled = prog_data->total_shared != 0 || cs_prog_data->uses_barrier;
+
+         intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
+                                                  slm_or_barrier_enabled,
+                                                  cs_prog_data->uses_fence,
+                                                  &pixel_async_compute_thread_limit,
+                                                  &z_pass_async_compute_thread_limit,
+                                                  &np_z_async_throttle_settings);
+         blorp_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 20
+            cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+            cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+            cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+            cm.AsyncComputeThreadLimitMask = 0x7;
+            cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+            cm.ZAsyncThrottlesettingsMask = 0x3;
+#else
+            cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+            cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+            cm.PixelAsyncComputeThreadLimitMask = 0x7;
+            cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+            if (intel_device_info_is_mtl_or_arl(devinfo)) {
+               cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+               cm.ZAsyncThrottlesettingsMask = 0x3;
+            }
+#endif
+         }
+      }
+
+      struct GENX(COMPUTE_WALKER_BODY) body = {
+         .SIMDSize                       = dispatch.simd_size / 16,
+         .MessageSIMD                    = dispatch.simd_size / 16,
+         .LocalXMaximum                  = cs_prog_data->local_size[0] - 1,
+         .LocalYMaximum                  = cs_prog_data->local_size[1] - 1,
+         .LocalZMaximum                  = cs_prog_data->local_size[2] - 1,
+         .ThreadGroupIDStartingX         = group_x0,
+         .ThreadGroupIDStartingY         = group_y0,
+         .ThreadGroupIDStartingZ         = group_z0,
+         .ThreadGroupIDXDimension        = group_x1,
+         .ThreadGroupIDYDimension        = group_y1,
+         .ThreadGroupIDZDimension        = group_z1,
+         .ExecutionMask                  = dispatch.right_mask,
+         .PostSync.MOCS                  = isl_mocs(batch->blorp->isl_dev, 0, false),
+
+         /* Send number of layers as inline register parameter to copy 2D MSAA
+          * array image/texture properly.
+          */
+         .EmitInlineParameter            = true,
+         .InlineData                     = {
+            [BLORP_INLINE_PARAM_PUSH_ADDRESS_LDW / 4]                = push_addr64 & 0xffffffff,
+            [BLORP_INLINE_PARAM_PUSH_ADDRESS_UDW / 4]                = push_addr64 >> 32,
+            [BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION / 4 + 0] = params->num_layers,
+         },
+
+         .GenerateLocalID                = cs_prog_data->generate_local_id != 0,
+         .EmitLocal                      = cs_prog_data->generate_local_id,
+         .WalkOrder                      = cs_prog_data->walk_order,
+         .TileLayout                     = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                                           TileY32bpe : Linear,
+#if GFX_VER >= 30
+         /* HSD 14016252163 */
+         .DispatchWalkOrder              = cs_prog_data->uses_sampler ? MortonWalk : LinearWalk,
+         .ThreadGroupBatchSize           = cs_prog_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
+#endif
+
+         .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
+            .KernelStartPointer = params->cs_prog_kernel +
+               brw_cs_prog_data_prog_offset(cs_prog_data, dispatch.simd_size),
+            .SamplerStatePointer = samplers_offset,
+            .SamplerCount = params->src.enabled ? 1 : 0,
+            .BindingTableEntryCount = params->src.enabled ? 2 : 1,
+            .BindingTablePointer = surfaces_offset,
+            .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+            .ThreadGroupDispatchSize =
+            intel_compute_threads_group_dispatch_size(dispatch.threads),
+            .SharedLocalMemorySize =
+            intel_compute_slm_encode_size(GFX_VER, prog_data->total_shared),
+            .PreferredSLMAllocationSize =
             intel_compute_preferred_slm_calc_encode_size(devinfo,
                                                          prog_data->total_shared,
                                                          dispatch.group_size,
                                                          dispatch.simd_size),
-         .NumberOfBarriers = cs_prog_data->uses_barrier,
+            .NumberOfBarriers = cs_prog_data->uses_barrier,
 #if GFX_VER >= 30
-         .RegistersPerThread =
+            .RegistersPerThread =
             intel_register_blocks(devinfo, prog_data->grf_used),
 #endif
-      },
-   };
+         },
+      };
 
-   assert(cs_prog_data->push.per_thread.regs == 0);
-   blorp_emit(batch, GENX(COMPUTE_WALKER), cw) {
-      cw.IndirectParameterEnable = use_indirect,
-      cw.body = body;
-   }
+      assert(cs_prog_data->push.per_thread.regs == 0);
+      blorp_emit(batch, GENX(COMPUTE_WALKER), cw) {
+         cw.IndirectParameterEnable = use_indirect;
+         cw.body = body;
+      }
+
 #else /* GFX_VERx10 >= 125 */
 
-   /* The MEDIA_VFE_STATE documentation for Gfx8+ says:
-    *
-    * "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE unless
-    *  the only bits that are changed are scoreboard related: Scoreboard
-    *  Enable, Scoreboard Type, Scoreboard Mask, Scoreboard * Delta. For
-    *  these scoreboard related states, a MEDIA_STATE_FLUSH is sufficient."
-    *
-    * Earlier generations say "MI_FLUSH" instead of "stalling PIPE_CONTROL",
-    * but MI_FLUSH isn't really a thing, so we assume they meant PIPE_CONTROL.
-    */
-   blorp_emit(batch, GENX(PIPE_CONTROL), pc) {
-      pc.CommandStreamerStallEnable = true;
-      pc.StallAtPixelScoreboard = true;
-   }
+      /* The MEDIA_VFE_STATE documentation for Gfx8+ says:
+       *
+       * "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE unless
+       *  the only bits that are changed are scoreboard related: Scoreboard
+       *  Enable, Scoreboard Type, Scoreboard Mask, Scoreboard * Delta. For
+       *  these scoreboard related states, a MEDIA_STATE_FLUSH is sufficient."
+       *
+       * Earlier generations say "MI_FLUSH" instead of "stalling
+       * PIPE_CONTROL", but MI_FLUSH isn't really a thing, so we assume they
+       * meant PIPE_CONTROL.
+       */
+      blorp_emit(batch, GENX(PIPE_CONTROL), pc) {
+         pc.CommandStreamerStallEnable = true;
+         pc.StallAtPixelScoreboard = true;
+      }
 
-   blorp_emit(batch, GENX(MEDIA_VFE_STATE), vfe) {
-      assert(prog_data->total_scratch == 0);
-      vfe.MaximumNumberofThreads =
-         devinfo->max_cs_threads * devinfo->subslice_total - 1;
-      vfe.NumberofURBEntries = 2;
+      blorp_emit(batch, GENX(MEDIA_VFE_STATE), vfe) {
+         assert(prog_data->total_scratch == 0);
+         vfe.MaximumNumberofThreads =
+            devinfo->max_cs_threads * devinfo->subslice_total - 1;
+         vfe.NumberofURBEntries = 2;
 #if GFX_VER < 11
-      vfe.ResetGatewayTimer =
-         Resettingrelativetimerandlatchingtheglobaltimestamp;
+         vfe.ResetGatewayTimer =
+            Resettingrelativetimerandlatchingtheglobaltimestamp;
 #endif
-      vfe.URBEntryAllocationSize = 2;
+         vfe.URBEntryAllocationSize = 2;
 
-      const uint32_t vfe_curbe_allocation =
-         align(cs_prog_data->push.per_thread.regs * dispatch.threads +
-               cs_prog_data->push.cross_thread.regs, 2);
-      vfe.CURBEAllocationSize = vfe_curbe_allocation;
-   }
+         const uint32_t vfe_curbe_allocation =
+            align(cs_prog_data->push.per_thread.regs * dispatch.threads +
+                  cs_prog_data->push.cross_thread.regs, 2);
+         vfe.CURBEAllocationSize = vfe_curbe_allocation;
+      }
 
-   blorp_emit(batch, GENX(MEDIA_CURBE_LOAD), curbe) {
-      curbe.CURBETotalDataLength = push_const_size;
-      curbe.CURBEDataStartAddress = push_const_offset;
-   }
+      blorp_emit(batch, GENX(MEDIA_CURBE_LOAD), curbe) {
+         curbe.CURBETotalDataLength = push_const_size;
+         curbe.CURBEDataStartAddress = push_const_offset;
+      }
 
-   struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {
-      .KernelStartPointer = params->cs_prog_kernel,
-      .SamplerStatePointer = samplers_offset,
-      .SamplerCount = params->src.enabled ? 1 : 0,
-      .BindingTableEntryCount = params->src.enabled ? 2 : 1,
-      .BindingTablePointer = surfaces_offset,
-      .ConstantURBEntryReadLength = cs_prog_data->push.per_thread.regs,
-      .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
-      .SharedLocalMemorySize = intel_compute_slm_encode_size(GFX_VER,
-                                                             prog_data->total_shared),
-      .BarrierEnable = cs_prog_data->uses_barrier,
-      .CrossThreadConstantDataReadLength =
+      struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {
+         .KernelStartPointer = params->cs_prog_kernel +
+            brw_cs_prog_data_prog_offset(cs_prog_data, dispatch.simd_size),
+         .SamplerStatePointer = samplers_offset,
+         .SamplerCount = params->src.enabled ? 1 : 0,
+         .BindingTableEntryCount = params->src.enabled ? 2 : 1,
+         .BindingTablePointer = surfaces_offset,
+         .ConstantURBEntryReadLength = cs_prog_data->push.per_thread.regs,
+         .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+         .SharedLocalMemorySize = intel_compute_slm_encode_size(GFX_VER,
+                                                                prog_data->total_shared),
+         .BarrierEnable = cs_prog_data->uses_barrier,
+         .CrossThreadConstantDataReadLength =
          cs_prog_data->push.cross_thread.regs,
-   };
+      };
 
-   uint32_t idd_offset;
-   uint32_t size = GENX(INTERFACE_DESCRIPTOR_DATA_length) * sizeof(uint32_t);
-   void *state = blorp_alloc_dynamic_state(batch, size, 64, &idd_offset);
-   if (state == NULL)
-      return;
-   GENX(INTERFACE_DESCRIPTOR_DATA_pack)(NULL, state, &idd);
+      uint32_t idd_offset;
+      uint32_t size = GENX(INTERFACE_DESCRIPTOR_DATA_length) * sizeof(uint32_t);
+      void *state = blorp_alloc_dynamic_state(batch, size, 64, &idd_offset);
+      if (state == NULL)
+         return;
+      GENX(INTERFACE_DESCRIPTOR_DATA_pack)(NULL, state, &idd);
 
-   blorp_emit(batch, GENX(MEDIA_INTERFACE_DESCRIPTOR_LOAD), mid) {
-      mid.InterfaceDescriptorTotalLength        = size;
-      mid.InterfaceDescriptorDataStartAddress   = idd_offset;
-   }
+      blorp_emit(batch, GENX(MEDIA_INTERFACE_DESCRIPTOR_LOAD), mid) {
+         mid.InterfaceDescriptorTotalLength        = size;
+         mid.InterfaceDescriptorDataStartAddress   = idd_offset;
+      }
 
-   blorp_emit(batch, GENX(GPGPU_WALKER), ggw) {
-      ggw.IndirectParameterEnable      = use_indirect,
-      ggw.SIMDSize                     = dispatch.simd_size / 16;
-      ggw.ThreadDepthCounterMaximum    = 0;
-      ggw.ThreadHeightCounterMaximum   = 0;
-      ggw.ThreadWidthCounterMaximum    = dispatch.threads - 1;
-      ggw.ThreadGroupIDStartingX       = group_x0;
-      ggw.ThreadGroupIDStartingY       = group_y0;
-      ggw.ThreadGroupIDStartingResumeZ = group_z0;
-      ggw.ThreadGroupIDXDimension      = group_x1;
-      ggw.ThreadGroupIDYDimension      = group_y1;
-      ggw.ThreadGroupIDZDimension      = group_z1;
-      ggw.RightExecutionMask           = dispatch.right_mask;
-      ggw.BottomExecutionMask          = 0xffffffff;
-   }
-
+      blorp_emit(batch, GENX(GPGPU_WALKER), ggw) {
+         ggw.IndirectParameterEnable      = use_indirect,
+            ggw.SIMDSize                     = dispatch.simd_size / 16;
+         ggw.ThreadDepthCounterMaximum    = 0;
+         ggw.ThreadHeightCounterMaximum   = 0;
+         ggw.ThreadWidthCounterMaximum    = dispatch.threads - 1;
+         ggw.ThreadGroupIDStartingX       = group_x0;
+         ggw.ThreadGroupIDStartingY       = group_y0;
+         ggw.ThreadGroupIDStartingResumeZ = group_z0;
+         ggw.ThreadGroupIDXDimension      = group_x1;
+         ggw.ThreadGroupIDYDimension      = group_y1;
+         ggw.ThreadGroupIDZDimension      = group_z1;
+         ggw.RightExecutionMask           = dispatch.right_mask;
+         ggw.BottomExecutionMask          = 0xffffffff;
+      }
 #endif /* GFX_VERx10 >= 125 */
+   }
 
    blorp_measure_end(batch, params);
 }

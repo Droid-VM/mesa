@@ -15,6 +15,7 @@ libpanfrost_bifrost_files = files(
   'bi_lower_spill.c',
   'bi_lower_swizzle.c',
   'bi_print.c',
+  'bi_print_common.c',
   'bi_opt_control_flow.c',
   'bi_opt_constant_fold.c',
   'bi_opt_copy_prop.c',
@@ -51,15 +52,6 @@ libpanfrost_bifrost_files = files(
   'valhall/va_pack.c',
   'valhall/va_perf.c',
   'valhall/va_validate.c',
-)
-
-bifrost_gen_disasm_c = custom_target(
-  'bifrost_gen_disasm.c',
-  input : ['gen_disasm.py', 'bifrost/ISA.xml'],
-  output : 'bifrost_gen_disasm.c',
-  command : [prog_python, '@INPUT@'],
-  capture : true,
-  depend_files : files('bifrost_isa.py'),
 )
 
 bi_opcodes_c = custom_target(
@@ -137,9 +129,19 @@ bifrost_nir_algebraic_c = custom_target(
   depend_files : nir_algebraic_depends,
 )
 
+libpanfrost_disasm = []
+bifrost_gen_disasm_c = custom_target(
+  'bifrost_gen_disasm.c',
+  input : ['gen_disasm.py', 'bifrost/ISA.xml'],
+  output : 'bifrost_gen_disasm.c',
+  command : [prog_python, '@INPUT@'],
+  capture : true,
+  depend_files : files('bifrost_isa.py'),
+)
+
 libpanfrost_bifrost_disasm = static_library(
   'panfrost_bifrost_disasm',
-  ['bifrost/disassemble.c', 'bi_print_common.c', bifrost_gen_disasm_c],
+  ['bifrost/disassemble.c', bifrost_gen_disasm_c],
   include_directories : [inc_include, inc_src],
   dependencies: [idep_nir],
   c_args : [no_override_init_args, soong_compat_c_args],
@@ -147,12 +149,14 @@ libpanfrost_bifrost_disasm = static_library(
   build_by_default : false,
 )
 
+libpanfrost_disasm += [libpanfrost_bifrost_disasm, libpanfrost_valhall_disasm]
+
 libpanfrost_bifrost = static_library(
   'panfrost_bifrost',
   [libpanfrost_bifrost_files, bi_opcodes_c, bi_swizzles_c, bi_printer_c, bi_packer_c, bifrost_nir_algebraic_c, valhall_c ],
   include_directories : [inc_include, inc_src, inc_valhall],
   dependencies: [idep_nir, idep_bi_opcodes_h, idep_bi_builder_h, idep_valhall_enums_h, libpanfrost_model_dep],
-  link_with: [libpanfrost_bifrost_disasm, libpanfrost_valhall_disasm],
+  link_with: libpanfrost_disasm,
   c_args : [libpanfrost_compiler_c_args],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,

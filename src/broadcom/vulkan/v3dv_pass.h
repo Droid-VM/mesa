@@ -29,22 +29,48 @@
 struct v3dv_device;
 struct v3dv_image_view;
 
-struct v3dv_subpass_attachment {
-   uint32_t attachment;
-   VkImageLayout layout;
-};
+typedef uint32_t v3dv_subpass_attachment;
 
 struct v3dv_subpass {
    uint32_t input_count;
-   struct v3dv_subpass_attachment *input_attachments;
+   v3dv_subpass_attachment *input_attachments;
 
    uint32_t color_count;
-   struct v3dv_subpass_attachment *color_attachments;
-   struct v3dv_subpass_attachment *resolve_attachments;
+   v3dv_subpass_attachment *color_attachments;
+   v3dv_subpass_attachment *resolve_attachments;
 
-   struct v3dv_subpass_attachment ds_attachment;
-   struct v3dv_subpass_attachment ds_resolve_attachment;
+   v3dv_subpass_attachment ds_attachment;
+   v3dv_subpass_attachment ds_resolve_attachment;
    bool resolve_depth, resolve_stencil;
+
+   /* UINT8_MAX disables TLB access for an input attachment. */
+   uint8_t tlb_input_attachment_location[MAX_INPUT_ATTACHMENTS];
+   bool has_tlb_color_input_self_dependency;
+   bool has_tlb_depth_stencil_input_self_dependency;
+   bool is_tlb_color_memory_barrier_safe;
+
+   /* Static compatibility with the previous subpass; job state is checked later. */
+   bool can_merge_with_previous;
+
+   uint8_t max_internal_bpp;
+   uint8_t total_color_bpp;
+   uint8_t view_layers;
+   bool msaa;
+
+   /* Tile sizes with MSAA disabled/enabled, and with double-buffer enabled. */
+   VkExtent2D tile_size[2];
+   VkExtent2D double_buffer_tile_size;
+
+   /* Combined color/depth/stencil requirements for double-buffer eligibility:
+    * earliest first use, latest last use, and whether any aspect loads/stores.
+    */
+   struct {
+      VkImageAspectFlags aspects;
+      uint32_t first_subpass;
+      uint32_t last_subpass;
+      VkAttachmentLoadOp load_op;
+      VkAttachmentStoreOp store_op;
+   } double_buffer;
 
    /* If we need to emit the clear of the depth/stencil attachment using a
     * a draw call instead of using the TLB (GFXH-1461).
@@ -85,13 +111,15 @@ struct v3dv_render_pass {
 
    bool multiview_enabled;
 
+   VkExtent2D granularity;
+
    uint32_t attachment_count;
    struct v3dv_render_pass_attachment *attachments;
 
    uint32_t subpass_count;
    struct v3dv_subpass *subpasses;
 
-   struct v3dv_subpass_attachment *subpass_attachments;
+   v3dv_subpass_attachment *subpass_attachments;
 };
 
 struct v3dv_framebuffer {

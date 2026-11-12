@@ -193,7 +193,10 @@ init_buffer(struct d3d12_screen *screen,
 
    buf_desc.alignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
    res->dxgi_format = DXGI_FORMAT_UNKNOWN;
-   buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
+   do {
+      buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
+   } while (!buf && d3d12_screen_reclaim_one(screen));
+
    if (!buf)
       return false;
    res->bo = d3d12_bo_wrap_buffer(screen, buf);
@@ -548,6 +551,30 @@ d3d12_resource_create(struct pipe_screen *pscreen,
    return d3d12_resource_create_or_place(d3d12_screen(pscreen), res, templ, nullptr, 0);
 }
 
+/* A staging buffer backed by a CPU-visible readback heap can be mapped directly
+ * instead of going through a staging copy. Resources allocated with the properties
+ * returned by GetCustomHeapProperties(D3D12_HEAP_TYPE_READBACK) report their heap
+ * as CUSTOM with CPUPageProperty WRITE_BACK and MemoryPoolPreference L0, so accept
+ * both ways.
+ */
+static bool
+d3d12_resource_can_import_as_staging(const struct pipe_resource *templ, 
+                                     ID3D12Resource *resource)
+{
+   if (!templ || templ->usage != PIPE_USAGE_STAGING)
+      return false;
+
+   D3D12_HEAP_PROPERTIES heap_props = {};
+   D3D12_HEAP_FLAGS heap_flags = D3D12_HEAP_FLAG_NONE;
+   if (FAILED(resource->GetHeapProperties(&heap_props, &heap_flags)))
+      return false;
+
+   return heap_props.Type == D3D12_HEAP_TYPE_READBACK ||
+          (heap_props.Type == D3D12_HEAP_TYPE_CUSTOM &&
+           heap_props.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_BACK &&
+           heap_props.MemoryPoolPreference == D3D12_MEMORY_POOL_L0);
+}
+
 static struct pipe_resource *
 d3d12_resource_from_handle(struct pipe_screen *pscreen,
                           const struct pipe_resource *templ,
@@ -712,7 +739,8 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
    }
    res->base.b.nr_samples = static_cast<uint8_t>(incoming_res_desc.SampleDesc.Count);
    res->base.b.last_level = static_cast<uint8_t>(incoming_res_desc.MipLevels - 1);
-   res->base.b.usage = PIPE_USAGE_DEFAULT;
+   res->base.b.usage = d3d12_resource_can_import_as_staging(templ, d3d12_res) ?
+      PIPE_USAGE_STAGING : PIPE_USAGE_DEFAULT;
    res->base.b.bind |= PIPE_BIND_SHARED;
    if (incoming_res_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
       res->base.b.bind |= PIPE_BIND_RENDER_TARGET | PIPE_BIND_BLENDABLE | PIPE_BIND_DISPLAY_TARGET;

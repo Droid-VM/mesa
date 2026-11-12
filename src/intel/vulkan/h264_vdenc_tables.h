@@ -1,5 +1,265 @@
 #ifndef _H264_VDENC_TABLES_H_
 
+#if GFX_VERx10 < 125
+static const uint8_t vdenc_const_qp_lambda[42] = {
+   0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02,
+   0x02, 0x03, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x07,
+   0x07, 0x08, 0x09, 0x0a, 0x0c, 0x0d, 0x0f, 0x11, 0x13, 0x15,
+   0x17, 0x1a, 0x1e, 0x21, 0x25, 0x2a, 0x2f, 0x35, 0x3b, 0x42,
+   0x4a, 0x53,
+};
+
+/* P frame */
+static const uint8_t vdenc_const_qp_lambda_p[42] = {
+   0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02,
+   0x02, 0x03, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x07,
+   0x07, 0x08, 0x09, 0x0a, 0x0c, 0x0d, 0x0f, 0x11, 0x13, 0x15,
+   0x17, 0x1a, 0x1e, 0x21, 0x25, 0x2a, 0x2f, 0x35, 0x3b, 0x42,
+   0x4a, 0x53,
+};
+
+static const uint16_t vdenc_const_skip_threshold_p[27] = {
+   0x0000, 0x0000, 0x0000, 0x0000, 0x0002, 0x0004, 0x0007, 0x000b,
+   0x0011, 0x0019, 0x0023, 0x0032, 0x0044, 0x005b, 0x0077, 0x0099,
+   0x00c2, 0x00f1, 0x0128, 0x0168, 0x01b0, 0x0201, 0x025c, 0x02c2,
+   0x0333, 0x03b0, 0x0000,
+};
+
+static const uint16_t vdenc_const_sic_forward_transform_coeff_threshold_0_p[27] = {
+   0x02, 0x02, 0x03, 0x04, 0x04, 0x05, 0x07, 0x09, 0x0b, 0x0e,
+   0x12, 0x14, 0x18, 0x1d, 0x20, 0x25, 0x2a, 0x34, 0x39, 0x3f,
+   0x4e, 0x51, 0x5b, 0x63, 0x6f, 0x7f, 0x00,
+};
+
+static const uint8_t vdenc_const_sic_forward_transform_coeff_threshold_1_p[27] = {
+   0x03, 0x04, 0x05, 0x05, 0x07, 0x09, 0x0b, 0x0e, 0x12, 0x17,
+   0x1c, 0x21, 0x27, 0x2c, 0x33, 0x3b, 0x41, 0x51, 0x5c, 0x1a,
+   0x1e, 0x21, 0x22, 0x26, 0x2c, 0x30, 0x00,
+};
+
+static const uint8_t vdenc_const_sic_forward_transform_coeff_threshold_2_p[27] = {
+   0x02, 0x02, 0x03, 0x04, 0x04, 0x05, 0x07, 0x09, 0x0b, 0x0e,
+   0x12, 0x14, 0x18, 0x1d, 0x20, 0x25, 0x2a, 0x34, 0x39, 0x0f,
+   0x13, 0x14, 0x16, 0x18, 0x1b, 0x1f, 0x00,
+};
+
+static const uint8_t vdenc_const_sic_forward_transform_coeff_threshold_3_p[27] = {
+   0x04, 0x05, 0x06, 0x09, 0x0b, 0x0d, 0x12, 0x16, 0x1b, 0x23,
+   0x2c, 0x33, 0x3d, 0x45, 0x4f, 0x5b, 0x66, 0x7f, 0x8e, 0x2a,
+   0x2f, 0x32, 0x37, 0x3c, 0x45, 0x4c, 0x00,
+};
+
+static const int vdenc_mode_const[2][12][52] = {
+    //INTRASLICE
+    {
+        //LUTMODE_INTRA_NONPRED
+        {
+            14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,         //QP=[0 ~12]
+            16, 18, 22, 24, 13, 15, 16, 18, 13, 15, 15, 12, 14,         //QP=[13~25]
+            12, 12, 10, 10, 11, 10, 10, 10, 9, 9, 8, 8, 8,              //QP=[26~38]
+            8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 7,                      //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_16x16, LUTMODE_INTRA
+        {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[0 ~12]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[13~25]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[26~38]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_8x8
+        {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  //QP=[0 ~12]
+            0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,  //QP=[13~25]
+            1, 1, 1, 1, 1, 4, 4, 4, 4, 6, 6, 6, 6,  //QP=[26~38]
+            6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7,  //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_4x4
+        {
+            56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56,   //QP=[0 ~12]
+            64, 72, 80, 88, 48, 56, 64, 72, 53, 59, 64, 56, 64,   //QP=[13~25]
+            57, 64, 58, 55, 64, 64, 64, 64, 59, 59, 60, 57, 50,   //QP=[26~38]
+            46, 42, 38, 34, 31, 27, 23, 22, 19, 18, 16, 14, 13,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_16x8, LUTMODE_INTER_8x16
+        { 0, },
+
+        //LUTMODE_INTER_8X8Q
+        { 0, },
+
+        //LUTMODE_INTER_8X4Q, LUTMODE_INTER_4X8Q, LUTMODE_INTER_16x8_FIELD
+        { 0, },
+
+        //LUTMODE_INTER_4X4Q, LUTMODE_INTER_8X8_FIELD
+        { 0, },
+
+        //LUTMODE_INTER_16x16, LUTMODE_INTER
+        { 0, },
+
+        //LUTMODE_INTER_BWD
+        { 0, },
+
+        //LUTMODE_REF_ID
+        { 0, },
+
+        //LUTMODE_INTRA_CHROMA
+        { 0, },
+    },
+
+    //PREDSLICE
+    {
+        //LUTMODE_INTRA_NONPRED
+        {
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,     //QP=[0 ~12]
+            7, 8, 9, 10, 5, 6, 7, 8, 6, 7, 7, 7, 7,    //QP=[13~25]
+            6, 7, 7, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7,     //QP=[26~38]
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,     //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_16x16, LUTMODE_INTRA
+        {
+            21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21,
+            24, 28, 31, 35, 19, 21, 24, 28, 20, 24, 25, 21, 24,
+            24, 24, 24, 21, 24, 24, 26, 24, 24, 24, 24, 24, 24,
+            24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
+
+        },
+
+        //LUTMODE_INTRA_8x8
+        {
+            26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26,   //QP=[0 ~12]
+            28, 32, 36, 40, 22, 26, 28, 32, 24, 26, 30, 26, 28,   //QP=[13~25]
+            26, 28, 26, 26, 30, 28, 28, 28, 26, 28, 28, 26, 28,   //QP=[26~38]
+            28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_4x4
+        {
+            64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,   //QP=[0 ~12]
+            72, 80, 88, 104, 56, 64, 72, 80, 58, 68, 76, 64, 68,  //QP=[13~25]
+            64, 68, 68, 64, 70, 70, 70, 70, 68, 68, 68, 68, 68,   //QP=[26~38]
+            68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68, 68,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_16x8, LUTMODE_INTER_8x16
+        {
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,      //QP=[0 ~12]
+            8, 9, 11, 12, 6, 7, 9, 10, 7, 8, 9, 8, 9,   //QP=[13~25]
+            8, 9, 8, 8, 9, 9, 9, 9, 8, 8, 8, 8, 8,      //QP=[26~38]
+            8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,      //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_8X8Q
+        {
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,   //QP=[0 ~12]
+            2, 3, 3, 3, 2, 2, 2, 3, 2, 2, 2, 2, 3,   //QP=[13~25]
+            2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,   //QP=[26~38]
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_8X4Q, LUTMODE_INTER_4X8Q, LUTMODE_INTER_16X8_FIELD
+        {
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,   //QP=[0 ~12]
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,   //QP=[13~25]
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,   //QP=[26~38]
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_4X4Q, LUTMODE_INTER_8x8_FIELD
+        {
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,   //QP=[0 ~12]
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,   //QP=[13~25]
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,   //QP=[26~38]
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_16x16, LUTMODE_INTER
+        {
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,   //QP=[0 ~12]
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,   //QP=[13~25]
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,   //QP=[26~38]
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,   //QP=[39~51]
+        },
+
+        //LUTMODE_INTER_BWD
+        {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[0 ~12]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[13~25]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[26~38]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[39~51]
+        },
+
+        //LUTMODE_REF_ID
+        {
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,    //QP=[0 ~12]
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,    //QP=[13~25]
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,    //QP=[26~38]
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,    //QP=[39~51]
+        },
+
+        //LUTMODE_INTRA_CHROMA
+        {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[0 ~12]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[13~25]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[26~38]
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    //QP=[39~51]
+        },
+    },
+};
+
+
+#define VDENC_LUTMODE_INTRA_NONPRED             0x00
+#define VDENC_LUTMODE_INTRA                     0x01
+#define VDENC_LUTMODE_INTRA_16x16               0x01
+#define VDENC_LUTMODE_INTRA_8x8                 0x02
+#define VDENC_LUTMODE_INTRA_4x4                 0x03
+#define VDENC_LUTMODE_INTER_16x8                0x04
+#define VDENC_LUTMODE_INTER_8x16                0x04
+#define VDENC_LUTMODE_INTER_8X8Q                0x05
+#define VDENC_LUTMODE_INTER_8X4Q                0x06
+#define VDENC_LUTMODE_INTER_4X8Q                0x06
+#define VDENC_LUTMODE_INTER_16x8_FIELD          0x06
+#define VDENC_LUTMODE_INTER_4X4Q                0x07
+#define VDENC_LUTMODE_INTER_8x8_FIELD           0x07
+#define VDENC_LUTMODE_INTER                     0x08
+#define VDENC_LUTMODE_INTER_16x16               0x08
+#define VDENC_LUTMODE_INTER_BWD                 0x09
+#define VDENC_LUTMODE_REF_ID                    0x0A
+#define VDENC_LUTMODE_INTRA_CHROMA              0x0B
+
+static unsigned char
+map_44_lut_value(unsigned int v, unsigned char max)
+{
+    unsigned int maxcost;
+    int d;
+    unsigned char ret;
+
+    if (v == 0) {
+        return 0;
+    }
+
+    maxcost = ((max & 15) << (max >> 4));
+
+    if (v >= maxcost) {
+        return max;
+    }
+
+    d = (int)(log((double)v) / log(2.0)) - 3;
+
+    if (d < 0) {
+        d = 0;
+    }
+
+    ret = (unsigned char)((d << 4) + (int)((v + (d == 0 ? 0 : (1 << (d - 1)))) >> d));
+    ret = (ret & 0xf) == 0 ? (ret | 8) : ret;
+
+    return ret;
+}
+#else
+
 static const uint32_t h264_vdenc_cmd3_table[5][52][22] = {
    { /* type 0 */
       { 0x05010000, 0x1a1a0a0a, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000004, 0x0c240400, 0x00000000, 0x001c0000, 0x0c0e2406, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00020002 },
@@ -1199,5 +1459,7 @@ static const uint32_t h264_vdenc_avc_img_state_dw8[53] = {
    0x08000000, 0x08000000, 0x08000000, 0x02000000, 0x02000000, 0x02000000, 0x02000000, 0x02000000,
    0x02000000, 0x02000000, 0x08000000, 0x08000000, 0x08000000,
 };
+
+#endif /* GFX_VERx10 >= 125 */
 
 #endif

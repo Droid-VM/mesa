@@ -28,3 +28,19 @@ mtl_command_resolve_counter_heap(mtl_command_buffer *command_buffer,
                                  uint32_t count, uint64_t dst_addr)
 {
 }
+
+void
+mtl_command_buffer_set_label(mtl_command_buffer *command_buffer,
+                             const char *label)
+{
+}
+
+void
+mtl_command_buffer_push_debug_group(void *encoder, const char *label)
+{
+}
+
+void
+mtl_command_buffer_pop_debug_group(void *encoder)
+{
+}

@@ -44,19 +44,29 @@ struct panvk_image {
 
    /* One image each for 2x 4x 8x 16x. We don't support more than 16x. */
    VkImage ms_imgs[4];
+
+   /* If an image can track validity of CRC even when external access is
+    * possible. */
+   bool crc_safe_external;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
 
-/* Check whether it is possible that images in a given configuration may use
- * AFBC tiling. This function does not have access to all of the relevant
- * image configuration, and returns true if any images with the specified
- * configuration subset may use AFBC. */
-bool panvk_image_can_use_afbc(
-   struct panvk_physical_device *phys_dev, VkFormat fmt,
-   VkImageUsageFlags usage, VkImageType type, VkImageTiling tiling,
-   VkImageCreateFlags flags);
+
+static inline void
+panvk_image_set_compression_props(VkImageCompressionPropertiesEXT *props,
+                                  bool compressed)
+{
+   /* AFBC is our only compression and it is lossless. Tiled modifiers are not
+    * compression.
+    */
+   props->imageCompressionFlags = compressed
+                                     ? VK_IMAGE_COMPRESSION_DEFAULT_EXT
+                                     : VK_IMAGE_COMPRESSION_DISABLED_EXT;
+   props->imageCompressionFixedRateFlags =
+      VK_IMAGE_COMPRESSION_FIXED_RATE_NONE_EXT;
+}
 
 static inline unsigned
 panvk_plane_index(const struct panvk_image *image,
@@ -82,6 +92,8 @@ panvk_image_use_yuv_tex(unsigned arch, VkFormat format)
       return false;
 
    switch (format) {
+   case VK_FORMAT_G8B8G8R8_422_UNORM:
+   case VK_FORMAT_B8G8R8G8_422_UNORM:
    case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
    case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
    case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
@@ -160,5 +172,17 @@ static inline bool
 panvk_sparse_block_is_valid(struct panvk_sparse_block_desc desc) { return desc.size_B > 0; }
 
 VkSparseImageFormatProperties panvk_get_sparse_image_fmt_props(VkImageType type, VkFormat format);
+
+static inline uint64_t
+panvk_image_plane_crc_header_addr(const struct panvk_image *image)
+{
+   const struct panvk_image_plane *img_plane = &image->planes[0];
+
+   if (!img_plane->image.props.crc || !img_plane->plane.base)
+      return 0;
+
+   return img_plane->plane.base +
+          img_plane->plane.layout.slices[0].crc.header_offset_B;
+}
 
 #endif

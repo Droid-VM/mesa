@@ -604,6 +604,28 @@ genX(libanv_preprocess_gfx_generate)(global void *cmd_base,
    }
 }
 
+void
+genX(libanv_postprocess_gfx_generate)(global void *data_base,
+                                      uint32_t data_stride,
+                                      global uint32_t *seq_count,
+                                      uint32_t max_seq_count,
+                                      uint32_t data_prolog_size,
+                                      uint32_t fs_color_offset,
+                                      uint32_t seq_idx)
+{
+   uint32_t max_count = seq_count != 0 ? min(*seq_count, max_seq_count) : max_seq_count;
+
+   if (seq_idx >= max_count)
+      return;
+
+   /* There is an assumption here that there is only push constant data in the
+    * data part of the preprocess data.
+    */
+   global struct anv_push_constants *push_data_ptr =
+      get_ptr(data_base, data_stride, data_prolog_size, seq_idx);
+   push_data_ptr->drv_data.gfx.fs_color_offset = fs_color_offset;
+}
+
 #if GFX_VERx10 >= 125
 static void
 emit_dispatch_commands(global void *cmd_base,
@@ -621,28 +643,63 @@ emit_dispatch_commands(global void *cmd_base,
 
    uint64_t pc_addr = (uint64_t)push_data_ptr + descriptor->push_data_offset;
 
-   struct GENX(COMPUTE_WALKER) v = {
-      .PredicateEnable = (flags & ANV_GENERATED_FLAG_PREDICATED) != 0,
-      .body = {
-         .ThreadGroupIDXDimension = info->x,
-         .ThreadGroupIDYDimension = info->y,
-         .ThreadGroupIDZDimension = info->z,
-         .ExecutionMask           = descriptor->right_mask,
-         .InlineData              = {
-            descriptor->gfx125.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
-            pc_addr & 0xffffffff : ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[0]],
-            descriptor->gfx125.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
-            pc_addr >> 32 : ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[1]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[2]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[3]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[4]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[5]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[6]],
-            ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[7]],
+   if (GFX_VER >= 35 && (flags & ANV_GENERATED_FLAG_EFFICIENT_64B)) {
+#if GFX_VER >= 35
+      struct GENX(COMPUTE_WALKER_2) v = {
+         .PredicateEnable = (flags & ANV_GENERATED_FLAG_PREDICATED) != 0,
+         .body = {
+            .ThreadGroupIDXDimension = info->x,
+            .ThreadGroupIDYDimension = info->y,
+            .ThreadGroupIDZDimension = info->z,
+            .ExecutionMask           = descriptor->right_mask,
+            .InlineData              = {
+               descriptor->gfx350.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
+               pc_addr & 0xffffffff : ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[0]],
+               descriptor->gfx350.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
+               pc_addr >> 32 : ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[1]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[2]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[3]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[4]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[5]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[6]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[7]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[8]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[9]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[10]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[11]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[12]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[13]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[14]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx350.inline_dwords[15]],
+            },
          },
-      },
-   };
-   GENX(COMPUTE_WALKER_repack)(cmd_ptr, descriptor->gfx125.compute_walker, &v);
+      };
+      GENX(COMPUTE_WALKER_2_repack)(cmd_ptr, descriptor->gfx350.compute_walker_2, &v);
+#endif
+   } else {
+      struct GENX(COMPUTE_WALKER) v = {
+         .PredicateEnable = (flags & ANV_GENERATED_FLAG_PREDICATED) != 0,
+         .body = {
+            .ThreadGroupIDXDimension = info->x,
+            .ThreadGroupIDYDimension = info->y,
+            .ThreadGroupIDZDimension = info->z,
+            .ExecutionMask           = descriptor->right_mask,
+            .InlineData              = {
+               descriptor->gfx125.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
+               pc_addr & 0xffffffff : ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[0]],
+               descriptor->gfx125.inline_dwords[0] == ANV_INLINE_DWORD_PUSH_ADDRESS_LDW ?
+               pc_addr >> 32 : ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[1]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[2]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[3]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[4]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[5]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[6]],
+               ((global uint32_t *)push_data_ptr)[descriptor->gfx125.inline_dwords[7]],
+            },
+         },
+      };
+      GENX(COMPUTE_WALKER_repack)(cmd_ptr, descriptor->gfx125.compute_walker, &v);
+   }
 }
 #else
 static void
@@ -873,7 +930,6 @@ genX(libanv_postprocess_cs_generate)(global void *cmd_base,
 #endif
 }
 
-#if GFX_VERx10 >= 125
 static uint3
 calc_local_trace_size(uint3 global_size)
 {
@@ -922,6 +978,7 @@ genX(libanv_preprocess_rt_generate)(global void *cmd_base,
                                     uint32_t flags,
                                     uint32_t seq_idx)
 {
+#if GFX_VERx10 >= 125
    uint32_t max_count = seq_count != 0 ? min(*seq_count, max_seq_count) : max_seq_count;
 
    if (seq_idx == 0) {
@@ -1018,7 +1075,7 @@ genX(libanv_preprocess_rt_generate)(global void *cmd_base,
       },
    };
    GENX(COMPUTE_WALKER_repack)(cmd_ptr, compute_walker_template, &v);
-}
 #endif /* GFX_VERx10 >= 125 */
+}
 
 #endif /* GFX_VER >= 9 */

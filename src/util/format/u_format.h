@@ -204,18 +204,25 @@ struct util_format_description
    unsigned is_snorm:1;
 
    /**
+    * Whether the format's byte order is the opposite of the host's, so that
+    * each packed word or array channel must be byte-swapped when accessed.
+    */
+   unsigned is_byte_swapped:1;
+
+   /**
     * Input channel description, in the order XYZW.
     *
     * Only valid for UTIL_FORMAT_LAYOUT_PLAIN formats.
     *
     * If each channel is accessed as an individual N-byte value, X is always
-    * at the lowest address in memory, Y is always next, and so on.  For all
-    * currently-defined formats, the N-byte value has native endianness.
+    * at the lowest address in memory, Y is always next, and so on. The
+    * N-byte value has native endianness unless is_byte_swapped is set.
     *
     * If instead a group of channels is accessed as a single N-byte value,
     * the order of the channels within that value depends on endianness.
     * For big-endian targets, X is the most significant subvalue,
-    * otherwise it is the least significant one.
+    * otherwise it is the least significant one. A format with
+    * is_byte_swapped set is described as on the other endianness.
     *
     * For example, if X is 8 bits and Y is 24 bits, the memory order is:
     *
@@ -1527,6 +1534,11 @@ util_format_unpack_rgba_8unorm_rect(enum pipe_format format,
 bool
 util_format_fits_8unorm(const struct util_format_description *format_desc) ATTRIBUTE_CONST;
 
+void
+util_format_byte_swap_rect(enum pipe_format format,
+                           void *dst, const void *src, unsigned stride,
+                           unsigned width, unsigned height);
+
 bool
 util_format_translate(enum pipe_format dst_format,
                       void *dst, unsigned dst_stride,
@@ -1610,6 +1622,7 @@ int util_format_get_largest_non_void_channel(enum pipe_format format);
 unsigned util_format_get_max_channel_size(enum pipe_format format);
 
 uint32_t util_format_get_tilesize(enum pipe_format format, uint32_t dimensions, uint32_t samples, uint32_t axis);
+bool util_format_is_stencil_only(enum pipe_format format);
 
 #ifdef __cplusplus
 } // extern "C" {

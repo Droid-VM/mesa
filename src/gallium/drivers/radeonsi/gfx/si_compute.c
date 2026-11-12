@@ -45,7 +45,7 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
    program->shader.wave_size = si_determine_wave_size(sscreen, &program->shader);
 
    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
-   si_get_ir_cache_key(sel, false, false, shader->wave_size, ir_blake3_cache_key);
+   si_get_ir_cache_key(shader, ir_blake3_cache_key);
 
    /* Try to load the shader from the shader cache. */
    simple_mtx_lock(&sscreen->shader_cache_mutex);
@@ -71,7 +71,7 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
       shader->config.rsrc1 = S_00B848_VGPRS(si_shader_encode_vgprs(shader)) |
                              S_00B848_SGPRS(si_shader_encode_sgprs(shader)) |
                              S_00B848_DX10_CLAMP(sscreen->info.gfx_level < GFX12) |
-                             S_00B848_MEM_ORDERED(si_shader_mem_ordered(shader)) |
+                             S_00B848_MEM_ORDERED(shader->config.mem_ordered) |
                              S_00B848_FLOAT_MODE(shader->config.float_mode) |
                              /* This is needed for CWSR, but it causes halts to work differently. */
                              S_00B848_PRIV(sscreen->info.gfx_level == GFX11);
@@ -110,7 +110,12 @@ void *si_create_compute_state_for_nir(struct pipe_context *ctx, nir_shader *nir,
    struct si_context *sctx = (struct si_context *)ctx;
    struct si_screen *sscreen = (struct si_screen *)ctx->screen;
    struct si_compute *program = CALLOC_STRUCT(si_compute);
-   struct si_shader_selector *sel = &program->sel;
+   struct si_shader_selector *sel;
+
+   if (!program)
+      return NULL;
+
+   sel = &program->sel;
 
    pipe_reference_init(&sel->base.reference, 1);
    sel->stage = stage;
@@ -181,13 +186,13 @@ static void si_bind_compute_state(struct pipe_context *ctx, void *state)
    sctx->compute_shaderbuf_sgprs_dirty = true;
    sctx->compute_image_sgprs_dirty = true;
 
-   if (unlikely((sctx->screen->debug_flags & DBG(SQTT)) && sctx->sqtt)) {
+   if (unlikely((sctx->screen->debug_flags & DBG(SQTT)) && sctx->sqtt.data)) {
       uint32_t pipeline_code_hash = _mesa_hash_data_with_seed(
          program->shader.binary.code_buffer,
          program->shader.binary.code_size,
          0);
 
-      if (!si_sqtt_pipeline_is_registered(sctx->sqtt, pipeline_code_hash)) {
+      if (!si_sqtt_pipeline_is_registered(sctx->sqtt.data, pipeline_code_hash)) {
          /* Short lived fake pipeline: we don't need to reupload the compute shaders,
           * as we do for the gfx ones so just create a temp pipeline to be able to
           * call si_sqtt_register_pipeline, and then drop it.
@@ -210,14 +215,17 @@ static void si_set_global_binding(struct pipe_context *ctx, unsigned first, unsi
    struct si_context *sctx = (struct si_context *)ctx;
 
    if (first + n > sctx->max_global_buffers) {
+      struct pipe_resource **new_global_buffers;
       unsigned old_max = sctx->max_global_buffers;
       sctx->max_global_buffers = first + n;
-      sctx->global_buffers = realloc(
+      new_global_buffers = realloc(
          sctx->global_buffers, sctx->max_global_buffers * sizeof(sctx->global_buffers[0]));
-      if (!sctx->global_buffers) {
+      if (!new_global_buffers) {
          mesa_loge("failed to allocate compute global_buffers");
+         sctx->max_global_buffers = old_max;
          return;
       }
+      sctx->global_buffers = new_global_buffers;
 
       memset(&sctx->global_buffers[old_max], 0,
              (sctx->max_global_buffers - old_max) * sizeof(sctx->global_buffers[0]));
@@ -334,8 +342,11 @@ static bool si_switch_compute_shader(struct si_context *sctx, struct si_compute 
 
       if (!si_setup_compute_scratch_buffer(sctx->screen, shader,
                                            &sctx->compute_scratch_buffer,
-                                           sctx->max_seen_compute_scratch_bytes_per_wave))
+                                           sctx->max_seen_compute_scratch_bytes_per_wave)) {
+         if (!sctx->screen->info.has_scratch_base_registers)
+            simple_mtx_unlock(&shader->selector->mutex);
          return false;
+      }
 
       radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, sctx->compute_scratch_buffer,
                                 RADEON_USAGE_READWRITE | RADEON_PRIO_SCRATCH_BUFFER);
@@ -585,7 +596,7 @@ static void si_emit_dispatch_packets(struct si_context *sctx, const struct pipe_
    if (sctx->gfx_level >= GFX10 && waves_per_threadgroup == 1)
       threadgroups_per_cu = 2;
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       if (info->indirect) {
          si_sqtt_write_event_marker(sctx, &sctx->gfx_cs,
                                     EventCmdDispatchIndirect,
@@ -787,7 +798,7 @@ static void si_emit_dispatch_packets(struct si_context *sctx, const struct pipe_
       radeon_emit(dispatch_initiator);
    }
 
-   if (unlikely(sctx->sqtt_enabled && sctx->gfx_level >= GFX9))
+   if (unlikely(si_is_sqtt_active(sctx) && sctx->gfx_level >= GFX9))
       radeon_event_write(V_028A90_THREAD_TRACE_MARKER);
 
    radeon_end();
@@ -875,7 +886,7 @@ static void si_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info
       /* Indirect buffers are read through L2 on GFX9-GFX11, but not other hw. */
       if ((sctx->gfx_level <= GFX8 || sscreen->info.cp_sdma_ge_use_system_memory_scope) &&
           si_resource(info->indirect)->L2_cache_dirty) {
-         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+         si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
          si_resource(info->indirect)->L2_cache_dirty = false;
       }
    }

@@ -98,11 +98,18 @@ vn_semaphore_is_timeline(VkSemaphore sem_handle)
 }
 
 static inline bool
-vn_semaphore_is_sync_fd(VkSemaphore sem_handle)
+vn_wait_semaphore_is_sync_fd(VkSemaphore sem_handle)
 {
    struct vn_semaphore *sem = vn_semaphore_from_handle(sem_handle);
    return sem->payload->type == VN_SYNC_TYPE_IMPORTED_SYNC_FD ||
           (sem->payload->type == VN_SYNC_TYPE_SYNC && sem->sync_fd_export);
+}
+
+static inline bool
+vn_signal_semaphore_is_sync_fd(VkSemaphore sem_handle)
+{
+   struct vn_semaphore *sem = vn_semaphore_from_handle(sem_handle);
+   return sem->permanent.type == VN_SYNC_TYPE_SYNC && sem->sync_fd_export;
 }
 
 bool

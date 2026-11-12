@@ -135,6 +135,9 @@ struct spirv_to_nir_options {
 
       /* Whether OpFMin/OpFMax/OpFClamp should behave like the NMax versions. */
       bool force_nan_preserve_min_max;
+
+      /* Whether GLSL.std.450 Fma should be always exact. */
+      bool force_exact_glsl_fma;
    } workarounds;
 
    /* In Debug Builds, instead of emitting an OS break on failure, just return NULL from

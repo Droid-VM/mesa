@@ -723,7 +723,7 @@ enum vpe_status vpe_check_support(
     for (i = 0; i < param->num_streams; i++)
         if (vpe_priv->stream_ctx != NULL)
             if (vpe_priv->stream_ctx[i].mps_ctx)
-                vpe_clear_mps_ctx(vpe_priv, vpe_priv->stream_ctx[i].mps_ctx);
+                vpe_free_mps_ctx(vpe_priv, &vpe_priv->stream_ctx[i].mps_ctx);
 
     if (status == VPE_STATUS_OK) {
         // output checking - check per asic support

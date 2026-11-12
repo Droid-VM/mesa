@@ -51,6 +51,7 @@ struct v3dv_pipeline_key {
    bool sample_alpha_to_one;
    bool software_blend;
    uint8_t cbufs;
+   uint8_t tlb_input_attachment_location[MAX_INPUT_ATTACHMENTS];
    struct {
       enum pipe_format format;
       uint8_t swizzle[4];
@@ -194,6 +195,9 @@ struct v3dv_pipeline_cache {
 
    /* For VK_EXT_pipeline_creation_cache_control. */
    bool externally_synchronized;
+
+   /* For VK_KHR_maintenance8 */
+   bool internally_synchronized_merge;
 };
 
 enum v3dv_ez_state {
@@ -338,9 +342,6 @@ struct v3dv_pipeline {
 
    VkShaderStageFlags active_stages;
    VkPipelineCreateFlagBits2KHR flags;
-
-   struct v3dv_render_pass *pass;
-   struct v3dv_subpass *subpass;
 
    struct v3dv_pipeline_stage *stages[BROADCOM_SHADER_STAGES];
 

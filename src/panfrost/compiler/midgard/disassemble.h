@@ -9,4 +9,4 @@
 #include <stdio.h>
 
 void disassemble_midgard(FILE *fp, const void *code, size_t size,
-                         uint64_t gpu_id, bool verbose);
+                         unsigned quirks, bool verbose);

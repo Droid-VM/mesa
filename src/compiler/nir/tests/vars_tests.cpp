@@ -184,6 +184,7 @@ class nir_dead_write_vars_test : public nir_vars_test {};
 class nir_combine_stores_test : public nir_vars_test {};
 class nir_split_vars_test : public nir_vars_test {};
 class nir_remove_dead_variables_test : public nir_vars_test {};
+class nir_find_array_copies_test : public nir_vars_test {};
 
 } // namespace
 
@@ -2640,4 +2641,41 @@ TEST_F(nir_remove_dead_variables_test, pointer_initializer_dead)
    ASSERT_EQ(count, 0);
 }
 
+TEST_F(nir_find_array_copies_test, element_copies_become_array_copy)
+{
+   const struct glsl_type *array_type = glsl_array_type(glsl_int_type(), 4, 0);
+   nir_variable *src = create_var(nir_var_function_temp, array_type, "src");
+   nir_variable *dst = create_var(nir_var_function_temp, array_type, "dst");
 
+   for (int i = 0; i < 4; i++) {
+      nir_def *value = nir_load_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, src), i));
+      nir_store_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, dst), i), value, 1);
+   }
+
+   ASSERT_TRUE(nir_opt_find_array_copies(b->shader));
+   nir_validate_shader(b->shader, NULL);
+   EXPECT_EQ(count_intrinsics(nir_intrinsic_copy_deref), 1);
+}
+
+TEST_F(nir_find_array_copies_test, loads_in_another_block_are_not_matched)
+{
+   const struct glsl_type *array_type = glsl_array_type(glsl_int_type(), 4, 0);
+   nir_variable *src = create_var(nir_var_function_temp, array_type, "src");
+   nir_variable *dst = create_var(nir_var_function_temp, array_type, "dst");
+   nir_variable *cond = create_int(nir_var_mem_global, "cond");
+
+   nir_def *values[4];
+   for (int i = 0; i < 4; i++)
+      values[i] = nir_load_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, src), i));
+
+   nir_if *if_stmt = nir_push_if(b, nir_ieq_imm(b, nir_load_var(b, cond), 0));
+   nir_store_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, src), 0), nir_imm_int(b, 1), 1);
+   nir_pop_if(b, if_stmt);
+
+   for (int i = 0; i < 4; i++)
+      nir_store_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, dst), i), values[i], 1);
+
+   nir_opt_find_array_copies(b->shader);
+   nir_validate_shader(b->shader, NULL);
+   EXPECT_EQ(count_intrinsics(nir_intrinsic_copy_deref), 0);
+}

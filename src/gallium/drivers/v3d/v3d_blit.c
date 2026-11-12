@@ -24,6 +24,7 @@
 #include "nir/pipe_nir.h"
 #include "util/format/u_format.h"
 #include "util/perf/cpu_trace.h"
+#include "util/u_gen_mipmap.h"
 #include "util/u_surface.h"
 #include "util/u_blitter.h"
 #include "compiler/nir/nir_builder.h"
@@ -268,11 +269,22 @@ v3d_generate_mipmap(struct pipe_context *pctx,
                                          layer, layer,
                                          true)) {
                         assert(layer == first_layer);
-                        return false;
+                        goto fallback;
                 }
         }
 
         return true;
+
+fallback:
+        perf_debug("Software fallback for generate_mipmap()");
+        unsigned filter = PIPE_TEX_FILTER_NEAREST;
+
+        /* Check if the format supports filtering */
+        if (v3d_format_supports_filtering(devinfo, format))
+                filter = PIPE_TEX_FILTER_LINEAR;
+
+        return util_gen_mipmap(pctx, prsc, format, base_level, last_level,
+                               first_layer, last_layer, filter);
 }
 
 static void
@@ -813,6 +825,7 @@ static void
 v3d_sand8_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
 {
         struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_device_info *devinfo = &v3d->screen->devinfo;
         struct v3d_resource *src = v3d_resource(info->src.resource);
         ASSERTED struct v3d_resource *dst = v3d_resource(info->dst.resource);
 
@@ -833,6 +846,13 @@ v3d_sand8_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
         assert(info->src.box.y == 0 && info->dst.box.y == 0);
         assert(info->src.box.width == info->dst.box.width);
         assert(info->src.box.height == info->dst.box.height);
+
+        /* V3D 7.x is able to detile SAND formats in hardware */
+        if (v3d_X(devinfo, tfu_sand)(pctx, info->dst.resource, info->dst.level,
+                                     info->src.resource, info->src.level)) {
+                info->mask &= ~PIPE_MASK_RGBA;
+                return;
+        }
 
         MESA_TRACE_FUNC();
 
@@ -1125,6 +1145,7 @@ static void
 v3d_sand30_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
 {
         struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_device_info *devinfo = &v3d->screen->devinfo;
         struct v3d_resource *src = v3d_resource(info->src.resource);
         ASSERTED struct v3d_resource *dst = v3d_resource(info->dst.resource);
 
@@ -1147,6 +1168,13 @@ v3d_sand30_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
         assert(info->src.box.width == info->dst.box.width);
         assert(info->src.box.height == info->dst.box.height);
 
+        /* V3D 7.x is able to detile SAND formats in hardware */
+        if (v3d_X(devinfo, tfu_sand)(pctx, info->dst.resource, info->dst.level,
+                                     info->src.resource, info->src.level)) {
+                info->mask &= ~PIPE_MASK_RGBA;
+                return;
+        }
+
         MESA_TRACE_FUNC();
 
         v3d_blitter_save(v3d, info->render_condition_enable ?
@@ -1165,7 +1193,7 @@ v3d_sand30_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
          */
         unsigned width, height;
         pipe_surface_size(&dst_surf, &width, &height);
-        height /= 2;
+        height = DIV_ROUND_UP(height, 2);
         width = align(width, 8);
         if (src->cpp == 2)
                 width /= 2;

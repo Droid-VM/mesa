@@ -10,6 +10,10 @@
 #error "PAN_ARCH must be defined"
 #endif
 
+#if PAN_ARCH < 6
+#error "No precompiled shaders on Midgard"
+#endif
+
 #include "genxml/gen_macros.h"
 #include "util/simple_mtx.h"
 #include "libpan_dgc.h"

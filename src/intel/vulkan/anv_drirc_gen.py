@@ -21,6 +21,7 @@ def declare_options(android_version):
     U64 = drirc_gen.DrircUint64
     E = drirc_gen.DrircEnum
     EV = drirc_gen.DrircEnumValue
+    S = drirc_gen.DrircString
 
     debug_options = [
         # Workaround subgroups
@@ -53,9 +54,6 @@ def declare_options(android_version):
         F("lower_depth_range_rate", 1.0, 0.0, 1.0,
           "Lower depth range for fixing misrendering issues due to z coordinate float point interpolation accuracy",
           c_name="lower_depth_range_rate"),
-        B("force_indirect_descriptors", False,
-          "Use an indirection to access buffer/image/texture/sampler handles",
-          c_name="force_indirect_descriptors"),
         B("limit_trig_input_range", False,
           "Limit trig input range to [-2p : 2p] to improve sin/cos calculation precision on Intel",
           c_name="limit_trig_input_range"),
@@ -83,16 +81,19 @@ def declare_options(android_version):
         B("anv_emulate_divergent_barriers", False,
           "Temporary workaround for a broken shader in some recent RE engine games",
           c_name="emulate_divergent_barriers"),
+        B("anv_force_exact_glsl_fma", False,
+          "Disallow contract/reassociation for GLSLstd450Fma.",
+          c_name="force_exact_glsl_fma"),
 
         # Workaround various driver
         B("always_flush_cache", False,
           "Enable flushing GPU caches with each draw call", c_name="always_flush_cache"),
+        B("anv_enable_efficient_64bit", False,
+          "Enable efficient 64bit mode on Gfx35+",
+          c_name="enable_efficient_64bit"),
         B("anv_force_filter_addr_rounding", False,
           "Force min/mag filter address rounding to be enabled even for NEAREST sampling",
           c_name="force_filter_addr_rounding"),
-        B("anv_enable_buffer_comp", False,
-          "Enable CCS on buffers where possible",
-          c_name="enable_buffer_comp"),
         B("anv_external_memory_implicit_sync", False,
           "Implicit sync on external BOs",
           c_name="external_memory_implicit_sync"),
@@ -108,6 +109,9 @@ def declare_options(android_version):
         B("custom_border_colors_without_format", android_version == 0,
           "Enable custom border colors without format",
           c_name="custom_border_colors_without_format"),
+        B("force_indirect_descriptors", False,
+          "Use an indirection to access buffer/image/texture/sampler handles",
+          c_name="force_indirect_descriptors"),
         B("intel_sampler_route_to_lsc", False,
           "Specific toggle to enable sampler route to LSC",
           c_name="sampler_route_to_lsc"),
@@ -126,7 +130,9 @@ def declare_options(android_version):
         B("anv_write_lookup_maps_unconditionally", False,
           "Unconditionally write lookup maps for BLAS update operation",
           c_name="write_lookup_maps_unconditionally"),
-
+        B("anv_disable_xe_engine_cycles", False,
+          "Disable use of DRM_XE_DEVICE_QUERY_ENGINE_CYCLES on Xe",
+          c_name="disable_xe_engine_cycles"),
         # Workaround command emission
         B("anv_barrier_post_untyped_clear_shader", False,
           "Insert pipeline barriers post clearing shader on untyped data",
@@ -176,6 +182,12 @@ def declare_options(android_version):
         I("query_copy_with_shader_threshold", 6, 0, 0x7fffffff,
           "Query threshold count above which query copies are executed with a shader",
           c_name="query_copy_with_shader_threshold"),
+        B("anv_disable_jay", False,
+          "Disable Jay and fall back to the brw compiler",
+          c_name="disable_jay"),
+        S("anv_queue_override",
+          description="Override exposed queue families & counts",
+          c_name="queue_override"),
 
         B("anv_enable_alloc_oversubscription", True,
           "Allow the optional alignment of allocation sizes to large page sizes",
@@ -203,6 +215,9 @@ def declare_options(android_version):
         I("anv_enable_opt_divergent_atomics_compute_only", 0, 0, 3,
           "Enable fusion of divergent atomics for compute shaders only (see brw_divergent_atomics_flags)",
           c_name="opt_divergent_atomics_compute_only"),
+        I("anv_enable_opt_atomic_branch_compute_only", 0, 0, 7,
+          "Enable atomic-branch optimization cases as a bitmask (enum intel_atomic_branch_cases): bit0=SKIP_ON_ZERO, bit1=MAX, bit2=MIN",
+          c_name="opt_atomic_branch_compute_only"),
         F("anv_max_vs_payload", 0.90, 0.0, 1.0,
           "Maximum percentage of the register file that can be used as thread payload for the vertex shader",
           c_name="max_vs_payload"),
@@ -212,11 +227,23 @@ def declare_options(android_version):
         B("intel_force_sampler_prefetch", False,
           "Enable binding table sampler prefteching",
           c_name="sampler_prefetch"),
+        E("intel_code_motion", 0, 0, 2,
+          [EV(0, "compiler default"),
+           EV(1, "nir_opt_licm, hoist out of loops only"),
+           EV(2, "nir_opt_gcm, global code motion")],
+          "Which code motion pass runs in the NIR optimization loop",
+          c_name="code_motion"),
 
         B("force_guc_low_latency", False,
           "Enable low latency GuC strategy.",
           c_name="guc_low_latency"),
-
+        E("anv_sample_d_performance", 0, 0, 3,
+          [EV(0, "Disable_sample_d_optimization"),
+           EV(1, "sample_d_ignore12b"),
+           EV(2, "sample_d_ignore16b"),
+           EV(3, "sample_d_ignore20b")],
+          "SAMPLER_STATE::anv_sample_d_performance",
+          c_name="sample_d_performance"),
         E("anv_stack_ids", 512, 256, 2048,
           [EV(256,  "256 stackids"),
            EV(512,  "512 stackids"),
@@ -224,6 +251,9 @@ def declare_options(android_version):
            EV(2048, "2048 stackids")],
           "Control the number stackIDs (i.e. number of unique rays in the RT subsytem)",
           c_name="stack_ids"),
+        B("anv_dynamic_stack_id_control", False,
+          "Enable Xe3 dynamic StackID control for ray tracing dispatches",
+          c_name="dynamic_stack_id_control"),
         E("anv_rt_dispatch_timeout", 512, 64, 4096,
           [EV(64,    "64 clocks"),
            EV(128,   "128 clocks"),
@@ -246,6 +276,23 @@ def declare_options(android_version):
            EV(4096,  "4096 clocks")],
           "Force BTD child dispatches if dispatches do not happen naturally for number of clocks equal to the programmed timeout counter",
           c_name="rt_dispatch_timeout"),
+        I("anv_rt_tile_x", 0, 0, 256,
+          "Ray tracing dispatch tile width (0 for automatic)",
+          c_name="rt_tile_x"),
+        I("anv_rt_tile_y", 0, 0, 64,
+          "Ray tracing dispatch tile height (0 for automatic)",
+          c_name="rt_tile_y"),
+        E("anv_force_preferred_walk_order", 0, 0, 6,
+          [EV(0, "use the compiled default walk order"),
+           EV(1, "force XYZ (linear) walk order"),
+           EV(2, "force XZY walk order"),
+           EV(3, "force YXZ walk order"),
+           EV(4, "force YZX walk order"),
+           EV(5, "force ZXY walk order"),
+           EV(6, "force ZYX walk order")],
+          "Force preferred walk order for compute shader invocations "
+          "(enum intel_compute_walk_order value + 1, 0 = compiled default)",
+          c_name="force_preferred_walk_order"),
     ]
 
     feature_options = [
@@ -264,6 +311,9 @@ def declare_options(android_version):
         B("compression_control_enabled", android_version >= 37,
           "Enable VK_EXT_image_compression_control support",
           c_name="compression_control_enabled"),
+        B("anv_always_bindless", False,
+          "Forces all descriptor sets to use the internal bindless model",
+          c_name="always_bindless"),
     ]
 
     misc_options = []

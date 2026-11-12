@@ -309,7 +309,8 @@ void v3dv_job_start_frame(struct v3dv_job *job,
                           uint32_t render_target_count,
                           uint8_t max_internal_bpp,
                           uint8_t total_color_bpp,
-                          bool msaa);
+                          bool msaa,
+                          const VkExtent2D *tile_size);
 
 bool v3dv_job_type_is_gpu(struct v3dv_job *job);
 
@@ -415,7 +416,7 @@ struct v3dv_cmd_buffer_state {
    struct v3dv_render_pass dynamic_pass;
    struct v3dv_subpass dynamic_subpass;
    struct v3dv_render_pass_attachment dynamic_attachments[18 /* (8 color + D/S) x 2 (for resolves) */];
-   struct v3dv_subpass_attachment dynamic_subpass_attachments[18];
+   v3dv_subpass_attachment dynamic_subpass_attachments[18];
    struct v3dv_framebuffer *dynamic_framebuffer;
 
    VkRect2D render_area;

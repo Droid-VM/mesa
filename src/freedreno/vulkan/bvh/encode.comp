@@ -385,7 +385,7 @@ main()
                DEREF(REF(vk_ir_node)OFFSET(args.intermediate_bvh,
                                            ir_id_to_offset(children[i]))).aabb;
 
-            float surface_area = aabb_surface_area(bounds);
+            float surface_area = aabb_half_surface_area(bounds);
             if (surface_area > largest_surface_area) {
                largest_surface_area = surface_area;
                collapsed_child_index = i;

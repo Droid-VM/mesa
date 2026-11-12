@@ -321,6 +321,10 @@ bool fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info
                        const struct fdl_image_params *params,
                        const struct fdl_explicit_layout *explicit_layout);
 
+uint64_t fdl6_layout_multiplanar_image(struct fdl_layout *y_layout,
+                                       struct fdl_layout *uv_layout,
+                                       uint32_t mip_levels);
+
 static inline void
 fdl_set_pitchalign(struct fdl_layout *layout, unsigned pitchalign)
 {
@@ -474,6 +478,13 @@ uint32_t fdl6_get_bank_mask(const struct fdl_layout *layout, unsigned miplevel,
 uint32_t fdl6_get_bank_shift(const struct fdl_ubwc_config *config);
 
 ENDC;
+
+/* Dwords of an A6XX/A7XX buffer descriptor that the D3D12 range emulation
+ * for SSBOs and texel buffers fills. They overlap the UBWC flag buffer
+ * fields, which buffers don't use.
+ */
+#define FDL6_EMULATED_BUFFER_SIZE_DWORD 7
+#define FDL6_EMULATED_SSBO_ADDR_DWORD   11
 
 #ifdef __cplusplus
 #include "common/fd_hw_common.h"

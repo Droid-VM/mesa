@@ -43,16 +43,12 @@ can_alias_srcs_of_def(struct ir3_register *src)
    if (def_instr->opc == OPC_META_COLLECT) {
       return true;
    }
-   if (def_instr->opc == OPC_MOV) {
-      /* We haven't seen any indication that aliasing supports the address
-       * register, nor does it seem important to do so based on how many fossils
-       * it took to find a case of it being attempted during alias setup.
-       */
-      return is_same_type_mov(def_instr) &&
-             !(def_instr->srcs[0]->flags & (IR3_REG_SHARED | IR3_REG_RELATIV));
-   }
-
-   return false;
+   /* We haven't seen any indication that aliasing supports the address
+    * register, nor does it seem important to do so based on how many fossils
+    * it took to find a case of it being attempted during alias setup.
+    */
+   return is_same_type_mov(def_instr, false) &&
+          !(def_instr->srcs[0]->flags & (IR3_REG_SHARED | IR3_REG_RELATIV));
 }
 
 static bool
@@ -142,7 +138,7 @@ alias_srcs(struct ir3_instruction *instr, const struct ir3_compiler *compiler)
     * scheduler to avoid putting potentially-aliasing instructions between mova
     * and the last use of the mova.
     */
-   if (num_aliases > 0 && compiler->info->props.alias_mova_quirk) {
+   if (num_aliases > 0 && IR3_QUIRK(compiler, QCTDD11147232_alias_mova)) {
       ir3_dst_create(instr, REG_A0_X, IR3_REG_HALF);
    }
 
@@ -176,7 +172,7 @@ ir3_create_alias_tex_regs(struct ir3 *ir)
       /* All current HW has a limitation where alias.tex is not allowed inside a
        * predt/predf/prede sequence.
        */
-      if (!ir->compiler->info->props.alias_predication_quirk ||
+      if (!IR3_QUIRK(ir->compiler, QCTDD11183148_alias_pred) ||
           !block_is_predicated) {
          foreach_instr (instr, &block->instr_list) {
             if (supports_alias_srcs(instr)) {
@@ -699,8 +695,9 @@ create_output_aliases(struct ir3_shader_variant *v, struct ir3_instruction *end)
       unsigned rt = output->slot - FRAG_RESULT_DATA0;
 
       foreach_src_n (comp_src, comp, src_instr) {
-         if (!(comp_src->flags & (IR3_REG_IMMED | IR3_REG_CONST))) {
-            /* Only const and immediate values can be aliased. */
+         if (!(comp_src->flags & (IR3_REG_IMMED | IR3_REG_CONST)) ||
+             (comp_src->flags & IR3_REG_RELATIV)) {
+            /* Only (non-relative) const and immediate values can be aliased. */
             continue;
          }
 

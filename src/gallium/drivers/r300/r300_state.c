@@ -722,7 +722,11 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             break;
 
 #if UTIL_ARCH_BIG_ENDIAN
+        /* R500 packs components into two registers, so BE swizzles differ. */
         case PIPE_FORMAT_A8R8G8B8_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
             /* A8R8G8B8 constant-color blending consumes the register lanes
              * in a different order from pipe RGBA. Program the inverse
              * order so GL_CONSTANT_COLOR sees pipe RGBA.
@@ -750,6 +754,11 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             float g = c.color[1];
             float b = c.color[2];
             float a = c.color[3];
+            if (r300->screen->caps.is_r500) {
+                c.color[0] = b;
+                c.color[2] = r;
+                break;
+            }
             c.color[0] = g;
             c.color[1] = b;
             c.color[2] = a;
@@ -757,8 +766,13 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             break;
         }
 
+        case PIPE_FORMAT_B4G4R4A4_UNORM:
+        case PIPE_FORMAT_B4G4R4X4_UNORM:
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
             /* 1555 colorbuffer blending consumes the constant color in
              * colorbuffer-lane order. Match the B5G5R5* output swizzle so
              * GL_CONSTANT_COLOR blending sees pipe RGBA.
@@ -1316,13 +1330,17 @@ static void* r300_create_fs_state(struct pipe_context* pipe,
     memset(&precompile_state, 0, sizeof(precompile_state));
 
     if (fs->state.type == PIPE_SHADER_IR_NIR) {
-        /* Pick something for the shadow samplers so that we have somewhat reliable shader stats later. */
+        /* Record sampler metadata and pick something for the shadow samplers
+         * so that we have somewhat reliable shader stats later. */
         nir_foreach_function_impl(impl, fs->state.ir.nir) {
             nir_foreach_block_safe(block, impl) {
                 nir_foreach_instr_safe(instr, block) {
                     if (instr->type != nir_instr_type_tex)
                         continue;
                     nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+                    if (tex->sampler_dim == GLSL_SAMPLER_DIM_2D)
+                        fs->samplers_2d |= 1u << tex->sampler_index;
 
                     if (tex->is_shadow) {
                         precompile_state.unit[tex->sampler_index].compare_mode_enabled = true;
@@ -1733,6 +1751,7 @@ static void*
     struct r300_context* r300 = r300_context(pipe);
     struct r300_sampler_state* sampler = CALLOC_STRUCT(r300_sampler_state);
     bool is_r500 = r300->screen->caps.is_r500;
+    int lod_bias_correction = 1;
     int lod_bias;
 
     sampler->state = *state;
@@ -1775,10 +1794,18 @@ static void*
 
     /* Unfortunately, r300-r500 don't support floating-point mipmap lods. */
     /* We must pass these to the merge function to clamp them properly. */
-    sampler->min_lod = (unsigned)MAX2(state->min_lod, 0);
-    sampler->max_lod = (unsigned)MAX2(ceilf(state->max_lod), 0);
+    /* Clamp before conversion because GL allows LOD values beyond UINT_MAX. */
+    sampler->min_lod = (unsigned)CLAMP(state->min_lod, 0,
+                                      R300_MAX_TEXTURE_LEVELS - 1);
+    sampler->max_lod = (unsigned)CLAMP(ceilf(state->max_lod), 0,
+                                      R300_MAX_TEXTURE_LEVELS - 1);
 
-    lod_bias = CLAMP((int)(state->lod_bias * 32 + 1), -(1 << 9), (1 << 9) - 1);
+    /* Fine-tune the existing empirical LOD bias correction for mip-nearest. */
+    if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST)
+        lod_bias_correction += is_r500 ? 2 : 1;
+
+    lod_bias = CLAMP((int)(state->lod_bias * 32 + lod_bias_correction),
+                     -(1 << 9), (1 << 9) - 1);
 
     sampler->filter1 |= (lod_bias << R300_LOD_BIAS_SHIFT) & R300_LOD_BIAS_MASK;
 
@@ -1890,10 +1917,12 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
         /* A new sampler view (= texture)... */
         dirty_tex = true;
 
-        /* Set the texrect factor in the fragment shader.
-             * Needed for RECT and NPOT fallback. */
+        /* Set texture size factors in the fragment shader.
+         * Needed for RECT, unnormalized coordinates, and NPOT fallback. */
         texture = r300_resource(views[i]->texture);
-        if (texture->tex.is_npot) {
+        if (texture->tex.is_npot || views[i]->target == PIPE_TEXTURE_RECT ||
+            (i < state->sampler_state_count && state->sampler_states[i] &&
+             state->sampler_states[i]->state.unnormalized_coords)) {
             r300_mark_atom_dirty(r300, &r300->fs_rc_constant_state);
         }
 

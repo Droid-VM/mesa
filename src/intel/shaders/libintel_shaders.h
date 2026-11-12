@@ -13,7 +13,7 @@
 
 #include "util/macros.h"
 
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 
 #else
 #include "libcl_vk.h"
@@ -22,7 +22,7 @@
 #include "genxml/genX_cl_pack.h"
 #include "genxml/genX_rt_cl_pack.h"
 
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 
 #define _3DPRIM_PATCHLIST(n) (0x20 + (n - 1))
 #endif
@@ -54,7 +54,9 @@ enum anv_generated_draw_flags {
    /* Wa_16014912113 */
    ANV_GENERATED_FLAG_WA_16014912113 = BITFIELD_BIT(9),
    /* Wa_18022330953 / Wa_22011440098 */
-   ANV_GENERATED_FLAG_WA_18022330953 = BITFIELD_BIT(10)
+   ANV_GENERATED_FLAG_WA_18022330953 = BITFIELD_BIT(10),
+   /* Efficient 64bit mode */
+   ANV_GENERATED_FLAG_EFFICIENT_64B  = BITFIELD_BIT(11),
 };
 
 /**

@@ -455,7 +455,7 @@ class BitSetExpression(object):
             self.name = 'anon_' + str(isa.anon_expression_count)
             isa.anon_expression_count = isa.anon_expression_count + 1
         expr = xml.text.strip()
-        self.fieldnames = list(set(re.findall(r"{([a-zA-Z0-9_]+)}", expr)))
+        self.fieldnames = sorted(set(re.findall(r"{([a-zA-Z0-9_]+)}", expr)))
         self.expr = re.sub(r"{([a-zA-Z0-9_]+)}", r"\1", expr)
         dbg("'{}' -> '{}'".format(expr, self.expr))
 

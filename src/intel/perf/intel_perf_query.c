@@ -24,8 +24,6 @@
 #include <unistd.h>
 #include <poll.h>
 
-#include "common/intel_gem.h"
-
 #include "dev/intel_debug.h"
 #include "dev/intel_device_info.h"
 
@@ -511,7 +509,7 @@ intel_perf_active_queries(struct intel_perf_context *perf_ctx,
 
    default:
       UNREACHABLE("Unknown query type");
-      break;
+      return -1;
    }
 }
 

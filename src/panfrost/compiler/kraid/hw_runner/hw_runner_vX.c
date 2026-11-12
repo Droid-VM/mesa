@@ -39,6 +39,7 @@ struct hw_runner_cmdstream_info {
    uint8_t fau_count;
 
    uint64_t shader_program_descriptor_device_ptr;
+   uint8_t shader_max_regs;
 
    uint64_t thread_storage_descriptor_device_ptr;
 };
@@ -55,7 +56,7 @@ hw_runner_fill_cmd_stream(struct pan_kmod_dev *dev,
    struct cs_builder_conf conf = {
       .nr_registers = csif_info->cs_reg_count,
       .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
-      .compute_ep_limit = dev->props.max_tasks_per_core,
+      .compute_ep_limit = PAN_ARCH >= 12 ? dev->props.max_tasks_per_core : 0,
       .alloc_buffer = NULL,
       .cookie = NULL,
       .ls_sb_slot = 0,
@@ -91,8 +92,13 @@ hw_runner_fill_cmd_stream(struct pan_kmod_dev *dev,
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, FAU_0), fau);
 
    assert((info->shader_program_descriptor_device_ptr & BITFIELD64_MASK(5)) == 0);
-   cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SPD_0),
-                info->shader_program_descriptor_device_ptr);
+   uint64_t spd = info->shader_program_descriptor_device_ptr;
+   if (PAN_ARCH >= 14) {
+      spd |= (info->shader_max_regs <= 32) ?
+         MALI_SHADER_REGISTER_ALLOCATION_32_PER_THREAD :
+         MALI_SHADER_REGISTER_ALLOCATION_64_PER_THREAD;
+   }
+   cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SPD_0), spd);
 
    assert((info->thread_storage_descriptor_device_ptr & BITFIELD64_MASK(6)) == 0);
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, TSD_0),
@@ -155,6 +161,10 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
     * - code
     * - TSD: Thread Storage Descriptor
     * - SPD: Shader Program Descriptor
+    * - SRT: Shader Resource Table (that's just a list of entries actually)
+    *   - SRE: Shader Resource Entry (descriptor pointer + size)
+    *     - Buffer Descriptors
+    * - SRT: Shader Resource Table
     * - CS: Command Stream (CSF commands)
     * Writable data must be in a separate non-executable buffer
     */
@@ -170,6 +180,18 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
    uint64_t spd_offset = ALIGN_POT(size_B, MALI_SHADER_PROGRAM_ALIGN);
    size_B = spd_offset + MALI_SHADER_PROGRAM_LENGTH;
 
+   /* Resource tables entries must be a multiple of
+    * MALI_RESOURCE_TABLE_SIZE_ALIGNMENT, even though we only use one entry.
+    */
+   uint64_t srt_offset = ALIGN_POT(size_B, MALI_RESOURCE_ALIGN);
+   uint64_t srt_size_N = ALIGN_POT(1, MALI_RESOURCE_TABLE_SIZE_ALIGNMENT);
+   uint64_t srt_size_B = MALI_RESOURCE_LENGTH * srt_size_N;
+   size_B = srt_offset + srt_size_B;
+
+   uint64_t bd_offset = ALIGN_POT(size_B, MALI_BUFFER_ALIGN);
+   uint64_t bd_size_B = MALI_BUFFER_LENGTH * info->simple_buffer_count;
+   size_B = bd_offset + bd_size_B;
+
    uint64_t cs_offset = ALIGN_POT(size_B, 128);
    size_B = cs_offset + MAX_CMD_STREAM_LEN_B;
 
@@ -179,22 +201,17 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
       .cs_size_B = 0,
    };
 
-   if (info->data_bo_host_ptr == NULL || info->descr_bo_host_ptr == NULL)
+   if (info->descr_bo_host_ptr == NULL)
       return;
 
    /* Fill the data in */
-   struct hw_runner_shader_args args = {
-      .data_addr = info->data_bo_device_ptr,
-      .data_stride = info->data_stride_B,
-   };
-
    void *descr_ptr = info->descr_bo_host_ptr;
 
    /* FAU */
    memcpy(descr_ptr + fau_offset_B, info->fau_ptr, info->fau_size_B);
    /* shader_args must be copied on top of FAU */
-   memcpy(descr_ptr + fau_offset_B + info->args_fau_offset, &args,
-          sizeof(args));
+   memcpy(descr_ptr + fau_offset_B + info->args_fau_offset, &info->shader_args,
+          sizeof(info->shader_args));
    /* Shader code */
    memcpy(descr_ptr + shader_offset_B, info->code_ptr, info->code_size_B);
 
@@ -231,7 +248,33 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
       spd.binary = info->descr_bo_device_ptr + shader_offset_B;
    }
 
+   /* SRT/SRE */
+   struct mali_resource_packed *srt = descr_ptr + srt_offset;
+   memset(srt, 0, srt_size_B);
+   pan_pack(&srt[0], RESOURCE, sre) {
+      sre.address = info->descr_bo_device_ptr + bd_offset;
+      sre.size = bd_size_B;
+      sre.contains_descriptors = true;
+   }
+
+   uint64_t descr_offset = 0;
+   for (int i = 0; i < info->simple_buffer_count; i++) {
+      struct mali_buffer_packed *buf_packed = descr_ptr + bd_offset
+                                              + descr_offset;
+      pan_pack(buf_packed, BUFFER, buf) {
+         buf.address = info->simple_buffers[i].device_ptr;
+         buf.size = info->simple_buffers[i].size_B;
+      }
+      descr_offset += MALI_BUFFER_LENGTH;
+   }
+
    /* Write CSF command stream */
+   uint64_t shader_resource_device_ptr =
+      info->simple_buffer_count ? info->descr_bo_device_ptr + srt_offset : 0;
+   uint8_t shader_resource_table_size =
+      info->simple_buffer_count ? MALI_RESOURCE_TABLE_SIZE_ALIGNMENT : 0;
+   uint64_t fau_device_ptr =
+      info->fau_size_B ? (info->descr_bo_device_ptr + fau_offset_B) : 0;
    struct hw_runner_cmdstream_info cmdstream_info = {
       .output_cs = {
          .host_ptr = info->descr_bo_host_ptr + cs_offset,
@@ -240,17 +283,15 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
          .size_B = 0,
       },
       .invocations = info->invocations,
-      .shader_resource_device_ptr = 0,
-      .shader_resource_table_size = 0,
-      .fau_device_ptr = info->fau_size_B ? (info->descr_bo_device_ptr + fau_offset_B) : 0,
+      .shader_resource_device_ptr = shader_resource_device_ptr,
+      .shader_resource_table_size = shader_resource_table_size,
+      .fau_device_ptr = fau_device_ptr,
       .fau_count = (info->fau_size_B / 4),
       .shader_program_descriptor_device_ptr = info->descr_bo_device_ptr + spd_offset,
+      .shader_max_regs = (info->register_count <= 32) ? 32 : 64,
       .thread_storage_descriptor_device_ptr = info->descr_bo_device_ptr + tsd_offset,
    };
 
    hw_runner_fill_cmd_stream(kdev, &cmdstream_info);
    out->cs_size_B = cmdstream_info.output_cs.size_B;
-
-   /* At last, copy data */
-   memcpy(info->data_bo_host_ptr, info->data_ptr, info->data_size_B);
 }

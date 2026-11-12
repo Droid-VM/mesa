@@ -219,7 +219,7 @@ _mesa_glthread_init(struct gl_context *ctx)
       return;
 
    if (!util_queue_init(&glthread->queue, "gl", MARSHAL_MAX_BATCHES - 2,
-                        1, 0, NULL)) {
+                        1, UTIL_QUEUE_INIT_WAKE_AT_HALF_EMPTY, NULL)) {
       return;
    }
 

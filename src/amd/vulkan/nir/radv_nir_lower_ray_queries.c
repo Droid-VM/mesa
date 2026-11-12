@@ -520,10 +520,14 @@ lower_rq_proceed(nir_builder *b, nir_intrinsic_instr *instr, struct ray_query_va
    nir_metadata_require(instr->instr.block->impl, nir_metadata_dominance);
 
    bool ignore_cull_mask = false;
+   bool tmin_zero = false;
    if (vars->initialize && nir_block_dominates(vars->initialize->instr.block, instr->instr.block)) {
       nir_src cull_mask = vars->initialize->src[3];
       if (nir_src_is_const(cull_mask) && nir_src_as_uint(cull_mask) == 0xFF)
          ignore_cull_mask = true;
+
+      nir_src tmin = vars->initialize->src[7];
+      tmin_zero = nir_src_is_const(tmin) && nir_src_as_float(tmin) == 0.0;
    }
 
    nir_variable *inv_dir = nir_local_variable_create(b->impl, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "inv_dir");
@@ -565,6 +569,7 @@ lower_rq_proceed(nir_builder *b, nir_intrinsic_instr *instr, struct ray_query_va
       .vars = trav_vars,
       .stack_entries = vars->stack_entries,
       .ignore_cull_mask = ignore_cull_mask,
+      .tmin_zero = tmin_zero,
       .stack_store_cb = store_stack_entry,
       .stack_load_cb = load_stack_entry,
       .aabb_cb = handle_candidate_aabb,

@@ -37,13 +37,28 @@ ALIASES = {
 }
 
 TARGETS = {
+    "tahiti": ["amd", "TAHITI"],
+    "pitcairn": ["amd", "PITCAIRN"],
+    "bonaire": ["amd", "BONAIRE"],
+    "hawaii": ["amd", "HAWAII"],
+    "polaris10": ["amd", "POLARIS10"],
+    "polaris12": ["amd", "POLARIS12"],
     "stoney": ["amd", "STONEY"],
-    "raven": ["amd", "RAVEN2"],
+    "vega10": ["amd", "VEGA10"],
+    "raven": ["amd", "RAVEN"],
+    "raven2": ["amd", "RAVEN2"],
+    "renoir": ["amd", "RENOIR"],
     "cezanne": ["amd", "RENOIR"],
-    "mendocino": ["amd", "RAPHAEL_MENDOCINO"],
-    "vangogh": ["amd", "VANGOGH"],
+    "vega20": ["amd", "VEGA20"],
+    "navi10": ["amd", "NAVI10"],
     "navi21": ["amd", "NAVI21"],
+    "vangogh": ["amd", "VANGOGH"],
+    "rembrandt": ["amd", "REMBRANDT"],
+    "mendocino": ["amd", "RAPHAEL_MENDOCINO"],
     "navi31": ["amd", "NAVI31"],
+    "navi33": ["amd", "NAVI33"],
+    "phoenix": ["amd", "PHOENIX"],
+    "strix1": ["amd", "STRIX1"],
     "gfx1201": ["amd", "GFX1201"],
 
     "m1": ["asahi", None],
@@ -56,6 +71,7 @@ TARGETS = {
     "a200": ["freedreno", "200"],
     "a201": ["freedreno", "201"],
     "a220": ["freedreno", "220"],
+    "a225": ["freedreno", "225"],
     "a305": ["freedreno", "305"],
     "a320": ["freedreno", "320"],
     "a330": ["freedreno", "330"],
@@ -68,24 +84,17 @@ TARGETS = {
     "a610": ["freedreno", "610"],
     "a618": ["freedreno", "618"],
     "a630": ["freedreno", "630"],
+    "a650": ["freedreno", "650"],
     "a660": ["freedreno", "660"],
     "a702": ["freedreno", "702"],
+    "a710": ["freedreno", "710"],
+    "a720": ["freedreno", "720"],
     "a730": ["freedreno", "730"],
+    "a735": ["freedreno", "735"],
     "a740": ["freedreno", "740"],
     "a750": ["freedreno", "750"],
     "a810": ["freedreno", "810"],
     "a830": ["freedreno", "830"],
-
-    "skl": ["intel", "skl"],
-    "apl": ["intel", "apl"],
-    "glk": ["intel", "glk"],
-    "kbl": ["intel", "kbl"],
-    "jsl": ["intel", "jsl"],
-    "tgl": ["intel", "tgl"],
-    "adl": ["intel", "adl"],
-    "rpl": ["intel", "rpl"],
-    "lnl": ["intel", "lnl"],
-    "ptl": ["intel", "ptl"],
 
     "mali450": ["lima", None],
 
@@ -112,6 +121,17 @@ TARGETS = {
     "rpi3": ["vc4", None],
 
 }
+
+INTEL_TARGETS = [
+   "lpt", "brw", "g4x", "ilk", "snb", "ivb", "hsw", "byt", "bdw", "chv", "skl",
+   "bxt", "kbl", "aml", "glk", "cfl", "whl", "cml", "icl", "ehl", "jsl", "tgl",
+   "rkl", "dg1", "adl", "sg1", "rpl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl",
+   "nvl-u", "nvl"
+]
+
+for target in INTEL_TARGETS:
+    assert(target not in TARGETS)
+    TARGETS[target] = ["intel", target]
 
 LD_PRELOAD = {
     "amd": "src/amd/drm-shim/libamdgpu_noop_drm_shim.so",

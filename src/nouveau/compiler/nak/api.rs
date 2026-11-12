@@ -101,12 +101,12 @@ impl GetDebugFlags for OnceLock<Debug> {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_should_print_nir() -> bool {
     DEBUG.print()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_debug_no_ugpr() -> bool {
     DEBUG.no_ugpr()
 }
@@ -168,8 +168,6 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
         lower_ffract: true,
         lower_fpow: true,
         lower_scmp: true,
-        lower_uadd_carry: true,
-        lower_usub_borrow: true,
         has_rotate32: dev.sm >= 32,
         has_shfr32: dev.sm >= 32,
         has_iadd3: dev.sm >= 70,
@@ -197,7 +195,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_compiler_create(
     dev: *const nv_device_info,
 ) -> *mut nak_compiler {
@@ -213,17 +211,17 @@ pub extern "C" fn nak_compiler_create(
     Box::into_raw(nak)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_compiler_destroy(nak: *mut nak_compiler) {
     unsafe { drop(Box::from_raw(nak)) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_debug_flags(_nak: *const nak_compiler) -> u64 {
     DEBUG.debug_flags().into()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_nir_options(
     nak: *const nak_compiler,
 ) -> *const nir_shader_compiler_options {
@@ -232,7 +230,7 @@ pub extern "C" fn nak_nir_options(
     &nak.nir_options
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_max_warps_per_sm(
     num_gprs: u32,
     nak: *const nak_compiler,
@@ -317,7 +315,9 @@ impl ShaderBin {
                             post_depth_coverage: fs_info.post_depth_coverage,
                             uses_sample_shading: fs_info.uses_sample_shading,
                             early_fragment_tests: fs_info.early_fragment_tests,
-                            _pad: [0; 135],
+                            z_min_bounded: fs_info.z_min_bounded,
+                            z_max_bounded: fs_info.z_max_bounded,
+                            _pad: [0; 133],
                         },
                     }
                 }
@@ -468,7 +468,7 @@ impl std::ops::Deref for ShaderBin {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_shader_bin_destroy(bin: *mut nak_shader_bin) {
     unsafe {
         _ = Box::from_raw(bin as *mut ShaderBin);
@@ -559,7 +559,7 @@ fn nak_compile_shader_internal(
     Box::into_raw(bin) as *mut nak_shader_bin
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_compile_shader(
     nir: *mut nir_shader,
     dump_asm: bool,

@@ -21,6 +21,9 @@
 #define foreach_batch(ctx, idx)                                                \
    BITSET_FOREACH_SET(idx, ctx->batches.active, PAN_MAX_BATCHES)
 
+#define foreach_render_batch(ctx, idx)                                         \
+   BITSET_FOREACH_SET(idx, ctx->batches.active, PAN_MAX_RENDER_BATCHES)
+
 static unsigned
 panfrost_batch_idx(struct panfrost_batch *batch)
 {
@@ -47,30 +50,24 @@ panfrost_batch_add_surface(struct panfrost_batch *batch,
 {
    if (surf->texture) {
       struct panfrost_resource *rsrc = pan_resource(surf->texture);
-      pan_legalize_format(batch->ctx, rsrc, surf->format, true, false);
-      panfrost_batch_write_rsrc(batch, rsrc, MESA_SHADER_FRAGMENT);
+      pan_resource_modifier_legalize(batch->ctx, rsrc, surf->format, true,
+                                     false);
+      panfrost_batch_write_rsrc(batch, rsrc);
    }
 }
 
 static int
 panfrost_batch_init(struct panfrost_context *ctx,
-                    const struct pipe_framebuffer_state *key,
-                    struct panfrost_batch *batch)
+                    struct panfrost_batch *batch,
+                    enum panfrost_batch_type type)
 {
    struct pipe_screen *pscreen = ctx->base.screen;
    struct panfrost_screen *screen = pan_screen(pscreen);
    struct panfrost_device *dev = &screen->dev;
 
+   batch->type = type;
    batch->ctx = ctx;
-
-   batch->seqnum = ++ctx->batches.seqnum;
-
    batch->bos = UTIL_DYNARRAY_INIT;
-
-   batch->minx = batch->miny = ~0;
-   batch->maxx = batch->maxy = 0;
-
-   util_copy_framebuffer_state(&batch->key, key);
 
    /* Preallocate the main pool, since every batch has at least one job
     * structure so it will be used */
@@ -85,13 +82,23 @@ panfrost_batch_init(struct panfrost_context *ctx,
                           PAN_BO_INVISIBLE, 65536, "Varyings", false, true))
       return -1;
 
-   for (unsigned i = 0; i < batch->key.nr_cbufs; ++i)
-      panfrost_batch_add_surface(batch, &batch->key.cbufs[i]);
+   if (type == PANFROST_BATCH_RENDER) {
+      batch->seqnum = ++ctx->batches.seqnum;
+      batch->minx = batch->miny = ~0;
+      batch->maxx = batch->maxy = 0;
 
-   panfrost_batch_add_surface(batch, &batch->key.zsbuf);
+      util_copy_framebuffer_state(&batch->key, &ctx->pipe_framebuffer);
+
+      for (unsigned i = 0; i < batch->key.nr_cbufs; ++i)
+         panfrost_batch_add_surface(batch, &batch->key.cbufs[i]);
+
+      panfrost_batch_add_surface(batch, &batch->key.zsbuf);
+   }
 
    if (dev->arch >= 10)
       u_trace_init(&batch->trace, &ctx->trace_context);
+
+   BITSET_SET(ctx->batches.active, panfrost_batch_idx(batch));
 
    return screen->vtbl.init_batch(batch);
 }
@@ -103,10 +110,8 @@ panfrost_batch_cleanup(struct panfrost_context *ctx,
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
    struct panfrost_device *dev = pan_device(ctx->base.screen);
 
-   assert(batch->seqnum);
-
-   if (ctx->batch == batch)
-      ctx->batch = NULL;
+   if (ctx->batch[batch->type] == batch)
+      ctx->batch[batch->type] = NULL;
 
    screen->vtbl.cleanup_batch(batch);
 
@@ -132,7 +137,8 @@ panfrost_batch_cleanup(struct panfrost_context *ctx,
    panfrost_pool_cleanup(&batch->pool);
    panfrost_pool_cleanup(&batch->invisible_pool);
 
-   util_unreference_framebuffer_state(&batch->key);
+   if (batch->type == PANFROST_BATCH_RENDER)
+      util_unreference_framebuffer_state(&batch->key);
 
    util_dynarray_fini(&batch->bos);
 
@@ -147,14 +153,14 @@ static void panfrost_batch_submit(struct panfrost_context *ctx,
                                   struct panfrost_batch *batch);
 
 static struct panfrost_batch *
-panfrost_get_batch(struct panfrost_context *ctx,
-                   const struct pipe_framebuffer_state *key)
+find_best_render_batch(struct panfrost_context *ctx)
 {
    struct panfrost_batch *batch = NULL;
 
-   for (unsigned i = 0; i < PAN_MAX_BATCHES; i++) {
+   for (unsigned i = 0; i < PAN_MAX_RENDER_BATCHES; i++) {
       if (ctx->batches.slots[i].seqnum &&
-          util_framebuffer_state_equal(&ctx->batches.slots[i].key, key)) {
+          util_framebuffer_state_equal(&ctx->batches.slots[i].key,
+                                       &ctx->pipe_framebuffer)) {
          /* We found a match, increase the seqnum for the LRU
           * eviction logic.
           */
@@ -174,7 +180,7 @@ panfrost_get_batch(struct panfrost_context *ctx,
       panfrost_batch_submit(ctx, batch);
    }
 
-   if (panfrost_batch_init(ctx, key, batch)) {
+   if (panfrost_batch_init(ctx, batch, PANFROST_BATCH_RENDER)) {
       mesa_loge("panfrost_batch_init failed");
       panfrost_batch_cleanup(ctx, batch);
       /* prevent this batch from being reused without initializing */
@@ -182,46 +188,42 @@ panfrost_get_batch(struct panfrost_context *ctx,
       return NULL;
    }
 
-   unsigned batch_idx = panfrost_batch_idx(batch);
-   BITSET_SET(ctx->batches.active, batch_idx);
-
    return batch;
 }
 
 /* Get the job corresponding to the FBO we're currently rendering into */
 
 struct panfrost_batch *
-panfrost_get_batch_for_fbo(struct panfrost_context *ctx)
+panfrost_get_render_batch(struct panfrost_context *ctx)
 {
-   /* If we already began rendering, use that */
+   struct panfrost_batch *batch;
 
-   if (ctx->batch) {
-      assert(util_framebuffer_state_equal(&ctx->batch->key,
+   /* If we already began rendering, use that */
+   batch = ctx->batch[PANFROST_BATCH_RENDER];
+   if (batch) {
+      assert(util_framebuffer_state_equal(&batch->key,
                                           &ctx->pipe_framebuffer));
-      return ctx->batch;
+      return batch;
    }
 
    /* If not, look up the job */
-   struct panfrost_batch *batch =
-      panfrost_get_batch(ctx, &ctx->pipe_framebuffer);
+   batch = find_best_render_batch(ctx);
    if (!batch)
       return NULL;
 
-   /* Set this job as the current FBO job. Will be reset when updating the
-    * FB state and when submitting or releasing a job.
-    */
-   ctx->batch = batch;
+   /* Make the batch current. */
+   ctx->batch[PANFROST_BATCH_RENDER] = batch;
    panfrost_dirty_state_all(ctx);
    return batch;
 }
 
 struct panfrost_batch *
-panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx,
-                                 const char *reason)
+panfrost_get_fresh_render_batch(struct panfrost_context *ctx,
+                                const char *reason)
 {
    struct panfrost_batch *batch;
 
-   batch = panfrost_get_batch(ctx, &ctx->pipe_framebuffer);
+   batch = find_best_render_batch(ctx);
    panfrost_dirty_state_all(ctx);
 
    /* We only need to submit and get a fresh batch if there is no
@@ -230,10 +232,34 @@ panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx,
    if (batch->draw_count + batch->compute_count > 0) {
       perf_debug(ctx, "Flushing the current FBO due to: %s", reason);
       panfrost_batch_submit(ctx, batch);
-      batch = panfrost_get_batch(ctx, &ctx->pipe_framebuffer);
+      batch = find_best_render_batch(ctx);
    }
 
-   ctx->batch = batch;
+   ctx->batch[PANFROST_BATCH_RENDER] = batch;
+   return batch;
+}
+
+struct panfrost_batch *
+panfrost_get_compute_batch(struct panfrost_context *ctx)
+{
+   struct panfrost_batch *batch;
+
+   /* Use current batch if set. */
+   batch = ctx->batch[PANFROST_BATCH_COMPUTE];
+   if (batch)
+      return batch;
+
+   /* Otherwise, initialize the batch reserved for compute jobs. */
+   batch = &ctx->batches.slots[PAN_COMPUTE_BATCH_SLOT];
+   if (panfrost_batch_init(ctx, batch, PANFROST_BATCH_COMPUTE)) {
+      mesa_loge("panfrost_batch_init failed");
+      panfrost_batch_cleanup(ctx, batch);
+      return NULL;
+   }
+
+   /* Make the batch current. */
+   ctx->batch[PANFROST_BATCH_COMPUTE] = batch;
+   panfrost_dirty_state_all(ctx);
    return batch;
 }
 
@@ -286,12 +312,9 @@ panfrost_batch_get_bo_access(struct panfrost_batch *batch, unsigned handle)
 {
    unsigned size = util_dynarray_num_elements(&batch->bos, pan_bo_access);
 
-   if (handle >= size) {
-      unsigned grow = handle + 1 - size;
-
-      memset(util_dynarray_grow(&batch->bos, pan_bo_access, grow), 0,
-             grow * sizeof(pan_bo_access));
-   }
+   if (handle >= size &&
+       !util_dynarray_grow_zero(&batch->bos, pan_bo_access, handle + 1 - size))
+      return NULL;
 
    return util_dynarray_element(&batch->bos, pan_bo_access, handle);
 }
@@ -335,64 +358,61 @@ panfrost_batch_add_bo_old(struct panfrost_batch *batch, struct panfrost_bo *bo,
    *entry = flags;
 }
 
-static uint32_t
-panfrost_access_for_stage(mesa_shader_stage stage)
+void
+panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo)
 {
-   return (stage == MESA_SHADER_FRAGMENT) ? PAN_BO_ACCESS_FRAGMENT
-                                          : PAN_BO_ACCESS_VERTEX_TILER;
+   panfrost_batch_add_bo_old(batch, bo, PAN_BO_ACCESS_READ);
 }
 
 void
-panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                      mesa_shader_stage stage)
+panfrost_batch_write_bo(struct panfrost_batch *batch, struct panfrost_bo *bo)
 {
-   panfrost_batch_add_bo_old(
-      batch, bo, PAN_BO_ACCESS_READ | panfrost_access_for_stage(stage));
-}
-
-void
-panfrost_batch_write_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                        mesa_shader_stage stage)
-{
-   panfrost_batch_add_bo_old(
-      batch, bo, PAN_BO_ACCESS_WRITE | panfrost_access_for_stage(stage));
+   panfrost_batch_add_bo_old(batch, bo, PAN_BO_ACCESS_WRITE);
 }
 
 void
 panfrost_batch_read_rsrc(struct panfrost_batch *batch,
-                         struct panfrost_resource *rsrc,
-                         mesa_shader_stage stage)
+                         struct panfrost_resource *rsrc)
 {
-   uint32_t access = PAN_BO_ACCESS_READ | panfrost_access_for_stage(stage);
-
-   pan_resource_update_access(batch->ctx, rsrc, false);
-
-   panfrost_batch_add_bo_old(batch, rsrc->bo, access);
+   /* Recursive call to panfrost_batch_read_rsrc() to add all planes.
+    * The max recursion depth should be 3.
+    */
+   if (rsrc->base.next)
+      panfrost_batch_read_rsrc(batch, pan_resource(rsrc->base.next));
 
    if (rsrc->separate_stencil)
-      panfrost_batch_add_bo_old(batch, rsrc->separate_stencil->bo, access);
-   if (rsrc->shadow_image)
-      panfrost_batch_add_bo_old(batch, rsrc->shadow_image->bo, access);
+      panfrost_batch_read_rsrc(batch, rsrc->separate_stencil);
 
+   if (rsrc->shadow_image)
+      panfrost_batch_read_rsrc(batch, rsrc->shadow_image);
+
+   uint32_t access = PAN_BO_ACCESS_READ | PAN_BO_ACCESS_PER_CTX_TRACKING;
+
+   pan_resource_update_access(batch->ctx, rsrc, false);
+   panfrost_batch_add_bo_old(batch, rsrc->bo, access);
    panfrost_batch_update_access(batch, rsrc, false);
 }
 
 void
 panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-                          struct panfrost_resource *rsrc,
-                          mesa_shader_stage stage)
+                          struct panfrost_resource *rsrc)
 {
-   uint32_t access = PAN_BO_ACCESS_WRITE | panfrost_access_for_stage(stage);
-
-   pan_resource_update_access(batch->ctx, rsrc, true);
-
-   panfrost_batch_add_bo_old(batch, rsrc->bo, access);
+   /* Recursive call to panfrost_batch_write_rsrc() to add all planes.
+    * The max recursion depth should be 3.
+    */
+   if (rsrc->base.next)
+      panfrost_batch_write_rsrc(batch, pan_resource(rsrc->base.next));
 
    if (rsrc->separate_stencil)
-      panfrost_batch_add_bo_old(batch, rsrc->separate_stencil->bo, access);
-   if (rsrc->shadow_image)
-      panfrost_batch_add_bo_old(batch, rsrc->shadow_image->bo, access);
+      panfrost_batch_write_rsrc(batch, rsrc->separate_stencil);
 
+   if (rsrc->shadow_image)
+      panfrost_batch_write_rsrc(batch, rsrc->shadow_image);
+
+   uint32_t access = PAN_BO_ACCESS_WRITE | PAN_BO_ACCESS_PER_CTX_TRACKING;
+
+   pan_resource_update_access(batch->ctx, rsrc, true);
+   panfrost_batch_add_bo_old(batch, rsrc->bo, access);
    panfrost_batch_update_access(batch, rsrc, true);
 }
 
@@ -406,7 +426,7 @@ panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
    bo = panfrost_bo_create(pan_device(batch->ctx->base.screen), size,
                            create_flags, label);
    if (bo) {
-      panfrost_batch_add_bo(batch, bo, stage);
+      panfrost_batch_add_bo(batch, bo);
 
       /* panfrost_batch_add_bo() has retained a reference and
        * panfrost_bo_create() initialize the refcnt to 1, so let's
@@ -434,7 +454,7 @@ panfrost_batch_get_scratchpad(struct panfrost_batch *batch,
                                   MESA_SHADER_VERTEX, "Thread local storage");
 
       if (batch->scratchpad)
-         panfrost_batch_add_bo(batch, batch->scratchpad, MESA_SHADER_FRAGMENT);
+         panfrost_batch_add_bo(batch, batch->scratchpad);
    }
 
    return batch->scratchpad;
@@ -483,6 +503,7 @@ panfrost_batch_to_fb_info(const struct panfrost_batch *batch,
    fb->force_samples = (batch->line_smoothing == U_TRISTATE_YES) ? 16 : 0;
    fb->rt_count = batch->key.nr_cbufs;
    fb->pls_enabled = batch->key.pls_enabled;
+   fb->downscale_rts = batch->key.downscale_cbufs;
    fb->sprite_coord_origin = (batch->sprite_coord_origin == U_TRISTATE_YES);
    fb->first_provoking_vertex =
       (batch->first_provoking_vertex == U_TRISTATE_YES);
@@ -510,6 +531,11 @@ panfrost_batch_to_fb_info(const struct panfrost_batch *batch,
       }
 
       fb->rts[i].discard = !reserve && !(batch->resolve & mask);
+
+      if (fb->downscale_rts) {
+         assert(fb->rt_count == 2);
+         fb->rts[i].discard = false;
+      }
 
       /* Clamp the rendering area to the damage extent. The
        * KHR_partial_update spec states that trying to render outside of
@@ -749,6 +775,18 @@ out:
    panfrost_batch_cleanup(ctx, batch);
 }
 
+void
+panfrost_flush_batch(struct panfrost_batch *batch, const char *reason)
+{
+   assert(reason);
+   PAN_TRACE_SCOPE(PAN_TRACE_GL_JOB, "%s reason=\"%s\"", __func__, reason);
+
+   struct panfrost_context *ctx = batch->ctx;
+
+   perf_debug(ctx, "Flushing batch due to: %s", reason);
+   panfrost_batch_submit(ctx, batch);
+}
+
 /* Submit all batches */
 
 void
@@ -758,13 +796,17 @@ panfrost_flush_all_batches(struct panfrost_context *ctx, const char *reason)
    PAN_TRACE_SCOPE(PAN_TRACE_GL_JOB, "%s reason=\"%s\"", __func__, reason);
    perf_debug(ctx, "Flushing everything due to: %s", reason);
 
-   struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+   struct panfrost_batch *batch = panfrost_get_compute_batch(ctx);
+   if (batch)
+      panfrost_batch_submit(ctx, batch);
+
+   batch = panfrost_get_render_batch(ctx);
    if (!batch)
       return;
 
    panfrost_batch_submit(ctx, batch);
 
-   for (unsigned i = 0; i < PAN_MAX_BATCHES; i++) {
+   for (unsigned i = 0; i < PAN_MAX_RENDER_BATCHES; i++) {
       if (ctx->batches.slots[i].seqnum)
          panfrost_batch_submit(ctx, &ctx->batches.slots[i]);
    }

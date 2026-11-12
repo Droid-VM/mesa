@@ -145,14 +145,15 @@ st_device_reset_callback(void *data, enum pipe_reset_status status)
 
 /**
  * Query information about GPU resets observed by this context
- *
- * Called via \c dd_function_table::GetGraphicsResetStatus.
  */
-static GLenum
+GLenum
 st_get_graphics_reset_status(struct gl_context *ctx)
 {
    struct st_context *st = st_context(ctx);
    enum pipe_reset_status status;
+
+   if (!st->screen->caps.device_reset_status_query)
+      return GL_NO_ERROR;
 
    if (st->reset_status != PIPE_NO_RESET) {
       status = st->reset_status;
@@ -178,11 +179,3 @@ st_install_device_reset_callback(struct st_context *st)
    }
 }
 
-
-void
-st_init_flush_functions(struct pipe_screen *screen,
-                        struct dd_function_table *functions)
-{
-   if (screen->caps.device_reset_status_query)
-      functions->GetGraphicsResetStatus = st_get_graphics_reset_status;
-}

@@ -1,18 +1,19 @@
 // Copyright © 2023 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
-extern crate bitview;
+extern crate mesa_util;
 extern crate nvidia_headers;
 
 use crate::ir::{
     MeshShaderInfo, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
     ShaderStageInfo, VtgIoInfo,
 };
-use bitview::{
+use mesa_util::bitview::{
     BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
 };
 use nak_bindings::*;
 use nvidia_headers::classes::cla097::sph::*;
+use nvidia_headers::classes::clc797::sph::*;
 use std::ops::Range;
 
 pub const _SPHV3_SHADER_HEADER_SIZE: usize = 20;
@@ -445,15 +446,15 @@ impl ShaderProgramHeader {
     }
 
     #[inline]
-    pub fn set_does_interlock(&mut self, does_interlock: bool) {
+    pub fn set_reads_interlock_ticket(&mut self, reads_interlock_ticket: bool) {
         assert!(self.shader_type == ShaderType::Fragment);
-        self.set_bit(610, does_interlock);
+        self.set_field(SPHV4_T2_READS_INTERLOCK_TICKET, reads_interlock_ticket);
     }
 
     #[inline]
-    pub fn set_uses_underestimate(&mut self, uses_underestimate: bool) {
+    pub fn set_uses_inner_coverage(&mut self, uses_inner_coverage: bool) {
         assert!(self.shader_type == ShaderType::Fragment);
-        self.set_bit(611, uses_underestimate);
+        self.set_field(SPHV4_T2_USES_INNER_COVERAGE, uses_inner_coverage);
     }
 
     #[inline]
@@ -546,7 +547,7 @@ pub fn encode_header(
             sph.set_omap_sample_mask(io.writes_sample_mask);
             sph.set_omap_depth(io.writes_depth);
             sph.set_omap_targets(io.writes_color);
-            sph.set_uses_underestimate(uses_underestimate);
+            sph.set_uses_inner_coverage(uses_underestimate);
 
             for (index, value) in io.barycentric_attr_in.iter().enumerate() {
                 sph.set_pervertex_imap_vector(index, *value);
@@ -562,7 +563,7 @@ pub fn encode_header(
         ShaderStageInfo::Fragment(stage) => {
             let zs_self_dep = fs_key.is_some_and(|key| key.zs_self_dep);
             sph.set_kills_pixels(stage.uses_kill || zs_self_dep);
-            sph.set_does_interlock(stage.does_interlock);
+            sph.set_reads_interlock_ticket(stage.reads_interlock_ticket);
         }
         ShaderStageInfo::Geometry(stage) => {
             sph.set_gs_passthrough_enable(stage.passthrough_enable);

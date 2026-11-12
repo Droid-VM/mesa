@@ -45,7 +45,11 @@ PanfrostDriver::init_perfcnt()
       dev = std::make_unique<PanfrostDevice>(drm_device.fd);
    }
    if (!perf) {
-      perf = std::make_unique<PanfrostPerf>(*dev);
+      perf = std::make_unique<PanfrostPerf>();
+      if (!perf->init(*dev)) {
+         perf = nullptr;
+         return false;
+      }
    }
    if (groups.empty() && counters.empty()) {
       std::tie(groups, counters) = create_available_counters(*perf);

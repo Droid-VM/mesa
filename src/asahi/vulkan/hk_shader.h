@@ -229,6 +229,9 @@ struct hk_api_shader {
    /* Is this an internal passthrough geometry shader? */
    bool is_passthrough;
 
+   char *debug_nir_dump;
+   char *debug_agx_dump;
+
    struct hk_shader variants[];
 };
 

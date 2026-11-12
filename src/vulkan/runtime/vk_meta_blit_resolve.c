@@ -1,5 +1,6 @@
 /*
  * Copyright © 2022 Collabora Ltd
+ * Copyright © 2026 Arm Ltd
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -30,6 +31,7 @@
 #include "vk_render_pass.h"
 
 #include "nir_builder.h"
+#include "nir_format_convert.h"
 
 struct vk_meta_blit_key {
    enum vk_meta_object_key_type key_type;
@@ -38,6 +40,7 @@ struct vk_meta_blit_key {
    VkResolveModeFlagBits resolve_mode;
    VkResolveModeFlagBits stencil_resolve_mode;
    bool stencil_as_discard;
+   bool need_int_clamp;
    VkFormat dst_format;
    VkImageAspectFlags aspects;
 };
@@ -129,14 +132,6 @@ compute_off_scale(uint32_t src_level_size,
    *scale_out = dst_scale;
 }
 
-static inline nir_def *
-load_struct_var(nir_builder *b, nir_variable *var, uint32_t field)
-{
-   nir_deref_instr *deref =
-      nir_build_deref_struct(b, nir_build_deref_var(b, var), field);
-   return nir_load_deref(b, deref);
-}
-
 static nir_def *
 build_tex_resolve(nir_builder *b, nir_deref_instr *t,
                   nir_def *coord,
@@ -224,8 +219,9 @@ build_blit_shader(const struct vk_meta_blit_key *key)
                           false /* row_major */, "push");
    nir_variable *push = nir_variable_create(b->shader, nir_var_mem_push_const,
                                             push_iface_type, "push");
+   nir_deref_instr *push_deref = nir_build_deref_var(b, push);
 
-   nir_def *xy_xform = load_struct_var(b, push, 0);
+   nir_def *xy_xform = nir_load_struct_field(b, push_deref, 0);
    nir_def *xy_off = nir_channels(b, xy_xform, 3 << 0);
    nir_def *xy_scale = nir_channels(b, xy_xform, 3 << 2);
 
@@ -233,7 +229,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
    out_coord_xy = nir_trim_vector(b, out_coord_xy, 2);
    nir_def *src_coord_xy = nir_ffma_weak(b, out_coord_xy, xy_scale, xy_off);
 
-   nir_def *z_xform = load_struct_var(b, push, 1);
+   nir_def *z_xform = nir_load_struct_field(b, push_deref, 1);
    nir_def *z_off = nir_channel(b, z_xform, 0);
    nir_def *z_scale = nir_channel(b, z_xform, 1);
 
@@ -327,6 +323,25 @@ build_blit_shader(const struct vk_meta_blit_key *key)
                                  key->src_samples, resolve_mode);
       }
       val = nir_trim_vector(b, val, out_comps);
+      if (key->need_int_clamp) {
+         enum pipe_format dst_pfmt = vk_format_to_pipe_format(key->dst_format);
+         const struct util_format_description *dst_desc =
+            util_format_description(dst_pfmt);
+         unsigned bits[4];
+         for (int i = 0; i < 4; i++) {
+            bits[i] = dst_desc->channel[i].size;
+            /* empty channels are rejected by nir_format_clamp_*int,
+             * so mark this as having the same number of bits as
+             * the first channel
+             */
+            if (bits[i] == 0)
+               bits[i] = dst_desc->channel[0].size;
+         }
+         if (util_format_is_pure_uint(dst_pfmt))
+            val = nir_format_clamp_uint(b, val, bits);
+         else if (util_format_is_pure_sint(dst_pfmt))
+            val = nir_format_clamp_sint(b, val, bits);
+      }
 
       if (key->stencil_as_discard) {
          assert(key->aspects == VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -756,6 +771,7 @@ vk_meta_blit_image(struct vk_command_buffer *cmd,
    key.src_samples = src_image->samples;
    key.dim = vk_image_sampler_dim(src_image);
    key.dst_format = dst_format;
+   key.need_int_clamp = meta->sw_clamp_int_blits && dst_format != src_format;
 
    for (uint32_t r = 0; r < region_count; r++) {
       struct vk_meta_blit_push_data push = {0};
@@ -1023,7 +1039,11 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
       u_foreach_bit(v, view_mask) {
          region.srcSubresource.baseArrayLayer = src_view->base_array_layer + v;
          region.srcSubresource.layerCount = 1;
-         region.dstSubresource.baseArrayLayer = dst_view->base_array_layer + v;
+         uint32_t dst_layer = dst_view->base_array_layer + v;
+         if (dst_view->image->image_type == VK_IMAGE_TYPE_3D)
+            region.dstOffset.z = dst_layer;
+         else
+            region.dstSubresource.baseArrayLayer = dst_layer;
          region.dstSubresource.layerCount = 1;
 
          vk_meta_resolve_image(cmd, meta,
@@ -1034,7 +1054,10 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
    } else {
       region.srcSubresource.baseArrayLayer = src_view->base_array_layer;
       region.srcSubresource.layerCount = layer_count;
-      region.dstSubresource.baseArrayLayer = dst_view->base_array_layer;
+      if (dst_view->image->image_type == VK_IMAGE_TYPE_3D)
+         region.dstOffset.z = dst_view->base_array_layer;
+      else
+         region.dstSubresource.baseArrayLayer = dst_view->base_array_layer;
       region.dstSubresource.layerCount = layer_count;
 
       vk_meta_resolve_image(cmd, meta,

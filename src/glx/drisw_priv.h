@@ -50,6 +50,11 @@ struct drisw_drawable
    XShmSegmentInfo shminfo;
    int xDepth;
    int swapInterval;
+
+   /* kopper: Present ConfigureNotify tracking */
+   struct xcb_special_event *resize_se;
+   uint32_t resize_eid;
+   uint32_t resize_serial;
 };
 
 #endif

@@ -310,10 +310,9 @@ dri_create_image_from_renderbuffer(struct dri_context *dri_ctx,
 void
 dri2_destroy_image(struct dri_image *img)
 {
-   const __DRIimageLoaderExtension *imgLoader = img->screen->image.loader;
+   const __DRIimageLoaderExtension *imgLoader = img->screen->loader.image;
 
-   if (imgLoader && imgLoader->base.version >= 4 &&
-         imgLoader->destroyLoaderImageState) {
+   if (imgLoader && imgLoader->destroyLoaderImageState) {
       imgLoader->destroyLoaderImageState(img->loader_private);
    }
 
@@ -426,23 +425,23 @@ static const struct dri2_format_mapping dri2_format_table[] = {
       { DRM_FORMAT_XBGR2101010,   __DRI_IMAGE_FORMAT_XBGR2101010,
         PIPE_FORMAT_R10G10B10X2_UNORM, 1, },
       { DRM_FORMAT_ARGB8888,      __DRI_IMAGE_FORMAT_ARGB8888,
-        PIPE_FORMAT_BGRA8888_UNORM, 1, },
+        PIPE_FORMAT_B8G8R8A8_UNORM, 1, },
       { DRM_FORMAT_BGRA8888,      PIPE_FORMAT_A8R8G8B8_UNORM,
         PIPE_FORMAT_A8R8G8B8_UNORM, 1, },
       { DRM_FORMAT_ABGR8888,      __DRI_IMAGE_FORMAT_ABGR8888,
-        PIPE_FORMAT_RGBA8888_UNORM, 1, },
+        PIPE_FORMAT_R8G8B8A8_UNORM, 1, },
       { DRM_FORMAT_RGBA8888,      PIPE_FORMAT_A8B8G8R8_UNORM,
         PIPE_FORMAT_A8B8G8R8_UNORM, 1, },
       { __DRI_IMAGE_FOURCC_SARGB8888,     __DRI_IMAGE_FORMAT_SARGB8,
-        PIPE_FORMAT_BGRA8888_SRGB, 1, },
+        PIPE_FORMAT_B8G8R8A8_SRGB, 1, },
       { DRM_FORMAT_XRGB8888,      __DRI_IMAGE_FORMAT_XRGB8888,
-        PIPE_FORMAT_BGRX8888_UNORM, 1, },
+        PIPE_FORMAT_B8G8R8X8_UNORM, 1, },
       { DRM_FORMAT_BGRX8888,      PIPE_FORMAT_X8R8G8B8_UNORM,
         PIPE_FORMAT_X8R8G8B8_UNORM, 1, },
       { DRM_FORMAT_RGB888,        __DRI_IMAGE_FORMAT_RGB888,
         PIPE_FORMAT_B8G8R8_UNORM, 1, },
       { DRM_FORMAT_XBGR8888,      __DRI_IMAGE_FORMAT_XBGR8888,
-        PIPE_FORMAT_RGBX8888_UNORM, 1, },
+        PIPE_FORMAT_R8G8B8X8_UNORM, 1, },
       { DRM_FORMAT_RGBX8888,      PIPE_FORMAT_X8B8G8R8_UNORM,
         PIPE_FORMAT_X8B8G8R8_UNORM, 1, },
       { DRM_FORMAT_BGR888,        __DRI_IMAGE_FORMAT_BGR888,
@@ -462,9 +461,9 @@ static const struct dri2_format_mapping dri2_format_table[] = {
       { DRM_FORMAT_R16,           __DRI_IMAGE_FORMAT_R16,
         PIPE_FORMAT_R16_UNORM, 1, },
       { DRM_FORMAT_GR88,          __DRI_IMAGE_FORMAT_GR88,
-        PIPE_FORMAT_RG88_UNORM, 1, },
+        PIPE_FORMAT_R8G8_UNORM, 1, },
       { DRM_FORMAT_GR1616,        __DRI_IMAGE_FORMAT_GR1616,
-        PIPE_FORMAT_RG1616_UNORM, 1, },
+        PIPE_FORMAT_R16G16_UNORM, 1, },
       { DRM_FORMAT_R16F,          PIPE_FORMAT_R16_FLOAT,
          PIPE_FORMAT_R16_FLOAT, 1 },
       { DRM_FORMAT_R32F,          PIPE_FORMAT_R32_FLOAT,
@@ -583,7 +582,7 @@ static const struct dri2_format_mapping dri2_format_table[] = {
           { 1, 0, 0, __DRI_IMAGE_FORMAT_R16 },
           { 2, 0, 0, __DRI_IMAGE_FORMAT_R16 } } },
 
-      { DRM_FORMAT_NV12,          __DRI_IMAGE_FORMAT_NONE,
+      { DRM_FORMAT_NV12,          PIPE_FORMAT_NV12,
         PIPE_FORMAT_NV12, 2,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_R8 },
           { 1, 1, 1, __DRI_IMAGE_FORMAT_GR88 } } },
@@ -669,7 +668,7 @@ static const struct dri2_format_mapping dri2_format_table[] = {
        * V into A.  This lets the texture sampler interpolate the Y
        * components correctly when sampling from plane 0, and interpolate
        * U and V correctly when sampling from plane 1. */
-      { DRM_FORMAT_YUYV,          __DRI_IMAGE_FORMAT_NONE,
+      { DRM_FORMAT_YUYV,          PIPE_FORMAT_YUYV,
         PIPE_FORMAT_YUYV, 2,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_GR88 },
           { 0, 1, 0, __DRI_IMAGE_FORMAT_ARGB8888 } } },
@@ -742,6 +741,12 @@ dri2_get_mapping_by_format(int format)
          return &dri2_format_table[i];
    }
 
+   /* an image with the fixed little-endian variant of a format */
+   for (unsigned i = 0; i < ARRAY_SIZE(dri2_format_table); i++) {
+      if (util_format_le_byte_order(dri2_format_table[i].dri_format) == format)
+         return &dri2_format_table[i];
+   }
+
    return NULL;
 }
 
@@ -794,6 +799,109 @@ dri2_yuv_dma_buf_supported(struct dri_screen *screen,
    return true;
 }
 
+static unsigned
+dri2_get_tex_usage(struct dri_screen *screen, enum pipe_format format)
+{
+   struct pipe_screen *pscreen = screen->base.screen;
+   unsigned tex_usage = 0;
+
+   if (pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
+                                    PIPE_BIND_RENDER_TARGET))
+      tex_usage |= PIPE_BIND_RENDER_TARGET;
+   if (pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW) ||
+       pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SAMPLER_VIEW_SUBOPTIMAL))
+      tex_usage |= PIPE_BIND_SAMPLER_VIEW;
+
+   return tex_usage;
+}
+
+/**
+ * A dma-buf has the little-endian layout of its fourcc, so on a big-endian
+ * host it is imported with the fixed little-endian variant of \p format, if
+ * there is one and the driver can sample it.
+ */
+static enum pipe_format
+dri2_get_import_format(struct dri_screen *screen, enum pipe_format format)
+{
+   struct pipe_screen *pscreen = screen->base.screen;
+   enum pipe_format le_format = util_format_le_byte_order(format);
+
+   if (UTIL_ARCH_BIG_ENDIAN && le_format != format &&
+       pscreen->is_format_supported(pscreen, le_format, screen->target, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW))
+      return le_format;
+
+   return format;
+}
+
+/**
+ * The format to allocate an image of \p format with, and the binds the driver
+ * supports for it in \p tex_usage. On a big-endian host this is the fixed
+ * little-endian variant of \p format, which has the layout of the fourcc, if
+ * the driver supports it for all that it supports \p format for.
+ */
+enum pipe_format
+dri2_get_create_format(struct dri_screen *screen, enum pipe_format format,
+                       unsigned *tex_usage)
+{
+   enum pipe_format le_format = util_format_le_byte_order(format);
+
+   *tex_usage = dri2_get_tex_usage(screen, format);
+
+   if (UTIL_ARCH_BIG_ENDIAN && le_format != format && *tex_usage &&
+       dri2_get_tex_usage(screen, le_format) == *tex_usage)
+      return le_format;
+
+   return format;
+}
+
+/**
+ * The fourcc of an image described by \p map with a texture of \p format.
+ * It has DRM_FORMAT_BIG_ENDIAN set if the texture is host-endian and a
+ * dma-buf with the plain fourcc is imported with a different format.
+ */
+int
+dri2_get_image_fourcc(struct dri_screen *screen,
+                      const struct dri2_format_mapping *map,
+                      enum pipe_format format)
+{
+   if (format == map->pipe_format &&
+       dri2_get_import_format(screen, map->pipe_format) != map->pipe_format)
+      return map->dri_fourcc | DRM_FORMAT_BIG_ENDIAN;
+
+   return map->dri_fourcc;
+}
+
+/**
+ * The mapping to import a dma-buf of \p fourcc with, or NULL. Unless
+ * \p fourcc is one from dri2_get_image_fourcc(), this is \p import_map, a
+ * copy of the table entry with the formats from dri2_get_import_format().
+ */
+const struct dri2_format_mapping *
+dri2_get_import_mapping(struct dri_screen *screen, int fourcc,
+                        struct dri2_format_mapping *import_map)
+{
+   const struct dri2_format_mapping *map = dri2_get_mapping_by_fourcc(fourcc);
+
+   if (!map) {
+      map = dri2_get_mapping_by_fourcc(fourcc & ~DRM_FORMAT_BIG_ENDIAN);
+      if (map &&
+          dri2_get_image_fourcc(screen, map, map->pipe_format) != fourcc)
+         map = NULL;
+      return map;
+   }
+
+   *import_map = *map;
+   import_map->pipe_format = dri2_get_import_format(screen, map->pipe_format);
+   for (unsigned i = 0; i < map->nplanes; i++)
+      import_map->planes[i].dri_format =
+         dri2_get_import_format(screen, map->planes[i].dri_format);
+
+   return import_map;
+}
+
 bool
 dri_query_dma_buf_formats(struct dri_screen *screen, int max, int *formats,
                            int *count)
@@ -827,40 +935,6 @@ dri_query_dma_buf_formats(struct dri_screen *screen, int max, int *formats,
    }
    *count = j;
    return true;
-}
-
-
-struct dri_image *
-dri_create_image_with_modifiers(struct dri_screen *screen,
-                                 uint32_t width, uint32_t height,
-                                 uint32_t dri_format, uint32_t dri_usage,
-                                 const uint64_t *modifiers,
-                                 unsigned int modifiers_count,
-                                 void *loaderPrivate)
-{
-   if (modifiers && modifiers_count > 0) {
-      bool has_valid_modifier = false;
-      int i;
-
-      /* It's acceptable to create an image with INVALID modifier in the list,
-       * but it cannot be on the only modifier (since it will certainly fail
-       * later). While we could easily catch this after modifier creation, doing
-       * the check here is a convenient debug check likely pointing at whatever
-       * interface the client is using to build its modifier list.
-       */
-      for (i = 0; i < modifiers_count; i++) {
-         if (modifiers[i] != DRM_FORMAT_MOD_INVALID) {
-            has_valid_modifier = true;
-            break;
-         }
-      }
-      if (!has_valid_modifier)
-         return NULL;
-   }
-
-   return dri_create_image(screen, width, height, dri_format,
-                           modifiers, modifiers_count, dri_usage,
-                           loaderPrivate);
 }
 
 void

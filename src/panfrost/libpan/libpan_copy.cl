@@ -6,7 +6,6 @@
 #include "compiler/libcl/libcl.h"
 #include "libpan_copy.h"
 
-#if PAN_ARCH >= 6
 KERNEL(32)
 panlib_fill(global uint32_t *address, uint32_t value)
 {
@@ -84,5 +83,4 @@ panlib_copy_mem_indirect(global const uint32_t *cmd)
 
    panlib_copy_mem_body(dst, src, size);
 }
-#endif
 #endif

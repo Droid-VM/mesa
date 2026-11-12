@@ -42,18 +42,6 @@
 #define MAX_FRAMEBUFFER_WIDTH          (1u << 14)
 #define MAX_FRAMEBUFFER_HEIGHT         (1u << 14)
 
-/*
- * This is the point we switch from using CP to compute shader
- * for certain buffer operations.
- */
-#define RADV_BUFFER_OPS_CS_THRESHOLD 4096
-
-/* On dGPUs, GTT/host-memory copies use CP DMA up to this size and a compute
- * shader above it (CP DMA is a serial engine that underperforms compute for
- * large transfers).
- */
-#define RADV_BUFFER_OPS_GTT_CP_DMA_MAX_BYTES 65536
-
 #define RADV_BUFFER_UPDATE_THRESHOLD 1024
 
 /* descriptor index into scratch ring offsets */
@@ -140,9 +128,14 @@
 #define RADV_NUM_SMOOTH_AA_SAMPLES 4
 
 /* Size of the temporary buffer allocated for transfer queue copy command workarounds.
- * The size is chosen so that it can fit two lines of (1 << 14) blocks at 16 bpp.
+ * The size is chosen so that it can fit two lines of (1 << 14) blocks at 16 bytes per pixel.
  */
 #define RADV_SDMA_TRANSFER_TEMP_BYTES (2 * (1 << 14) * 16)
+
+/* Padding for the temporary buffer size before the actual contents on SDMA2-3.
+ * The size is chosen to be 1 microtile at 16 bytes per pixel.
+ */
+#define RADV_SDMA_TRANSFER_TEMP_PAD_BYTES_SDMA2 (8 * 8 * 16)
 
 #define RADV_VERT_ATTRIB_MAX MAX2(VERT_ATTRIB_MAX, VERT_ATTRIB_GENERIC0 + MAX_VERTEX_ATTRIBS)
 
@@ -153,8 +146,8 @@
 #define RADV_ACCEL_STRUCT_DESC_SIZE  16
 
 /* Descriptor heaps */
-#define RADV_HEAP_RESOURCE  0
-#define RADV_HEAP_SAMPLER   1
+#define RADV_HEAP_RESOURCE 0
+#define RADV_HEAP_SAMPLER  1
 
 /* Number of descriptor heaps */
 #define RADV_MAX_HEAPS (RADV_HEAP_SAMPLER + 1)

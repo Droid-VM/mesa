@@ -122,6 +122,13 @@ fd_acc_end_query(struct fd_context *ctx, struct fd_query *q) assert_dt
    struct fd_ringbuffer *ring = fd_batch_get_tile_epilogue(batch);
    struct fd_resource *rsc = fd_resource(aq->prsc);
 
+   /* The batch writes the query's bo even if no draw resumed the query, so
+    * that waiting for its result waits for this batch:
+    */
+   fd_screen_lock(ctx->screen);
+   fd_batch_resource_write(batch, rsc);
+   fd_screen_unlock(ctx->screen);
+
    if (ctx->screen->gen < 5) {
       OUT_PKT3(ring, CP_MEM_WRITE, 3);
       OUT_RELOC(ring, rsc->bo, 0, 0, 0);

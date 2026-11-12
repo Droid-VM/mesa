@@ -5,6 +5,7 @@
  */
 
 #include <llvm-c/Core.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -13,6 +14,10 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/Support/CommandLine.h>
+#if LLVM_VERSION_MAJOR >= 24
+#include <llvm/TargetParser/AMDGPUTargetParser.h>
+#include <llvm/TargetParser/Triple.h>
+#endif
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Utils.h>
@@ -77,6 +82,25 @@ bool ac_is_llvm_processor_supported(LLVMTargetMachineRef tm, const char *process
       return TM->getMCSubtargetInfo()->isCPUStringValid(processor);
    #endif
 }
+
+#if LLVM_VERSION_MAJOR >= 24
+/* The returned StringRef points into LLVM's static name table and is
+ * NUL-terminated, so it's safe to return as a C string.
+ */
+const char *ac_get_llvm_subarch_name(enum radeon_family family)
+{
+   AMDGPU::GPUKind kind = AMDGPU::parseArchAMDGCN(ac_get_llvm_processor_name(family));
+   return AMDGPU::getSubArchName(AMDGPU::getSubArch(kind)).data();
+}
+
+/* Validate the subarch before target machine creation, which would otherwise
+ * fatal-error on an unrecognized one.
+ */
+bool ac_is_llvm_subarch_supported(const char *subarch)
+{
+   return Triple::parseSubArch(subarch) != Triple::NoSubArch;
+}
+#endif
 
 void ac_reset_llvm_all_options_occurrences()
 {
@@ -228,6 +252,12 @@ struct raw_memory_ostream : public raw_pwrite_stream {
 struct ac_midend_optimizer
 {
    TargetMachine *target_machine;
+#if LLVM_VERSION_MAJOR >= 24
+   /* PassBuilder reads its library options from this context. The pipeline
+    * is built manually, so it doesn't need to be the context of the modules.
+    */
+   LLVMContext pass_builder_context;
+#endif
    PassBuilder pass_builder;
    TargetLibraryInfoImpl target_library_info;
 
@@ -247,7 +277,11 @@ struct ac_midend_optimizer
 
    ac_midend_optimizer(TargetMachine *arg_target_machine, bool arg_check_ir)
       : target_machine(arg_target_machine),
+#if LLVM_VERSION_MAJOR >= 24
+        pass_builder(pass_builder_context, target_machine, PipelineTuningOptions(), {}),
+#else
         pass_builder(target_machine, PipelineTuningOptions(), {}),
+#endif
         target_library_info(Triple(target_machine->getTargetTriple()))
    {
       /* Build the pipeline and optimize.
@@ -417,15 +451,35 @@ LLVMValueRef ac_build_atomic_rmw(struct ac_llvm_context *ctx, LLVMAtomicRMWBinOp
    case LLVMAtomicRMWBinOpFAdd:
       binop = AtomicRMWInst::FAdd;
       break;
+   case LLVMAtomicRMWBinOpFMin:
+      binop = AtomicRMWInst::FMin;
+      break;
+   case LLVMAtomicRMWBinOpFMax:
+      binop = AtomicRMWInst::FMax;
+      break;
    default:
       UNREACHABLE("invalid LLVMAtomicRMWBinOp");
       break;
    }
    unsigned SSID = unwrap(ctx->context)->getOrInsertSyncScopeID(sync_scope);
-   return wrap(unwrap(ctx->builder)
-                        ->CreateAtomicRMW(binop, unwrap(ptr), unwrap(val),
-                                          MaybeAlign(0),
-                                          AtomicOrdering::SequentiallyConsistent, SSID));
+   AtomicRMWInst *rmw =
+      unwrap(ctx->builder)->CreateAtomicRMW(binop, unwrap(ptr), unwrap(val), MaybeAlign(0),
+                                            AtomicOrdering::SequentiallyConsistent, SSID);
+
+   if (rmw->isFloatingPointOperation() &&
+       LLVMGetPointerAddressSpace(LLVMTypeOf(ptr)) != AC_ADDR_SPACE_LDS) {
+      MDNode *empty_md = MDNode::get(*unwrap(ctx->context), {});
+      rmw->setMetadata("amdgpu.no.fine.grained.memory", empty_md);
+      if (binop == AtomicRMWInst::FAdd && rmw->getType()->isFloatTy()) {
+#if LLVM_VERSION_MAJOR >= 24
+         rmw->setMetadata(LLVMContext::MD_atomic_ignore_denormal_mode, empty_md);
+#else
+         rmw->setMetadata("amdgpu.ignore.denormal.mode", empty_md);
+#endif
+      }
+   }
+
+   return wrap(rmw);
 }
 
 LLVMValueRef ac_build_atomic_cmp_xchg(struct ac_llvm_context *ctx, LLVMValueRef ptr,

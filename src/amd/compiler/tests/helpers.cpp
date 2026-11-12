@@ -32,7 +32,7 @@ Temp inputs[16];
 static radeon_info rad_info;
 static nir_shader_compiler_options nir_options;
 static nir_builder _nb;
-nir_builder *nb;
+nir_builder* nb;
 
 static VkInstance vk_instance = VK_NULL_HANDLE;
 static VkDevice vk_device = VK_NULL_HANDLE;
@@ -163,7 +163,8 @@ setup_cs(const char* input_spec, enum amd_gfx_level gfx_level, enum radeon_famil
 }
 
 bool
-setup_nir_cs(enum amd_gfx_level gfx_level, mesa_shader_stage stage, enum radeon_family family, const char* subvariant)
+setup_nir_cs(enum amd_gfx_level gfx_level, mesa_shader_stage stage, enum radeon_family family,
+             const char* subvariant)
 {
    if (!set_variant(gfx_level, subvariant))
       return false;
@@ -215,7 +216,7 @@ finish_validator_test()
    finish_program(program.get(), true, true);
    aco_print_program(program.get(), output);
    fprintf(output, "Validation results:\n");
-   if (aco::validate_ir(program.get()))
+   if (aco::validate_ir(program.get()) && aco::validate_cfg(program.get()))
       fprintf(output, "Validation passed\n");
    else
       fprintf(output, "Validation failed\n");
@@ -225,12 +226,12 @@ void
 finish_opt_test()
 {
    finish_program(program.get(), true, true);
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before optimization failed");
       return;
    }
    aco::optimize(program.get());
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after optimization failed");
       return;
    }
@@ -241,12 +242,12 @@ void
 finish_setup_reduce_temp_test()
 {
    finish_program(program.get(), true, true);
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before setup_reduce_temp failed");
       return;
    }
    aco::setup_reduce_temp(program.get());
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after setup_reduce_temp failed");
       return;
    }
@@ -257,12 +258,12 @@ void
 finish_lower_subdword_test()
 {
    finish_program(program.get(), true, true);
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before lower_subdword failed");
       return;
    }
    aco::lower_subdword(program.get());
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after lower_subdword failed");
       return;
    }
@@ -273,7 +274,7 @@ void
 finish_ra_test(ra_test_policy policy)
 {
    finish_program(program.get(), true, true);
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before register allocation failed");
       return;
    }
@@ -282,7 +283,7 @@ finish_ra_test(ra_test_policy policy)
    aco::live_var_analysis(program.get());
    aco::register_allocation(program.get(), policy);
 
-   if (aco::validate_ra(program.get())) {
+   if (aco::validate_ra(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after register allocation failed");
       return;
    }
@@ -295,14 +296,17 @@ finish_optimizer_postRA_test()
 {
    finish_program(program.get(), true, true);
 
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before optimize_postRA failed");
       return;
    }
 
+   /* the post-RA optimizer uses kill flags */
+   aco::live_var_analysis(program.get());
+
    aco::optimize_postRA(program.get());
 
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after optimize_postRA failed");
       return;
    }
@@ -315,14 +319,14 @@ finish_to_hw_instr_test()
 {
    finish_program(program.get(), true, true);
 
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation before lower_to_hw_instr failed");
       return;
    }
 
    aco::lower_to_hw_instr(program.get());
 
-   if (!aco::validate_ir(program.get())) {
+   if (!aco::validate_ir(program.get()) || !aco::validate_cfg(program.get())) {
       fail_test("Validation after lower_to_hw_instr failed");
       return;
    }
@@ -387,12 +391,14 @@ finish_assembler_test()
 {
    finish_program(program.get());
    std::vector<uint32_t> binary;
-   unsigned exec_size = emit_program(program.get(), binary);
+   std::vector<aco_symbol> symbols;
+   aco_callback_params params = {};
+   emit_program(program.get(), binary, symbols, true, &params);
 
    /* we could use CLRX for disassembly but that would require it to be
     * installed */
    if (program->gfx_level >= GFX8) {
-      print_asm(program.get(), rad_info.family, binary, exec_size / 4u, output);
+      print_asm(program.get(), rad_info.family, binary, params.exec_size / 4u, output);
    } else {
       // TODO: maybe we should use CLRX and skip this test if it's not available?
       for (uint32_t dword : binary)
@@ -401,10 +407,11 @@ finish_assembler_test()
 }
 
 void
-live_var_analysis_debug_func(void* private_data, enum aco_compiler_debug_level level, const char* message)
+live_var_analysis_debug_func(void* private_data, enum aco_compiler_debug_level level,
+                             const char* message)
 {
    if (level == ACO_COMPILER_DEBUG_LEVEL_ERROR)
-      *(bool *)private_data = true;
+      *(bool*)private_data = true;
 }
 
 void
@@ -427,7 +434,8 @@ finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
    memset(&info, 0, sizeof(info));
    info.hw_stage = hw_stage;
    info.wave_size = wave_size;
-   info.workgroup_size = nb->shader->info.workgroup_size[0] * nb->shader->info.workgroup_size[1] * nb->shader->info.workgroup_size[2];
+   info.workgroup_size = nb->shader->info.workgroup_size[0] * nb->shader->info.workgroup_size[1] *
+                         nb->shader->info.workgroup_size[2];
 
    memset(&config, 0, sizeof(config));
 
@@ -618,7 +626,7 @@ ext_sbyte(Temp src, unsigned idx, Builder b)
 
 void
 emit_divergent_if_else(Program* prog, aco::Builder& b, Operand cond, std::function<void()> then,
-                       std::function<void()> els)
+                       std::function<void()> els, bool full_exec)
 {
    prog->blocks.reserve(prog->blocks.size() + 6);
 
@@ -651,10 +659,16 @@ emit_divergent_if_else(Program* prog, aco::Builder& b, Operand cond, std::functi
    endif_block->linear_preds.push_back(else_linear->index);
 
    PhysReg saved_exec_reg(84);
+   Operand saved_exec = Operand::c32_or_c64(-1, bld.lm == s2);
 
    b.reset(if_block);
-   Temp saved_exec = b.sop1(Builder::s_and_saveexec, b.def(b.lm, saved_exec_reg),
-                            Definition(scc, s1), Definition(exec, b.lm), cond, Operand(exec, b.lm));
+   if (full_exec) {
+      bld.pseudo(aco_opcode::p_parallelcopy, Definition(exec, b.lm), cond);
+   } else {
+      Temp tmp = b.sop1(Builder::s_and_saveexec, b.def(b.lm, saved_exec_reg), Definition(scc, s1),
+                        Definition(exec, b.lm), cond, Operand(exec, b.lm));
+      saved_exec = Operand(tmp, saved_exec_reg);
+   }
    b.branch(aco_opcode::p_cbranch_nz, then_logical->index, then_linear->index);
 
    b.reset(then_logical);
@@ -667,8 +681,8 @@ emit_divergent_if_else(Program* prog, aco::Builder& b, Operand cond, std::functi
    b.branch(aco_opcode::p_branch, invert->index);
 
    b.reset(invert);
-   b.sop2(Builder::s_andn2, Definition(exec, bld.lm), Definition(scc, s1),
-          Operand(saved_exec, saved_exec_reg), Operand(exec, bld.lm));
+   b.sop2(Builder::s_andn2, Definition(exec, bld.lm), Definition(scc, s1), saved_exec,
+          Operand(exec, bld.lm));
    b.branch(aco_opcode::p_cbranch_nz, else_logical->index, else_linear->index);
 
    b.reset(else_logical);
@@ -681,8 +695,7 @@ emit_divergent_if_else(Program* prog, aco::Builder& b, Operand cond, std::functi
    b.branch(aco_opcode::p_branch, endif_block->index);
 
    b.reset(endif_block);
-   b.pseudo(aco_opcode::p_parallelcopy, Definition(exec, bld.lm),
-            Operand(saved_exec, saved_exec_reg));
+   b.pseudo(aco_opcode::p_parallelcopy, Definition(exec, bld.lm), saved_exec);
 }
 
 VkDevice

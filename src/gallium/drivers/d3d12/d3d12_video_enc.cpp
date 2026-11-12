@@ -214,6 +214,12 @@ d3d12_video_encoder_sync_completion(struct pipe_video_codec *codec,
       HRESULT hr = S_OK;
 
       auto &pool_entry = pD3D12Enc->m_inflightResourcesPool[pool_index];
+      // Command objects are NULL if destroy runs from a failed creation path
+      if (!pool_entry.m_CompletionFence ||
+          !pool_entry.m_spCommandAllocator ||
+          !pool_entry.m_spResolveCommandAllocator)
+         return false;
+
       if (!d3d12_fence_finish(pool_entry.m_CompletionFence.get(), timeout_ns))
          return false;
 
@@ -283,8 +289,13 @@ d3d12_video_encoder_destroy(struct pipe_video_codec *codec)
    if(pD3D12Enc->m_bPendingWorkNotFlushed){
       size_t pool_index = d3d12_video_encoder_pool_current_index(pD3D12Enc);
       d3d12_video_encoder_flush(codec);
-      d3d12_video_encoder_sync_completion(codec, pool_index, OS_TIMEOUT_INFINITE);
+      d3d12_fence_finish(pD3D12Enc->m_inflightResourcesPool[pool_index].m_CompletionFence.get(), OS_TIMEOUT_INFINITE);
    }
+
+   // Reset batches before destroying the encoder
+   // to avoid leaving command allocators in a non-reset state
+   for (uint32_t i = 0; i < pD3D12Enc->m_MaxQueueAsyncDepth; ++i)
+      (void) d3d12_video_encoder_sync_completion(codec, i, 0);
 
    if (pD3D12Enc->m_SliceHeaderRepackBuffer)
       pD3D12Enc->m_screen->resource_destroy(pD3D12Enc->m_screen, pD3D12Enc->m_SliceHeaderRepackBuffer);
@@ -749,8 +760,8 @@ d3d12_video_encoder_update_picparams_tracking(struct d3d12_video_encoder *pD3D12
                                               struct pipe_video_buffer *  srcTexture,
                                               struct pipe_picture_desc *  picture)
 {
-      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams =
-         d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
+   d3d12_video_encoder_picture_control_codec_data_mutable currentPicParams =
+      d3d12_video_encoder_get_current_picture_param_settings_mutable(pD3D12Enc);
 
    enum pipe_video_format codec = u_reduce_video_profile(pD3D12Enc->base.profile);
    bool bUsedAsReference = false;
@@ -1244,11 +1255,12 @@ d3d12_video_encoder_get_current_picture_param_settings_legacy(struct d3d12_video
    return curPicParamsData;
 }
 
-D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1
-d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encoder *pD3D12Enc)
+template <typename T>
+static T
+d3d12_video_encoder_get_current_picture_param_settings_impl(struct d3d12_video_encoder *pD3D12Enc)
 {
    enum pipe_video_format codec = u_reduce_video_profile(pD3D12Enc->base.profile);
-   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 curPicParamsData = {};
+   T curPicParamsData = {};
    switch (codec) {
 #if VIDEO_CODEC_H264ENC
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
@@ -1277,6 +1289,20 @@ d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encode
       } break;
    }
    return curPicParamsData;
+}
+
+D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1
+d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encoder *pD3D12Enc)
+{
+   return d3d12_video_encoder_get_current_picture_param_settings_impl<
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1>(pD3D12Enc);
+}
+
+d3d12_video_encoder_picture_control_codec_data_mutable
+d3d12_video_encoder_get_current_picture_param_settings_mutable(struct d3d12_video_encoder *pD3D12Enc)
+{
+   return d3d12_video_encoder_get_current_picture_param_settings_impl<
+      d3d12_video_encoder_picture_control_codec_data_mutable>(pD3D12Enc);
 }
 
 D3D12_VIDEO_ENCODER_RATE_CONTROL
@@ -2363,6 +2389,15 @@ d3d12_video_encoder_update_current_encoder_config_state(struct d3d12_video_encod
 #if VIDEO_CODEC_AV1ENC
       case PIPE_VIDEO_FORMAT_AV1:
       {
+         d3d12_video_encoder_update_output_stats_resources(pD3D12Enc,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_qp_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_satd_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_psnr);
+
+         d3d12_video_encoder_update_move_rects(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *)picture)->move_info);
+         d3d12_video_encoder_update_dirty_rects(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *)picture)->dirty_info);
+
          d3d12_video_encoder_update_qpmap_input(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *) picture)->input_qpmap_info,
                                                            ((struct pipe_av1_enc_picture_desc *)picture)->roi,
                                                            ((struct pipe_av1_enc_picture_desc *)picture)->temporal_id);
@@ -2956,6 +2991,10 @@ d3d12_video_encoder_begin_frame(struct pipe_video_codec * codec,
                    (uint64_t)current_pool_index);
       d3d12_fence_finish(pD3D12Enc->m_inflightResourcesPool[current_pool_index].m_CompletionFence.get(), OS_TIMEOUT_INFINITE);
    }
+
+   // Opportunistically reset batches
+   for (uint32_t i = 0; i < pD3D12Enc->m_MaxQueueAsyncDepth; ++i)
+      (void) d3d12_video_encoder_sync_completion(codec, i, 0);
 
    if (!d3d12_video_encoder_reconfigure_session(pD3D12Enc, target, picture)) {
       debug_printf("[d3d12_video_encoder] d3d12_video_encoder_begin_frame - Failure on "
@@ -3695,8 +3734,8 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
    }
 
    // Update current frame pic params state after reconfiguring above.
-   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams =
-      d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
+   d3d12_video_encoder_picture_control_codec_data_mutable currentPicParams =
+      d3d12_video_encoder_get_current_picture_param_settings_mutable(pD3D12Enc);
 
    if (!pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(currentPicParams)) {
       debug_printf("[d3d12_video_encoder_encode_bitstream] get_current_frame_picture_control_data failed!\n");
@@ -3744,16 +3783,19 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
    if (pD3D12Enc->m_spEncodeCommandList4 && pD3D12Enc->m_spResolveCommandList4) {
 
       // Update current frame pic params state after reconfiguring above.
-      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams =
-         d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
+      d3d12_video_encoder_picture_control_codec_data_mutable currentPicParamsMutable =
+         d3d12_video_encoder_get_current_picture_param_settings_mutable(pD3D12Enc);
 
-      if (!pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(currentPicParams)) {
+      if (!pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(currentPicParamsMutable)) {
          debug_printf("[d3d12_video_encoder_encode_bitstream] get_current_frame_picture_control_data failed!\n");
          pD3D12Enc->m_inflightResourcesPool[d3d12_video_encoder_pool_current_index(pD3D12Enc)].encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
          pD3D12Enc->m_spEncodedFrameMetadata[d3d12_video_encoder_metadata_current_index(pD3D12Enc)].encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
          assert(false);
          return;
       }
+
+      const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams =
+         d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
 
       D3D12_VIDEO_ENCODER_DIRTY_REGIONS dirtyRegions = { };
       dirtyRegions.MapSource = pD3D12Enc->m_currentEncodeConfig.m_DirtyRectsDesc.MapSource;

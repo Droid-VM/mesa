@@ -40,7 +40,8 @@ typedef struct nir_shader nir_shader;
 
 enum blorp_op {
    BLORP_OP_BLIT,
-   BLORP_OP_COPY,
+   BLORP_OP_BLIT_COPY,
+   BLORP_OP_MEM_COPY,
    BLORP_OP_COPY_INDIRECT,
    BLORP_OP_COPY_IMAGE_INDIRECT,
    BLORP_OP_CCS_AMBIGUATE,
@@ -67,9 +68,11 @@ struct blorp_batch;
 struct blorp_params;
 
 struct blorp_config {
+   bool enable_tbimr;
    bool use_mesh_shading;
    bool use_unrestricted_depth_range;
    bool use_cached_dynamic_states;
+   bool use_efficient_64bit;
 };
 
 enum blorp_dynamic_state {
@@ -102,8 +105,6 @@ struct blorp_context {
 
    struct blorp_compiler *compiler;
 
-   bool enable_tbimr;
-
    nir_shader *(*get_fp64_nir)(struct blorp_context *context);
 
    void (*upload_dynamic_state)(struct blorp_context *context,
@@ -113,14 +114,14 @@ struct blorp_context {
 
    bool (*lookup_shader)(struct blorp_batch *batch,
                          const void *key, uint32_t key_size,
-                         uint32_t *kernel_out, void *prog_data_out);
+                         uint64_t *kernel_out, void *prog_data_out);
    bool (*upload_shader)(struct blorp_batch *batch,
                          uint32_t stage,
                          const void *key, uint32_t key_size,
                          const void *kernel, uint32_t kernel_size,
                          const void *prog_data,
                          uint32_t prog_data_size,
-                         uint32_t *kernel_out, void *prog_data_out);
+                         uint64_t *kernel_out, void *prog_data_out);
    uint64_t (*get_surface_address)(struct blorp_batch *batch,
                                    struct blorp_address addr);
    void (*exec)(struct blorp_batch *batch, const struct blorp_params *params);
@@ -177,6 +178,13 @@ enum blorp_batch_flags {
    /** Source buffer is unpadded and needs careful accesses
     */
    BLORP_BATCH_SRC_UNPADDED          = BITFIELD_BIT(7),
+
+   /**
+    * This flag indicates blorp not to emit the view port for depth fast
+    * clear. On GFX35+ platforms, this is possible in some cases, thanks to a
+    * hardware change (HSD 14022502615).
+    */
+   BLORP_BATCH_NO_HIZ_EMIT_DEPTH_CLEAR_VIEWPORT = BITFIELD_BIT(8),
 };
 
 struct blorp_batch {
@@ -286,20 +294,26 @@ blorp_copy_get_formats(const struct isl_device *isl_dev,
                        enum isl_format *dst_view_format);
 
 void
-blorp_copy(struct blorp_batch *batch,
-           const struct blorp_surf *src_surf,
-           unsigned src_level, unsigned src_layer,
-           const struct blorp_surf *dst_surf,
-           unsigned dst_level, unsigned dst_layer,
-           uint32_t src_x, uint32_t src_y,
-           uint32_t dst_x, uint32_t dst_y,
-           uint32_t src_width, uint32_t src_height);
+blorp_blit_copy(struct blorp_batch *batch,
+                const struct blorp_surf *src_surf,
+                unsigned src_level, unsigned src_layer,
+                const struct blorp_surf *dst_surf,
+                unsigned dst_level, unsigned dst_layer,
+                uint32_t src_x, uint32_t src_y,
+                uint32_t dst_x, uint32_t dst_y,
+                uint32_t src_width, uint32_t src_height);
 
 void
-blorp_buffer_copy(struct blorp_batch *batch,
-                  struct blorp_address src,
-                  struct blorp_address dst,
-                  uint64_t size);
+blorp_blit_buffer_copy(struct blorp_batch *batch,
+                       struct blorp_address src,
+                       struct blorp_address dst,
+                       uint64_t size);
+
+void
+blorp_mem_copy(struct blorp_batch *batch,
+               struct blorp_address src,
+               struct blorp_address dst,
+               uint64_t size);
 
 void
 blorp_copy_memory_indirect(struct blorp_batch *batch,
@@ -384,7 +398,7 @@ blorp_hiz_clear_depth_stencil(struct blorp_batch *batch,
                               bool clear_stencil, uint8_t stencil_value);
 void
 blorp_clear_attachments(struct blorp_batch *batch,
-                        uint32_t binding_table_offset,
+                        uint64_t binding_table_offset_or_ss_pointer,
                         enum isl_format depth_format,
                         uint32_t num_samples,
                         uint32_t start_layer, uint32_t num_layers,

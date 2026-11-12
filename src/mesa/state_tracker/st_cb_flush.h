@@ -31,14 +31,11 @@
 
 
 #include "util/compiler.h"
+#include "util/glheader.h"
 
-struct dd_function_table;
+struct gl_context;
 struct pipe_fence_handle;
 struct st_context;
-
-extern void
-st_init_flush_functions(struct pipe_screen *screen,
-                        struct dd_function_table *functions);
 
 void st_glFlush(struct gl_context *ctx, unsigned gallium_flush_flags);
 void st_glFinish(struct gl_context *ctx);
@@ -53,6 +50,9 @@ st_finish(struct st_context *st);
 
 extern void
 st_install_device_reset_callback(struct st_context *st);
+
+GLenum
+st_get_graphics_reset_status(struct gl_context *ctx);
 
 
 #endif /* ST_CB_FLUSH_H */

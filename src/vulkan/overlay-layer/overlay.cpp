@@ -273,8 +273,8 @@ static void unmap_object(uint64_t obj)
 static VkLayerInstanceCreateInfo *get_instance_chain_info(const VkInstanceCreateInfo *pCreateInfo,
                                                           VkLayerFunction func)
 {
-   vk_foreach_struct_const(item, pCreateInfo->pNext) {
-      if (item->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
+   vk_foreach_struct_const(sType, item, pCreateInfo->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
           ((VkLayerInstanceCreateInfo *) item)->function == func)
          return (VkLayerInstanceCreateInfo *) item;
    }
@@ -285,8 +285,8 @@ static VkLayerInstanceCreateInfo *get_instance_chain_info(const VkInstanceCreate
 static VkLayerDeviceCreateInfo *get_device_chain_info(const VkDeviceCreateInfo *pCreateInfo,
                                                       VkLayerFunction func)
 {
-   vk_foreach_struct_const(item, pCreateInfo->pNext) {
-      if (item->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
+   vk_foreach_struct_const(sType, item, pCreateInfo->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
           ((VkLayerDeviceCreateInfo *) item)->function == func)
          return (VkLayerDeviceCreateInfo *)item;
    }
@@ -295,36 +295,39 @@ static VkLayerDeviceCreateInfo *get_device_chain_info(const VkDeviceCreateInfo *
 }
 
 static void
-free_chain(struct VkBaseOutStructure *chain)
+free_chain(void *chain)
 {
    while (chain) {
       void *node = chain;
-      chain = chain->pNext;
+      chain = vk_pnext_get_next(chain);
       free(node);
    }
 }
 
-static struct VkBaseOutStructure *
-clone_chain(const struct VkBaseInStructure *chain)
+static void *
+clone_chain(const void *chain)
 {
-   struct VkBaseOutStructure *head = NULL, *tail = NULL;
+   void *head = NULL, *tail = NULL;
 
-   vk_foreach_struct_const(item, chain) {
-      size_t item_size = vk_structure_type_size(item);
+   vk_foreach_struct_const(sType, item, chain) {
+      size_t item_size = vk_structure_type_size(sType);
       if (item_size == 0) {
          free_chain(head);
          return NULL;
       }
 
-      struct VkBaseOutStructure *new_item =
-         (struct VkBaseOutStructure *)malloc(item_size);;
+      void *new_item = malloc(item_size);;
+      if (!new_item) {
+          free_chain(head);
+          return NULL;
+      }
 
       memcpy(new_item, item, item_size);
 
       if (!head)
          head = new_item;
       if (tail)
-         tail->pNext = new_item;
+         vk_pnext_set_next(tail, new_item);
       tail = new_item;
    }
 
@@ -1203,6 +1206,13 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
    struct device_data *device_data = data->device;
    struct overlay_draw *draw = get_overlay_draw(data);
 
+   /* Draw on the present queue if the command pool family allows it. The
+    * application may submit to other queues from other threads.
+    */
+   struct queue_data *draw_queue =
+      present_queue->family_index == device_data->graphic_queue->family_index ?
+      present_queue : device_data->graphic_queue;
+
    device_data->vtable.ResetCommandBuffer(draw->command_buffer, 0);
 
    VkRenderPassBeginInfo render_pass_info = {};
@@ -1398,7 +1408,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
     * vkQueuePresent, insert our own cross engine synchronization
     * semaphore.
     */
-   if (n_wait_semaphores == 0 && device_data->graphic_queue->queue != present_queue->queue) {
+   if (n_wait_semaphores == 0 && draw_queue->queue != present_queue->queue) {
       VkPipelineStageFlags stages_wait = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
       VkSubmitInfo submit_info = {};
       submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1419,7 +1429,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores = &draw->semaphore;
 
-      device_data->vtable.QueueSubmit(device_data->graphic_queue->queue, 1, &submit_info, draw->fence);
+      device_data->vtable.QueueSubmit(draw_queue->queue, 1, &submit_info, draw->fence);
    } else {
       VkPipelineStageFlags *stages_wait = (VkPipelineStageFlags*) malloc(sizeof(VkPipelineStageFlags) * n_wait_semaphores);
       for (unsigned i = 0; i < n_wait_semaphores; i++)
@@ -1438,7 +1448,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores = &draw->semaphore;
 
-      device_data->vtable.QueueSubmit(device_data->graphic_queue->queue, 1, &submit_info, draw->fence);
+      device_data->vtable.QueueSubmit(draw_queue->queue, 1, &submit_info, draw->fence);
 
       free(stages_wait);
    }
@@ -2242,8 +2252,7 @@ static VkResult overlay_BeginCommandBuffer(
    if (cmd_buffer_data->level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
       VkCommandBufferBeginInfo begin_info = *pBeginInfo;
 
-      struct VkBaseOutStructure *new_pnext =
-         clone_chain((const struct VkBaseInStructure *)pBeginInfo->pNext);
+      void *new_pnext = clone_chain(pBeginInfo->pNext);
       VkCommandBufferInheritanceInfo inhe_info;
 
       /* If there was no pNext chain given or we managed to copy it, we can
@@ -2566,8 +2575,7 @@ static VkResult overlay_CreateDevice(
 
    VkDeviceCreateInfo create_info = *pCreateInfo;
 
-   struct VkBaseOutStructure *new_pnext =
-      clone_chain((const struct VkBaseInStructure *) pCreateInfo->pNext);
+   void *new_pnext = clone_chain(pCreateInfo->pNext);
    if (new_pnext != NULL) {
       create_info.pNext = new_pnext;
 

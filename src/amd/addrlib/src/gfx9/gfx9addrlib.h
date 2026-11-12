@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -252,7 +252,7 @@ protected:
 
     virtual BOOL_32 HwlIsStandardSwizzle(
         AddrResourceType resourceType,
-        AddrSwizzleMode  swizzleMode) const
+        AddrSwizzleMode  swizzleMode) const override
     {
         return m_swizzleModeTable[swizzleMode].isStd ||
                (IsTex3d(resourceType) && m_swizzleModeTable[swizzleMode].isDisp);
@@ -260,14 +260,14 @@ protected:
 
     virtual BOOL_32 HwlIsDisplaySwizzle(
         AddrResourceType resourceType,
-        AddrSwizzleMode  swizzleMode) const
+        AddrSwizzleMode  swizzleMode) const override
     {
         return IsTex2d(resourceType) && m_swizzleModeTable[swizzleMode].isDisp;
     }
 
     virtual BOOL_32 HwlIsThin(
         AddrResourceType resourceType,
-        AddrSwizzleMode  swizzleMode) const
+        AddrSwizzleMode  swizzleMode) const override
     {
         return ((IsTex2d(resourceType)  == TRUE) ||
                 ((IsTex3d(resourceType) == TRUE)                  &&
@@ -277,7 +277,7 @@ protected:
 
     virtual BOOL_32 HwlIsThick(
         AddrResourceType resourceType,
-        AddrSwizzleMode  swizzleMode) const
+        AddrSwizzleMode  swizzleMode) const override
     {
         return (IsTex3d(resourceType) &&
                 (m_swizzleModeTable[swizzleMode].isZ || m_swizzleModeTable[swizzleMode].isStd));
@@ -285,59 +285,59 @@ protected:
 
     virtual ADDR_E_RETURNCODE HwlComputeHtileInfo(
         const ADDR2_COMPUTE_HTILE_INFO_INPUT* pIn,
-        ADDR2_COMPUTE_HTILE_INFO_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_HTILE_INFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeCmaskInfo(
         const ADDR2_COMPUTE_CMASK_INFO_INPUT* pIn,
-        ADDR2_COMPUTE_CMASK_INFO_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_CMASK_INFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeDccInfo(
         const ADDR2_COMPUTE_DCCINFO_INPUT* pIn,
-        ADDR2_COMPUTE_DCCINFO_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_DCCINFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeCmaskAddrFromCoord(
         const ADDR2_COMPUTE_CMASK_ADDRFROMCOORD_INPUT* pIn,
-        ADDR2_COMPUTE_CMASK_ADDRFROMCOORD_OUTPUT*      pOut);
+        ADDR2_COMPUTE_CMASK_ADDRFROMCOORD_OUTPUT*      pOut) override;
 
     virtual ADDR_E_RETURNCODE HwlComputeHtileAddrFromCoord(
         const ADDR2_COMPUTE_HTILE_ADDRFROMCOORD_INPUT* pIn,
-        ADDR2_COMPUTE_HTILE_ADDRFROMCOORD_OUTPUT*      pOut);
+        ADDR2_COMPUTE_HTILE_ADDRFROMCOORD_OUTPUT*      pOut) override;
 
     virtual ADDR_E_RETURNCODE HwlComputeHtileCoordFromAddr(
         const ADDR2_COMPUTE_HTILE_COORDFROMADDR_INPUT* pIn,
-        ADDR2_COMPUTE_HTILE_COORDFROMADDR_OUTPUT*      pOut);
+        ADDR2_COMPUTE_HTILE_COORDFROMADDR_OUTPUT*      pOut) override;
 
     virtual ADDR_E_RETURNCODE HwlSupportComputeDccAddrFromCoord(
-        const ADDR2_COMPUTE_DCC_ADDRFROMCOORD_INPUT* pIn);
+        const ADDR2_COMPUTE_DCC_ADDRFROMCOORD_INPUT* pIn) override;
 
     virtual VOID HwlComputeDccAddrFromCoord(
         const ADDR2_COMPUTE_DCC_ADDRFROMCOORD_INPUT* pIn,
-        ADDR2_COMPUTE_DCC_ADDRFROMCOORD_OUTPUT*      pOut);
+        ADDR2_COMPUTE_DCC_ADDRFROMCOORD_OUTPUT*      pOut) override;
 
     virtual UINT_32 HwlGetEquationIndex(
         const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn,
-        ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeBlock256Equation(
         AddrResourceType rsrcType,
         AddrSwizzleMode swMode,
         UINT_32 elementBytesLog2,
-        ADDR_EQUATION* pEquation) const;
+        ADDR_EQUATION* pEquation) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeThinEquation(
         AddrResourceType rsrcType,
         AddrSwizzleMode swMode,
         UINT_32 elementBytesLog2,
-        ADDR_EQUATION* pEquation) const;
+        ADDR_EQUATION* pEquation) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeThickEquation(
         AddrResourceType rsrcType,
         AddrSwizzleMode swMode,
         UINT_32 elementBytesLog2,
-        ADDR_EQUATION* pEquation) const;
+        ADDR_EQUATION* pEquation) const override;
 
     // Get equation table pointer and number of equations
-    virtual UINT_32 HwlGetEquationTableInfo(const ADDR_EQUATION** ppEquationTable) const
+    virtual UINT_32 HwlGetEquationTableInfo(const ADDR_EQUATION** ppEquationTable) const override
     {
         *ppEquationTable = m_equationTable;
 
@@ -351,42 +351,52 @@ protected:
 
     virtual ADDR_E_RETURNCODE HwlComputePipeBankXor(
         const ADDR2_COMPUTE_PIPEBANKXOR_INPUT* pIn,
-        ADDR2_COMPUTE_PIPEBANKXOR_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_PIPEBANKXOR_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSlicePipeBankXor(
         const ADDR2_COMPUTE_SLICE_PIPEBANKXOR_INPUT* pIn,
-        ADDR2_COMPUTE_SLICE_PIPEBANKXOR_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_SLICE_PIPEBANKXOR_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSubResourceOffsetForSwizzlePattern(
         const ADDR2_COMPUTE_SUBRESOURCE_OFFSET_FORSWIZZLEPATTERN_INPUT* pIn,
-        ADDR2_COMPUTE_SUBRESOURCE_OFFSET_FORSWIZZLEPATTERN_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_SUBRESOURCE_OFFSET_FORSWIZZLEPATTERN_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlGetPreferredSurfaceSetting(
         const ADDR2_GET_PREFERRED_SURF_SETTING_INPUT* pIn,
-        ADDR2_GET_PREFERRED_SURF_SETTING_OUTPUT*      pOut) const;
+        ADDR2_GET_PREFERRED_SURF_SETTING_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceInfoSanityCheck(
-        const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn) const;
+        const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceInfoTiled(
          const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn,
-         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const;
+         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceInfoLinear(
          const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn,
-         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const;
+         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*      pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceAddrFromCoordTiled(
         const ADDR2_COMPUTE_SURFACE_ADDRFROMCOORD_INPUT* pIn,
-        ADDR2_COMPUTE_SURFACE_ADDRFROMCOORD_OUTPUT*      pOut) const;
+        ADDR2_COMPUTE_SURFACE_ADDRFROMCOORD_OUTPUT*      pOut) const override;
 
-    virtual UINT_32 HwlComputeMaxBaseAlignments() const;
+    ADDR_E_RETURNCODE HwlCopyMemToSurface(
+        const ADDR2_COPY_MEMSURFACE_INPUT*  pIn,
+        const ADDR2_COPY_MEMSURFACE_REGION* pRegions,
+        UINT_32                             regionCount) const override final;
 
-    virtual UINT_32 HwlComputeMaxMetaBaseAlignments() const;
+    ADDR_E_RETURNCODE HwlCopySurfaceToMem(
+        const ADDR2_COPY_MEMSURFACE_INPUT*  pIn,
+        const ADDR2_COPY_MEMSURFACE_REGION* pRegions,
+        UINT_32                             regionCount) const override final;
 
-    virtual BOOL_32 HwlInitGlobalParams(const ADDR_CREATE_INPUT* pCreateIn);
+    virtual UINT_32 HwlComputeMaxBaseAlignments() const override;
 
-    virtual ChipFamily HwlConvertChipFamily(UINT_32 uChipFamily, UINT_32 uChipRevision);
+    virtual UINT_32 HwlComputeMaxMetaBaseAlignments() const override;
+
+    virtual BOOL_32 HwlInitGlobalParams(const ADDR_CREATE_INPUT* pCreateIn) override;
+
+    virtual ChipFamily HwlConvertChipFamily(UINT_32 uChipFamily, UINT_32 uChipRevision) override;
 
     virtual VOID ComputeThinBlockDimension(
         UINT_32*         pWidth,
@@ -395,7 +405,7 @@ protected:
         UINT_32          bpp,
         UINT_32          numSamples,
         AddrResourceType resourceType,
-        AddrSwizzleMode  swizzleMode) const;
+        AddrSwizzleMode  swizzleMode) const override;
 
 private:
     VOID GetRbEquation(CoordEq* pRbEq, UINT_32 rbPerSeLog2, UINT_32 seLog2) const;
@@ -424,7 +434,7 @@ private:
                         UINT_32 mip0Width, UINT_32 mip0Height, UINT_32 mip0Depth,
                         UINT_32* pNumMetaBlkX, UINT_32* pNumMetaBlkY, UINT_32* pNumMetaBlkZ) const;
 
-    BOOL_32 IsValidDisplaySwizzleMode(const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn) const;
+    BOOL_32 IsValidDisplaySwizzleMode(const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn) const override;
 
     ADDR_E_RETURNCODE ComputeSurfaceLinearPadding(
         const ADDR2_COMPUTE_SURFACE_INFO_INPUT* pIn,

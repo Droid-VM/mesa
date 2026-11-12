@@ -10,10 +10,10 @@
 static void
 iris_fine_fence_reset(struct iris_batch *batch)
 {
-   u_upload_alloc_ref(batch->fine_fences.uploader,
-		  0, sizeof(uint64_t), sizeof(uint64_t),
-                  &batch->fine_fences.ref.offset, &batch->fine_fences.ref.res,
-                  (void **)&batch->fine_fences.map);
+   iris_u_upload_alloc_ref_to_iris_state_ref(batch->fine_fences.uploader,
+                                             0, sizeof(uint64_t), sizeof(uint64_t),
+                                             &batch->fine_fences.ref,
+                                             (void **)&batch->fine_fences.map);
    WRITE_ONCE(*batch->fine_fences.map, 0);
    batch->fine_fences.next++;
 }

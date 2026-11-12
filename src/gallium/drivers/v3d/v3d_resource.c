@@ -29,6 +29,7 @@
 #include "util/u_inlines.h"
 #include "util/u_resource.h"
 #include "util/u_surface.h"
+#include "util/u_transfer.h"
 #include "util/u_transfer_helper.h"
 #include "util/u_upload_mgr.h"
 #include "util/format/u_format_zs.h"
@@ -1200,6 +1201,25 @@ v3d_resource_screen_init(struct pipe_screen *pscreen)
                                                             U_TRANSFER_HELPER_MSAA_MAP);
 }
 
+static void
+v3d_clear_buffer(struct pipe_context *pctx,
+                 struct pipe_resource *prsc,
+                 unsigned offset,
+                 unsigned size,
+                 const void *clear_value,
+                 int clear_value_size)
+{
+        struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_device_info *devinfo = &v3d->screen->devinfo;
+
+        if (v3d_X(devinfo, tfu_clear_buffer)(pctx, prsc, offset, size,
+                                             clear_value, clear_value_size))
+                return;
+
+        u_default_clear_buffer(pctx, prsc, offset, size, clear_value,
+                               clear_value_size);
+}
+
 void
 v3d_resource_context_init(struct pipe_context *pctx)
 {
@@ -1211,6 +1231,7 @@ v3d_resource_context_init(struct pipe_context *pctx)
         pctx->buffer_subdata = u_default_buffer_subdata;
         pctx->texture_subdata = v3d_texture_subdata;
         pctx->resource_copy_region = util_resource_copy_region;
+        pctx->clear_buffer = v3d_clear_buffer;
         pctx->blit = v3d_blit;
         pctx->generate_mipmap = v3d_generate_mipmap;
         pctx->flush_resource = v3d_flush_resource;

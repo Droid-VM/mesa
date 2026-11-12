@@ -255,6 +255,8 @@ count_tensors(const struct pipe_ml_operation *poperations,
       case PIPE_ML_OPERATION_TYPE_ADD:
          tensor_count = MAX2(tensor_count, poperation->input_tensors[1]->index);
          break;
+      case PIPE_ML_OPERATION_TYPE_POOLING:
+         break;
       default:
          DBG("poperation->type %d\n", poperation->type);
          UNREACHABLE("Unsupported ML operation type");
@@ -287,8 +289,9 @@ rkt_ml_operation_supported(struct pipe_ml_device *pdevice,
       struct pipe_tensor *bias_tensor = operation->conv.bias_tensor;
       struct pipe_tensor *output_tensor = operation->output_tensors[0];
 
-      // Dilation and per-axis quantization not yet implemented
-      if (tensor_quantization_supported(input_tensor) &&
+      // Dilation, per-axis quantization and missing biases not yet implemented
+      if (bias_tensor &&
+          tensor_quantization_supported(input_tensor) &&
           tensor_quantization_supported(weight_tensor) &&
           tensor_quantization_supported(bias_tensor) &&
           tensor_quantization_supported(output_tensor) &&
@@ -302,6 +305,27 @@ rkt_ml_operation_supported(struct pipe_ml_device *pdevice,
       supported = operation->input_tensors[0]->data == NULL &&
                   operation->input_tensors[1]->data == NULL;
       break;
+   case PIPE_ML_OPERATION_TYPE_POOLING: {
+      struct pipe_tensor *input_tensor = operation->input_tensors[0];
+      struct pipe_tensor *output_tensor = operation->output_tensors[0];
+      unsigned filter_width = operation->pooling.filter_width;
+      unsigned filter_height = operation->pooling.filter_height;
+
+      /* Padding is excluded from the average, which a convolution can't do */
+      supported = operation->pooling.type == PIPE_ML_POOLING_TYPE_AVG &&
+                  input_tensor->dims[3] == output_tensor->dims[3] &&
+                  tensor_quantization_supported(input_tensor) &&
+                  tensor_quantization_supported(output_tensor) &&
+                  filter_width == filter_height &&
+                  filter_width <= 31 &&
+                  filter_width % 2 == 1 &&
+                  operation->pooling.stride_x == operation->pooling.stride_y &&
+                  operation->pooling.padding_top == 0 &&
+                  operation->pooling.padding_bottom == 0 &&
+                  operation->pooling.padding_left == 0 &&
+                  operation->pooling.padding_right == 0;
+      break;
+   }
    default:
       supported = false;
    }
@@ -344,6 +368,62 @@ rkt_ml_subgraph_create(struct pipe_ml_device *pdevice,
          lower_convolution(subgraph, &poperations[i], &operation);
          util_dynarray_append(&subgraph->operations, operation);
          break;
+      case PIPE_ML_OPERATION_TYPE_POOLING: {
+         /* Average pooling is implemented as a depthwise convolution whose
+          * every tap holds the constant weight 1/(fw*fh) -- this is how the
+          * vendor blob does it too, and it reuses the tested convolution path
+          * (and completes on the DPU, so no PPU or kernel changes). The tap is
+          * stored as 16 in the hardware's signed weight domain (uint8 144 with
+          * zero_point 128) and the 1/(fw*fh*16) factor is folded into the
+          * weight scale; the DPU requantization then yields the average. */
+         const struct pipe_ml_operation *poperation = &poperations[i];
+         unsigned fw = poperation->pooling.filter_width;
+         unsigned fh = poperation->pooling.filter_height;
+         unsigned channels = poperation->input_tensors[0]->dims[3];
+         const uint8_t weight_step = 16;
+
+         uint8_t *weights = malloc(fw * fh * channels);
+         memset(weights, 0x80 + weight_step, fw * fh * channels);
+         int32_t *biases = calloc(channels, sizeof(int32_t));
+
+         struct pipe_tensor weight_tensor = {0};
+         weight_tensor.data = weights;
+         weight_tensor.dims[0] = 1;
+         weight_tensor.dims[1] = fh;
+         weight_tensor.dims[2] = fw;
+         weight_tensor.dims[3] = channels;
+         weight_tensor.zero_point = 0x80;
+         weight_tensor.scale = 1.0f / ((float)(fw * fh) * (float)weight_step);
+
+         struct pipe_tensor bias_tensor = {0};
+         bias_tensor.data = (uint8_t *)biases;
+         bias_tensor.dims[0] = channels;
+         bias_tensor.scale =
+            poperation->input_tensors[0]->scale * weight_tensor.scale;
+
+         struct pipe_ml_operation conv = *poperation;
+         conv.type = PIPE_ML_OPERATION_TYPE_CONVOLUTION;
+         conv.conv.weight_tensor = &weight_tensor;
+         conv.conv.bias_tensor = &bias_tensor;
+         conv.conv.stride_x = poperation->pooling.stride_x;
+         conv.conv.stride_y = poperation->pooling.stride_y;
+         conv.conv.padding_top = poperation->pooling.padding_top;
+         conv.conv.padding_bottom = poperation->pooling.padding_bottom;
+         conv.conv.padding_left = poperation->pooling.padding_left;
+         conv.conv.padding_right = poperation->pooling.padding_right;
+         conv.conv.depthwise = true;
+         conv.conv.pointwise = fw == 1 && fh == 1;
+         conv.conv.relu = false;
+         conv.conv.dilation_width_factor = 1;
+         conv.conv.dilation_height_factor = 1;
+
+         lower_convolution(subgraph, &conv, &operation);
+         util_dynarray_append(&subgraph->operations, operation);
+
+         free(weights);
+         free(biases);
+         break;
+      }
       case PIPE_ML_OPERATION_TYPE_ADD: {
          /* Fuse tensor addition into convolution*/
          struct rkt_operation *input_op_1 =

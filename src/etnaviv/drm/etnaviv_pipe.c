@@ -24,10 +24,13 @@
  *    Christian Gmeiner <christian.gmeiner@gmail.com>
  */
 
+#include "util/perf/cpu_trace.h"
+
 #include "etnaviv_priv.h"
 
 int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
 {
+	MESA_TRACE_FUNC();
 	struct etna_device *dev = pipe->gpu->dev;
 	int ret;
 

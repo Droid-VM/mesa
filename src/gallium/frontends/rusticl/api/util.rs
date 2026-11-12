@@ -14,7 +14,7 @@ use std::convert::TryInto;
 use std::ffi::{c_void, CStr};
 use std::iter::zip;
 use std::mem::MaybeUninit;
-use std::ops::BitAnd;
+use std::ops::{BitAnd, Not};
 use std::sync::Arc;
 
 // TODO: use MaybeUninit::copy_from_slice once stable
@@ -506,9 +506,34 @@ pub fn checked_compare(a: usize, o: cmp::Ordering, b: u64) -> bool {
     }
 }
 
-pub fn bit_check<A: BitAnd<Output = A> + PartialEq + Default, B: Into<A>>(a: A, b: B) -> bool {
-    a & b.into() != A::default()
+pub trait BitFlags: BitAnd<Self, Output = Self> + Sized + Copy + PartialEq {
+    fn are_all_bits_set<Other: Into<Self> + Copy>(&self, other: Other) -> bool {
+        *self & other.into() == other.into()
+    }
+
+    fn are_any_bits_set<Other: Into<Self>>(&self, other: Other) -> bool
+    where
+        Self: Default,
+    {
+        *self & other.into() != Default::default()
+    }
+
+    fn are_no_bits_set<Other: Into<Self>>(&self, other: Other) -> bool
+    where
+        Self: Default,
+    {
+        *self & other.into() == Default::default()
+    }
+
+    fn are_other_bits_set<Other: Into<Self> + Not<Output = Other>>(&self, other: Other) -> bool
+    where
+        Self: Default,
+    {
+        self.are_any_bits_set(!other)
+    }
 }
+
+impl<A: BitAnd<A, Output = A> + Copy + PartialEq> BitFlags for A {}
 
 // Taken from "Appendix D: Checking for Memory Copy Overlap"
 // src_offset and dst_offset are additions to support sub-buffers

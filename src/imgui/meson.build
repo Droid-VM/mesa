@@ -11,6 +11,8 @@ libimgui_core_dep = declare_dependency(
 )
 
 if with_tools.contains('gamma')
+  dep_vulkan = dependency('vulkan')
+
   libimgui_sdl3_vulkan = static_library(
     'imgui_sdl3_vulkan',
     files(
@@ -21,6 +23,7 @@ if with_tools.contains('gamma')
       'imgui_tables.cpp',
       'imgui_widgets.cpp',
     ),
+    dependencies : dep_vulkan.partial_dependency(compile_args : true, includes : true),
     cpp_args : cpp.get_supported_arguments('-w', '-Wno-error'),
     install : false
   )

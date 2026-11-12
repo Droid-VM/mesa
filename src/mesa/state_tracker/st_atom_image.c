@@ -54,19 +54,7 @@ st_convert_image(const struct st_context *st, const struct gl_image_unit *u,
 
    img->format = st_mesa_format_to_pipe_format(st, u->_ActualFormat);
 
-   switch (u->Access) {
-   case GL_READ_ONLY:
-      img->access = PIPE_IMAGE_ACCESS_READ;
-      break;
-   case GL_WRITE_ONLY:
-      img->access = PIPE_IMAGE_ACCESS_WRITE;
-      break;
-   case GL_READ_WRITE:
-      img->access = PIPE_IMAGE_ACCESS_READ_WRITE;
-      break;
-   default:
-      UNREACHABLE("bad gl_image_unit::Access");
-   }
+   img->access = st_image_access(u->Access);
 
    img->shader_access = 0;
    if (!(shader_access & ACCESS_NON_READABLE))

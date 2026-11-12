@@ -39,6 +39,7 @@
 #include "v3d_simulator_wrapper.h"
 
 #include "common/v3d_performance_counters.h"
+#include "common/v3d_tfu.h"
 
 #include "util/log.h"
 #include "util/macros.h"
@@ -196,6 +197,19 @@ v3dX(simulator_submit_tfu_ioctl)(struct v3d_hw *v3d,
         V3D_WRITE(TFU_REG(COEF2), args->coef[2]);
         V3D_WRITE(TFU_REG(COEF3), args->coef[3]);
 
+#if V3D_VERSION >= 71
+        const uint32_t iformat = (args->icfg >> V3D_IFC_ICFG_IFORMAT_LSB) &
+                                 BITFIELD_MASK(V3D_IFC_ICFG_IFORMAT_MSB -
+                                 V3D_IFC_ICFG_IFORMAT_LSB + 1);
+
+        if (iformat == V3D71_TFU_ICFG_FORMAT_CONSTANT_COLOUR) {
+                V3D_WRITE(TFU_REG(CCOL0), args->v71.ccol[0]);
+                V3D_WRITE(TFU_REG(CCOL1), args->v71.ccol[1]);
+                V3D_WRITE(TFU_REG(CCOL2), args->v71.ccol[2]);
+                V3D_WRITE(TFU_REG(CCOL3), args->v71.ccol[3]);
+        }
+#endif
+
         V3D_WRITE(TFU_REG(ICFG), args->icfg);
 
         while ((V3D_READ(TFU_REG(CS)) & TFU_REG(CS_CVTCT_SET)) == last_vtct) {
@@ -294,6 +308,9 @@ v3dX(simulator_get_param_ioctl)(struct v3d_hw *v3d,
                 return 0;
         case DRM_V3D_PARAM_CONTEXT_RESET_COUNTER:
                 args->value = 0;
+                return 0;
+        case DRM_V3D_PARAM_SUPPORTS_TFU_CCOL:
+                args->value = V3D_VERSION >= 71;
                 return 0;
         }
 

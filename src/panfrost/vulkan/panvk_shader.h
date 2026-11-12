@@ -108,6 +108,9 @@ struct panvk_common_sysvals_inner {
 
    /* Address of the printf buffer */
    aligned_u64 printf_buffer_address;
+
+   /* Address of the shader constant data buffer */
+   aligned_u64 constant_data;
 } __attribute__((aligned(FAU_WORD_SIZE)));
 
 struct panvk_common_sysvals {
@@ -403,6 +406,12 @@ struct panvk_shader_variant {
    const void *bin_ptr;
    uint32_t bin_size;
    bool own_bin;
+
+#if PAN_ARCH < 9
+   const void *data_ptr;
+   uint32_t data_size;
+   struct panvk_priv_mem data_mem;
+#endif
 
    struct panvk_priv_mem code_mem;
 

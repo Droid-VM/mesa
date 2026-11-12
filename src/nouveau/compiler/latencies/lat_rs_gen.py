@@ -30,7 +30,7 @@ const fn pred(has_pred: bool, a: u32, b: u32) -> u32 {
 
 % for reg_file, cats in file_cats.items():
 <% enum_name = to_camel(reg_file) + 'Latency' + sm.upper() %>
-#[derive(PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ${enum_name} {
 % for category in cats[0].header.cats:
    ${to_camel(category)},

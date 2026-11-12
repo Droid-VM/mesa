@@ -565,6 +565,7 @@ vtn_translate_scope(struct vtn_builder *b, SpvScope scope);
 
 struct vtn_image_pointer {
    nir_deref_instr *image;
+   const struct glsl_type *type;
    unsigned format;
    nir_def *coord;
    nir_def *sample;
@@ -698,6 +699,9 @@ struct vtn_builder {
 
    /* True if we need to ignore OpReturn after OpEmitMeshTasksEXT. */
    bool wa_ignore_return_after_emit_mesh_tasks;
+
+   /* True if we need to fixup image derefs stored to nir_var_function_temp. */
+   bool wa_image_function_vars;
 
    /* Workaround discard bugs in HLSL -> SPIR-V compilers */
    bool convert_discard_to_demote;
@@ -965,6 +969,8 @@ void vtn_variable_store(struct vtn_builder *b, struct vtn_ssa_value *src,
 void vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
                           const uint32_t *w, unsigned count);
 
+void vtn_handle_constants(struct vtn_builder *b, SpvOp opcode,
+                          const uint32_t *w, unsigned count);
 
 typedef void (*vtn_decoration_foreach_cb)(struct vtn_builder *,
                                           struct vtn_value *,
@@ -1149,4 +1155,20 @@ struct vtn_ssa_value *vtn_composite_copy_logical(struct vtn_builder *b, struct v
                                                  struct vtn_type* dest_type);
 nir_def *vtn_vector_construct(struct vtn_builder *b, unsigned num_components,
                               unsigned num_srcs, nir_def **srcs);
+void vtn_collect_ssa_sources(struct vtn_builder *b,
+                             const uint32_t *w_srcs,
+                             struct vtn_ssa_value **vtn_src,
+                             unsigned num_srcs);
+void vtn_downconvert_ssa_sources(struct vtn_builder *b,
+                                 struct vtn_ssa_value **vtn_src,
+                                 unsigned num_srcs);
+
+static inline bool
+vtn_value_needs_mediump_16bit(struct vtn_builder *b,
+                              struct vtn_value *dest_val)
+{
+   return b->options->mediump_16bit_alu &&
+          vtn_has_decoration(b, dest_val, SpvDecorationRelaxedPrecision);
+}
+
 #endif /* _VTN_PRIVATE_H_ */

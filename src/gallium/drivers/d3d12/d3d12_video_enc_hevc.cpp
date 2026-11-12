@@ -511,7 +511,9 @@ d3d12_video_encoder_update_current_frame_pic_params_info_hevc(struct d3d12_video
          // Set and validate log2_sao_offset_scale_luma
          //
          pHEVCPicData->log2_sao_offset_scale_luma = static_cast<UCHAR>(hevcPic->pic.pps_range_extension.log2_sao_offset_scale_luma);
-         if ((pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_HEVCCodecCaps.allowed_log2_sao_offset_scale_luma_values & (1 << pHEVCPicData->log2_sao_offset_scale_luma)) == 0)
+         const uint32_t allowed_sao_luma = pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_HEVCCodecCaps.allowed_log2_sao_offset_scale_luma_values;
+         if ((allowed_sao_luma != 0) ? ((allowed_sao_luma & (1u << pHEVCPicData->log2_sao_offset_scale_luma)) == 0)
+                                     : (pHEVCPicData->log2_sao_offset_scale_luma != 0))
          {
             debug_printf("D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2 arguments are not supported - log2_sao_offset_scale_luma %d is not supported.\n", pHEVCPicData->log2_sao_offset_scale_luma);
             assert(false);
@@ -521,7 +523,9 @@ d3d12_video_encoder_update_current_frame_pic_params_info_hevc(struct d3d12_video
          // Set and validate log2_sao_offset_scale_chroma
          //
          pHEVCPicData->log2_sao_offset_scale_chroma = static_cast<UCHAR>(hevcPic->pic.pps_range_extension.log2_sao_offset_scale_chroma);
-         if ((pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_HEVCCodecCaps.allowed_log2_sao_offset_scale_chroma_values & (1 << pHEVCPicData->log2_sao_offset_scale_chroma)) == 0)
+         const uint32_t allowed_sao_chroma = pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_HEVCCodecCaps.allowed_log2_sao_offset_scale_chroma_values;
+         if ((allowed_sao_chroma != 0) ? ((allowed_sao_chroma & (1u << pHEVCPicData->log2_sao_offset_scale_chroma)) == 0)
+                                       : (pHEVCPicData->log2_sao_offset_scale_chroma != 0))
          {
             debug_printf("D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2 arguments are not supported - log2_sao_offset_scale_chroma %d is not supported.\n", pHEVCPicData->log2_sao_offset_scale_chroma);
             assert(false);
@@ -608,11 +612,11 @@ d3d12_video_encoder_update_current_frame_pic_params_info_hevc(struct d3d12_video
                   pHEVCPicData->QPMapValuesCount, pHEVCPicData->pRateControlQPMap);
    }
 
-   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 picParams1 = {};
-   picParams1.pHEVCPicData = pHEVCPicData;
-   picParams1.DataSize = sizeof(*pHEVCPicData);
-   pD3D12Enc->m_upDPBManager->begin_frame(picParams1, bUsedAsReference, picture);
-   pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(picParams1);
+   d3d12_video_encoder_picture_control_codec_data_mutable picParams = {};
+   picParams.pHEVCPicData = pHEVCPicData;
+   picParams.DataSize = sizeof(*pHEVCPicData);
+   pD3D12Enc->m_upDPBManager->begin_frame(picParams, bUsedAsReference, picture);
+   pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(picParams);
 
    // Save state snapshot from record time to resolve headers at get_feedback time
    size_t current_metadata_slot = static_cast<size_t>(pD3D12Enc->m_fenceValue % pD3D12Enc->m_MaxMetadataBuffersCount);

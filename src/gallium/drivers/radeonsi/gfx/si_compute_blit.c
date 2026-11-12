@@ -12,9 +12,9 @@
 
 static void si_compute_begin_internal(struct si_context *sctx, bool render_condition_enabled)
 {
-   sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_START;
+   sctx->barrier_flags &= ~AC_BARRIER_PIPELINESTAT_START;
    if (sctx->num_hw_pipestat_streamout_queries)
-      si_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_STOP);
+      si_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_STOP);
 
    if (!render_condition_enabled)
       sctx->render_cond_enabled = false;
@@ -28,9 +28,9 @@ static void si_compute_begin_internal(struct si_context *sctx, bool render_condi
 
 static void si_compute_end_internal(struct si_context *sctx)
 {
-   sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+   sctx->barrier_flags &= ~AC_BARRIER_PIPELINESTAT_STOP;
    if (sctx->num_hw_pipestat_streamout_queries)
-      si_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_START);
+      si_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_START);
 
    sctx->render_cond_enabled = sctx->render_cond;
    sctx->blitter_running = false;
@@ -159,14 +159,14 @@ bool si_compute_clear_copy_buffer(struct si_context *sctx, struct pipe_resource 
    if (!sctx->screen->has_gfx_compute)
       return false;
 
-   struct ac_cs_clear_copy_buffer_options options = {
+   ac_cs_clear_copy_buffer_options options = {
       .nir_options = sctx->screen->nir_options,
       .info = &sctx->screen->info,
       .print_key = si_can_dump_shader(sctx->screen, MESA_SHADER_COMPUTE, SI_DUMP_SHADER_KEY),
       .fail_if_slow = fail_if_slow,
    };
 
-   struct ac_cs_clear_copy_buffer_info info = {
+   ac_cs_clear_copy_buffer_info info = {
       .dst_offset = dst_offset,
       .src_offset = src_offset,
       .size = size,
@@ -180,7 +180,7 @@ bool si_compute_clear_copy_buffer(struct si_context *sctx, struct pipe_resource 
    };
    memcpy(info.clear_value, clear_value, clear_value_size);
 
-   struct ac_cs_clear_copy_buffer_dispatch dispatch;
+   ac_cs_clear_copy_buffer_dispatch dispatch;
 
    if (!ac_prepare_cs_clear_copy_buffer(&options, &info, &dispatch))
       return false;
@@ -202,7 +202,9 @@ bool si_compute_clear_copy_buffer(struct si_context *sctx, struct pipe_resource 
       _mesa_hash_table_u64_insert(sctx->cs_dma_shaders, dispatch.shader_key.key, shader);
    }
 
-   memcpy(sctx->cs_user_data, dispatch.user_data, sizeof(dispatch.user_data));
+   const uint32_t user_data_bytes = dispatch.num_user_data * sizeof(uint32_t);
+   assert(user_data_bytes <= sizeof(sctx->cs_user_data));
+   memcpy(sctx->cs_user_data, dispatch.user_data, user_data_bytes);
    sctx->compute_dispatch_interleave = dispatch.dispatch_interleave;
 
    struct pipe_grid_info grid = {};
@@ -301,7 +303,7 @@ void si_retile_dcc(struct si_context *sctx, struct si_texture *tex)
    assert(sctx->gfx_level < GFX12);
 
    /* Flush and wait for CB before retiling DCC. */
-   si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_CB);
+   si_set_barrier_flags(sctx, AC_BARRIER_SYNC_AND_INV_CB);
 
    /* Set the DCC buffer. */
    assert(tex->surface.meta_offset && tex->surface.meta_offset <= UINT_MAX);
@@ -505,7 +507,7 @@ void si_compute_clear_image_dcc_single(struct si_context *sctx, struct si_textur
    struct pipe_grid_info info = {0};
    unsigned wg_dim = set_work_size(&info, 8, 8, 1, width, height, depth);
 
-   void **shader = &sctx->cs_clear_image_dcc_single[is_msaa][wg_dim];
+   void **shader = &sctx->cs_clear_image_dcc_single[is_msaa][wg_dim - 1];
    if (!*shader)
       *shader = si_clear_image_dcc_single_shader(sctx, is_msaa, wg_dim);
 
@@ -526,7 +528,7 @@ void si_init_compute_blit_functions(struct si_context *sctx)
 bool si_should_blit_clamp_to_edge(const struct pipe_blit_info *info, unsigned coord_mask)
 {
    return util_is_box_out_of_bounds(&info->src.box, coord_mask, info->src.resource->width0,
-                                    info->src.resource->height0, info->src.level);
+                                    info->src.resource->height0, 1, info->src.level);
 }
 
 bool si_compute_clear_image(struct si_context *sctx, struct pipe_resource *tex,
@@ -718,29 +720,37 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
        info->alpha_blend ||
        info->num_window_rectangles ||
        info->swizzle_enable ||
-       info->scissor_enable)
+       info->scissor_enable ||
+       util_format_is_depth_or_stencil(info->dst.format) ||
+       util_format_is_depth_or_stencil(info->src.format))
       return false;
 
-   struct ac_cs_blit_options options = {
+   /* Image stores support DCC since GFX10. Fail only for gfx queues because compute queues
+    * can't fall back to a pixel shader. DCC must be decompressed and disabled for compute
+    * queues by the caller.
+    *
+    * If (src_access || dst_access), one of the images is block-compressed, which can't fall
+    * back to a pixel shader in radeonsi.
+    */
+   if (sctx->gfx_level < GFX10 && sctx->is_gfx_queue && vi_dcc_enabled(sdst, info->dst.level) &&
+       !src_access && !dst_access)
+      return false;
+
+   ac_cs_blit_options options = {
       .nir_options = sctx->screen->nir_options,
       .info = &sctx->screen->info,
       .use_aco = sctx->screen->use_aco,
-      .no_fmask = sctx->screen->debug_flags & DBG(NO_FMASK),
-      /* Compute queues can't fail because there is no alternative. */
-      .fail_if_slow = sctx->is_gfx_queue && fail_if_slow &&
-                      /* Compressed and subsampled image blits can't fail because
-                       * the gfx (pixel shader) blit doesn't support them. */
-                      !((src_access | dst_access) & SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT) &&
-                      !(sctx->screen->debug_flags & DBG(FORCE_COMPUTE_BLIT)),
+      .print_key = si_can_dump_shader(sctx->screen, MESA_SHADER_COMPUTE, SI_DUMP_SHADER_KEY),
    };
 
-   struct ac_cs_blit_description blit = {
+   ac_cs_blit_description blit = {
       .dst = {
          .surf = &sdst->surface,
          .dim = get_tex_dim(sdst),
          .is_array = get_tex_is_array(sdst),
          .width0 = info->dst.resource->width0,
          .height0 = info->dst.resource->height0,
+         .depth0 = info->dst.resource->depth0,
          .num_samples = info->dst.resource->nr_samples,
          .level = info->dst.level,
          .box = info->dst.box,
@@ -752,24 +762,31 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
          .is_array = ssrc ? get_tex_is_array(ssrc) : false,
          .width0 = ssrc ? info->src.resource->width0 : 0,
          .height0 = ssrc ? info->src.resource->height0 : 0,
+         .depth0 = ssrc ? info->src.resource->depth0 : 0,
          .num_samples = ssrc ? info->src.resource->nr_samples : 0,
          .level = info->src.level,
          .box = info->src.box,
          .format = info->src.format,
       },
-      .is_gfx_queue = sctx->is_gfx_queue,
-      /* if (src_access || dst_access), one of the images is block-compressed, which can't fall
-       * back to a pixel shader on radeonsi */
-      .dst_has_dcc = vi_dcc_enabled(sdst, info->dst.level) && !src_access && !dst_access,
+      .src_has_non_identity_fmask = ssrc && ssrc->surface.fmask_size,
       .sample0_only = info->sample0_only,
+      /* Compute queues can't fail because there is no alternative. */
+      .fail_if_slow = sctx->is_gfx_queue && fail_if_slow &&
+                      /* Compressed and subsampled image blits can't fail because
+                       * the gfx (pixel shader) blit doesn't support them. */
+                      !((src_access | dst_access) & SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT) &&
+                      !(sctx->screen->debug_flags & DBG(FORCE_COMPUTE_BLIT)),
+      .linear_filter = info->filter == PIPE_TEX_FILTER_LINEAR,
    };
 
    if (clear_color)
       blit.clear_color = *clear_color;
 
-   struct ac_cs_blit_dispatches out;
-   if (!ac_prepare_compute_blit(&options, &blit, &out))
+   if (!ac_should_use_compute_blit(&options, &blit))
       return false;
+
+   ac_cs_blit_dispatches out;
+   ac_prepare_compute_blit(&options, &blit, &out);
 
    if (!out.num_dispatches)
       return true;
@@ -812,7 +829,7 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
 
    /* Execute compute blits. */
    for (unsigned i = 0; i < out.num_dispatches; i++) {
-      struct ac_cs_blit_dispatch *dispatch = &out.dispatches[i];
+      ac_cs_blit_dispatch *dispatch = &out.dispatches[i];
 
       void *shader = _mesa_hash_table_u64_search(sctx->cs_blit_shaders, dispatch->shader_key.key);
       if (!shader) {

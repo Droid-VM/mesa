@@ -43,6 +43,39 @@
 #include "vk_drm_syncobj.h"
 #include "vk_log.h"
 
+#define PVR_DRM_VERSION_MAJOR_SHIFT    20
+#define PVR_DRM_VERSION_MINOR_SHIFT    10
+#define PVR_DRM_VERSION_PATCH_SHIFT    0
+
+#define PVR_DRM_VERSION_MAJOR_MASK     UINT32_C(0xFFF00000)
+#define PVR_DRM_VERSION_MINOR_MASK     UINT32_C(0x000FFC00)
+#define PVR_DRM_VERSION_PATCH_MASK     UINT32_C(0x000003FF)
+
+/**
+ * Packs the drm version.
+ *
+ * The packed layout is as follows:
+ *
+ * \verbatim
+ *    +--------+--------+--------+
+ *    | 31..20 | 19..10 | 9..0   |
+ *    +========+========+========+
+ *    | MAJOR  | MINOR  | PATCH  |
+ *    +--------+--------+--------+
+ * \endverbatim
+ *
+ */
+
+#define PVR_DRM_VERSION_PACK(major, minor, patch) \
+   ((((major) << PVR_DRM_VERSION_MAJOR_SHIFT) & PVR_DRM_VERSION_MAJOR_MASK) | \
+    (((minor) << PVR_DRM_VERSION_MINOR_SHIFT) & PVR_DRM_VERSION_MINOR_MASK) | \
+    (((patch) << PVR_DRM_VERSION_PATCH_SHIFT) & PVR_DRM_VERSION_PATCH_MASK))
+
+#define PVR_DRM_VERSION_VALID(major, minor, patch) \
+   ((((major) & ~(PVR_DRM_VERSION_MAJOR_MASK >> PVR_DRM_VERSION_MAJOR_SHIFT)) == 0) && \
+    (((minor) & ~(PVR_DRM_VERSION_MINOR_MASK >> PVR_DRM_VERSION_MINOR_SHIFT)) == 0) && \
+    (((patch) & ~(PVR_DRM_VERSION_PATCH_MASK >> PVR_DRM_VERSION_PATCH_SHIFT)) == 0))
+
 static void pvr_drm_finish_heaps(struct pvr_drm_winsys *const drm_ws)
 {
    if (!pvr_winsys_helper_winsys_heap_finish(
@@ -119,6 +152,41 @@ pvr_u32_in_array(const uint32_t *array, const size_t len, const uint32_t val)
    }
 
    return false;
+}
+
+static VkResult pvr_drm_get_fw_info(struct pvr_drm_winsys *drm_ws,
+                                    struct pvr_device_fw_info *fw_info)
+{
+   /* Default to oldest firmware version when FW info dev query is unsupported. */
+   struct drm_pvr_dev_query_fw_info query_fw_info = {
+      .major_version = 1,
+      .minor_version = 0,
+   };
+
+   VkResult result = VK_SUCCESS;
+
+   if (drm_ws->drm_version >= PVR_DRM_VERSION_PACK(1, 1, 0)) {
+      struct drm_pvr_ioctl_dev_query_args args = {
+         .type = DRM_PVR_DEV_QUERY_FW_INFO_GET,
+         .size = sizeof(query_fw_info),
+         .pointer = (__u64)&query_fw_info
+      };
+
+      result = pvr_ioctl(drm_ws->base.render_fd,
+                         DRM_IOCTL_PVR_DEV_QUERY,
+                         &args,
+                         VK_ERROR_INITIALIZATION_FAILED);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   assert(PVR_FW_VERSION_VALID(query_fw_info.major_version,
+                               query_fw_info.minor_version));
+
+   fw_info->fw_version =
+      PVR_FW_VERSION_PACK(query_fw_info.major_version, query_fw_info.minor_version);
+
+   return result;
 }
 
 static VkResult pvr_drm_override_quirks(struct pvr_drm_winsys *drm_ws,
@@ -273,6 +341,27 @@ out:
 }
 
 static VkResult
+pvr_drm_override_features(struct pvr_drm_winsys *drm_ws,
+                          struct pvr_device_info *dev_info,
+                          const struct pvr_device_fw_info *fw_info)
+{
+   VkResult result = VK_SUCCESS;
+
+   /* GS RTA support requires support in the FW */
+   uint32_t fw_gs_rta_support_min_version = PVR_FW_VERSION_PACK(1, 1);
+   if (PVR_HAS_FEATURE(dev_info, gs_rta_support) &&
+       fw_info->fw_version < fw_gs_rta_support_min_version) {
+      mesa_logw("Missing FW support for GS RTA support, feature disabled. "
+                "Upgrade to a newer FW version. Min Required %d.%d",
+                PVR_FW_VERSION_UNPACK_MAJOR(fw_gs_rta_support_min_version),
+                PVR_FW_VERSION_UNPACK_MINOR(fw_gs_rta_support_min_version));
+      dev_info->features.has_gs_rta_support = false;
+   }
+
+   return result;
+}
+
+static VkResult
 pvr_drm_get_runtime_info(struct pvr_drm_winsys *drm_ws,
                          struct drm_pvr_dev_query_runtime_info *const value)
 {
@@ -336,6 +425,20 @@ pvr_drm_winsys_device_info_init(struct pvr_winsys *ws,
    result = pvr_drm_override_enhancements(drm_ws, dev_info);
    if (result != VK_SUCCESS) {
       mesa_logw("Failed to get enhancements for this GPU\n");
+      goto err_out;
+   }
+
+   result = pvr_drm_get_fw_info(drm_ws, &runtime_info->fw_info);
+   if (result != VK_SUCCESS) {
+      mesa_logw("Failed to check FW feature support for this GPU\n");
+      goto err_out;
+   }
+
+   result = pvr_drm_override_features(drm_ws,
+                                      dev_info,
+                                      &runtime_info->fw_info);
+   if (result != VK_SUCCESS) {
+      mesa_logw("Failed to check FW feature support for this GPU");
       goto err_out;
    }
 
@@ -426,7 +529,8 @@ struct pvr_static_data_area_description {
 
 static VkResult pvr_drm_get_heap_static_data_descriptions(
    struct pvr_drm_winsys *const drm_ws,
-   struct pvr_static_data_area_description desc_out[DRM_PVR_HEAP_COUNT])
+   struct pvr_static_data_area_description *desc_out,
+   const uint32_t pvr_heap_count)
 {
    struct drm_pvr_dev_query_static_data_areas query = { 0 };
    struct drm_pvr_ioctl_dev_query_args args = {
@@ -459,7 +563,9 @@ static VkResult pvr_drm_get_heap_static_data_descriptions(
                                 sizeof(*array) *
                                    query.static_data_areas.count));
 
-   query.static_data_areas.array = (__u64)array;
+   query.static_data_areas =
+      (struct drm_pvr_obj_array)DRM_PVR_OBJ_ARRAY(query.static_data_areas.count,
+                                                  array);
 
    /* Get the array */
    result = pvr_ioctlf(drm_ws->base.render_fd,
@@ -472,7 +578,7 @@ static VkResult pvr_drm_get_heap_static_data_descriptions(
 
    for (size_t i = 0; i < query.static_data_areas.count; i++) {
       /* Unknown heaps might cause a write outside the array bounds. */
-      if (array[i].location_heap_id >= DRM_PVR_HEAP_COUNT)
+      if (array[i].location_heap_id >= pvr_heap_count)
          continue;
 
       switch (array[i].area_usage) {
@@ -511,7 +617,7 @@ out:
 
 static VkResult pvr_drm_setup_heaps(struct pvr_drm_winsys *const drm_ws)
 {
-   struct pvr_winsys_heap *const winsys_heaps[DRM_PVR_HEAP_COUNT] = {
+   struct pvr_winsys_heap *const winsys_heaps[] = {
       [DRM_PVR_HEAP_GENERAL] = &drm_ws->general_heap.base,
       [DRM_PVR_HEAP_PDS_CODE_DATA] = &drm_ws->pds_heap.base,
       [DRM_PVR_HEAP_USC_CODE] = &drm_ws->usc_heap.base,
@@ -519,53 +625,71 @@ static VkResult pvr_drm_setup_heaps(struct pvr_drm_winsys *const drm_ws)
       [DRM_PVR_HEAP_VIS_TEST] = &drm_ws->vis_test_heap.base,
       [DRM_PVR_HEAP_TRANSFER_FRAG] = &drm_ws->transfer_frag_heap.base,
    };
+
+/* PVR_HEAP_COUNT_MAX_SUPPORTED tracks the largest range that includes all
+ * heap indices supported by this Vulkan driver.
+ *
+ * PVR_HEAP_COUNT_MIN_REQUIRED tracks the largest range that includes only
+ * heap indices strictly required by this Vulkan driver.
+ *
+ * PVR_HEAP_COUNT_MAX_SUPPORTED and PVR_HEAP_COUNT_MIN_REQUIRED depend on
+ * UM only and shouldn't be confused with optional heaps.
+ * DRM_IOCTL_PVR_DEV_QUERY with DRM_PVR_DEV_QUERY_GPU_INFO_GET will always
+ * return indices for optional heaps if they lie within a range requested
+ * by UM with query.heaps.count.
+ */
+#define PVR_HEAP_COUNT_MAX_SUPPORTED (ARRAY_SIZE(winsys_heaps))
+#define PVR_HEAP_COUNT_MIN_REQUIRED (DRM_PVR_HEAP_TRANSFER_FRAG + 1)
+
    struct pvr_static_data_area_description
-      static_data_descriptions[DRM_PVR_HEAP_COUNT] = { 0 };
-   struct drm_pvr_dev_query_heap_info query = { 0 };
+      static_data_descriptions[PVR_HEAP_COUNT_MAX_SUPPORTED] = { 0 };
+   struct drm_pvr_heap array[PVR_HEAP_COUNT_MAX_SUPPORTED] = { 0 };
+   struct drm_pvr_dev_query_heap_info query = {
+      .heaps = DRM_PVR_OBJ_ARRAY(ARRAY_SIZE(array), array),
+   };
    struct drm_pvr_ioctl_dev_query_args args = {
       .type = DRM_PVR_DEV_QUERY_HEAP_INFO_GET,
       .size = sizeof(query),
       .pointer = (__u64)&query
    };
-   struct drm_pvr_heap *array;
    VkResult result;
    int i = 0;
 
-   /* Get the array length */
-   result = pvr_ioctlf(drm_ws->base.render_fd,
-                       DRM_IOCTL_PVR_DEV_QUERY,
-                       &args,
-                       VK_ERROR_INITIALIZATION_FAILED,
-                       "Failed to fetch heap info array size");
-   if (result != VK_SUCCESS)
-      goto out;
+   static_assert(PVR_HEAP_COUNT_MAX_SUPPORTED <= DRM_PVR_HEAP_COUNT &&
+                 PVR_HEAP_COUNT_MAX_SUPPORTED >= PVR_HEAP_COUNT_MIN_REQUIRED,
+                 "Max supported heap count not in the expected range");
+   static_assert(ARRAY_SIZE(array) == ARRAY_SIZE(static_data_descriptions),
+                 "DRM heap array length must match static area array");
+   static_assert(ARRAY_SIZE(array) == ARRAY_SIZE(winsys_heaps),
+                 "DRM heap array length must match winsys heap array");
 
-   array = vk_alloc(drm_ws->base.alloc,
-                    sizeof(*array) * query.heaps.count,
-                    8,
-                    VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-   if (!array) {
-      result = vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
-      goto out;
-   }
-
-   VG(VALGRIND_MAKE_MEM_DEFINED(array, sizeof(*array) * query.heaps.count));
-
-   query.heaps.array = (__u64)array;
-
-   /* Get the array */
+   /* Copy all heaps from the kernel into the array */
    result = pvr_ioctlf(drm_ws->base.render_fd,
                        DRM_IOCTL_PVR_DEV_QUERY,
                        &args,
                        VK_ERROR_INITIALIZATION_FAILED,
                        "Failed to fetch heap info array");
    if (result != VK_SUCCESS)
-      goto out_free_array;
+      return result;
+
+   if (query.heaps.count < PVR_HEAP_COUNT_MIN_REQUIRED) {
+      mesa_loge("Unsupported number of PVR DRM heaps");
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+#undef PVR_HEAP_COUNT_MIN_REQUIRED
+
+   /* The kernel should never return more heaps than requested. */
+   if (query.heaps.count > PVR_HEAP_COUNT_MAX_SUPPORTED) {
+      mesa_logw("Unexpected number of PVR DRM heaps");
+      query.heaps.count = PVR_HEAP_COUNT_MAX_SUPPORTED;
+   }
+#undef PVR_HEAP_COUNT_MAX_SUPPORTED
 
    result = pvr_drm_get_heap_static_data_descriptions(drm_ws,
-                                                      static_data_descriptions);
+                                                      static_data_descriptions,
+                                                      ARRAY_SIZE(static_data_descriptions));
    if (result != VK_SUCCESS)
-      goto out_free_array;
+      return result;
 
    for (; i < query.heaps.count; i++) {
       const bool present = array[i].size;
@@ -633,8 +757,7 @@ static VkResult pvr_drm_setup_heaps(struct pvr_drm_winsys *const drm_ws)
       }
    }
 
-   result = VK_SUCCESS;
-   goto out_free_array;
+   return VK_SUCCESS;
 
 err_pvr_drm_heap_finish_all_heaps:
    /* Undo from where we left off */
@@ -652,15 +775,12 @@ err_pvr_drm_heap_finish_all_heaps:
       pvr_winsys_helper_winsys_heap_finish(winsys_heaps[i]);
    }
 
-out_free_array:
-   vk_free(drm_ws->base.alloc, array);
-
-out:
    return result;
 }
 
 VkResult pvr_drm_winsys_create(const int render_fd,
                                const int display_fd,
+                               drmVersionPtr version,
                                const VkAllocationCallbacks *alloc,
                                struct pvr_winsys **const ws_out)
 {
@@ -678,6 +798,14 @@ VkResult pvr_drm_winsys_create(const int render_fd,
       result = vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_out;
    }
+
+   assert(PVR_DRM_VERSION_VALID(version->version_major,
+                                version->version_minor,
+                                version->version_patchlevel));
+
+   drm_ws->drm_version = PVR_DRM_VERSION_PACK(version->version_major,
+                                              version->version_minor,
+                                              version->version_patchlevel);
 
    drm_ws->base.ops = &drm_winsys_ops;
    drm_ws->base.render_fd = render_fd;

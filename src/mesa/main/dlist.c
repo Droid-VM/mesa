@@ -760,7 +760,11 @@ vbo_destroy_vertex_list(struct gl_context *ctx, struct vbo_save_vertex_list *nod
       free(node->start_counts);
    }
 
-   _mesa_reference_buffer_object(ctx, &node->cold->ib.obj, NULL);
+   if (node->cold->bo)
+      vbo_save_release_bo(ctx,
+         &node->cold->bo,
+         node->cold->bo_start, node->cold->bo_end);
+
    free(node->cold->current_data);
    node->cold->current_data = NULL;
 
@@ -5594,7 +5598,7 @@ save_Begin(GLenum mode)
    else {
       ctx->Driver.CurrentSavePrimitive = mode;
 
-      vbo_save_NotifyBegin(ctx, mode, false);
+      vbo_save_NotifyBegin(ctx, mode, true);
    }
 }
 

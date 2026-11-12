@@ -49,6 +49,7 @@ static const struct nvk_mme_test_case *mme_tests[NVK_MME_COUNT] = {
    [NVK_MME_SET_SHADING_RATE_CONTROL]      = nvk_mme_set_shading_rate_control_tests,
    [NVK_MME_SET_ANTI_ALIAS]                = nvk_mme_set_anti_alias_tests,
    [NVK_MME_SET_STATISTICS_COUNTERS]       = nvk_mme_set_statistics_counters_tests,
+   [NVK_MME_SET_WRITE_MASK]                = nvk_mme_set_write_mask_tests,
 };
 
 uint32_t *

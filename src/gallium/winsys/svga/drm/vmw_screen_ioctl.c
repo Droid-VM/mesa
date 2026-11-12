@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2024 Broadcom. All Rights Reserved.
+ * Copyright (c) 2009-2026 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc.
  * and/or its subsidiaries.
  * SPDX-License-Identifier: MIT
@@ -87,7 +87,7 @@ vmw_ioctl_extended_context_create(struct vmw_winsys_screen *vws,
    if (ret)
       return -1;
 
-   vmw_printf("Context id is %d\n", c_arg.cid);
+   vmw_printf("%s Context id is %d\n", __func__, c_arg.rep.cid);
    return c_arg.rep.cid;
 }
 
@@ -190,7 +190,7 @@ vmw_ioctl_gb_surface_create(struct vmw_winsys_screen *vws,
    struct vmw_region *region = NULL;
    int ret;
 
-   vmw_printf("%s flags %d format %d\n", __func__, flags, format);
+   vmw_printf("%s flags %lx format %d\n", __func__, flags, format);
 
    if (p_region) {
       region = CALLOC_STRUCT(vmw_region);
@@ -293,7 +293,7 @@ vmw_ioctl_gb_surface_create(struct vmw_winsys_screen *vws,
       *p_region = region;
    }
 
-   vmw_printf("Surface id is %d\n", rep->sid);
+   vmw_printf("%s Surface id is %d\n", __func__, rep->handle);
    return rep->handle;
 
 out_fail_create:
@@ -447,7 +447,7 @@ vmw_ioctl_gb_surface_ref(struct vmw_winsys_screen *vws,
       *numMipLevels = rep->creq.mip_levels;
    }
 
-   vmw_printf("%s flags %d format %d\n", __func__, *flags, *format);
+   vmw_printf("%s flags %lx format %d\n", __func__, *flags, *format);
 
    if (needs_unref)
       vmw_ioctl_surface_destroy(vws, *handle);
@@ -611,8 +611,7 @@ vmw_ioctl_region_create(struct vmw_winsys_screen *vws, uint32_t size)
    region->size = size;
    region->drm_fd = vws->ioctl.drm_fd;
 
-   vmw_printf("   gmrId = %u, offset = %u\n",
-              region->ptr.gmrId, region->ptr.offset);
+   vmw_printf("%s: handle = %u\n", __func__, region->handle);
 
    return region;
 
@@ -626,8 +625,7 @@ vmw_ioctl_region_destroy(struct vmw_region *region)
 {
    struct drm_vmw_unref_dmabuf_arg arg;
 
-   vmw_printf("%s: gmrId = %u, offset = %u\n", __func__,
-              region->ptr.gmrId, region->ptr.offset);
+   vmw_printf("%s: handle = %u\n", __func__, region->handle);
 
    if (region->data) {
       os_munmap(region->data, region->size);
@@ -653,8 +651,7 @@ vmw_ioctl_region_map(struct vmw_region *region)
 {
    void *map;
 
-   vmw_printf("%s: gmrId = %u, offset = %u\n", __func__,
-              region->ptr.gmrId, region->ptr.offset);
+   vmw_printf("%s: handle = %u\n", __func__, region->handle);
 
    if (region->data == NULL) {
       map = os_mmap(NULL, region->size, PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -679,8 +676,7 @@ vmw_ioctl_region_map(struct vmw_region *region)
 void
 vmw_ioctl_region_unmap(struct vmw_region *region)
 {
-   vmw_printf("%s: gmrId = %u, offset = %u\n", __func__,
-              region->ptr.gmrId, region->ptr.offset);
+   vmw_printf("%s: handle = %u\n", __func__, region->handle);
 
    --region->map_count;
    os_munmap(region->data, region->size);

@@ -50,6 +50,12 @@ struct path_fork {
 };
 
 struct routes {
+   /**
+    * Set of blocks which are dominated by one of the loop headers but which
+    * are outside the loop.
+    */
+   struct set *outside;
+
    struct path regular;
    struct path brk;
    struct path cont;
@@ -78,27 +84,40 @@ struct strct_lvl {
    bool irreducible;
 };
 
+static void
+validate_path(const struct path *path)
+{
+#ifndef NDEBUG
+   assert(path->reachable != NULL);
+   assert(path->reachable->entries > 0);
+   assert((path->fork == NULL) == (path->reachable->entries == 1));
+
+   if (!path->fork)
+      return;
+
+   for (unsigned i = 0; i < 2; i++) {
+      validate_path(&path->fork->paths[i]);
+      set_foreach(path->fork->paths[i].reachable, entry) {
+         assert(_mesa_set_search_pre_hashed(path->reachable,
+                                            entry->hash, entry->key));
+      }
+   }
+
+   set_foreach(path->reachable, entry) {
+      assert(_mesa_set_search_pre_hashed(path->fork->paths[0].reachable,
+                                         entry->hash, entry->key) ||
+             _mesa_set_search_pre_hashed(path->fork->paths[1].reachable,
+                                         entry->hash, entry->key));
+   }
+#endif
+}
+
 static int
 nir_block_ptr_cmp(const void *_a, const void *_b)
 {
    const nir_block *const *a = _a;
    const nir_block *const *b = _b;
    return (int)(*a)->index - (int)(*b)->index;
-}
-
-static void
-print_block_set(const struct set *set)
-{
-   printf("{ ");
-   if (set != NULL) {
-      unsigned count = 0;
-      set_foreach(set, entry) {
-         if (count++)
-            printf(", ");
-         printf("%u", ((nir_block *)entry->key)->index);
-      }
-   }
-   printf(" }\n");
 }
 
 /** Return a sorted array of blocks for a set
@@ -120,6 +139,22 @@ sorted_block_arr_for_set(const struct set *block_set, void *mem_ctx)
    assert(i == num_blocks);
    qsort(block_arr, num_blocks, sizeof(*block_arr), nir_block_ptr_cmp);
    return block_arr;
+}
+
+static void
+print_block_set(const struct set *set)
+{
+   printf("{ ");
+   if (set != NULL) {
+      nir_block **arr = sorted_block_arr_for_set(set, NULL);
+      for (unsigned i = 0; i < set->entries; i++) {
+         if (i)
+            printf(", ");
+         printf("%u", arr[i]->index);
+      }
+      ralloc_free(arr);
+   }
+   printf(" }\n");
 }
 
 static nir_block *
@@ -269,10 +304,8 @@ route_to_cond(nir_builder *b, struct routes *routing, nir_def *condition,
 static struct set *
 fork_reachable(struct path_fork *fork)
 {
-   struct set *reachable = _mesa_set_clone(fork->paths[0].reachable, fork);
-   set_foreach(fork->paths[1].reachable, entry)
-      _mesa_set_add_pre_hashed(reachable, entry->hash, entry->key);
-   return reachable;
+   return _mesa_set_union(fork->paths[0].reachable,
+                          fork->paths[1].reachable, fork);
 }
 
 /**
@@ -286,19 +319,21 @@ fork_reachable(struct path_fork *fork)
 static void
 loop_routing_start(struct routes *routing, nir_builder *b,
                    struct path loop_path, struct set *reach,
-                   void *mem_ctx)
+                   struct set *outside, void *mem_ctx)
 {
    if (NIR_LOWER_GOTO_IFS_DEBUG) {
       printf("loop_routing_start:\n");
-      printf("    reach =                       ");
+      printf("    reach =           ");
       print_block_set(reach);
-      printf("    loop_path.reachable =         ");
+      printf("    loop_path =       ");
       print_block_set(loop_path.reachable);
-      printf("    routing->regular.reachable =  ");
+      printf("    routing.outside = ");
+      print_block_set(routing->outside);
+      printf("    routing.regular = ");
       print_block_set(routing->regular.reachable);
-      printf("    routing->brk.reachable =      ");
+      printf("    routing.brk =     ");
       print_block_set(routing->brk.reachable);
-      printf("    routing->cont.reachable =     ");
+      printf("    routing.cont =    ");
       print_block_set(routing->cont.reachable);
       printf("\n");
    }
@@ -326,6 +361,9 @@ loop_routing_start(struct routes *routing, nir_builder *b,
    routing->regular = loop_path;
    routing->loop_backup = routing_backup;
 
+   if (outside != NULL)
+      routing->outside = _mesa_set_union(routing->outside, outside, mem_ctx);
+
    if (break_needed) {
       struct path_fork *fork = rzalloc(mem_ctx, struct path_fork);
       fork->is_var = true;
@@ -346,6 +384,7 @@ loop_routing_start(struct routes *routing, nir_builder *b,
       routing->brk.fork = fork;
       routing->brk.reachable = fork_reachable(fork);
    }
+   validate_path(&routing->brk);
 
    nir_loop *loop = nir_push_loop(b);
    nir_loop_add_continue_construct(loop);
@@ -417,28 +456,32 @@ loop_routing_end(struct routes *routing, nir_builder *b)
  *                     added to this set
  * \param  outside  all blocks directly outside the loop will be added
  * \param  reach  all blocks reachable from the loop will be added
+ * \param  parent_outside  set of blocks which are dominator children of some
+ *                         parent loop header but which are not inside the
+ *                         parent loop
  */
 static void
 inside_outside(nir_block *block, struct set *loop_heads, struct set *outside,
-               struct set *reach, struct set *brk_reachable, void *mem_ctx)
+               struct set *reach, const struct set *parent_outside,
+               void *mem_ctx)
 {
    assert(_mesa_set_search(loop_heads, block));
    struct set *remaining = _mesa_pointer_set_create(mem_ctx);
    for (int i = 0; i < block->num_dom_children; i++) {
-      if (!_mesa_set_search(brk_reachable, block->dom_children[i]))
+      if (!_mesa_set_search(parent_outside, block->dom_children[i]))
          _mesa_set_add(remaining, block->dom_children[i]);
    }
 
    if (NIR_LOWER_GOTO_IFS_DEBUG) {
       printf("inside_outside(%u):\n", block->index);
-      printf("    loop_heads = ");
+      printf("    loop_heads =      ");
       print_block_set(loop_heads);
-      printf("    reach =      ");
+      printf("    reach =           ");
       print_block_set(reach);
-      printf("    brk_reach =  ");
-      print_block_set(brk_reachable);
-      printf("    remaining =  ");
+      printf("    remaining =       ");
       print_block_set(remaining);
+      printf("    parent_outside =  ");
+      print_block_set(parent_outside);
       printf("\n");
    }
 
@@ -472,13 +515,12 @@ inside_outside(nir_block *block, struct set *loop_heads, struct set *outside,
    }
 
    /* Add everything remaining to loop_heads */
-   set_foreach(remaining, entry)
-      _mesa_set_add_pre_hashed(loop_heads, entry->hash, entry->key);
+   _mesa_set_add_set(loop_heads, remaining);
 
    /* Recurse for each remaining */
    set_foreach(remaining, entry) {
       inside_outside((nir_block *)entry->key, loop_heads, outside, reach,
-                     brk_reachable, mem_ctx);
+                     parent_outside, mem_ctx);
    }
 
    for (int i = 0; i < 2; i++) {
@@ -655,8 +697,18 @@ organize_levels(struct list_head *levels, struct set *remaining,
 {
    if (NIR_LOWER_GOTO_IFS_DEBUG) {
       printf("organize_levels:\n");
-      printf("    reach =     ");
+      printf("    reach =           ");
       print_block_set(reach);
+      printf("    remaining =       ");
+      print_block_set(remaining);
+      printf("    routing.outside = ");
+      print_block_set(routing->outside);
+      printf("    routing.regular = ");
+      print_block_set(routing->regular.reachable);
+      printf("    routing.brk =     ");
+      print_block_set(routing->brk.reachable);
+      printf("    routing.cont =    ");
+      print_block_set(routing->cont.reachable);
    }
 
    /* blocks that can be reached by the remaining blocks */
@@ -691,7 +743,7 @@ organize_levels(struct list_head *levels, struct set *remaining,
       curr_level->irreducible = !curr_level->blocks->entries;
       if (curr_level->irreducible) {
          handle_irreducible(remaining, curr_level,
-                            routing->brk.reachable, mem_ctx);
+                            routing->outside, mem_ctx);
       }
       assert(curr_level->blocks->entries);
 
@@ -721,9 +773,7 @@ organize_levels(struct list_head *levels, struct set *remaining,
             prev_frontier =
                _mesa_set_clone(&level_block->dom_frontier, curr_level);
          } else {
-            set_foreach(&level_block->dom_frontier, entry)
-               _mesa_set_add_pre_hashed(prev_frontier, entry->hash,
-                                        entry->key);
+            _mesa_set_add_set(prev_frontier, &level_block->dom_frontier);
          }
       }
 
@@ -779,6 +829,7 @@ organize_levels(struct list_head *levels, struct set *remaining,
          routing->regular.fork = fork;
          routing->regular.reachable = fork_reachable(fork);
       }
+      validate_path(&routing->regular);
    }
 }
 
@@ -827,7 +878,7 @@ plant_levels(struct list_head *levels, struct routes *routing,
       struct path in_path = routing->regular;
       routing->regular = level->out_path;
       if (level->irreducible)
-         loop_routing_start(routing, b, in_path, level->reach, mem_ctx);
+         loop_routing_start(routing, b, in_path, level->reach, NULL, mem_ctx);
       select_blocks(routing, b, in_path, mem_ctx);
       if (level->irreducible)
          loop_routing_end(routing, b);
@@ -836,8 +887,20 @@ plant_levels(struct list_head *levels, struct routes *routing,
    }
 }
 
-/**
- * builds the control flow of a block and all its dominance children
+/** Builds the control flow of a block and all its dominance children
+ *
+ * If this block is a loop header, its dominance children are split into two
+ * sets: inside and outside and the inside blocks are placed in a loop
+ * construct and the outside blocks are placed after it, with appropreate
+ * paths so we can target them through the break from inside the loop.
+ *
+ * If this block is inside one or more loops, routing->outside contains the
+ * set of blocks which were dominated by any loop head (and therefore might be
+ * dominated by us) and which are outside those loops.  Those blocks are
+ * placed directly by the nir_structurize() on the relevant loop head and are
+ * skipped here.  This prevents us from placing a block twice or accidentally
+ * hoisting a block inside a loop that should be placed outside.
+ *
  * \param  routing  the routing after the block and all dominated blocks
  */
 static void
@@ -846,7 +909,7 @@ nir_structurize(struct routes *routing, nir_builder *b, nir_block *block,
 {
    struct set *remaining = _mesa_pointer_set_create(mem_ctx);
    for (int i = 0; i < block->num_dom_children; i++) {
-      if (!_mesa_set_search(routing->brk.reachable, block->dom_children[i]))
+      if (!_mesa_set_search(routing->outside, block->dom_children[i]))
          _mesa_set_add(remaining, block->dom_children[i]);
    }
 
@@ -860,13 +923,13 @@ nir_structurize(struct routes *routing, nir_builder *b, nir_block *block,
       struct set *outside = _mesa_pointer_set_create(mem_ctx);
       struct set *reach = _mesa_pointer_set_create(mem_ctx);
       inside_outside(block, loop_heads, outside, reach,
-                     routing->brk.reachable, mem_ctx);
+                     routing->outside, mem_ctx);
 
       set_foreach(outside, entry)
          _mesa_set_remove_key(remaining, entry->key);
 
-      organize_levels(&outside_levels, outside, reach, routing, b->impl,
-                      false, mem_ctx);
+      organize_levels(&outside_levels, _mesa_set_clone(outside, mem_ctx),
+                      reach, routing, b->impl, false, mem_ctx);
 
       struct path loop_path = {
          .reachable = _mesa_pointer_set_create(mem_ctx),
@@ -874,7 +937,7 @@ nir_structurize(struct routes *routing, nir_builder *b, nir_block *block,
       };
       _mesa_set_add(loop_path.reachable, block);
 
-      loop_routing_start(routing, b, loop_path, reach, mem_ctx);
+      loop_routing_start(routing, b, loop_path, reach, outside, mem_ctx);
    }
 
    struct set *reach = _mesa_pointer_set_create(mem_ctx);
@@ -948,6 +1011,7 @@ nir_lower_goto_ifs_impl(nir_function_impl *impl)
 
    struct routes *routing = rzalloc(mem_ctx, struct routes);
    *routing = (struct routes){
+      .outside = empty_set,
       .regular.reachable = end_set,
       .brk.reachable = empty_set,
       .cont.reachable = empty_set,

@@ -21,14 +21,16 @@
 #include "vk_format.h"
 #include "vk_image.h"
 
-#define RADV_IMAGE_USAGE_WRITE_BITS                                                                                   \
-   (VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR | VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |                               \
+#define RADV_IMAGE_USAGE_WRITE_BITS                                                                                    \
+   (VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR | VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |                                \
     VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_2_STORAGE_BIT_KHR)
 
 struct radv_image_plane {
    VkFormat format;
    struct radeon_surf surface;
    uint32_t first_mip_pipe_misaligned; /* GFX10-GFX11.5 */
+   /* Whether ASTC mipmapped images are padded on GFX9. */
+   bool gfx9_astc_padded;
 };
 
 struct radv_image_binding {
@@ -69,9 +71,6 @@ struct radv_image {
     * track whether HiZ metadata are in-sync with main image data, per-level.
     */
    uint64_t hiz_metadata_offset;
-
-   /* For VK_ANDROID_native_buffer, the WSI image owns the memory, */
-   VkDeviceMemory owned_memory;
 
    unsigned plane_count;
    bool disjoint;
@@ -114,6 +113,16 @@ static inline bool
 radv_image_has_dcc(const struct radv_image *image)
 {
    return !(image->planes[0].surface.flags & RADEON_SURF_Z_OR_SBUFFER) && image->planes[0].surface.meta_offset;
+}
+
+/**
+ * Return whether the image has display DCC for scanout surfaces.
+ */
+static inline bool
+radv_image_has_display_dcc(const struct radv_image *image)
+{
+   return image->planes[0].surface.display_dcc_offset &&
+          image->planes[0].surface.display_dcc_offset != image->planes[0].surface.meta_offset;
 }
 
 /**
@@ -253,7 +262,7 @@ radv_image_decompress_htile_on_image_stores(const struct radv_device *device, co
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   if (!radv_image_has_htile(image))
+   if (!radv_image_is_tc_compat_htile(image))
       return false;
 
    /* This is supported on GFX10-10.3 but according to PAL there are issues. */
@@ -400,9 +409,6 @@ void radv_compose_swizzle(const struct util_format_description *desc, const VkCo
 
 void radv_image_bo_set_metadata(struct radv_device *device, struct radv_image *image, struct radeon_winsys_bo *bo);
 
-void radv_image_override_offset_stride(struct radv_device *device, struct radv_image *image, uint64_t offset,
-                                       uint32_t stride);
-
 bool radv_image_can_fast_clear(const struct radv_device *device, const struct radv_image *image);
 
 struct ac_surf_info radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image);
@@ -414,6 +420,10 @@ struct radv_image_create_info {
    bool prime_blit_src;
    const struct radeon_bo_metadata *bo_metadata;
 };
+
+VkResult radv_image_init_layout(struct radv_device *device, struct radv_image_create_info create_info,
+                                uint64_t modifier, const struct VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info,
+                                const struct VkVideoProfileListInfoKHR *profile_list, struct radv_image *image);
 
 VkResult radv_image_create_layout(struct radv_device *device, struct radv_image_create_info create_info,
                                   const struct VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info,
@@ -451,12 +461,14 @@ enum radv_fmask_compression radv_layout_fmask_compression(const struct radv_devi
                                                           const struct radv_image *image, VkImageLayout layout,
                                                           unsigned queue_mask);
 
-unsigned radv_image_queue_family_mask(const struct radv_image *image, enum radv_queue_family family,
-                                      enum radv_queue_family queue_family);
+unsigned radv_image_queue_family_mask(const struct radv_image *image, enum radv_queue_family qf);
 
-bool radv_image_is_renderable(const struct radv_image *image);
+bool radv_image_is_renderable(const struct radv_physical_device *pdev, const struct radv_image *image);
 
 bool radv_image_is_l2_coherent(const struct radv_device *device, const struct radv_image *image,
                                const VkImageSubresourceRange *range);
+
+void radv_image_get_cmask_clear_copy_buffer_range(const struct radv_image *image, unsigned z, unsigned layer_count,
+                                                  uint64_t *offset, uint64_t *size);
 
 #endif /* RADV_IMAGE_H */

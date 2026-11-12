@@ -31,7 +31,6 @@
 #include "program/prog_print.h"
 
 #include "pipe/p_state.h"
-#include "pipe/p_shader_tokens.h"
 
 #include "cso_cache/cso_cache.h"
 

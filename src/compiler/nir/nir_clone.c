@@ -423,7 +423,6 @@ clone_tex(clone_state *state, const nir_tex_instr *tex)
 
    ntex->texture_non_uniform = tex->texture_non_uniform;
    ntex->sampler_non_uniform = tex->sampler_non_uniform;
-   ntex->offset_non_uniform = tex->offset_non_uniform;
    ntex->embedded_sampler = tex->embedded_sampler;
 
    ntex->backend_flags = tex->backend_flags;
@@ -496,7 +495,9 @@ static nir_cmat_call_instr *
 clone_cmat_call(clone_state *state, const nir_cmat_call_instr *call)
 {
    nir_function *ncallee = remap_global(state, call->callee);
-   nir_cmat_call_instr *ncall = nir_cmat_call_instr_create(state->ns, call->op, ncallee);
+   nir_function *decode_vec = remap_global(state, call->decode_vec_fn);
+   nir_cmat_call_instr *ncall = nir_cmat_call_instr_create(state->ns, call->op,
+                                                           ncallee, decode_vec);
    clone_debug_info(state, &ncall->instr, &call->instr);
 
    for (unsigned i = 0; i < ncall->num_params; i++)

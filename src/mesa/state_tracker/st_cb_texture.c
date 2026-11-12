@@ -75,9 +75,9 @@
 #include "util/log.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_tile.h"
 #include "util/format/u_format.h"
+#include "util/format/u_formats.h"
 #include "util/u_surface.h"
 #include "util/u_sampler.h"
 #include "util/u_math.h"
@@ -1577,10 +1577,10 @@ format_is_swizzled_rgba(enum pipe_format format)
 {
     const struct util_format_description *desc = util_format_description(format);
 
-    if ((desc->swizzle[0] == TGSI_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[1] == TGSI_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[2] == TGSI_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[3] == TGSI_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
+    if ((desc->swizzle[0] == PIPE_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[1] == PIPE_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[2] == PIPE_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[3] == PIPE_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
        return false;
 
     return true;
@@ -1753,6 +1753,7 @@ try_pbo_upload_common(struct gl_context *ctx,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -2022,6 +2023,7 @@ try_pbo_download(struct st_context *st,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -2308,8 +2310,14 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
                                    &src_templ.width0, &src_templ.height0,
                                    &src_templ.depth0, &src_templ.array_size);
 
-   /* Check for NPOT texture support. */
-   if (!screen->caps.npot_textures &&
+   /* This only needs level-zero NPOT sampling with clamp-to-edge, which is
+    * required desktop GL 2.0 and GLES2 even without an NPOT extension. */
+   const bool allow_npot_staging =
+      screen->caps.npot_textures ||
+      _mesa_is_gles2(ctx) ||
+      (_mesa_is_desktop_gl(ctx) && ctx->Version >= 20);
+
+   if (!allow_npot_staging &&
        (!util_is_power_of_two_or_zero(src_templ.width0) ||
         !util_is_power_of_two_or_zero(src_templ.height0) ||
         !util_is_power_of_two_or_zero(src_templ.depth0))) {
@@ -3331,6 +3339,16 @@ st_finalize_texture(struct gl_context *ctx,
       }
    }
 
+   /* Cache whether the extra YUV plane-view / lowering setup must run for
+    * this texture, so st_get_sampler_views() and st_get_external_sampler_key()
+    * can read a flag instead of re-deriving it on every call.
+    */
+   if (tObj->pt) {
+      enum pipe_format view_format = st_get_view_format(tObj);
+      tObj->needs_yuv_plane_views = (view_format != tObj->pt->format ||
+                                     util_format_is_yuv(view_format));
+   }
+
    /* Pull in any images not in the object's texture:
     */
    for (face = 0; face < nr_faces; face++) {
@@ -3363,6 +3381,9 @@ st_finalize_texture(struct gl_context *ctx,
                  stImage->Depth == depth)) {
                /* src image fits expected dest mipmap level size */
                copy_image_data_to_texture(st, tObj, level, stImage);
+               /* framebuffers rendering to the image have to follow it */
+               if (tObj->_RenderToTexture)
+                  ST_SET_FRAMEBUFFER_STATES(ctx->NewDriverState);
             }
          }
       }
@@ -3691,6 +3712,15 @@ st_TextureView(struct gl_context *ctx,
    tex->surface_format =
       st_mesa_format_to_pipe_format(st_context(ctx), image->TexFormat);
 
+   /* Cache whether the extra YUV plane-view / lowering setup in
+    * st_get_sampler_views() and st_get_external_sampler_key() must run for
+    * this texture. st_finalize_texture() returns early for surface_based
+    * textures without computing this.
+    */
+   tex->needs_yuv_plane_views = tex->pt &&
+      (tex->surface_format != tex->pt->format ||
+       util_format_is_yuv(tex->surface_format));
+
    tex->lastLevel = numLevels - 1;
 
    /* free texture sampler views.  They need to be recreated when we
@@ -3812,9 +3842,13 @@ st_SetTextureStorageForMemoryObject(struct gl_context *ctx,
                                     GLsizei height, GLsizei depth,
                                     GLuint64 offset, const char *func)
 {
-   return st_texture_storage(ctx, texObj, levels,
-                             width, height, depth,
-                             memObj, offset, func);
+   if (!st_texture_storage(ctx, texObj, levels,
+                           width, height, depth,
+                           memObj, offset, func))
+      return GL_FALSE;
+
+   texObj->FromMemoryObject = true;
+   return GL_TRUE;
 }
 
 GLboolean

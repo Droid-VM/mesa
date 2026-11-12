@@ -71,8 +71,20 @@ companion_slot(struct etna_context *ctx, unsigned x);
 unsigned
 etna_vs_sampler_base(struct etna_context *ctx);
 
+static inline bool
+etna_sampler_uses_border(const struct pipe_sampler_state *ss)
+{
+   return ss->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+          ss->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+          ss->wrap_r == PIPE_TEX_WRAP_CLAMP_TO_BORDER;
+}
+
 /* update TS / cache for a sampler if required */
 void
 etna_update_sampler_source(struct pipe_sampler_view *view, int num);
+
+struct etna_resource *
+etna_sampler_view_resource(struct etna_context *ctx,
+                           struct pipe_sampler_view *view, unsigned num);
 
 #endif

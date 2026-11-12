@@ -102,7 +102,7 @@ static inline int
 u_bit_scan(unsigned *mask)
 {
    const int i = ffs(*mask) - 1;
-   *mask ^= (1u << i);
+   *mask &= *mask - 1;
    return i;
 }
 
@@ -116,7 +116,7 @@ static inline int
 u_bit_scan64(uint64_t *mask)
 {
    const int i = ffsll(*mask) - 1;
-   *mask ^= (((uint64_t)1) << i);
+   *mask &= *mask - 1;
    return i;
 }
 

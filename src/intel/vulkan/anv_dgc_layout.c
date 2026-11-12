@@ -275,7 +275,11 @@ VkResult anv_CreateIndirectCommandsLayoutEXT(
       }
 
       cs_layout->dispatch.seq_offset = vk_layout->dispatch_src_offset_B;
-      if (devinfo->verx10 >= 125) {
+      if (device->physical->uses_efficient_64bit) {
+         /* On Gfx35+ everything is in a single instruction FAT instruction */
+         uint32_t cmd_size = COMPUTE_WALKER_2_length(devinfo) * 4;
+         layout_add_command(layout_obj, cmd_size, "compute-walker-2");
+      } else if (devinfo->verx10 >= 125) {
          /* On Gfx12.5+ everything is in a single instruction */
          uint32_t cmd_size = COMPUTE_WALKER_length(devinfo) * 4;
          layout_add_command(layout_obj, cmd_size, "compute-walker");
@@ -302,8 +306,13 @@ VkResult anv_CreateIndirectCommandsLayoutEXT(
    if (vk_layout->dgc_info & BITFIELD_BIT(MESA_VK_DGC_RT)) {
       layout_obj->bind_point = VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
 
-      uint32_t cmd_size = COMPUTE_WALKER_length(devinfo) * 4;
-      layout_add_command(layout_obj, cmd_size, "compute-walker");
+      const uint32_t cmd_size =
+         (device->physical->uses_efficient_64bit ?
+          COMPUTE_WALKER_2_length(devinfo) :
+          COMPUTE_WALKER_length(devinfo)) * 4;
+      layout_add_command(layout_obj, cmd_size,
+                         device->physical->uses_efficient_64bit ?
+                         "compute-walker-2" : "compute-walker");
 
       cs_layout->dispatch.seq_offset = vk_layout->dispatch_src_offset_B;
    }

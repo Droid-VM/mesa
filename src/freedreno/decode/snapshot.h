@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "util/log.h"
 #include "util/macros.h"
 
 /* High word is static, low word is snapshot version ID */
@@ -329,6 +330,8 @@ struct snapshot_gmu_version {
 static FILE *snapshot;
 static uint64_t ptbase = 0x43210000;  /* We don't always have a real ttbr0, so fake it */
 
+#define SNAPSHOT_MAX_GPU_OBJECT (4 * 1024 * 1024)
+
 static inline void
 snapshot_write(const void *data, size_t sz)
 {
@@ -404,6 +407,27 @@ struct reg_buf {
 };
 
 static struct reg_buf reg_buf;
+
+/**
+ * Append a register to the pending snapshot section.  Returns false (and
+ * warns once) if the buffer is full, rather than asserting or overflowing.
+ */
+static inline bool
+reg_buf_push(uint32_t offset, uint32_t value)
+{
+   if (reg_buf.count >= ARRAY_SIZE(reg_buf.regs)) {
+      mesa_logw_once("warning: register buffer full (%zu), "
+                     "dropping further registers in this section\n",
+                     ARRAY_SIZE(reg_buf.regs));
+      return false;
+   }
+
+   reg_buf.regs[reg_buf.count].offset = offset;
+   reg_buf.regs[reg_buf.count].value = value;
+   reg_buf.count++;
+
+   return true;
+}
 
 static inline void
 snapshot_registers(void)
@@ -578,7 +602,14 @@ snapshot_ib(uint64_t gpuaddr, const uint32_t *dwords, uint32_t sizedwords)
       }
    }
 
-   assert(idx < ARRAY_SIZE(ibs));
+   /* Warn what is being dropped in case of overflow instead of asserting*/
+   if (idx >= ARRAY_SIZE(ibs)) {
+      mesa_logw_once("warning: more than %zu IBs, dropping the rest "
+                     "(first dropped: %016" PRIx64 ")\n",
+                     ARRAY_SIZE(ibs), gpuaddr);
+      return;
+   }
+
    ibs[idx].ib.gpuaddr = gpuaddr;
    ibs[idx].ib.size = sizedwords;
    ibs[idx].ib.ptbase = ptbase;

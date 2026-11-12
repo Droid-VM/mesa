@@ -81,6 +81,7 @@ struct pipe_viewport_state;
 struct pipe_compute_state;
 struct pipe_ml_operation;
 struct pipe_tensor;
+struct pipe_clientptr_range;
 union pipe_color_union;
 union pipe_query_result;
 struct u_log_context;
@@ -96,6 +97,13 @@ typedef void (*pipe_draw_func)(struct pipe_context *pipe,
                                const struct pipe_draw_indirect_info *indirect,
                                const struct pipe_draw_start_count_bias *draws,
                                unsigned num_draws);
+
+typedef void (*pipe_draw_buffers_func)(struct pipe_context *pipe,
+                                       const struct pipe_draw_info *info,
+                                       const struct pipe_vertex_buffer *buffers,
+                                       unsigned buffer_count,
+                                       const struct pipe_draw_start_count_bias *draws,
+                                       unsigned num_draws);
 
 /**
  * Gallium rendering context.  Basically:
@@ -118,6 +126,7 @@ struct pipe_context {
     * Once you are done, use u_upload_unmap.
     */
    struct u_upload_mgr *stream_uploader; /* everything but shader constants */
+   struct u_upload_mgr *clientptr_uploader; /* staging buffers mapped to a client pointer range */
    struct u_upload_mgr *const_uploader;  /* shader constants only */
 
    /**
@@ -161,6 +170,18 @@ struct pipe_context {
     * \param num_draws     number of direct draws; 1 for indirect multi draws
     */
    pipe_draw_func draw_vbo;
+
+   /**
+    * Same behavior as draw_vbo except that indirect draws are not supported.
+    *
+    * \param pipe          context
+    * \param info          draw info
+    * \param buffers       vertex buffers used until the next set_vertex_buffers call
+    * \param buffer_count   number of vertex buffers
+    * \param draws         array of (start, count) pairs for direct draws
+    * \param num_draws     number of direct draws
+    */
+   pipe_draw_buffers_func draw_vbo_buffers;
 
    /**
     * Multi draw for display lists.
@@ -449,6 +470,18 @@ struct pipe_context {
 
    void (*set_min_samples)(struct pipe_context *,
                            unsigned min_samples);
+
+   /**
+    * Sample coverage as the API states it, for hardware that takes a
+    * coverage fraction rather than a per sample bitmask.
+    *
+    * Optional. When a driver leaves this unset the frontend folds the
+    * coverage into set_sample_mask() instead, which quantizes it to the
+    * sample count. A driver implementing this gets the unquantized value
+    * and receives only the explicit sample mask through set_sample_mask().
+    */
+   void (*set_sample_coverage)(struct pipe_context *,
+                               float value, bool invert);
 
    /* Called to set user clip plane state.  Unused on GL drivers with
     * !caps->clip_planes.
@@ -877,6 +910,9 @@ struct pipe_context {
     * out_transfer will contain the transfer object that must be passed
     * to all the other transfer functions. It also contains useful
     * information (like texture strides for texture_map).
+    *
+    * \return pointer to mapped buffer, or PIPE_TRANSFER_CLIENT_POINTER if
+    * usage contains PIPE_MAP_CLIENT_POINTER
     */
    void *(*buffer_map)(struct pipe_context *,
                        struct pipe_resource *resource,
@@ -892,6 +928,35 @@ struct pipe_context {
    void (*transfer_flush_region)(struct pipe_context *,
                                  struct pipe_transfer *transfer,
                                  const struct pipe_box *);
+
+   /**
+    * Map a resource to a client pointer range.
+    * 
+    * If for \param transfer the backing resource is already mapped to a
+    * client pointer range, \param clientptr_range is left unused.
+    *
+    * \param ctx          The current context.
+    * \param transfer     The transfer from which to get a mapped pointer
+    * \param clientptr_range The client range to map into or NULL
+    * \param size         On failure, size of a client range needed to map
+    *                     the backing BO
+    *
+    * \return pointer to mapped buffer, or NULL if not enough space. (cf. \param size)
+    *
+    * \note if \param clientptr_range is consumed for the mapping, it is emptied.
+    */
+
+   void *(*transfer_map_clientptr_range)(struct pipe_context *,
+                        struct pipe_transfer *transfer,
+                        struct pipe_clientptr_range *clientptr_range,
+                        uint32_t *size);
+
+   /**
+    * Releases and potentially unmaps a client pointer returned from
+    * transfer_map_clientptr_range.
+    */
+   void (*transfer_unmap_clientptr_range)(struct pipe_context *,
+                                          struct pipe_transfer *);
 
    void (*buffer_unmap)(struct pipe_context *,
                         struct pipe_transfer *transfer);
@@ -1205,7 +1270,7 @@ struct pipe_context {
     *
     * \param ctx        pipe context
     * \param handle     64-bit image handle
-    * \param access     GL_READ_ONLY, GL_WRITE_ONLY or GL_READ_WRITE
+    * \param access     PIPE_IMAGE_ACCESS_* flags
     * \param resident   TRUE for resident, FALSE otherwise
     */
    void (*make_image_handle_resident)(struct pipe_context *ctx, uint64_t handle,
@@ -1288,7 +1353,33 @@ struct pipe_context {
    struct pipe_ml_subgraph *(*ml_subgraph_deserialize)(struct pipe_context *context,
                                                        const uint8_t *data,
                                                        size_t size);
+
+   /**
+    * Retrieve the underlying driver context pointer.
+    *
+    * \param context    pipe context
+    *
+    * This allows frontend to get the backend driver context for cases where
+    * trace or ddebug are enabled.
+    */
+   struct pipe_context *(*get_driver_pipe_context)(struct pipe_context *context);
 };
+
+
+/**
+ * Returns the driver context, unwrapping any wrapper (debug driver,
+ * threaded) contexts. Returns the context itself if it is not wrapped.
+ *
+ * Note that when a threaded context is unwrapped this way, no
+ * synchronization with the driver thread is performed; use
+ * threaded_context_unwrap_sync() first if synchronization is required.
+ */
+static inline struct pipe_context *
+pipe_get_driver_context(struct pipe_context *pipe)
+{
+   return pipe && pipe->get_driver_pipe_context ?
+          pipe->get_driver_pipe_context(pipe) : pipe;
+}
 
 
 #ifdef __cplusplus

@@ -42,6 +42,7 @@ extern "C" {
 struct vk_acceleration_structure_build_ops;
 struct vk_command_buffer_ops;
 struct vk_device_shader_ops;
+struct vk_frame_pacer;
 struct vk_sync_signal;
 struct vk_sync_wait;
 
@@ -136,6 +137,9 @@ struct vk_device {
     *     level dispatch table.
     */
    const struct vk_device_dispatch_table *command_dispatch_table;
+
+   /** App workarounds dispatch table */
+   struct vk_device_dispatch_table *app_workarounds_dispatch_table;
 
    /** Command buffer vtable when using the common command pool */
    const struct vk_command_buffer_ops *command_buffer_ops;
@@ -312,6 +316,8 @@ struct vk_device {
    mtx_t swapchain_name_mtx;
    struct hash_table *swapchain_name;
 
+   struct vk_frame_pacer *frame_pacer;
+
    /* For VK_KHR_pipeline_binary */
    bool disable_internal_cache;
 
@@ -322,6 +328,8 @@ struct vk_device {
    uint32_t memory_report_count;
 
    struct vk_pipeline_robustness_state robustness_state;
+
+   FILE *debug_output;
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_device, base, VkDevice,

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "jay_ir.h"
+#include "jay_opcodes.h"
 
 static enum jay_stride
 min_stride_for_type(enum jay_type T)
@@ -52,12 +53,17 @@ restrict_mixed_strides(jay_inst *I, unsigned s)
           (I->op == JAY_OPCODE_MUL_32X16 || I->op == JAY_OPCODE_MUL_32) ||
           (jay_is_send_like(I) || I->op == JAY_OPCODE_DPAS) ||
           jay_is_shuffle_like(I) ||
+          (I->op == JAY_OPCODE_CVT &&
+           jay_cvt_src_type(I) == JAY_TYPE_F16 &&
+           !jay_type_is_any_float(I->type)) ||
           s == 2;
 }
 
 enum jay_stride
 jay_dst_stride_minmax(jay_inst *I, bool do_max)
 {
+   assert(I->dst.file == GPR || jay_is_null(I->dst));
+
    enum jay_stride min = min_stride_for_type(I->type);
    enum jay_stride max = max_stride_for_type(I->type);
 
@@ -65,6 +71,11 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
     * execution data type to the destination type
     */
    if (I->op == JAY_OPCODE_CVT) {
+      /* ..and refuse mov.u16 dst<4>, src<2>:f */
+      if (min == JAY_STRIDE_2) {
+         max = JAY_STRIDE_4;
+      }
+
       min = MAX2(min, min_stride_for_type(jay_src_type(I, 0)));
 
       /* Conversions between integer and HF must be strided by a DWord on the
@@ -77,17 +88,19 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
          min = JAY_STRIDE_4;
    }
 
-   if (I->op == JAY_OPCODE_EXPAND_QUAD) {
+   if (I->op == JAY_OPCODE_EXPAND_QUAD ||
+       I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS) {
+      return JAY_STRIDE_4;
+   }
+
+   /* SLICE_REPACK assume its operands use 4-byte stride. */
+   if (I->op == JAY_OPCODE_SLICE_REPACK) {
       return JAY_STRIDE_4;
    }
 
    /* V/UV types are restricted */
    if (I->op == JAY_OPCODE_SHR_ODD_SUBSPANS_BY_4) {
       return JAY_STRIDE_2;
-   }
-
-   if (I->op == JAY_OPCODE_SLICE_REPACK && jay_slice_repack_unpack(I)) {
-      return JAY_STRIDE_4;
    }
 
    /* The src2 restriction quoted above effectively implies we should not stride
@@ -103,12 +116,24 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
 enum jay_stride
 jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max)
 {
+   assert(I->src[s].file == GPR);
+
    enum jay_stride min = min_stride_for_type(jay_src_type(I, s));
    enum jay_stride max = max_stride_for_type(jay_src_type(I, s));
+
+   /* Stride 8 would result in the input spanning four GRFs for SIMD32. */
+   if (I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS && do_max) {
+      max = JAY_STRIDE_4;
+   }
 
    /* BSpec 56640: bfloat sources must be packed */
    if (jay_src_type(I, s) == JAY_TYPE_BF16) {
       return JAY_STRIDE_2;
+   }
+
+   /* SLICE_REPACK assume its operands use 4-byte stride. */
+   if (I->op == JAY_OPCODE_SLICE_REPACK) {
+      return JAY_STRIDE_4;
    }
 
    /* SENDs cannot do any regioning so force exactly the types of the sources
@@ -129,7 +154,7 @@ jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max)
       max = JAY_STRIDE_4;
    }
 
-   if (restrict_mixed_strides(I, s))
+   if (restrict_mixed_strides(I, s) && I->dst.file == GPR)
       return jay_dst_stride_minmax(I, do_max);
 
    return (do_max && !restrict_mixed_strides(I, s)) ? max : min;

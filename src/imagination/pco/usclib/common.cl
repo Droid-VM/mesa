@@ -92,9 +92,16 @@ cs_query_copy_common(void)
    uint result_base_addr_lo = nir_load_preamble(1, PVR_QUERY_COPY_DATA_RESULT_BO_LO, 0);
    uint result_base_addr_hi = nir_load_preamble(1, PVR_QUERY_COPY_DATA_RESULT_BO_HI, 0);
 
+   uint result_stride = nir_load_preamble(1, PVR_QUERY_COPY_DATA_RESULT_STRIDE, 0);
    uint dest_stride = nir_load_preamble(1, PVR_QUERY_COPY_DATA_DEST_STRIDE, 0);
 
+   uint report_count = nir_load_preamble(1, PVR_QUERY_COPY_DATA_REPORT_COUNT, 0);
+
    uint flags = nir_load_preamble(1, PVR_QUERY_COPY_DATA_FLAGS, 0);
+   bool is_64bit = flags & VK_QUERY_RESULT_64_BIT;
+
+   uint dest_elem_stride = is_64bit ? sizeof(uint64_t) : sizeof(uint32_t);
+   uint report_stride = sizeof(uint32_t);
 
    uint index = query_calc_global_id();
 
@@ -102,30 +109,32 @@ cs_query_copy_common(void)
       uint2 avail_addr = nir_uadd64_32(avail_base_addr_lo, avail_base_addr_hi, index * sizeof(uint32_t));
       uint available = nir_dma_ld_pco(1, avail_addr);
 
-      uint2 dest_addr = nir_umad64_32(dest_stride, index, dest_base_addr_lo, dest_base_addr_hi);
+      uint2 dest_base_addr = nir_umad64_32(dest_stride, index, dest_base_addr_lo, dest_base_addr_hi);
 
       if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
-         uint2 result_addr = nir_uadd64_32(result_base_addr_lo, result_base_addr_hi, index * sizeof(uint32_t));
-         uint result = nir_dma_ld_pco(1, result_addr);
+         uint2 result_base_addr = nir_umad64_32(result_stride, index, result_base_addr_lo, result_base_addr_hi);
 
-         /* TODO: for 64/32-bit writes, just prep the 64-bit one and set the burst-length variably. */
-         if (flags & VK_QUERY_RESULT_64_BIT) {
-            /* TODO: check if data should be (result, 0) or (0, result) */
-            nir_dma_st_pco(false, dest_addr, result, 0);
-         } else {
-            nir_dma_st_pco(false, dest_addr, result);
+         for (unsigned r = 0; r < report_count; ++r) {
+            uint2 dest_addr = nir_umad64_32(r, dest_elem_stride, dest_base_addr.x, dest_base_addr.y);
+            uint2 result_addr = nir_umad64_32(r, report_stride, result_base_addr.x, result_base_addr.y);
+            uint result = nir_dma_ld_pco(1, result_addr);
+
+            /* TODO: for 64/32-bit writes, just prep the 64-bit one and set the burst-length variably. */
+            if (is_64bit)
+               nir_dma_st_pco(false, dest_addr, result, 0);
+            else
+               nir_dma_st_pco(false, dest_addr, result);
          }
       }
 
       if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) {
-         if (flags & VK_QUERY_RESULT_64_BIT) {
-            dest_addr = nir_uadd64_32(dest_addr.x, dest_addr.y, sizeof(uint64_t));
-            /* TODO: check if data should be (available, 0) or (0, available) */
+         uint2 dest_addr = nir_umad64_32(report_count, dest_elem_stride, dest_base_addr.x, dest_base_addr.y);
+
+         /* TODO: for 64/32-bit writes, just prep the 64-bit one and set the burst-length variably. */
+         if (is_64bit)
             nir_dma_st_pco(false, dest_addr, available, 0);
-         } else {
-            dest_addr = nir_uadd64_32(dest_addr.x, dest_addr.y, sizeof(uint32_t));
+         else
             nir_dma_st_pco(false, dest_addr, available);
-         }
       }
    }
 }
@@ -141,11 +150,20 @@ cs_query_reset_common(void)
    uint avail_base_addr_lo = nir_load_preamble(1, PVR_QUERY_RESET_DATA_AVAILABILITY_BO_LO, 0);
    uint avail_base_addr_hi = nir_load_preamble(1, PVR_QUERY_RESET_DATA_AVAILABILITY_BO_HI, 0);
 
+   uint result_stride = nir_load_preamble(1, PVR_QUERY_RESET_DATA_RESULT_STRIDE, 0);
+   uint report_count = nir_load_preamble(1, PVR_QUERY_RESET_DATA_REPORT_COUNT, 0);
+
+   uint report_stride = sizeof(uint32_t);
+
    uint index = query_calc_global_id();
 
    if (index < index_count) {
-      uint2 result_addr = nir_uadd64_32(result_base_addr_lo, result_base_addr_hi, index * sizeof(uint32_t));
-      nir_dma_st_pco(false, result_addr, 0);
+      uint2 result_base_addr = nir_umad64_32(result_stride, index, result_base_addr_lo, result_base_addr_hi);
+
+      for (unsigned r = 0; r < report_count; ++r) {
+         uint2 result_addr = nir_umad64_32(r, report_stride, result_base_addr.x, result_base_addr.y);
+         nir_dma_st_pco(false, result_addr, 0);
+      }
 
       uint2 avail_addr = nir_uadd64_32(avail_base_addr_lo, avail_base_addr_hi, index * sizeof(uint32_t));
       nir_dma_st_pco(false, avail_addr, 0);

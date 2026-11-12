@@ -59,6 +59,7 @@ radv-raven-vkcts:
   variables:
     DEQP_SUITE: radv
     DEQP_FRACTION: 6
+    RADV_EXPERIMENTAL: hic
 
 amd-raven-skqp:
   extends:
@@ -137,6 +138,17 @@ radeonsi-raven-va:
     # spend all our time in drm_lastclose()'s modesetting.
     HWCI_START_WESTON: 1
 
+radeonsi-raven-va-no_gfx_compute:
+  extends:
+    - .lava-x86_64-test-video-no_gfx_compute
+    - .radeonsi-raven-test:x86_64
+    - .radeonsi-vaapi-rules
+    - .lava-hp-x360-14a-cb0001xx-zork:x86_64
+  variables:
+    DEQP_SUITE: vaapi-no_gfx_compute
+    GPU_VERSION: radeonsi-raven-va-no_gfx_compute
+    VAAPI: 1
+
 radeonsi-mendocino-glcts-piglit:
   extends:
     - .lava-x86_64-test-gl
@@ -160,6 +172,7 @@ radv-cezanne-vkcts-asan:
     DEQP_SUITE: radv
     DEQP_FRACTION: 5
     FDO_CI_CONCURRENT: 3  # We get OOMkills if we go wider
+    RADV_EXPERIMENTAL: hic
 
 ############### VKCTS tests ###############
 
@@ -191,17 +204,18 @@ radv-hawaii-vkcts-full:
   timeout: 47m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
+    RADV_EXPERIMENTAL: transfer_queue
 
 radv-polaris10-vkcts-full:
   extends:
     - .ci-tron-test-radv-vk-nightly
     - .polaris10-test-valve-kws
     - .radv-valve-manual-rules
-  timeout: 57m
+  timeout: 67m
   variables:
     CI_TRON_TIMEOUT__BOOT_CYCLE__RETRIES: 4
     CI_TRON_TIMEOUT__BOOT_CYCLE__MINUTES: 70
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 55
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 65
     RADV_EXPERIMENTAL: video_decode,video_encode
     radv_enable_float16_gfx8: true
 
@@ -213,7 +227,7 @@ radv-vega10-vkcts-full:
   timeout: 47m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
-    RADV_EXPERIMENTAL: transfer_queue,video_decode,video_encode,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,video_decode,video_encode,msrtss,hic
 
 radv-renoir-vkcts-full:
   extends:
@@ -223,7 +237,7 @@ radv-renoir-vkcts-full:
   timeout: 1h 20m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 78
-    RADV_EXPERIMENTAL: transfer_queue,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,msrtss,hic
 
 radv-navi10-vkcts-full:
   timeout: 30m
@@ -234,7 +248,7 @@ radv-navi10-vkcts-full:
     - .radv-valve-manual-rules
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
-    RADV_EXPERIMENTAL: transfer_queue,hic,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,msrtss
 
 radv-navi21-vkcts:
   timeout: 18m
@@ -360,6 +374,20 @@ radv-gfx1201-fluster:
     DEQP_SUITE: radv-fluster
 
 ############### Fossilize
+radv-validate-cache:
+  stage: code-validation
+  timeout: 5m
+  extends:
+    - .test-vk
+    - .radv-rules
+  rules:
+    - !reference [.no_downstream_pipeline-rules, rules]
+    - !reference [.radv-rules, rules]
+  variables:
+    VK_DRIVER: radeon
+  script:
+    - ./install/radv-validate-cache.sh
+
 radv-fossils:
   extends:
     - .radv-valve-rules
@@ -498,9 +526,9 @@ radv-vangogh-vkd3d-asan:
     - .test-vkd3d-proton
     - .vangogh-test-valve
     - .radv-valve-manual-rules
-  timeout: 12m
+  timeout: 15m
   variables:
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 10
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 13
     # Random tests fail/crash when trying to run them in parallel
     FDO_CI_CONCURRENT: 1
 

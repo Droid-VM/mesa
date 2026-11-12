@@ -303,14 +303,12 @@ softpipe_create_gs_state(struct pipe_context *pipe,
    softpipe_create_shader_state(pipe, &state->shader, templ,
                                 sp_debug & SP_DBG_GS);
 
-   if (state->shader.tokens) {
-      state->draw_data = draw_create_geometry_shader(softpipe->draw,
-                                                     &state->shader);
-      if (state->draw_data == NULL)
-         goto fail;
+   state->draw_data = draw_create_geometry_shader(softpipe->draw,
+                                                  &state->shader);
+   if (state->draw_data == NULL)
+      goto fail;
 
-      state->max_sampler = state->draw_data->info.file_max[TGSI_FILE_SAMPLER];
-   }
+   state->max_sampler = state->draw_data->info.file_max[TGSI_FILE_SAMPLER];
 
    return state;
 

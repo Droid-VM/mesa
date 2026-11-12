@@ -205,7 +205,7 @@ _mesa_set_create_u32_keys(void *mem_ctx)
 
 /* Copy the set from src to dst. */
 bool
-_mesa_set_copy(struct set *dst, struct set *src, void *dst_mem_ctx)
+_mesa_set_copy(struct set *dst, const struct set *src, void *dst_mem_ctx)
 {
    /* Copy the structure except the initial storage. */
    memcpy(dst, src, offsetof(struct set, _initial_storage));
@@ -227,7 +227,7 @@ _mesa_set_copy(struct set *dst, struct set *src, void *dst_mem_ctx)
 
 /* It's preferred to use _mesa_set_copy instead of this to skip ralloc. */
 struct set *
-_mesa_set_clone(struct set *set, void *dst_mem_ctx)
+_mesa_set_clone(const struct set *set, void *dst_mem_ctx)
 {
    struct set *clone;
 
@@ -721,4 +721,22 @@ _mesa_set_equal(const struct set *a, const struct set *b)
    }
 
    return true;
+}
+
+void
+_mesa_set_add_set(struct set *set, const struct set *other)
+{
+   assert(set->key_hash_function == other->key_hash_function);
+   assert(set->key_equals_function == other->key_equals_function);
+
+   set_foreach(other, entry)
+      set_add(set, entry->hash, entry->key);
+}
+
+struct set *
+_mesa_set_union(const struct set *a, const struct set *b, void *dst_mem_ctx)
+{
+   struct set *u = _mesa_set_clone(a, dst_mem_ctx);
+   _mesa_set_add_set(u, b);
+   return u;
 }

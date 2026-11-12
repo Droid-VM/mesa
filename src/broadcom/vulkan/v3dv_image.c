@@ -659,6 +659,10 @@ get_image_subresource_layout(struct v3dv_device *device,
             layout->size = prev_slice->offset - slice->offset;
       }
    }
+   VkSubresourceHostMemcpySize *memcpy_size =
+      vk_find_struct(layout2->pNext, SUBRESOURCE_HOST_MEMCPY_SIZE);
+   if (memcpy_size)
+      memcpy_size->size = layout->size;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -779,7 +783,7 @@ create_image_view(struct v3dv_device *device,
     * data reads to the R component and ignore the GBA channels that contain
     * the depth aspect data.
     *
-    * FIXME: thwe code belows calls vk_component_mapping_to_pipe_swizzle
+    * FIXME: the code below calls vk_component_mapping_to_pipe_swizzle
     * only so it can then call util_format_compose_swizzles later. Maybe it
     * makes sense to implement swizzle composition using VkSwizzle directly.
     */

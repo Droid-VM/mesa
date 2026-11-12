@@ -272,6 +272,7 @@ llvmpipe_init_screen_caps(struct pipe_screen *screen)
    caps->vertex_color_clamped = true;
    caps->glsl_feature_level_compatibility =
    caps->glsl_feature_level = 460;
+   caps->fs_sample_variables = true;
    caps->compute = true;
    caps->user_vertex_buffers = true;
    caps->tgsi_texcoord = true;
@@ -513,11 +514,13 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_extract_word = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
-   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_bitfield_extract64,
+   /* LLVM calls into libgcc for a 64-bit division on a 32-bit target, and
+    * RuntimeDyld can't resolve the R_PPC_REL24 of that call on 32-bit PowerPC.
+    */
+   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_bitfield_extract64 |
+                          (DETECT_ARCH_PPC && !DETECT_ARCH_PPC_64 ? nir_lower_divmod64 : 0),
    .lower_doubles_options = nir_lower_dround_even,
    .max_unroll_iterations = 32,
    .lower_to_scalar = true,
@@ -674,6 +677,10 @@ llvmpipe_is_format_supported(struct pipe_screen *_screen,
       if (!lp_storage_render_image_format_supported(format))
          return false;
 
+   /* The JIT doesn't byte-swap on image stores. */
+   if (format_desc->is_byte_swapped && (bind & PIPE_BIND_SHADER_IMAGE))
+      return false;
+
    if (bind & PIPE_BIND_SHADER_IMAGE) {
       if (!lp_storage_image_format_supported(format))
          return false;
@@ -804,6 +811,9 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
     */
    llvmpipe_screen_destroy_setup_cache(screen);
 
+   if (screen->late_init_done)
+      llvmpipe_sampler_matrix_destroy(screen);
+
    lp_jit_screen_cleanup(screen);
 
    lp_context_destroy(&screen->llvm_context);
@@ -879,12 +889,10 @@ update_cache_blake3_cpu(blake3_hasher *ctx)
 {
    const struct util_cpu_caps_t *cpu_caps = util_get_cpu_caps();
    /*
-    * Don't need the cpu cache affinity stuff. The rest
-    * is contained in first 5 dwords.
+    * Don't need the cpu cache affinity stuff, which starts at num_L3_caches.
     */
-   STATIC_ASSERT(offsetof(struct util_cpu_caps_t, num_L3_caches)
-                 == 5 * sizeof(uint32_t));
-   _mesa_blake3_update(ctx, cpu_caps, 5 * sizeof(uint32_t));
+   _mesa_blake3_update(ctx, cpu_caps,
+                       offsetof(struct util_cpu_caps_t, num_L3_caches));
 }
 
 
@@ -897,12 +905,17 @@ lp_disk_cache_create(struct llvmpipe_screen *screen)
    char cache_id[BLAKE3_HEX_LEN];
    _mesa_blake3_init(&ctx);
 
-   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx) ||
-       !disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx))
       return;
+
+#if !GALLIVM_USE_ORCJIT
+   if (!disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+      return;
+#endif
 
    _mesa_blake3_update(&ctx, &gallivm_perf, sizeof(gallivm_perf));
    update_cache_blake3_cpu(&ctx);
+   _mesa_blake3_update(&ctx, &lp_native_vector_width, sizeof(lp_native_vector_width));
    _mesa_blake3_final(&ctx, blake3);
    mesa_bytes_to_hex(cache_id, blake3, BLAKE3_KEY_LEN);
 
@@ -1001,12 +1014,25 @@ llvmpipe_screen_late_init(struct llvmpipe_screen *screen)
    lp_build_init(); /* get lp_native_vector_width initialised */
 
    lp_disk_cache_create(screen);
+
+   llvmpipe_init_sampler_matrix(screen);
+
    screen->late_init_done = true;
 out:
    mtx_unlock(&screen->late_mutex);
    return ret;
 }
 
+uint64_t
+llvmpipe_get_mem_file_size(struct pipe_screen *_screen)
+{
+#if DETECT_OS_LINUX
+   struct llvmpipe_screen *screen = llvmpipe_screen(_screen);
+   return screen->mem_file_size;
+#else
+   return 0;
+#endif
+}
 
 /**
  * Create a new pipe_screen object

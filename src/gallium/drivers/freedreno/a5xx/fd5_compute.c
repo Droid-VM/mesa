@@ -80,7 +80,7 @@ cs_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring, struct ir3_s
                      A5XX_HLSQ_CS_CNTL_0_UNK0(regid(63, 0)) |
                      A5XX_HLSQ_CS_CNTL_0_UNK1(regid(63, 0)) |
                      A5XX_HLSQ_CS_CNTL_0_LOCALIDREGID(local_invocation_id));
-   OUT_RING(ring, 0x1); /* HLSQ_CS_CNTL_1 */
+   OUT_RING(ring, A5XX_HLSQ_CS_CNTL_1_WORKITEMRASTORDER(WORKITEMRASTORDER_LINEAR));
 
    if (instrlen > 0)
       fd5_emit_shader(ring, v);
@@ -107,7 +107,8 @@ fd5_launch_grid(struct fd_context *ctx,
    fd5_emit_cs_consts(v, ring, ctx, info);
 
    util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
-      nglobal++;
+      if (*res)
+         nglobal++;
 
    if (nglobal > 0) {
       /* global resources don't otherwise get an OUT_RELOC(), since
@@ -118,7 +119,8 @@ fd5_launch_grid(struct fd_context *ctx,
        */
       OUT_PKT7(ring, CP_NOP, 2 * nglobal);
       util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
-         OUT_RELOC(ring, fd_resource(*res)->bo, 0, 0, 0);
+         if (*res)
+            OUT_RELOC(ring, fd_resource(*res)->bo, 0, 0, 0);
    }
 
    const unsigned *local_size =

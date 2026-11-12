@@ -59,6 +59,13 @@
 
 #define PVR_MAX_DESCRIPTORS_PER_SET 1024U
 
+#define PVR_MAX_PUSH_DESCRIPTORS 32U
+
+/* size in bytes of the largest descriptor */
+/* 6 uint64_t + 8 uint32_t  = 6 * 8 + 8 * 4 = 80 bytes */
+/* increase this a bit to give some head room */
+#define PVR_MAX_DESCRIPTOR_SIZE 96U
+
 #define PVR_MAX_FRAMEBUFFER_LAYERS PVR_MAX_ARRAY_LAYERS
 
 /* The limit is somewhat arbitrary, it just translates into more pds code
@@ -66,6 +73,16 @@
  * other implementations.
  */
 #define PVR_MAX_VERTEX_INPUT_BINDINGS 16U
+
+#define PVR_XFB_MAX_STREAMS 1U
+#define PVR_XFB_MAX_BUFFERS 4U
+#define PVR_XFB_PTEMP_ENTRIES_PER_VARYING 3U
+/* Number of 64-bit persistent temps declared by the XFB PDS programs. */
+#define PVR_XFB_MAX_PTEMPS_SETS \
+   (PVR_XFB_MAX_BUFFERS * PVR_XFB_PTEMP_ENTRIES_PER_VARYING)
+#define PVR_XFB_MAX_TOTAL_VARYINGS 128U
+#define PVR_XFB_MAX_DATA_SIZE 512U
+#define PVR_XFB_MAX_DATA_STRIDE 2048U
 
 #define PVR_TEXEL_BUFFER_OFFSET_ALIGNMENT 16U
 #define PVR_UNIFORM_BUFFER_OFFSET_ALIGNMENT 4U

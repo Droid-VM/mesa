@@ -412,6 +412,11 @@ v3dX(emit_state)(struct pipe_context *pctx)
                         cl_emit_prepacked_sized(&job->bcl,
                                                 v3d->rasterizer->depth_offset_z16,
                                                 cl_packet_length(DEPTH_OFFSET));
+                } else if (job->zsbuf.texture &&
+                           util_format_get_depth_bits(job->zsbuf.format) == 24) {
+                        cl_emit_prepacked_sized(&job->bcl,
+                                                v3d->rasterizer->depth_offset_z24,
+                                                cl_packet_length(DEPTH_OFFSET));
                 } else {
                         cl_emit_prepacked_sized(&job->bcl,
                                                 v3d->rasterizer->depth_offset,

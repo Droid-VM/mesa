@@ -495,6 +495,7 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
     */
 
    if (format_matches_type(format_desc, type) &&
+       !format_desc->is_byte_swapped &&
        format_desc->block.bits <= type.width * 4 &&
        /* XXX this shouldn't be needed */
        util_is_power_of_two_or_zero(format_desc->block.bits)) {
@@ -548,6 +549,9 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
       packed = lp_build_gather(gallivm, type.length/4,
                                format_desc->block.bits, fetch_type,
                                aligned, base_ptr, offset, false);
+      if (format_desc->is_byte_swapped)
+         packed = lp_build_bswap_packed(gallivm, conv_type,
+                                        format_desc->block.bits, packed);
 
       assert(format_desc->block.bits * type.length / 4 <=
              type.width * type.length);
@@ -645,6 +649,9 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
          packed = lp_build_gather_elem(gallivm, num_pixels,
                                        format_desc->block.bits, 32, aligned,
                                        base_ptr, offset, k, false);
+         if (format_desc->is_byte_swapped)
+            packed = lp_build_bswap_packed(gallivm, lp_type_uint(32),
+                                           format_desc->block.bits, packed);
 
          tmps[k] = lp_build_unpack_arith_rgba_aos(gallivm,
                                                   format_desc,
@@ -699,6 +706,7 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
 
    /* If all channels are of same type and we are not using half-floats */
    if (format_desc->is_array &&
+       !format_desc->is_byte_swapped &&
        format_desc->colorspace == UTIL_FORMAT_COLORSPACE_RGB) {
       assert(!format_desc->is_mixed);
       return lp_build_fetch_rgba_aos_array(gallivm, format_desc, type, base_ptr, offset);
@@ -735,7 +743,8 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
     * s3tc rgb formats
     */
 
-   if (format_desc->layout == UTIL_FORMAT_LAYOUT_S3TC) {
+   if (UTIL_ARCH_LITTLE_ENDIAN &&
+       format_desc->layout == UTIL_FORMAT_LAYOUT_S3TC) {
       struct lp_type tmp_type;
       LLVMValueRef tmp;
 
@@ -763,7 +772,8 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
     * rgtc rgb formats
     */
 
-   if (format_desc->layout == UTIL_FORMAT_LAYOUT_RGTC) {
+   if (UTIL_ARCH_LITTLE_ENDIAN &&
+       format_desc->layout == UTIL_FORMAT_LAYOUT_RGTC) {
       struct lp_type tmp_type;
       LLVMValueRef tmp;
 

@@ -65,6 +65,10 @@
 #include "drm-uapi/drm_fourcc.h"
 #endif
 
+#if DETECT_OS_LINUX
+#include <fcntl.h>
+#endif
+
 #if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -783,6 +787,7 @@ llvmpipe_resource_from_handle(struct pipe_screen *_screen,
                                     (struct pipe_memory_allocation**)&alloc,
                                     &size, true)) {
          void *data = (char*)alloc->cpu_addr + whandle->offset;
+         whandle->size = size;
          lpr->dt = winsys->displaytarget_create_mapped(winsys, template->bind,
                                                        template->format, template->width0, template->height0,
                                                        whandle->stride, data, whandle);
@@ -792,7 +797,6 @@ llvmpipe_resource_from_handle(struct pipe_screen *_screen,
          lpr->dmabuf = true;
          lpr->tex_data = data;
          lpr->row_stride[0] = whandle->stride;
-         whandle->size = size;
       } else
 #endif
       {
@@ -1364,7 +1368,7 @@ llvmpipe_allocate_memory(struct pipe_screen *_screen, uint64_t size)
 
    mtx_unlock(&screen->mem_mutex);
 #else
-   mem->cpu_addr = malloc(mem->size);
+   mem->cpu_addr = os_malloc_aligned(mem->size, alignment);
    mem->fd = -1;
    mem->type = LLVMPIPE_MEMORY_FD_TYPE_INVALID;
 #endif
@@ -1385,13 +1389,15 @@ llvmpipe_free_memory(struct pipe_screen *pscreen,
    if (mem->fd >= 0) {
       mtx_lock(&screen->mem_mutex);
       util_vma_heap_free(&screen->mem_heap, mem->offset, mem->size);
+      fallocate(screen->fd_mem_alloc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                mem->offset, mem->size);
       mtx_unlock(&screen->mem_mutex);
    }
 
    if (mem->cpu_addr != MAP_FAILED)
       munmap(mem->cpu_addr, mem->size);
 #else
-   free(mem->cpu_addr);
+   os_free_aligned(mem->cpu_addr);
 #endif
 
    FREE(mem);

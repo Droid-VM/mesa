@@ -39,6 +39,7 @@
 struct pipe_context;
 struct pipe_fence;
 struct st_context;
+struct st_context_attribs;
 struct dri_drawable;
 struct dri_screen;
 
@@ -68,11 +69,6 @@ struct dri_context
     */
    void *loaderPrivate;
 
-   struct {
-       int draw_stamp;
-       int read_stamp;
-   } dri2;
-
    /* gallium */
    struct st_context *st;
    struct hud_context *hud;
@@ -96,8 +92,8 @@ dri_get_current(void);
 
 struct dri_context *
 dri_create_context(struct dri_screen *screen,
-                   gl_api api, const struct gl_config *visual,
-                   const struct __DriverContextConfig *ctx_config,
+                   struct st_context_attribs *attribs,
+                   const struct gl_config *visual,
                    unsigned *error,
                    struct dri_context *sharedContextPrivate,
                    void *loaderPrivate,

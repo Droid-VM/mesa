@@ -47,7 +47,6 @@
 
 #include "tgsi/tgsi_dump.h"
 #include "tgsi/tgsi_exec.h"
-#include "tgsi/tgsi_ureg.h"
 
 DEBUG_GET_ONCE_BOOL_OPTION(gallium_dump_vs, "GALLIUM_DUMP_VS", false)
 

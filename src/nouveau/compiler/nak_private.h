@@ -112,9 +112,11 @@ enum ENUM_PACKED nak_sv {
    NAK_SV_LANE_ID          = 0x00,
    NAK_SV_VIRTCFG          = 0x02,
    NAK_SV_VIRTID           = 0x03,
+   NAK_SV_ORDERING_TICKET  = 0x0f,
    NAK_SV_PRIM_TYPE        = 0x10,
    NAK_SV_INVOCATION_ID    = 0x11,
    NAK_SV_THREAD_KILL      = 0x13,
+   NAK_SV_AFFINITY         = 0x1c,
    NAK_SV_INVOCATION_INFO  = 0x1d,
    NAK_SV_COMBINED_TID     = 0x20,
    NAK_SV_TID_X            = 0x21,
@@ -207,6 +209,7 @@ bool nak_nir_lower_algebraic_late(nir_shader *nir, const struct nak_compiler *na
 bool nak_nir_lower_kepler_shared_atomics(nir_shader *shader);
 bool nak_nir_lower_mesh_stages_shared_atomics(nir_shader *nir);
 bool nak_nir_lower_f16vec2_shared_atomics(nir_shader *nir);
+bool nak_nir_opt_int64(nir_shader *nir, const struct nak_compiler *nak);
 
 struct nak_nir_attr_io_flags {
    bool output : 1;

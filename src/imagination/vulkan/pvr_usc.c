@@ -40,7 +40,7 @@
  */
 static pco_shader *build_shader(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
-   pco_preprocess_nir(ctx, nir);
+   pco_preprocess_nir(ctx, nir, data);
    pco_lower_nir(ctx, nir, data);
    pco_postprocess_nir(ctx, nir, data);
 
@@ -71,7 +71,8 @@ nir_shader *pvr_usc_fs_pfo_passthrough_nir(pco_ctx *ctx)
    nir_frag_store_pco(&b, nir_imm_int(&b, 0), .base = 0);
    nir_jump(&b, nir_jump_return);
 
-   pco_preprocess_nir(ctx, b.shader);
+   pco_data data = { 0 };
+   pco_preprocess_nir(ctx, b.shader, &data);
 
    return b.shader;
 }
@@ -163,6 +164,18 @@ pco_shader *pvr_usc_eot(pco_ctx *ctx,
          unsigned state_off = u * ROGUE_NUM_PBESTATE_STATE_WORDS;
          state0 = nir_imm_int(&b, props->state_words[state_off]);
          state1 = nir_imm_int(&b, props->state_words[state_off + 1]);
+      }
+
+      if (props->rta_element_stride[u]) {
+         nir_def *state =
+            nir_umad64_32(&b,
+                          nir_imm_int(&b, props->rta_element_stride[u]),
+                          nir_load_layer_id(&b),
+                          state0,
+                          state1);
+
+         state0 = nir_channel(&b, state, 0);
+         state1 = nir_channel(&b, state, 1);
       }
 
       last_emit = nir_emitpix_pco(&b, state0, state1);
@@ -1217,6 +1230,25 @@ pco_shader *pvr_uscgen_loadop(pco_ctx *ctx, struct pvr_load_op *load_op)
          assert(var);
          unsigned chans = glsl_get_vector_elements(var->type);
 
+         /* If this is for a rta then need to load the rta index and override
+          * the texture address to the required layer.
+          */
+         nir_def *addr_override = NULL;
+         if (load_op->clears_loads_state.rta_load_clear) {
+            nir_def *array_index = nir_load_layer_id(&b);
+            nir_def *array_stride =
+               nir_channel(&b, tex_meta, PCO_IMAGE_META_LAYER_SIZE);
+
+            nir_def *array_offset = nir_imul(&b, array_index, array_stride);
+
+            nir_def *base_addr = usclib_tex_state_address(&b, tex_state);
+            nir_def *base_addr_lo = nir_channel(&b, base_addr, 0);
+            nir_def *base_addr_hi = nir_channel(&b, base_addr, 1);
+
+            addr_override =
+               nir_uadd64_32(&b, base_addr_lo, base_addr_hi, array_offset);
+         }
+
          pco_smp_params params = {
             .tex_state = tex_state,
             .smp_state = smp_state,
@@ -1229,6 +1261,9 @@ pco_shader *pvr_uscgen_loadop(pco_ctx *ctx, struct pvr_load_op *load_op)
             .sampler_dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
 
             .ms_index = msaa ? nir_load_sample_id(&b) : NULL,
+
+            .addr_lo = addr_override ? nir_channel(&b, addr_override, 0) : NULL,
+            .addr_hi = addr_override ? nir_channel(&b, addr_override, 1) : NULL,
          };
 
          if (load_op->clears_loads_state.rt_2d_view_3d_mask & BITFIELD_BIT(rt_idx)) {

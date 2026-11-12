@@ -21,33 +21,93 @@ insert_spill_fill(jay_builder *b,
                   unsigned *sp_delta_B)
 {
    assert(mem.file == MEM && gpr.file != MEM);
+   const struct intel_device_info *devinfo = b->shader->devinfo;
+   const enum lsc_opcode op = load ? LSC_OP_LOAD : LSC_OP_STORE;
+   const enum lsc_addr_surface_type surf_type = LSC_ADDR_SURFTYPE_SS;
+   const unsigned max_imm_bits =
+      brw_max_immediate_offset_bits(devinfo, surf_type, false, false);
 
    unsigned offs_B = mem.reg * 4;
    unsigned mem_reg_B = offs_B * b->shader->dispatch_width;
 
    /* The stack pointer needs to be offset to the desired offset */
    signed sp_adjust_B = mem_reg_B - (*sp_delta_B);
-   if (sp_adjust_B) {
+
+   if (devinfo->ver < 20 ||
+       sp_adjust_B < u_intN_min(max_imm_bits) ||
+       sp_adjust_B > u_intN_max(max_imm_bits)) {
+      /* Fall back to the ALU when the offset overflows the immediate */
       jay_ADD(b, JAY_TYPE_U32, sp, sp, sp_adjust_B);
       *sp_delta_B = mem_reg_B;
+      sp_adjust_B = 0;
    }
 
-   const struct intel_device_info *devinfo = b->shader->devinfo;
    unsigned cache = load ? LSC_CACHE(devinfo, LOAD, L1STATE_L3MOCS) :
                            LSC_CACHE(devinfo, STORE, L1STATE_L3MOCS);
-   uint32_t desc = lsc_msg_desc(devinfo, load ? LSC_OP_LOAD : LSC_OP_STORE,
-                                LSC_ADDR_SURFTYPE_SS, LSC_ADDR_SIZE_A32,
+   uint64_t desc = lsc_msg_desc(devinfo, op, surf_type, LSC_ADDR_SIZE_A32,
                                 LSC_DATA_SIZE_D32, 1, false, cache);
+   gen_lsc_ex_desc ex_desc = {
+      .addr_type = surf_type,
+      .surface_state = {
+         .base_offset = sp_adjust_B,
+      },
+   };
+   desc |= (uint64_t) gen_lsc_ex_desc_imm_encode(devinfo, op, &ex_desc) << 32;
+
    jay_def srcs[] = { sp, gpr };
 
    jay_SEND(b, .sfid = GEN_SFID_UGM, .msg_desc = desc, .srcs = srcs,
             .nr_srcs = load ? 1 : 2, .dst = load ? gpr : jay_null(),
-            .type = JAY_TYPE_U32, .ex_desc = ADDRESS_REG);
+            .type = JAY_TYPE_U32, .ex_desc = ADDRESS_REG, .bindless = true);
+}
+
+static void
+lower_mem_copy_swap(jay_function *f)
+{
+   unsigned nr_mem = 0;
+   jay_foreach_inst_in_func(f, block, I) {
+      if (I->dst.file == MEM) {
+         nr_mem = MAX2(nr_mem, I->dst.reg + 1);
+      }
+   }
+
+   jay_foreach_inst_in_func_safe(f, block, I) {
+      jay_builder b = jay_init_builder(f, jay_before_inst(I));
+
+      jay_def t[] = { jay_bare_reg(MEM, nr_mem + 1),
+                      jay_bare_reg(MEM, nr_mem + 2) };
+      jay_def r[] = { jay_bare_reg(GPR, 0), jay_bare_reg(GPR, 1) };
+
+      if (I->op == JAY_OPCODE_SWAP && I->src[0].file == MEM) {
+         jay_MOV(&b, t[0], r[0]);
+         jay_MOV(&b, t[1], r[1]);
+         jay_MOV(&b, r[0], I->src[0]);
+         jay_MOV(&b, r[1], I->src[1]);
+         jay_MOV(&b, I->src[0], r[1]);
+         jay_MOV(&b, I->src[1], r[0]);
+         jay_MOV(&b, r[0], t[0]);
+         jay_MOV(&b, r[1], t[1]);
+         jay_remove_instruction(I);
+      } else if (I->op == JAY_OPCODE_MOV &&
+                 (I->dst.file == MEM && I->src[0].file == MEM)) {
+
+         jay_MOV(&b, t[0], r[0]);
+         jay_MOV(&b, r[0], I->src[0]);
+         jay_MOV(&b, I->dst, r[0]);
+         jay_MOV(&b, r[0], t[0]);
+         jay_remove_instruction(I);
+      }
+   }
 }
 
 void
 jay_lower_spill(jay_function *func)
 {
+   /* Lower memory copies/swaps to load/store upfront since this burns more
+    * spill slots. Caller doesn't need to worry about it this way.
+    */
+   lower_mem_copy_swap(func);
+
    jay_builder b = jay_init_builder(func, jay_before_function(func));
    signed ugpr_reservation = -1;
 
@@ -88,6 +148,7 @@ jay_lower_spill(jay_function *func)
 
    /* We use a 32-bit strided stack: SP = scratch + (lane ID * 4) */
    unsigned disp_width = b.shader->dispatch_width;
+   unsigned native_width = 8 * reg_unit(b.shader->devinfo);
    jay_LANE_ID_8(&b, jay_bare_regs(UGPR, ugpr_reservation, 4), 0);
 
    if (disp_width >= 16) {
@@ -101,7 +162,23 @@ jay_lower_spill(jay_function *func)
 
    jay_def lid = jay_bare_regs(UGPR, ugpr_reservation, disp_width / 2);
    jay_SHL(&b, JAY_TYPE_U16, lid, lid, util_logbase2(4));
-   jay_CVT(&b, JAY_TYPE_U32, sp, lid, JAY_TYPE_U16, JAY_ROUND, 0);
+
+   /* We want to convert U16 -> U32 in place. However, doing so with a
+    * compressed SIMD32 instruction has a hazard since the first half's write
+    * clobbers the second half's read. Instead, use uncompressed native
+    * instructions in reverse-order to avoid all the read-after-write hazards.
+    * This emits code like:
+    *
+    *    (16&W) mov.u32 u127, r126.16:u16
+    *    (16&W) mov.u32 u126, r126:u16
+    */
+   for (signed i = disp_width - native_width; i >= 0; i -= native_width) {
+      jay_CVT(&b, JAY_TYPE_U32,
+              jay_bare_regs(UGPR, ugpr_reservation + i, native_width),
+              jay_bare_regs(UGPR, ugpr_reservation + (i / 2), native_width / 2),
+              JAY_TYPE_U16, JAY_ROUND, 0);
+   }
+
    if (b.shader->scratch_size) {
       jay_ADD(&b, JAY_TYPE_U32, sp, sp, b.shader->scratch_size);
    }

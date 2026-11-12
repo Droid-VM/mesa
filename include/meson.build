@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 inc_include = [include_directories('.')]
-inc_winddk = include_directories('winddk')
 
 # Most things assume that Android headers are in the default include
 # path when compiling for Android so add the stub headers to

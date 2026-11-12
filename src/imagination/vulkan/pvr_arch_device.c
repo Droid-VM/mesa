@@ -30,7 +30,10 @@
 #include "pvr_query.h"
 #include "pvr_queue.h"
 #include "pvr_robustness.h"
+#include "pvr_rt_dataset.h"
 #include "pvr_tex_state.h"
+#include "pvr_utrace.h"
+#include "util/os_misc.h"
 
 #define PVR_GLOBAL_FREE_LIST_INITIAL_SIZE (2U * 1024U * 1024U)
 #define PVR_GLOBAL_FREE_LIST_MAX_SIZE (256U * 1024U * 1024U)
@@ -683,6 +686,89 @@ static void pvr_device_init_default_sampler_state(struct pvr_device *device)
    }
 }
 
+static VkResult pvr_init_null_pages(struct pvr_device *device)
+{
+   uint64_t page_size;
+   VkResult result;
+
+   /* zero/null pages should be (at least) 4096 dwords. */
+   os_get_page_size(&page_size);
+   uint64_t size = ALIGN_POT(4096 * sizeof(uint32_t), page_size);
+
+   /* Create a zero page for reads. */
+   /* TODO: make this read-only if we have a debug build so that we fault and
+    * catch any writes.
+    */
+   result = pvr_bo_alloc(device,
+                         device->heaps.general_heap,
+                         size,
+                         4,
+                         0,
+                         &device->null_state.zero_bo);
+
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Create a null page for writes. */
+   result = pvr_bo_alloc(device,
+                         device->heaps.general_heap,
+                         size,
+                         4,
+                         0,
+                         &device->null_state.null_bo);
+
+   if (result != VK_SUCCESS)
+      goto err_free_zero_buffer;
+
+   return VK_SUCCESS;
+
+err_free_zero_buffer:
+   pvr_bo_free(device, device->null_state.zero_bo);
+
+   return result;
+}
+
+static void pvr_finish_null_pages(struct pvr_device *device)
+{
+   pvr_bo_free(device, device->null_state.null_bo);
+   pvr_bo_free(device, device->null_state.zero_bo);
+}
+
+static VkResult pvr_device_dummy_rt_init(struct pvr_device *device)
+{
+   VkResult result;
+
+   result = pvr_arch_render_target_dataset_create(device,
+                                                  1, /* width */
+                                                  1, /* height */
+                                                  1, /* samples */
+                                                  1, /* layers */
+                                                  &device->dummy_rt.rt_dataset);
+   if (result != VK_SUCCESS)
+      return result;
+
+   result = pvr_arch_ppp_state_create(device,
+                                      1, /* width */
+                                      1, /* height */
+                                      &device->dummy_rt.ppp_state_bo,
+                                      &device->dummy_rt.ppp_state_size);
+   if (result != VK_SUCCESS)
+      goto err_render_target_dataset_destroy;
+
+   return VK_SUCCESS;
+
+err_render_target_dataset_destroy:
+   pvr_render_target_dataset_destroy(device->dummy_rt.rt_dataset);
+
+   return result;
+}
+
+static void pvr_device_dummy_rt_finish(struct pvr_device *device)
+{
+   pvr_bo_suballoc_free(device->dummy_rt.ppp_state_bo);
+   pvr_render_target_dataset_destroy(device->dummy_rt.rt_dataset);
+}
+
 VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
                                      const VkDeviceCreateInfo *pCreateInfo,
                                      const VkAllocationCallbacks *pAllocator,
@@ -704,11 +790,11 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    if (result != VK_SUCCESS)
       goto err_out;
 
-   device = vk_alloc2(&instance->vk.alloc,
-                      pAllocator,
-                      sizeof(*device),
-                      8,
-                      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   device = vk_zalloc2(&instance->vk.alloc,
+                       pAllocator,
+                       sizeof(*device),
+                       8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!device) {
       result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_pvr_winsys_destroy;
@@ -778,6 +864,13 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
       initial_free_list_size = PVR_SECONDARY_DEVICE_FREE_LIST_INITAL_SIZE;
    }
 
+   /* Call as early as possible so we're allocated as low an address as
+    * possible for the zero page.
+    */
+   result = pvr_init_null_pages(device);
+   if (result != VK_SUCCESS)
+      goto err_dec_device_count;
+
    result = pvr_free_list_create(device,
                                  initial_free_list_size,
                                  PVR_GLOBAL_FREE_LIST_MAX_SIZE,
@@ -786,7 +879,7 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
                                  NULL /* parent_free_list */,
                                  &device->global_free_list);
    if (result != VK_SUCCESS)
-      goto err_dec_device_count;
+      goto err_pvr_finish_null_pages;
 
    result = pvr_device_init_nop_program(device);
    if (result != VK_SUCCESS)
@@ -838,6 +931,14 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    if (result != VK_SUCCESS)
       goto err_pvr_robustness_buffer_finish;
 
+   /* Render target state for geometry-only kicks outside a render pass. */
+   result = pvr_device_dummy_rt_init(device);
+   if (result != VK_SUCCESS)
+      goto err_pvr_border_color_table_finish;
+
+   /* Initialize GPU tracing infrastructure */
+   pvr_device_utrace_init(device);
+
    /* FIXME: Move this to a later stage and possibly somewhere other than
     * pvr_device. The purpose of this is so that we don't have to get the size
     * on each kick.
@@ -855,6 +956,9 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    *pDevice = pvr_device_to_handle(device);
 
    return VK_SUCCESS;
+
+err_pvr_border_color_table_finish:
+   pvr_arch_border_color_table_finish(device);
 
 err_pvr_robustness_buffer_finish:
    pvr_robustness_buffer_finish(device);
@@ -894,6 +998,9 @@ err_pvr_free_nop_program:
 err_pvr_free_list_destroy:
    pvr_free_list_destroy(device->global_free_list);
 
+err_pvr_finish_null_pages:
+   pvr_finish_null_pages(device);
+
 err_dec_device_count:
    p_atomic_dec(&device->instance->active_device_count);
 
@@ -924,6 +1031,9 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
    if (!device)
       return;
 
+   /* Cleanup GPU tracing infrastructure */
+   pvr_device_utrace_finish(device);
+
    simple_mtx_lock(&device->rs_mtx);
    list_for_each_entry_safe (struct pvr_render_state,
                              rstate,
@@ -937,6 +1047,7 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
    simple_mtx_unlock(&device->rs_mtx);
    simple_mtx_destroy(&device->rs_mtx);
 
+   pvr_device_dummy_rt_finish(device);
    pvr_arch_border_color_table_finish(device);
    pvr_robustness_buffer_finish(device);
    pvr_spm_finish_scratch_buffer_store(device);
@@ -955,6 +1066,7 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
    pvr_bo_suballoc_free(device->nop_program.pds.pvr_bo);
    pvr_bo_suballoc_free(device->nop_program.usc);
    pvr_free_list_destroy(device->global_free_list);
+   pvr_finish_null_pages(device);
    pvr_bo_suballocator_fini(&device->suballoc_vis_test);
    pvr_bo_suballocator_fini(&device->suballoc_usc);
    pvr_bo_suballocator_fini(&device->suballoc_transfer);

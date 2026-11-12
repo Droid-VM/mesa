@@ -51,8 +51,6 @@ struct mesa_glinterop_export_in;
 struct mesa_glinterop_export_out;
 struct mesa_glinterop_flush_out;
 
-#define __DRI_BACKEND_VTABLE "DRI_DriverVtable"
-
 struct dri_config {
     struct gl_config modes;
 };
@@ -64,51 +62,9 @@ enum dri_screen_type {
    DRI_SCREEN_KMS_SWRAST,
 };
 
-/**
- * Description of the attributes used to create a config.
- *
- * This is passed as the context_config parameter to CreateContext. The idea
- * with this struct is that it can be extended without having to modify all of
- * the drivers. The first three members (major/minor_version and flags) are
- * always valid, but the remaining members are only valid if the corresponding
- * flag is set for the attribute. If the flag is not set then the default
- * value should be assumed. That way the driver can quickly check if any
- * attributes were set that it doesn't understand and report an error.
- */
-struct __DriverContextConfig {
-    /* These members are always valid */
-    unsigned major_version;
-    unsigned minor_version;
-    uint32_t flags;
-
-    /* Flags describing which of the remaining members are valid */
-    uint32_t attribute_mask;
-
-    /* Only valid if __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY is set */
-    int reset_strategy;
-
-    /* Only valid if __DRIVER_CONTEXT_PRIORITY is set */
-    unsigned priority;
-
-    /* Only valid if __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR is set */
-    int release_behavior;
-
-    /* Only valid if __DRIVER_CONTEXT_ATTRIB_NO_ERROR is set */
-    int no_error;
-
-    /* Only valid if __DRIVER_CONTEXT_ATTRIB_PROTECTED is set */
-    int protected_context;
-};
-
-#define __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY   (1 << 0)
-#define __DRIVER_CONTEXT_ATTRIB_PRIORITY         (1 << 1)
-#define __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR (1 << 2)
-#define __DRIVER_CONTEXT_ATTRIB_NO_ERROR         (1 << 3)
-#define __DRIVER_CONTEXT_ATTRIB_PROTECTED        (1 << 4)
-
 PUBLIC struct dri_screen *
 driCreateNewScreen3(int scrn, int fd,
-                    const __DRIextension **loader_extensions,
+                    const struct dri_loader_funcs *loader,
                     enum dri_screen_type type,
                     const struct dri_config ***driver_configs, bool driver_name_is_inferred,
                     bool has_multibuffer, void *data);
@@ -137,9 +93,7 @@ driIndexConfigAttrib(const struct dri_config *config, int index, unsigned int *a
 PUBLIC void
 driDestroyDrawable(struct dri_drawable *drawable);
 PUBLIC void
-driSwapBuffers(struct dri_drawable *drawable);
-PUBLIC void
-driSwapBuffersWithDamage(struct dri_drawable *drawable, int nrects, const int *rects);
+driSwapBuffers(struct dri_drawable *drawable, int nrects, const int *rects);
 PUBLIC struct dri_context *
 driCreateNewContext(struct dri_screen *screen, const struct dri_config *config,
                     struct dri_context *shared, void *data, bool thread_safe);
@@ -152,9 +106,7 @@ PUBLIC int driUnbindContext(struct dri_context *ctx);
 
 
 PUBLIC int64_t
-kopperSwapBuffers(struct dri_drawable *dPriv, uint32_t flush_flags);
-PUBLIC int64_t
-kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects);
+kopperSwapBuffers(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects);
 PUBLIC struct dri_drawable *
 kopperCreateNewDrawable(struct dri_screen *psp,
                         const struct dri_config *config,
@@ -287,13 +239,6 @@ PUBLIC bool
 dri2_query_dma_buf_format_modifier_attribs(struct dri_screen *_screen,
                                            uint32_t fourcc, uint64_t modifier,
                                            int attrib, uint64_t *value);
-PUBLIC struct dri_image *
-dri_create_image_with_modifiers(struct dri_screen *screen,
-                                 uint32_t width, uint32_t height,
-                                 uint32_t dri_format, uint32_t dri_usage,
-                                 const uint64_t *modifiers,
-                                 unsigned int modifiers_count,
-                                 void *loaderPrivate);
 PUBLIC int
 dri_query_compatible_render_only_device_fd(int kms_only_fd);
 

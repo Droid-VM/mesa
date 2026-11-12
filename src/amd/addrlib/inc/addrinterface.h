@@ -24,7 +24,7 @@ extern "C"
 #endif
 
 #define ADDRLIB_VERSION_MAJOR 10
-#define ADDRLIB_VERSION_MINOR 6
+#define ADDRLIB_VERSION_MINOR 9
 #define ADDRLIB_MAKE_VERSION(major, minor) ((major << 16) | minor)
 #define ADDRLIB_VERSION                    ADDRLIB_MAKE_VERSION(ADDRLIB_VERSION_MAJOR, ADDRLIB_VERSION_MINOR)
 
@@ -315,6 +315,21 @@ typedef struct _ADDR_CALLBACKS
     ADDR_DEBUGPRINT  debugPrint;    ///< Routine to print debug message
 } ADDR_CALLBACKS;
 
+/**
+****************************************************************************************************
+* ADDR_MAX_IMAGE_DIMS
+*
+*   @brief
+*       Structure for reporting the maximum supported image dimensions.
+****************************************************************************************************
+*/
+typedef struct _ADDR_MAX_IMAGE_DIMS
+{
+    ADDR_EXTENT3D  extent;       ///< Maximum supported width / height / depth
+    UINT_32        mipLevels;    ///< Maximum supported number of mip levels
+    UINT_32        samples;      ///< Maximum supported number of image samples
+} ADDR_MAX_IMAGE_DIMS;
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 //                               Create/Destroy functions
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -343,7 +358,8 @@ typedef union _ADDR_CREATE_FLAGS
         UINT_32 forceDccAndTcCompat    : 1;    ///< Force enable DCC and TC compatibility
         UINT_32 nonPower2MemConfig     : 1;    ///< Video memory bit width is not power of 2
         UINT_32 enableAltTiling        : 1;    ///< Enable alt tile mode
-        UINT_32 reserved               : 22;   ///< Reserved bits for future use
+        UINT_32 padValidEqBits         : 1;    ///< If set, then all bits in the equation will be marked as valid.
+        UINT_32 reserved               : 21;   ///< Reserved bits for future use
     };
 
     UINT_32 value;
@@ -2457,6 +2473,17 @@ ADDR_E_RETURNCODE ADDR_API AddrGetMaxMetaAlignments(
 
 /**
 ****************************************************************************************************
+*   AddrGetMaxDims
+*
+*   @return
+*       Returns maximnum image dimensions
+****************************************************************************************************
+*/
+const ADDR_MAX_IMAGE_DIMS* ADDR_API AddrGetMaxDims(
+    ADDR_HANDLE  hLib);
+
+/**
+****************************************************************************************************
 *                                Address library interface version 2
 *                                    available from Gfx9 hardware
 ****************************************************************************************************
@@ -2784,7 +2811,7 @@ typedef struct _ADDR2_COPY_MEMSURFACE_INPUT
     UINT_32             numMipLevels;    ///< Total mipmap levels
     UINT_32             numSamples;      ///< Number of samples
     UINT_32             pitchInElement;  ///< Pitch in elements (blocks for compressed formats)
-    UINT_32             pbXor;           ///< Xor value
+    UINT_32             pbXor;           ///< Xor value. Caller must do shift/masking beforehand.
 
     void*               pMappedSurface;  ///< Pointer to the image surface, mapped to CPU memory
     BOOL_32             singleSubres;    ///< Pointer is to the base of the subresource, not to the
@@ -2941,7 +2968,7 @@ typedef struct _ADDR2_META_MIP_INFO
             UINT_32    depth;
         };
 
-        // GFX10
+        /// GFX10
         struct
         {
             UINT_32    offset;      ///< Metadata offset within one slice,
@@ -4559,7 +4586,7 @@ typedef struct _ADDR3_COPY_MEMSURFACE_INPUT
     UINT_32             numMipLevels;    ///< Total mipmap levels
     UINT_32             numSamples;      ///< Number of samples
     UINT_32             pitchInElement;  ///< Pitch in elements (blocks for compressed formats)
-    UINT_32             pbXor;           ///< Xor value
+    UINT_32             pbXor;           ///< Xor value. Caller must do shift/masking beforehand.
 
     void*               pMappedSurface;  ///< Pointer to the image surface, mapped to CPU memory
     BOOL_32             singleSubres;    ///< Pointer is to the base of the subresource, not to the

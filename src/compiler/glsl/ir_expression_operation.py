@@ -87,8 +87,9 @@ int64_type = type("int64_t", "i64", "GLSL_TYPE_INT64")
 float_type = type("float", "f", "GLSL_TYPE_FLOAT")
 double_type = type("double", "d", "GLSL_TYPE_DOUBLE")
 bool_type = type("bool", "b", "GLSL_TYPE_BOOL")
+yuv_csc_standard_type = type("int", "i", "GLSL_TYPE_YUV_CSC_STANDARD_EXT")
 
-all_types = (uint_type, int_type, float_type, double_type, uint64_type, int64_type, bool_type)
+all_types = (uint_type, int_type, float_type, double_type, uint64_type, int64_type, bool_type, yuv_csc_standard_type)
 numeric_types = (uint_type, int_type, float_type, double_type, uint64_type, int64_type)
 signed_numeric_types = (int_type, float_type, double_type, int64_type)
 integer_types = (uint_type, int_type, uint64_type, int64_type)
@@ -570,6 +571,7 @@ ir_expression_operation = [
    operation("atan", 1, source_types=(float_type,), c_expression="atan({src0})"),
    operation("acos", 1, source_types=(float_type,), c_expression="acosf({src0})"),
    operation("asin", 1, source_types=(float_type,), c_expression="asinf({src0})"),
+   operation("tanh", 1, source_types=(float_type,), c_expression="tanh({src0})"),
 
    # Partial derivatives.
    operation("dFdx", 1, source_types=(float_type,), c_expression="0.0f"),
@@ -674,13 +676,6 @@ ir_expression_operation = [
    }),
    operation("imul_high", 2),       # Calculates the high 32-bits of a 64-bit multiply.
    operation("div", 2, printable_name="/", source_types=numeric_types, c_expression={'u': "{src1} == 0 ? 0 : {src0} / {src1}", 'i': "{src1} == 0 ? 0 : {src0} / {src1}", 'u64': "{src1} == 0 ? 0 : {src0} / {src1}", 'i64': "{src1} == 0 ? 0 : {src0} / {src1}", 'default': "{src0} / {src1}"}, flags=vector_scalar_operation),
-
-   # Returns the carry resulting from the addition of the two arguments.
-   operation("carry", 2),
-
-   # Returns the borrow resulting from the subtraction of the second argument
-   # from the first argument.
-   operation("borrow", 2),
 
    # Either (vector % vector) or (vector % scalar)
    #

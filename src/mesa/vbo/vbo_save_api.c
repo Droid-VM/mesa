@@ -69,7 +69,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
  * except position are copied to vbo_save_context::attrptr (see ATTR_UNION).
  * 'attrptr' are pointers to vbo_save_context::vertex ordered according to the enabled
  * attributes (se upgrade_vertex).
- * When the position attribute is received, all the attributes are then 
+ * When the position attribute is received, all the attributes are then
  * copied to the vertex_store (see the end of ATTR_UNION).
  * The vertex_store is simply an extensible float array.
  * When the vertex list needs to be compiled (see compile_vertex_list),
@@ -114,20 +114,22 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/state.h"
 #include "main/varray.h"
 #include "util/bitscan.h"
+#include "util/list.h"
 #include "util/u_memory.h"
 #include "util/hash_table.h"
 #include "gallium/auxiliary/indices/u_indices.h"
 #include "util/u_prim.h"
 
 #include "gallium/include/pipe/p_state.h"
+#include "state_tracker/st_cb_flush.h"
+#include "state_tracker/st_context.h"
 
 #include "vbo_private.h"
 #include "api_exec_decl.h"
 #include "api_save.h"
+#include <stdbool.h>
 
-#ifdef ERROR
-#undef ERROR
-#endif
+#define VBO_SAVE_SHARED_BUFFER_SIZE (VBO_SAVE_BUFFER_SIZE * 0.25)
 
 /* An interesting VBO number/name to help with debugging */
 #define VBO_BUF_ID  12345
@@ -140,6 +142,15 @@ _save_EvalCoord1f(GLfloat u);
 
 static void GLAPIENTRY
 _save_EvalCoord2f(GLfloat u, GLfloat v);
+
+static struct free_bo_pool_entry *
+_vbo_bo_add_to_free_list(struct gl_context *ctx,
+                         struct gl_buffer_object *bo,
+                         uint32_t remaining_free_bytes);
+
+static void
+_vbo_bo_mark_range_as_used(struct gl_context *ctx, struct free_bo_pool_entry *entry,
+                           uint32_t start, uint32_t end_excl);
 
 /*
  * NOTE: Old 'parity' issue is gone, but copying can still be
@@ -333,9 +344,9 @@ compare_vao(gl_vertex_processing_mode mode,
 }
 
 
-/* Create or reuse the vao for the vertex processing mode. */
+/* Create the vao for the vertex processing mode. */
 static void
-update_vao(struct gl_context *ctx,
+create_vao(struct gl_context *ctx,
            gl_vertex_processing_mode mode,
            struct gl_vertex_array_object **vao,
            struct gl_buffer_object *bo, GLintptr buffer_offset,
@@ -346,14 +357,6 @@ update_vao(struct gl_context *ctx,
 {
    /* Compute the bitmasks of vao_enabled arrays */
    GLbitfield vao_enabled = _vbo_get_vao_enabled_from_vbo(mode, vbo_enabled);
-
-   /*
-    * Check if we can possibly reuse the exisiting one.
-    * In the long term we should reset them when something changes.
-    */
-   if (compare_vao(mode, *vao, bo, buffer_offset, stride,
-                   vao_enabled, size, type, offset))
-      return;
 
    /* The initial refcount is 1 */
    _mesa_reference_vao(ctx, vao, NULL);
@@ -504,6 +507,79 @@ get_vertex_count(struct vbo_save_context *save)
    return save->vertex_store->used / save->vertex_size;
 }
 
+static bool
+is_vbo_storage_large_enough(const struct free_bo_pool_entry *vbo_candidate,
+                            unsigned free_space_start, unsigned free_space_end,
+                            unsigned total_bytes_needed,
+                            const GLsizei stride,
+                            uint32_t *start_aligned)
+{
+   assert(!vbo_candidate->VAO[0] ||
+          (vbo_candidate->VAO[0]->BufferBinding[0].Offset == 0 &&
+           vbo_candidate->VAO[0]->VertexAttrib[VERT_ATTRIB_POS].RelativeOffset == 0));
+
+   /* Align start position to the stride. */
+   while (stride && free_space_start % stride)
+      free_space_start++;
+
+   int available_bytes = free_space_end - free_space_start;
+
+   if (free_space_end < free_space_start ||
+       available_bytes < total_bytes_needed)
+      return false;
+
+   *start_aligned = free_space_start;
+
+   return true;
+}
+
+static void
+vbo_reuse_same_bo(const struct free_bo_pool_entry *bo_entry,
+                  const struct vbo_save_vertex_list *node,
+                  unsigned free_space_start,
+                  const GLsizei stride, int index_count,
+                  GLintptr *vao_buffer_offset,
+                  GLuint *start_offset,
+                  uint32_t *indices,
+                  uint32_t *max_index)
+{
+   *vao_buffer_offset = free_space_start;
+
+   if (*vao_buffer_offset > 0 && stride > 0) {
+      /* The vertex size is an exact multiple of the buffer offset (see
+      * is_vbo_storage_large_enough).
+      * This means that we can use zero-based vertex attribute pointers
+      * and specify the start of the primitive with the _mesa_prim::start
+      * field.  This results in issuing several draw calls with identical
+      * vertex attribute information.  This can result in fewer state
+      * changes in drivers.  In particular, the Gallium CSO module will
+      * filter out redundant vertex buffer changes.
+      *
+      * We cannot immediately update the primitives as some methods below
+      * still need the uncorrected start vertices.
+      */
+      assert(*vao_buffer_offset % stride == 0);
+
+      *start_offset = *vao_buffer_offset / stride;
+      *vao_buffer_offset = 0;
+
+      /* Correct the primitive starts, we can only do this here as copy_vertices
+      * and convert_line_loop_to_strip above consume the uncorrected starts.
+      * On the other hand the _vbo_loopback_vertex_list call below needs the
+      * primitives to be corrected already.
+      */
+      for (unsigned i = 0; i < node->cold->prim_count; i++) {
+         node->cold->prims[i].start += *start_offset;
+      }
+      /* start_offset shifts vertices (so v[0] becomes v[start_offset]), so we have
+      * to apply this transformation to all indices and max_index.
+      */
+      for (unsigned i = 0; i < index_count; i++)
+         indices[i] += *start_offset;
+
+      *max_index += *start_offset;
+   }
+}
 
 /**
  * Insert the active immediate struct onto the display list currently
@@ -514,17 +590,24 @@ compile_vertex_list(struct gl_context *ctx)
 {
    struct vbo_save_context *save = &vbo_context(ctx)->save;
    struct vbo_save_vertex_list *node;
+   struct gl_buffer_object *bo = NULL;
+   struct free_bo_pool_entry *reused_bo = NULL;
 
    /* Allocate space for this structure in the display list currently
     * being compiled.
     */
    node = (struct vbo_save_vertex_list *)
-      _mesa_dlist_alloc_vertex_list(ctx, !save->dangling_attr_ref && !save->no_current_update);
+      _mesa_dlist_alloc_vertex_list(ctx, !save->dangling_attr_ref && save->restore_attrib_after_draw);
 
    if (!node)
       return;
 
    node->cold = calloc(1, sizeof(*node->cold));
+   if (!node->cold) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "node->cold allocation failed");
+      save->out_of_memory = true;
+      return;
+   }
 
    /* Make sure the pointer is aligned to the size of a pointer */
    assert((GLintptr) node % sizeof(void *) == 0);
@@ -535,15 +618,10 @@ compile_vertex_list(struct gl_context *ctx)
    node->cold->wrap_count = save->copied.nr;
    node->cold->prims = malloc(sizeof(struct _mesa_prim) * save->prim_store->used);
    memcpy(node->cold->prims, save->prim_store->prims, sizeof(struct _mesa_prim) * save->prim_store->used);
-   node->cold->ib.obj = NULL;
    node->cold->prim_count = save->prim_store->used;
 
-   if (save->no_current_update) {
-      node->cold->current_data = NULL;
-   }
-   else {
+   if (save->restore_attrib_after_draw) {
       GLuint current_size = save->vertex_size - save->attrsz[0];
-      node->cold->current_data = NULL;
 
       if (current_size) {
          node->cold->current_data = malloc(current_size * sizeof(GLfloat));
@@ -579,24 +657,25 @@ compile_vertex_list(struct gl_context *ctx)
 
    merge_prims(ctx, node->cold->prims, &node->cold->prim_count);
 
-   GLintptr buffer_offset = 0;
+   GLintptr vao_buffer_offset = 0;
    GLuint start_offset = 0;
-
-   /* Create an index buffer. */
-   node->cold->min_index = node->cold->max_index = 0;
-   if (node->cold->vertex_count == 0 || node->cold->prim_count == 0)
-      goto end;
+   int total_vert_count;
 
    /* We won't modify node->prims, so use a const alias to avoid unintended
     * writes to it. */
    const struct _mesa_prim *original_prims = node->cold->prims;
 
-   int end = original_prims[node->cold->prim_count - 1].start +
-             original_prims[node->cold->prim_count - 1].count;
-   int total_vert_count = end - original_prims[0].start;
+   if (node->cold->vertex_count > 0 && node->cold->prim_count > 0) {
+      int end = original_prims[node->cold->prim_count - 1].start +
+               original_prims[node->cold->prim_count - 1].count;
+      total_vert_count = end - original_prims[0].start;
 
-   node->cold->min_index = node->cold->prims[0].start;
-   node->cold->max_index = end - 1;
+      node->cold->min_index = node->cold->prims[0].start;
+      node->cold->max_index = end - 1;
+   } else {
+      total_vert_count = 0;
+      node->cold->min_index = node->cold->max_index = 0;
+   }
 
    /* converting primitive types may result in many more indices */
    bool all_prims_supported = (ctx->Const.DriverSupportedPrimMask & BITFIELD_MASK(MESA_PRIM_COUNT)) == BITFIELD_MASK(MESA_PRIM_COUNT);
@@ -609,12 +688,32 @@ compile_vertex_list(struct gl_context *ctx)
    struct hash_table *vertex_to_index = NULL;
    fi_type *temp_vertices_buffer = NULL;
 
+   if (indices == NULL || (!all_prims_supported && tmp_indices == NULL)) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "indices allocation failed");
+      free(indices);
+      free(tmp_indices);
+      free(node->cold->prims);
+      node->cold->prims = NULL;
+      save->out_of_memory = true;
+      return;
+   }
+
+
    /* The loopback replay code doesn't use the index buffer, so we can't
     * dedup vertices in this case.
     */
-   if (!ctx->ListState.Current.UseLoopback) {
+   if (!ctx->ListState.Current.UseLoopback && total_vert_count > 0) {
       vertex_to_index = _mesa_hash_table_create(NULL, _hash_vertex_key, _compare_vertex_key);
       temp_vertices_buffer = malloc(save->vertex_store->buffer_in_ram_size);
+      if (temp_vertices_buffer == NULL) {
+         _mesa_error(ctx, GL_OUT_OF_MEMORY, "indices allocation failed");
+         free(indices);
+         free(tmp_indices);
+         free(node->cold->prims);
+         node->cold->prims = NULL;
+         save->out_of_memory = true;
+         return;
+      }
    }
 
    uint32_t max_index = 0;
@@ -761,96 +860,155 @@ compile_vertex_list(struct gl_context *ctx)
    }
 
    unsigned merged_prim_count = last_valid_prim + 1;
-   node->cold->ib.ptr = NULL;
-   node->cold->ib.count = idx;
-   node->cold->ib.index_size_shift = (GL_UNSIGNED_INT - GL_UNSIGNED_BYTE) >> 1;
 
    /* How many bytes do we need to store the indices and the vertices */
    total_vert_count = vertex_to_index ? (max_index + 1) : idx;
-   unsigned total_bytes_needed = idx * sizeof(uint32_t) +
-                                 total_vert_count * save->vertex_size * sizeof(fi_type);
+   const unsigned indices_size = idx * sizeof(uint32_t);
+   const unsigned vert_size = total_vert_count ? total_vert_count * save->vertex_size * sizeof(fi_type) : 4;
+   const unsigned total_bytes_needed = align(vert_size, 4) + indices_size;
+   uint32_t upload_offset = 0, reused_bo_range_start = 0;
+   ASSERTED bool shared_buffer;
 
-   const GLintptr old_offset = save->VAO[0] ?
-      save->VAO[0]->BufferBinding[0].Offset + save->VAO[0]->VertexAttrib[VERT_ATTRIB_POS].RelativeOffset : 0;
-   if (old_offset != save->current_bo_bytes_used && stride > 0) {
-      GLintptr offset_diff = save->current_bo_bytes_used - old_offset;
-      while (offset_diff > 0 &&
-             save->current_bo_bytes_used < save->current_bo->Size &&
-             offset_diff % stride != 0) {
-         save->current_bo_bytes_used++;
-         offset_diff = save->current_bo_bytes_used - old_offset;
+   if (save->free_bo_pool && total_bytes_needed < VBO_SAVE_SHARED_BUFFER_SIZE) {
+      struct bo_candidate {
+         struct free_bo_pool_entry *bo;
+         uint32_t hole_bit_count;
+         uint32_t range_start;
+         uint32_t start_in_bo;
+      };
+
+      struct bo_candidate no_wait_candidate = { 0 }, wait_candidate = { 0 };
+
+      uint32_t reused_bo_start_in_bo, frs, fre;
+      struct st_context *st = st_context(ctx);
+
+      /* Iterate on all BO and identify the best candidates. */
+      for (int i = 0; i < save->free_bo_pool_n_entries; i++) {
+         struct free_bo_pool_entry *entry = &save->free_bo_pool[i];
+         unsigned range_start, range_end;
+
+         if (!entry->bo)
+            continue;
+
+         BITSET_FOREACH_RANGE(range_start, range_end, entry->free_mask, VBO_SAVE_BUFFER_N_BITS) {
+            uint32_t s = range_end - range_start, start;
+
+            if (!is_vbo_storage_large_enough(entry,
+                                             range_start * VBO_SAVE_BUFFER_PER_BIT,
+                                             range_end * VBO_SAVE_BUFFER_PER_BIT,
+                                             total_bytes_needed, stride,
+                                             &start))
+               continue;
+
+            uint32_t r_end = (start + total_bytes_needed - 1) / VBO_SAVE_BUFFER_PER_BIT;
+
+            bool wait = entry->release_fence &&
+                        BITSET_TEST_RANGE(entry->dirty_mask, range_start, r_end);
+
+            if (wait) {
+               if (wait_candidate.bo && wait_candidate.hole_bit_count < s)
+                  continue;
+
+               wait_candidate.bo = entry;
+               wait_candidate.hole_bit_count = s;
+               wait_candidate.range_start = range_start;
+               wait_candidate.start_in_bo = start;
+            } else {
+               if (no_wait_candidate.bo && no_wait_candidate.hole_bit_count < s)
+                  continue;
+
+               no_wait_candidate.bo = entry;
+               no_wait_candidate.hole_bit_count = s;
+               no_wait_candidate.range_start = range_start;
+               no_wait_candidate.start_in_bo = start;
+            }
+         }
+      }
+
+      if (no_wait_candidate.bo) {
+         reused_bo = no_wait_candidate.bo;
+         reused_bo_start_in_bo = no_wait_candidate.start_in_bo;
+         reused_bo_range_start = no_wait_candidate.range_start;
+      } else if (wait_candidate.bo) {
+         st_flush(st, NULL, 0);
+
+         st->screen->fence_finish(st->screen, NULL, wait_candidate.bo->release_fence,
+                                  OS_TIMEOUT_INFINITE);
+         st->screen->fence_reference(st->screen, &wait_candidate.bo->release_fence, NULL);
+
+         /* Since we had to wait, clear dirty flags of signaled fences. */
+         for (int i = 0; i < save->free_bo_pool_n_entries; i++) {
+            struct free_bo_pool_entry *entry = &save->free_bo_pool[i];
+            if (entry->release_fence &&
+                st->screen->fence_finish(st->screen, NULL, entry->release_fence, 0)) {
+               BITSET_FOREACH_RANGE(frs, fre, entry->free_mask, VBO_SAVE_BUFFER_N_BITS)
+                  BITSET_CLEAR_RANGE(entry->dirty_mask, frs, fre);
+               st->screen->fence_reference(st->screen, &entry->release_fence, NULL);
+            }
+         }
+
+         reused_bo = wait_candidate.bo;
+         reused_bo_start_in_bo = wait_candidate.start_in_bo;
+         reused_bo_range_start = wait_candidate.range_start;
+      }
+
+      if (reused_bo) {
+         vbo_reuse_same_bo(reused_bo, node,
+                           reused_bo_start_in_bo,
+                           stride, idx, &vao_buffer_offset, &start_offset,
+                           indices, &max_index);
+         upload_offset = vao_buffer_offset + start_offset * stride;
+         bo = reused_bo->bo;
       }
    }
-   buffer_offset = save->current_bo_bytes_used;
 
-   /* Can we reuse the previous bo or should we allocate a new one? */
-   int available_bytes = save->current_bo ? save->current_bo->Size - save->current_bo_bytes_used : 0;
-   if (total_bytes_needed > available_bytes) {
-      if (save->current_bo)
-         _mesa_reference_buffer_object(ctx, &save->current_bo, NULL);
-      save->current_bo = _mesa_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
-      bool success = _mesa_bufferobj_data(ctx,
-                                          GL_ELEMENT_ARRAY_BUFFER_ARB,
-                                          MAX2(total_bytes_needed, VBO_SAVE_BUFFER_SIZE),
-                                          NULL,
-                                          GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
-                                          MESA_GALLIUM_VERTEX_STATE_STORAGE,
-                                          save->current_bo);
-      if (!success) {
-         _mesa_reference_buffer_object(ctx, &save->current_bo, NULL);
+   if (bo == NULL) {
+      /* Suballocating only small enough buffers from a larger buffer wastes
+       * less memory than rounding up all buffers smaller than
+       * VBO_SAVE_BUFFER_SIZE to VBO_SAVE_BUFFER_SIZE.
+       * "small enough" has been determined empirically.
+       */
+      int size;
+
+      if (total_bytes_needed < VBO_SAVE_SHARED_BUFFER_SIZE && save->free_bo_pool_n_entries) {
+         size = VBO_SAVE_BUFFER_SIZE;
+         shared_buffer = true;
+      } else {
+         size = total_bytes_needed;
+         shared_buffer = false;
+      }
+
+      /* No available bo found, allocate a new one. */
+      bo = _mesa_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
+      if (!bo || !_mesa_bufferobj_data(ctx,
+                                       GL_ELEMENT_ARRAY_BUFFER_ARB,
+                                       size,
+                                       NULL,
+                                       GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
+                                       MESA_GALLIUM_VERTEX_STATE_STORAGE,
+                                       bo)) {
+         _mesa_reference_buffer_object(ctx, &bo, NULL);
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "IB allocation");
          save->out_of_memory = true;
-      } else {
-         save->current_bo_bytes_used = 0;
-         available_bytes = save->current_bo->Size;
+         return;
       }
-      buffer_offset = 0;
+      vao_buffer_offset = 0;
+      /* Give our reference on the bo to node. */
+      node->cold->bo = bo;
    } else {
-      assert(old_offset <= buffer_offset);
-      const GLintptr offset_diff = buffer_offset - old_offset;
-      if (offset_diff > 0 && stride > 0 && offset_diff % stride == 0) {
-         /* The vertex size is an exact multiple of the buffer offset.
-          * This means that we can use zero-based vertex attribute pointers
-          * and specify the start of the primitive with the _mesa_prim::start
-          * field.  This results in issuing several draw calls with identical
-          * vertex attribute information.  This can result in fewer state
-          * changes in drivers.  In particular, the Gallium CSO module will
-          * filter out redundant vertex buffer changes.
-          */
-         /* We cannot immediately update the primitives as some methods below
-          * still need the uncorrected start vertices
-          */
-         start_offset = offset_diff/stride;
-         assert(old_offset == buffer_offset - offset_diff);
-         buffer_offset = old_offset;
-      }
-
-      /* Correct the primitive starts, we can only do this here as copy_vertices
-       * and convert_line_loop_to_strip above consume the uncorrected starts.
-       * On the other hand the _vbo_loopback_vertex_list call below needs the
-       * primitives to be corrected already.
-       */
-      for (unsigned i = 0; i < node->cold->prim_count; i++) {
-         node->cold->prims[i].start += start_offset;
-      }
-      /* start_offset shifts vertices (so v[0] becomes v[start_offset]), so we have
-       * to apply this transformation to all indices and max_index.
-       */
-      for (unsigned i = 0; i < idx; i++)
-         indices[i] += start_offset;
-      max_index += start_offset;
+      _mesa_reference_buffer_object(ctx, &node->cold->bo, bo);
    }
 
-   _mesa_reference_buffer_object(ctx, &node->cold->ib.obj, save->current_bo);
-
-   /* Upload the vertices first (see buffer_offset) */
+   /* Upload the vertices first (see vao_buffer_offset) */
    _mesa_bufferobj_subdata(ctx,
-                           save->current_bo_bytes_used,
+                           upload_offset,
                            total_vert_count * save->vertex_size * sizeof(fi_type),
                            vertex_to_index ? temp_vertices_buffer : save->vertex_store->buffer_in_ram,
-                           node->cold->ib.obj);
-   save->current_bo_bytes_used += total_vert_count * save->vertex_size * sizeof(fi_type);
-   node->cold->bo_bytes_used = save->current_bo_bytes_used;
+                           node->cold->bo);
+
+   node->cold->bo_start = reused_bo ? (reused_bo_range_start * VBO_SAVE_BUFFER_PER_BIT) : 0;
+   upload_offset += total_vert_count ? total_vert_count * save->vertex_size * sizeof(fi_type) : 4;
+   assert(node->cold->bo_start < upload_offset);
    ctx->ListState.Current.NeedsFlush = true;
 
   if (vertex_to_index) {
@@ -861,33 +1019,48 @@ compile_vertex_list(struct gl_context *ctx)
    /* Since we append the indices to an existing buffer, we need to adjust the start value of each
     * primitive (not the indices themselves). */
    if (!ctx->ListState.Current.UseLoopback) {
-      save->current_bo_bytes_used += align(save->current_bo_bytes_used, 4) - save->current_bo_bytes_used;
-      int indices_offset = save->current_bo_bytes_used / 4;
+      upload_offset += align(upload_offset, 4) - upload_offset;
+      int indices_offset = upload_offset / 4;
       for (int i = 0; i < merged_prim_count; i++) {
          merged_prims[i].start += indices_offset;
       }
    }
 
    /* Then upload the indices. */
-   if (node->cold->ib.obj) {
-      _mesa_bufferobj_subdata(ctx,
-                              save->current_bo_bytes_used,
-                              idx * sizeof(uint32_t),
-                              indices,
-                              node->cold->ib.obj);
-      save->current_bo_bytes_used += idx * sizeof(uint32_t);
-   } else {
-      node->cold->vertex_count = 0;
-      node->cold->prim_count = 0;
+   _mesa_bufferobj_subdata(ctx,
+                           upload_offset,
+                           idx * sizeof(uint32_t),
+                           indices,
+                           node->cold->bo);
+   upload_offset += idx * sizeof(uint32_t);
+   node->cold->bo_end = upload_offset;
+
+   if (!reused_bo) {
+      upload_offset = align(upload_offset, VBO_SAVE_BUFFER_PER_BIT);
+      if (upload_offset < bo->Size) {
+         assert(shared_buffer);
+         reused_bo = _vbo_bo_add_to_free_list(ctx, bo, bo->Size - upload_offset);
+         reused_bo_range_start = 0;
+      }
    }
+
+   if (reused_bo)
+      _vbo_bo_mark_range_as_used(ctx, reused_bo, reused_bo_range_start * VBO_SAVE_BUFFER_PER_BIT,
+                                 upload_offset);
 
    /* Prepare for DrawGallium */
    memset(&node->cold->info, 0, sizeof(struct pipe_draw_info));
    /* The other info fields will be updated in vbo_save_playback_vertex_list */
    node->cold->info.index_size = 4;
    node->cold->info.instance_count = 1;
-   node->cold->info.index.resource = node->cold->ib.obj->buffer;
-   if (merged_prim_count == 1) {
+   node->cold->info.index.resource = node->cold->bo->buffer;
+   if (merged_prim_count == 0) {
+      node->cold->info.mode = 0;
+      node->start_count.start = 0;
+      node->start_count.count = 0;
+      node->start_count.index_bias = 0;
+      node->modes = NULL;
+   } else if (merged_prim_count == 1) {
       node->cold->info.mode = merged_prims[0].mode;
       node->start_count.start = merged_prims[0].start;
       node->start_count.count = merged_prims[0].count;
@@ -921,21 +1094,7 @@ compile_vertex_list(struct gl_context *ctx)
    free(tmp_indices);
    free(merged_prims);
 
-end:
    node->draw_begins = node->cold->prims[0].begin;
-
-   if (!save->current_bo) {
-      save->current_bo = _mesa_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
-      bool success = _mesa_bufferobj_data(ctx,
-                                          GL_ELEMENT_ARRAY_BUFFER_ARB,
-                                          VBO_SAVE_BUFFER_SIZE,
-                                          NULL,
-                                          GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
-                                          MESA_GALLIUM_VERTEX_STATE_STORAGE,
-                                          save->current_bo);
-      if (!success)
-         save->out_of_memory = true;
-   }
 
    GLuint offsets[VBO_ATTRIB_MAX];
    for (unsigned i = 0, offset = 0; i < VBO_ATTRIB_MAX; ++i) {
@@ -943,16 +1102,25 @@ end:
       offset += save->attrsz[i] * sizeof(GLfloat);
    }
    /* Create a pair of VAOs for the possible VERTEX_PROCESSING_MODEs
-    * Note that this may reuse the previous one of possible.
+    * Note that this may reuse the previous one if possible.
     */
    for (gl_vertex_processing_mode vpm = VP_MODE_FF; vpm < VP_MODE_MAX; ++vpm) {
-      /* create or reuse the vao */
-      update_vao(ctx, vpm, &save->VAO[vpm],
-                 save->current_bo, buffer_offset, stride,
-                 save->enabled, save->attrsz, save->attrtype, offsets);
-      /* Reference the vao in the dlist */
-      node->cold->VAO[vpm] = NULL;
-      _mesa_reference_vao(ctx, &node->cold->VAO[vpm], save->VAO[vpm]);
+      const GLbitfield vao_enabled = _vbo_get_vao_enabled_from_vbo(vpm, save->enabled);
+
+      if (reused_bo &&
+          compare_vao(vpm, reused_bo->VAO[vpm], bo, vao_buffer_offset, stride,
+                      vao_enabled, save->attrsz, save->attrtype, offsets)) {
+         _mesa_reference_vao(ctx, &node->cold->VAO[vpm], reused_bo->VAO[vpm]);
+      } else {
+         /* Create a VAO. */
+         create_vao(ctx, vpm, &node->cold->VAO[vpm],
+                     bo, vao_buffer_offset, stride,
+                     save->enabled, save->attrsz, save->attrtype, offsets);
+
+         /* Store the first VAO in the entry. */
+         if (reused_bo && !reused_bo->VAO[vpm] && vao_buffer_offset == 0)
+            _mesa_reference_vao(ctx, &reused_bo->VAO[vpm], node->cold->VAO[vpm]);
+      }
    }
 
    /* Prepare for draw_vertex_state. */
@@ -963,7 +1131,7 @@ end:
 
          node->state[i] =
             st_create_gallium_vertex_state(ctx, node->cold->VAO[i],
-                                           node->cold->ib.obj,
+                                           node->cold->bo,
                                            enabled_attribs);
          node->private_refcount[i] = 0;
          node->enabled_attribs[i] = enabled_attribs;
@@ -1416,7 +1584,7 @@ _save_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
       MAT(VBO_ATTRIB_MAT_FRONT_SPECULAR, 4, face, params);
       break;
    case GL_SHININESS:
-      if (*params < 0 || *params > ctx->Const.MaxShininess) {
+      if (*params < 0 || *params > MAX_SHININESS) {
          _mesa_compile_error(ctx, GL_INVALID_VALUE, "glMaterial(shininess)");
       }
       else {
@@ -1553,7 +1721,7 @@ _save_CallLists(GLsizei n, GLenum type, const GLvoid * v)
  */
 void
 vbo_save_NotifyBegin(struct gl_context *ctx, GLenum mode,
-                     bool no_current_update)
+                     bool restore_attrib_after_draw)
 {
    struct vbo_save_context *save = &vbo_context(ctx)->save;
    const GLuint i = save->prim_store->used++;
@@ -1569,7 +1737,7 @@ vbo_save_NotifyBegin(struct gl_context *ctx, GLenum mode,
    save->prim_store->prims[i].start = get_vertex_count(save);
    save->prim_store->prims[i].count = 0;
 
-   save->no_current_update = no_current_update;
+   save->restore_attrib_after_draw = restore_attrib_after_draw;
 
    vbo_init_dispatch_save_begin_end(ctx);
 
@@ -1626,11 +1794,11 @@ _save_PrimitiveRestartNV(void)
    } else {
       /* get current primitive mode */
       GLenum curPrim = save->prim_store->prims[save->prim_store->used - 1].mode;
-      bool no_current_update = save->no_current_update;
+      bool restore_attrib_after_draw = save->restore_attrib_after_draw;
 
       /* restart primitive */
       CALL_End(ctx->Dispatch.Current, ());
-      vbo_save_NotifyBegin(ctx, curPrim, no_current_update);
+      vbo_save_NotifyBegin(ctx, curPrim, restore_attrib_after_draw);
    }
 }
 
@@ -1641,7 +1809,7 @@ save_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
    GET_CURRENT_CONTEXT(ctx);
    struct _glapi_table *dispatch = ctx->Dispatch.Current;
 
-   vbo_save_NotifyBegin(ctx, GL_QUADS, false);
+   vbo_save_NotifyBegin(ctx, GL_QUADS, true);
    CALL_Vertex2f(dispatch, (x1, y1));
    CALL_Vertex2f(dispatch, (x2, y1));
    CALL_Vertex2f(dispatch, (x2, y2));
@@ -1713,7 +1881,7 @@ save_DrawArrays(GLenum mode, GLint start, GLsizei count)
 
    _mesa_vao_map_arrays(ctx, vao, GL_MAP_READ_BIT);
 
-   vbo_save_NotifyBegin(ctx, mode, true);
+   vbo_save_NotifyBegin(ctx, mode, false);
 
    for (i = 0; i < count; i++)
       _mesa_array_element(ctx, start + i);
@@ -1826,7 +1994,7 @@ save_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
       indices =
          ADD_POINTERS(indexbuf->Mappings[MAP_INTERNAL].Pointer, indices);
 
-   vbo_save_NotifyBegin(ctx, mode, true);
+   vbo_save_NotifyBegin(ctx, mode, false);
 
    switch (type) {
    case GL_UNSIGNED_BYTE:
@@ -2066,6 +2234,132 @@ current_init(struct gl_context *ctx)
       assert(j < MAT_ATTRIB_MAX);
       save->currentsz[i] = &ctx->ListState.ActiveMaterialSize[j];
       save->current[i] = (fi_type *) ctx->ListState.CurrentMaterial[j];
+   }
+}
+
+static void
+_vbo_bo_mark_range_as_used(struct gl_context *ctx, struct free_bo_pool_entry *entry,
+                           uint32_t start, uint32_t end_excl)
+{
+   assert(
+      BITSET_TEST_RANGE(entry->free_mask, start / VBO_SAVE_BUFFER_PER_BIT,
+                        (end_excl - 1) / VBO_SAVE_BUFFER_PER_BIT));
+   BITSET_CLEAR_RANGE(entry->free_mask, start / VBO_SAVE_BUFFER_PER_BIT,
+                                        (end_excl - 1) / VBO_SAVE_BUFFER_PER_BIT);
+   BITSET_SET_RANGE(entry->dirty_mask,
+                     start / VBO_SAVE_BUFFER_PER_BIT,
+                     (end_excl - 1) / VBO_SAVE_BUFFER_PER_BIT);
+}
+
+static struct free_bo_pool_entry *
+_vbo_bo_add_to_free_list(struct gl_context *ctx, struct gl_buffer_object *bo,
+                         uint32_t remaining_free_bytes)
+{
+   struct vbo_save_context *save = &vbo_context(ctx)->save;
+   struct free_bo_pool_entry *e = NULL;
+
+   assert(bo->Size == VBO_SAVE_BUFFER_SIZE);
+
+   if (save->free_bo_pool == NULL)
+      save->free_bo_pool = calloc(save->free_bo_pool_n_entries, sizeof(*e));
+
+   struct {
+      uint32_t total, n_ranges;
+   } best = {
+      remaining_free_bytes / VBO_SAVE_BUFFER_PER_BIT, 1
+   };
+
+   for (int i = 0; i < save->free_bo_pool_n_entries; i++) {
+      struct free_bo_pool_entry *f = &save->free_bo_pool[i];
+
+      if (f->bo == NULL) {
+         /* This slot is empty, use it. */
+         e = f;
+         break;
+      } else {
+         uint32_t s = 0;
+         uint32_t range_start, range_end, n_ranges = 0;
+         BITSET_FOREACH_RANGE(range_start, range_end, f->free_mask, VBO_SAVE_BUFFER_N_BITS) {
+            s += range_end - range_start;
+            n_ranges++;
+         }
+
+         /* Remember this entry if it's smaller or more fragmented. */
+         if (s < best.total ||
+             (s == best.total && n_ranges > best.n_ranges)) {
+            best.total = s;
+            best.n_ranges = n_ranges;
+            e = f;
+         }
+      }
+   }
+
+   if (e) {
+      _vbo_release_pool_entry(ctx, e);
+
+      /* Set the bo reference. */
+      _mesa_reference_buffer_object(ctx, &e->bo, bo);
+   }
+
+   return e;
+}
+
+
+void
+vbo_save_release_bo(struct gl_context *ctx, struct gl_buffer_object **_bo,
+                    uint32_t start, uint32_t end_excl)
+{
+   struct vbo_save_context *save = &vbo_context(ctx)->save;
+   struct st_context *st = st_context(ctx);
+   struct gl_buffer_object *bo = *_bo;
+
+   assert(end_excl <= bo->Size);
+   assert(start < end_excl);
+   assert(start % VBO_SAVE_BUFFER_PER_BIT == 0);
+
+   unsigned n_owners = p_atomic_read(&bo->RefCount);
+
+   /* Release the caller's reference. */
+   _mesa_reference_buffer_object(ctx, _bo, NULL);
+
+   /* The caller was the sole owner of this bo. Exit. */
+   if (n_owners == 1 || !save->free_bo_pool || start == end_excl)
+      return;
+
+   n_owners--;
+
+   struct free_bo_pool_entry *entry = NULL;
+   for (int i = 0; i < save->free_bo_pool_n_entries; i++) {
+      entry = &save->free_bo_pool[i];
+
+      if (bo == entry->bo) {
+         unsigned pool_ref_cnt = 1;
+         for (int j = 0; j < 2; j++) {
+            if (entry->VAO[j] && entry->VAO[j]->BufferBinding[0].BufferObj)
+               pool_ref_cnt++;
+         }
+         /* If free_bo_pool is now the only owner of this bo, drop it to avoid keeping
+          * unused bo in memory.
+          */
+         if (n_owners == pool_ref_cnt) {
+            _vbo_release_pool_entry(ctx, entry);
+            return;
+         }
+
+         BITSET_SET_RANGE(entry->free_mask, start / VBO_SAVE_BUFFER_PER_BIT,
+                                            (end_excl - 1) / VBO_SAVE_BUFFER_PER_BIT);
+
+         if (st->screen->caps.draw_vertex_state) {
+            /* pipe_vertex_state are immutable, so get a deferred fence for this bo.
+             * Past this fence, the free+dirty ranges of this BO can be reused.
+             */
+            BITSET_SET_RANGE(entry->dirty_mask, start / VBO_SAVE_BUFFER_PER_BIT,
+                                                (end_excl - 1) / VBO_SAVE_BUFFER_PER_BIT);
+
+            st_flush(st, &entry->release_fence, PIPE_FLUSH_DEFERRED);
+         }
+         return;
+      }
    }
 }
 

@@ -375,7 +375,7 @@ enum tgsi_opcode {
    TGSI_OPCODE_U2I64              = 32,
    TGSI_OPCODE_CLOCK              = 33,
    TGSI_OPCODE_I2I64              = 34,
-   TGSI_OPCODE_READ_HELPER        = 35,
+   /* gap */
    TGSI_OPCODE_COS                = 36,
    TGSI_OPCODE_DDX                = 37,
    TGSI_OPCODE_DDY                = 38,
@@ -416,7 +416,7 @@ enum tgsi_opcode {
    TGSI_OPCODE_BRK                = 73,
    TGSI_OPCODE_IF                 = 74,
    TGSI_OPCODE_UIF                = 75,
-   TGSI_OPCODE_READ_INVOC         = 76,
+   /* gap */
    TGSI_OPCODE_ELSE               = 77,
    TGSI_OPCODE_ENDIF              = 78,
    TGSI_OPCODE_DDX_FINE           = 79,
@@ -427,7 +427,7 @@ enum tgsi_opcode {
    TGSI_OPCODE_NOT                = 85,
    TGSI_OPCODE_TRUNC              = 86,
    TGSI_OPCODE_SHL                = 87,
-   TGSI_OPCODE_BALLOT             = 88,
+   /* gap */
    TGSI_OPCODE_AND                = 89,
    TGSI_OPCODE_OR                 = 90,
    TGSI_OPCODE_MOD                = 91,
@@ -445,7 +445,7 @@ enum tgsi_opcode {
    TGSI_OPCODE_ATOMFADD           = 103,
    TGSI_OPCODE_TXQS               = 104,
    TGSI_OPCODE_RESQ               = 105,
-   TGSI_OPCODE_READ_FIRST         = 106,
+   /* gap */
    TGSI_OPCODE_NOP                = 107,
 
    TGSI_OPCODE_FSEQ               = 108,
@@ -496,8 +496,8 @@ enum tgsi_opcode {
    TGSI_OPCODE_SAMPLE_L           = 152,
    TGSI_OPCODE_GATHER4            = 153,
    TGSI_OPCODE_SVIEWINFO          = 154,
-   TGSI_OPCODE_SAMPLE_POS         = 155,
-   TGSI_OPCODE_SAMPLE_INFO        = 156,
+   /* gap */
+   /* gap */
 
    TGSI_OPCODE_UARL               = 157,
    TGSI_OPCODE_UCMP               = 158,
@@ -506,8 +506,8 @@ enum tgsi_opcode {
 
    TGSI_OPCODE_LOAD               = 161,
    TGSI_OPCODE_STORE              = 162,
-   TGSI_OPCODE_IMG2HND            = 163,
-   TGSI_OPCODE_SAMP2HND           = 164,
+   /* gap */
+   /* gap */
    /* gap */
    TGSI_OPCODE_BARRIER            = 166,
 
@@ -576,9 +576,9 @@ enum tgsi_opcode {
    TGSI_OPCODE_DROUND             = 221 /* nvc0 */,
    TGSI_OPCODE_DSSG               = 222,
 
-   TGSI_OPCODE_VOTE_ANY           = 223,
-   TGSI_OPCODE_VOTE_ALL           = 224,
-   TGSI_OPCODE_VOTE_EQ            = 225,
+   /* gap */
+   /* gap */
+   /* gap */
 
    TGSI_OPCODE_U64SEQ             = 226,
    TGSI_OPCODE_U64SNE             = 227,
@@ -609,10 +609,10 @@ enum tgsi_opcode {
 
    TGSI_OPCODE_DDIV               = 248,
 
-   TGSI_OPCODE_LOD                = 249,
+   /* gap */
 
-   TGSI_OPCODE_ATOMINC_WRAP       = 250,
-   TGSI_OPCODE_ATOMDEC_WRAP       = 251,
+   /* gap */
+   /* gap */
 
    TGSI_OPCODE_LAST               = 252,
 };

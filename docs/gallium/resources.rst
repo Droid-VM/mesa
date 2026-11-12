@@ -33,6 +33,11 @@ coordinate normalization and wrap modes, and in fact efficient OpenCL
 support will probably require drivers that don't have any of them, which
 will probably be advertised with an appropriate cap.
 
+Non-power-of-two base dimensions are valid for texture resources regardless
+of ``pipe_caps.npot_textures``. The capability does not constrain resource
+allocation or the number of mip levels; it describes supported sampling
+behavior, as documented in :ref:`pipe_caps`.
+
 TODO: document all targets. Note that both 3D and cube have restrictions
 that depend on the hardware generation.
 
@@ -83,8 +88,6 @@ PIPE_TEXTURE_1D / PIPE_TEXTURE_1D_ARRAY
 1D surface accessed with normalized coordinates.
 1D array textures are supported depending on pipe_caps.max_texture_array_layers.
 
-- If pipe_caps.npot_textures is not supported,
-      width must be a power of two
 - height0 must be 1
 - depth0 must be 1
 - array_size must be 1 for PIPE_TEXTURE_1D
@@ -92,8 +95,6 @@ PIPE_TEXTURE_1D / PIPE_TEXTURE_1D_ARRAY
 - Must use normalized coordinates
 
 OpenGL: GL_TEXTURE_1D in GL 1.0
-
-- pipe_caps.npot_textures is equivalent to GL 2.0 or :ext:`GL_ARB_texture_non_power_of_two`
 
 D3D11: 1D textures in D3D_FEATURE_LEVEL_10_0
 
@@ -119,8 +120,6 @@ PIPE_TEXTURE_2D / PIPE_TEXTURE_2D_ARRAY
 2D surface accessed with normalized coordinates.
 2D array textures are supported depending on pipe_caps.max_texture_array_layers.
 
-- If pipe_caps.npot_textures is not supported,
-      width and height must be powers of two
 - depth0 must be 1
 - array_size must be 1 for PIPE_TEXTURE_2D
 - Mipmaps can be used
@@ -128,8 +127,6 @@ PIPE_TEXTURE_2D / PIPE_TEXTURE_2D_ARRAY
 - No special restrictions on wrap modes
 
 OpenGL: GL_TEXTURE_2D in GL 1.0
-
-- pipe_caps.npot_textures is equivalent to GL 2.0 or :ext:`GL_ARB_texture_non_power_of_two`
 
 OpenCL: can create OpenCL images based on this, that can then be sampled arbitrarily
 
@@ -143,14 +140,10 @@ PIPE_TEXTURE_3D
 3-dimensional array of texels.
 Mipmap dimensions are reduced in all 3 coordinates.
 
-- If pipe_caps.npot_textures is not supported,
-      width, height and depth must be powers of two
 - array_size must be 1
 - Must use normalized coordinates
 
 OpenGL: GL_TEXTURE_3D in GL 1.2 or :ext:`GL_EXT_texture3D`
-
-- pipe_caps.npot_textures is equivalent to GL 2.0 or :ext:`GL_ARB_texture_non_power_of_two`
 
 D3D11: 3D textures
 
@@ -170,13 +163,10 @@ resulting in filtering taking samples from multiple surfaces near to the edge.
 - Width and height must be equal
 - depth0 must be 1
 - array_size must be a multiple of 6
-- If pipe_caps.npot_textures is not supported,
-      width and height must be powers of two
 - Must use normalized coordinates
 
 OpenGL: GL_TEXTURE_CUBE_MAP in GL 1.3 or :ext:`GL_EXT_texture_cube_map`
 
-- pipe_caps.npot_textures is equivalent to GL 2.0 or :ext:`GL_ARB_texture_non_power_of_two`
 - Seamless cube maps require GL 3.2 or :ext:`GL_ARB_seamless_cube_map` or :ext:`GL_AMD_seamless_cubemap_per_texture`
 - Cube map arrays require GL 4.0 or :ext:`GL_ARB_texture_cube_map_array`
 

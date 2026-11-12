@@ -224,7 +224,7 @@ fn enqueue_signal_semaphores(
         }
     }
 
-    let work = Semaphore::gpu_signal(semas, &q);
+    let work = Some(Semaphore::gpu_signal(semas, &q));
     create_and_queue(q, CL_COMMAND_SEMAPHORE_SIGNAL_KHR, evs, event, false, work)
 
     // CL_INVALID_VALUE if any of the semaphore objects specified by sema_objects requires a semaphore payload and sema_payload_list is NULL.
@@ -274,12 +274,12 @@ fn enqueue_wait_semaphores(
         evs,
         event,
         false,
-        Box::new(|_, ctx| {
+        Some(Box::new(|_, ctx| {
             for sema in semas {
                 sema.gpu_wait(ctx)?;
             }
             Ok(())
-        }),
+        })),
     )
 
     // CL_INVALID_VALUE if any of the semaphore objects specified by sema_objects requires a semaphore payload and sema_payload_list is NULL.

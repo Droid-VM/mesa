@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2022 Advanced Micro Devices, Inc.  All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc.  All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -49,88 +49,88 @@ protected:
     // Hwl interface - defined in AddrLib1
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceInfo(
         const ADDR_COMPUTE_SURFACE_INFO_INPUT* pIn,
-        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const;
+        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeFmaskInfo(
         const ADDR_COMPUTE_FMASK_INFO_INPUT* pIn,
-        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pOut);
+        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pOut) override;
 
     virtual ChipFamily HwlConvertChipFamily(
-        UINT_32 uChipFamily, UINT_32 uChipRevision);
+        UINT_32 uChipFamily, UINT_32 uChipRevision) override;
 
     virtual BOOL_32 HwlInitGlobalParams(
-        const ADDR_CREATE_INPUT* pCreateIn);
+        const ADDR_CREATE_INPUT* pCreateIn) override;
 
     virtual ADDR_E_RETURNCODE HwlSetupTileCfg(
         UINT_32 bpp, INT_32 index, INT_32 macroModeIndex, ADDR_TILEINFO* pInfo,
-        AddrTileMode* pMode = 0, AddrTileType* pType = 0) const;
+        AddrTileMode* pMode = 0, AddrTileType* pType = 0) const override;
 
     virtual VOID HwlComputeTileDataWidthAndHeightLinear(
         UINT_32* pMacroWidth, UINT_32* pMacroHeight,
-        UINT_32 bpp, ADDR_TILEINFO* pTileInfo) const;
+        UINT_32 bpp, ADDR_TILEINFO* pTileInfo) const override;
 
     virtual INT_32 HwlComputeMacroModeIndex(
         INT_32 tileIndex, ADDR_SURFACE_FLAGS flags, UINT_32 bpp, UINT_32 numSamples,
         ADDR_TILEINFO* pTileInfo, AddrTileMode* pTileMode = NULL, AddrTileType* pTileType = NULL
-        ) const;
+        ) const override;
 
     // Sub-hwl interface - defined in EgBasedLib
     virtual VOID HwlSetupTileInfo(
         AddrTileMode tileMode, ADDR_SURFACE_FLAGS flags,
         UINT_32 bpp, UINT_32 pitch, UINT_32 height, UINT_32 numSamples,
         ADDR_TILEINFO* inputTileInfo, ADDR_TILEINFO* outputTileInfo,
-        AddrTileType inTileType, ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const;
+        AddrTileType inTileType, ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const override;
 
     virtual INT_32 HwlPostCheckTileIndex(
         const ADDR_TILEINFO* pInfo, AddrTileMode mode, AddrTileType type,
-        INT curIndex = TileIndexInvalid) const;
+        INT curIndex = TileIndexInvalid) const override;
 
     virtual VOID HwlFmaskPreThunkSurfInfo(
         const ADDR_COMPUTE_FMASK_INFO_INPUT* pFmaskIn,
         const ADDR_COMPUTE_FMASK_INFO_OUTPUT* pFmaskOut,
         ADDR_COMPUTE_SURFACE_INFO_INPUT* pSurfIn,
-        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pSurfOut) const;
+        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pSurfOut) const override;
 
     virtual VOID HwlFmaskPostThunkSurfInfo(
         const ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pSurfOut,
-        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pFmaskOut) const;
+        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pFmaskOut) const override;
 
     virtual AddrTileMode HwlDegradeThickTileMode(
-        AddrTileMode baseTileMode, UINT_32 numSlices, UINT_32* pBytesPerTile) const;
+        AddrTileMode baseTileMode, UINT_32 numSlices, UINT_32* pBytesPerTile) const override;
 
-    virtual VOID HwlOverrideTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const;
+    virtual VOID HwlOverrideTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const override;
 
-    virtual VOID HwlOptimizeTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const;
+    virtual VOID HwlOptimizeTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const override;
 
-    virtual VOID HwlSelectTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const;
+    virtual VOID HwlSelectTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const override;
 
     /// Overwrite tile setting to PRT
-    virtual VOID HwlSetPrtTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const;
+    virtual VOID HwlSetPrtTileMode(ADDR_COMPUTE_SURFACE_INFO_INPUT* pInOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeDccInfo(
         const ADDR_COMPUTE_DCCINFO_INPUT* pIn,
-        ADDR_COMPUTE_DCCINFO_OUTPUT* pOut) const;
+        ADDR_COMPUTE_DCCINFO_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeCmaskAddrFromCoord(
         const ADDR_COMPUTE_CMASK_ADDRFROMCOORD_INPUT* pIn,
-        ADDR_COMPUTE_CMASK_ADDRFROMCOORD_OUTPUT* pOut) const;
+        ADDR_COMPUTE_CMASK_ADDRFROMCOORD_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeHtileAddrFromCoord(
         const ADDR_COMPUTE_HTILE_ADDRFROMCOORD_INPUT*  pIn,
-        ADDR_COMPUTE_HTILE_ADDRFROMCOORD_OUTPUT*       pOut) const;
+        ADDR_COMPUTE_HTILE_ADDRFROMCOORD_OUTPUT*       pOut) const override;
 
-    virtual UINT_32 HwlComputeMaxBaseAlignments() const;
+    virtual UINT_32 HwlComputeMaxBaseAlignments() const override;
 
-    virtual UINT_32 HwlComputeMaxMetaBaseAlignments() const;
+    virtual UINT_32 HwlComputeMaxMetaBaseAlignments() const override;
 
     virtual VOID HwlPadDimensions(
         AddrTileMode tileMode, UINT_32 bpp, ADDR_SURFACE_FLAGS flags,
         UINT_32 numSamples, ADDR_TILEINFO* pTileInfo, UINT_32 mipLevel,
-        UINT_32* pPitch, UINT_32 *PitchAlign, UINT_32 height, UINT_32 heightAlign) const;
+        UINT_32* pPitch, UINT_32 *PitchAlign, UINT_32 height, UINT_32 heightAlign) const override;
 
     virtual VOID HwlComputeSurfaceAlignmentsMacroTiled(
         AddrTileMode tileMode, UINT_32 bpp, ADDR_SURFACE_FLAGS flags,
-        UINT_32 mipLevel, UINT_32 numSamples, ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const;
+        UINT_32 mipLevel, UINT_32 numSamples, ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const override;
 
 private:
     VOID ReadGbTileMode(

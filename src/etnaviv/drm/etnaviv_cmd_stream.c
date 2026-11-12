@@ -28,6 +28,7 @@
 #include <stdlib.h>
 
 #include "util/hash_table.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_math.h"
 
 #include "etnaviv_drmif.h"
@@ -178,18 +179,23 @@ static uint32_t bo2idx(struct etna_cmd_stream *stream, struct etna_bo *bo,
 		uint32_t flags)
 {
 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
-	uint32_t hash = _mesa_hash_pointer(bo);
-	struct hash_entry *entry;
-	uint32_t idx;
+	uint32_t idx = READ_ONCE(bo->idx);
 
-	entry = _mesa_hash_table_search_pre_hashed(priv->bo_table, hash, bo);
+	if (unlikely(idx >= priv->nr_bos || priv->bos[idx] != bo)) {
+		uint32_t hash = _mesa_hash_pointer(bo);
+		struct hash_entry *entry;
 
-	if (entry) {
-		idx = (uint32_t)(uintptr_t)entry->data;
-	} else {
-		idx = append_bo(stream, bo);
-		_mesa_hash_table_insert_pre_hashed(priv->bo_table, hash, bo,
-			(void *)(uintptr_t)idx);
+		entry = _mesa_hash_table_search_pre_hashed(priv->bo_table, hash, bo);
+
+		if (entry) {
+			idx = (uint32_t)(uintptr_t)entry->data;
+		} else {
+			idx = append_bo(stream, bo);
+			_mesa_hash_table_insert_pre_hashed(priv->bo_table, hash, bo,
+				(void *)(uintptr_t)idx);
+		}
+
+		bo->idx = idx;
 	}
 
 	if (flags & ETNA_RELOC_READ)
@@ -203,8 +209,10 @@ static uint32_t bo2idx(struct etna_cmd_stream *stream, struct etna_bo *bo,
 void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 		int *out_fence_fd, bool is_noop)
 {
+	MESA_TRACE_FUNC();
 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
 	struct etna_gpu *gpu = priv->pipe->gpu;
+	int fence_fd = -1;
 
 	struct drm_etnaviv_gem_submit req = {
 		.pipe = gpu->core,
@@ -240,10 +248,12 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 		ret = drmCommandWriteRead(gpu->dev->fd, DRM_ETNAVIV_GEM_SUBMIT,
 				&req, sizeof(req));
 
-		if (ret)
+		if (ret) {
 			ERROR_MSG("submit failed: %d (%s)", ret, strerror(errno));
-		else
+		} else {
 			priv->last_timestamp = req.fence;
+			fence_fd = req.fence_fd;
+		}
 	}
 
 	for (uint32_t i = 0; i < priv->nr_bos; i++)
@@ -252,7 +262,7 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 	_mesa_hash_table_clear(priv->bo_table, NULL);
 
 	if (out_fence_fd)
-		*out_fence_fd = req.fence_fd;
+		*out_fence_fd = fence_fd;
 
 	stream->offset = 0;
 	priv->submit.nr_bos = 0;

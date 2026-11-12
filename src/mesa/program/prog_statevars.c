@@ -776,7 +776,7 @@ fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
 
    case STATE_ADVANCED_BLENDING_MODE:
       val[0].i = _mesa_get_advanced_blend_sh_constant(
-                   ctx->Color.BlendEnabled, ctx->Color._AdvancedBlendMode);
+                   ctx, ctx->Color.BlendEnabled, ctx->Color._AdvancedBlendMode);
       return;
 
    case STATE_ALPHA_REF:

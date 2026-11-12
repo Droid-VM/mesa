@@ -113,13 +113,18 @@ struct spill_block {
 
    /* Map of 32-bit indices to remapped 32-bit indices */
    struct hash_table_u64 *remap;
+
+   /* Active lane byte offset for UGPR fills. */
+   jay_def active_lane_x4;
 };
 
 struct spill_ctx {
    jay_function *func;
 
-   /* Register file being spilled and its associated control flow graph */
-   enum jay_file file, cfg;
+   /* Register file being spilled, its associated control flow graph and the
+    * register file we spill to.
+    */
+   enum jay_file file, cfg, target;
 
    /* Set of values whose file equals file */
    BITSET_WORD *in_file;
@@ -187,10 +192,7 @@ remap_inst(struct spill_ctx *ctx, struct hash_table_u64 *remap, jay_inst *I)
 static inline jay_def
 jay_def_spilled(struct spill_ctx *ctx, unsigned index)
 {
-   return jay_scalar(ctx->file == FLAG ? UGPR :
-                     ctx->file == UGPR ? GPR :
-                                         MEM,
-                     index + ctx->n);
+   return jay_scalar(ctx->target, 32, index + ctx->n);
 }
 
 static bool
@@ -212,7 +214,12 @@ ensure_spilled(struct spill_ctx *ctx, unsigned node)
 
       if (!BITSET_TEST(ctx->remat, node)) {
          jay_builder b = jay_init_builder(ctx->func, cursor);
-         jay_MOV(&b, jay_def_spilled(ctx, node), jay_scalar(ctx->file, node));
+         jay_inst *I = jay_MOV(&b, jay_def_spilled(ctx, node),
+                               jay_scalar(ctx->file, 32, node));
+
+         if (ctx->file == ACCUM || ctx->target == ACCUM) {
+            I->type = JAY_TYPE_F32;
+         }
       }
 
       ctx->spill_block[node] = NULL;
@@ -226,7 +233,7 @@ insert_reload(struct spill_ctx *ctx,
               unsigned node)
 {
    jay_builder b = jay_init_builder(ctx->func, cursor);
-   jay_def new_def = jay_alloc_def(&b, ctx->file, 1);
+   jay_def new_def = jay_alloc_def(&b, ctx->file, 32, 1);
 
    if (BITSET_TEST(ctx->remat, node)) {
       jay_inst *I = ctx->defs[node];
@@ -237,10 +244,40 @@ insert_reload(struct spill_ctx *ctx,
       jay_builder_insert(&b, clone);
    } else {
       ensure_spilled(ctx, node);
-      jay_inst *I = jay_MOV(&b, new_def, jay_def_spilled(ctx, node));
+      jay_def spilled = jay_def_spilled(ctx, node);
 
-      if (ctx->file == FLAG) {
-         I->type = JAY_TYPE_U | ctx->func->shader->dispatch_width;
+      if (ctx->file == UGPR) {
+         struct spill_block *sb = &ctx->blocks[block->index];
+         /*
+          * Most of the time no actual shuffles are needed so we're lazy
+          * initializing active_lane_x4. The initialization is required
+          * per-block since we need an active lane.
+          */
+         bool initialize = jay_is_null(sb->active_lane_x4);
+         if (initialize)
+            sb->active_lane_x4 = jay_alloc_def(&b, UGPR, 32, 1);
+
+         jay_SHUFFLE(&b, JAY_TYPE_U32, new_def, spilled, sb->active_lane_x4);
+
+         if (initialize) {
+            jay_builder init =
+               jay_init_builder(ctx->func, jay_before_block(block));
+            jay_def ballot = jay_alloc_def(&init, FLAG, 32, 1);
+            jay_def lane = jay_alloc_def(&init, UGPR, 32, 1);
+
+            jay_inst *mov = jay_MOV(&init, jay_null(), 1);
+            jay_set_conditional_mod(&init, mov, ballot, GEN_CONDITION_NE);
+            mov->zero_inactive = true;
+            jay_FBL(&init, lane, ballot);
+
+            jay_SHL(&init, JAY_TYPE_U32, sb->active_lane_x4, lane, 2);
+         }
+      } else {
+         jay_inst *I = jay_MOV(&b, new_def, spilled);
+         if (ctx->file == FLAG)
+            I->type = jay_flag_type(ctx->func);
+         else if (ctx->file == ACCUM || ctx->target == ACCUM)
+            I->type = JAY_TYPE_F32;
       }
    }
 
@@ -459,6 +496,7 @@ min_algorithm(struct spill_ctx *ctx,
                if (!u_sparse_bitset_test(&ctx->W, jay_index(I->dst))) {
                   ctx->spill_block[jay_index(I->dst)] = NULL;
                   I->dst = jay_def_spilled(ctx, jay_index(I->dst));
+                  I->uniform = jay_is_uniform(I->dst);
                }
             }
 
@@ -528,8 +566,8 @@ min_algorithm(struct spill_ctx *ctx,
       ctx->ip += inst_cycles(I);
 
       if (jay_debug & JAY_DBG_PRINTDEMAND) {
-         printf("(SP) %u: ", ctx->nW);
-         jay_print_inst(stdout, block, I, NULL);
+         fprintf(stderr, "(SP) %u: ", ctx->nW);
+         jay_print_inst(stderr, ctx->func, I);
       }
    }
 
@@ -554,7 +592,7 @@ compute_w_entry_loop_header(struct spill_ctx *ctx, jay_block *block)
 
    jay_foreach_phi_dst_in_block(block, I) {
       if (I->dst.file == ctx->file) {
-         ctx->candidates[j++] = (struct next_use) {
+         ctx->candidates[j++] = (struct next_use){
             .index = jay_index(I->dst),
             .dist = ctx->next_uses[jay_index(I->dst)],
          };
@@ -606,7 +644,7 @@ compute_w_entry(struct spill_ctx *ctx, jay_block *block)
 
    jay_foreach_phi_dst_in_block(block, I) {
       if (I->dst.file == ctx->file) {
-         ctx->candidates[j++] = (struct next_use) {
+         ctx->candidates[j++] = (struct next_use){
             .index = jay_index(I->dst),
             .dist = ctx->next_uses[jay_index(I->dst)],
          };
@@ -742,15 +780,16 @@ add_phi(struct spill_ctx *ctx,
    if (!trivial) {
       /* If the value differs across predecessors, insert a phi for it. */
       jay_builder b = jay_init_builder(ctx->func, jay_before_block(succ));
-      jay_def def = jay_alloc_def(&b, ctx->file, 1);
-      jay_PHI_DST(&b, def);
+      jay_def def = jay_alloc_def(&b, ctx->file, 32, 1);
+      jay_PHI_DST(&b, ctx->file == FLAG ? JAY_TYPE_U1 : JAY_TYPE_U32, def);
       remapped = jay_index(def);
 
       jay_foreach_predecessor(succ, pred, ctx->cfg) {
          b.cursor = jay_after_block_logical(*pred);
 
          uint32_t src = lookup_remap(ctx->blocks[(*pred)->index].remap, node);
-         jay_PHI_SRC_u32(&b, jay_scalar(ctx->file, src ? src : node), remapped);
+         jay_PHI_SRC_u32(&b, jay_scalar(ctx->file, 32, src ? src : node),
+                         remapped);
       }
    }
 
@@ -760,67 +799,33 @@ add_phi(struct spill_ctx *ctx,
    }
 }
 
-/*
- * UGPRs spill to GPRs so this (pre-RA) lowering is much simpler: just lower MOV
- * to SHUFFLE to legalize. Most of the time no actual shuffles are needed so
- * we're lazy initializing active_lane_x4. The initialization is required
- * per-block since we need an active lane.
- */
-static void
-lower_ugpr_spill(jay_function *func)
-{
-   jay_foreach_block(func, block) {
-      jay_def active_lane_x4 = jay_null();
-
-      jay_foreach_inst_in_block_safe(block, I) {
-         if (I->op == JAY_OPCODE_MOV &&
-             I->dst.file == UGPR &&
-             I->src[0].file == GPR) {
-
-            jay_builder b = jay_init_builder(func, jay_before_block(block));
-            if (jay_is_null(active_lane_x4)) {
-               jay_def ballot = jay_alloc_def(&b, FLAG, 1);
-               jay_def lane = jay_alloc_def(&b, UGPR, 1);
-
-               jay_inst *mov = jay_MOV(&b, jay_null(), 1);
-               jay_set_conditional_mod(&b, mov, ballot, GEN_CONDITION_NE);
-               mov->zero_inactive = true;
-               jay_FBL(&b, lane, ballot);
-
-               active_lane_x4 = jay_SHL_u32(&b, lane, 2);
-            }
-
-            b.cursor = jay_before_inst(I);
-            jay_SHUFFLE(&b, I->dst, I->src[0], active_lane_x4);
-            jay_remove_instruction(I);
-         }
-      }
-   }
-}
-
 void
-jay_spill(jay_function *func, enum jay_file file, unsigned k)
+jay_spill(jay_function *f, enum jay_file file, enum jay_file target, unsigned l)
 {
-   /* lower_ugpr_spill needs a UGPR temporary */
-   k -= (file == UGPR) ? 1 : 0;
+   /* If the demand is already below the limit, there's nothing to spill */
+   if (f->demand[file] <= l) {
+      return;
+   }
+
+   /* insert_reload needs a UGPR temporary */
+   unsigned k = l - ((file == UGPR) ? 1 : 0);
 
    void *memctx = ralloc_context(NULL);
    void *linctx = linear_context(memctx);
-   struct spill_ctx ctx = { .func = func, .k = k };
+   struct spill_ctx ctx = { .func = f, .k = k, .target = target };
 
-   ctx.n = func->ssa_alloc;
+   ctx.n = f->ssa_alloc;
    ctx.file = file;
-   ctx.cfg = file == GPR ? GPR : UGPR;
+   ctx.cfg = file == GPR || file == ACCUM ? GPR : UGPR;
    ctx.in_file = BITSET_LINEAR_ZALLOC(linctx, ctx.n);
    ctx.remat = BITSET_LINEAR_ZALLOC(linctx, ctx.n);
    ctx.defs = linear_zalloc_array(linctx, jay_inst *, ctx.n);
    ctx.spill_block = linear_zalloc_array(linctx, jay_block *, ctx.n);
    ctx.next_uses = linear_alloc_array(linctx, dist_t, ctx.n);
    ctx.candidates = linear_alloc_array(linctx, struct next_use, ctx.n);
-   ctx.blocks =
-      linear_zalloc_array(linctx, struct spill_block, func->num_blocks);
+   ctx.blocks = linear_zalloc_array(linctx, struct spill_block, f->num_blocks);
 
-   jay_foreach_inst_in_func(func, block, I) {
+   jay_foreach_inst_in_func(f, block, I) {
       jay_foreach_dst_index(I, dst, idx) {
          ctx.defs[idx] = I;
          ctx.spill_block[idx] = block;
@@ -836,12 +841,13 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
    }
 
    /* Don't remat phi sources since it ends up worse in practice */
-   jay_foreach_block(func, block) {
+   jay_foreach_block(f, block) {
       jay_foreach_phi_src_in_block(block, phi) {
          BITSET_CLEAR(ctx.remat, jay_index(phi->src[0]));
       }
 
       ctx.blocks[block->index].remap = _mesa_hash_table_u64_create(memctx);
+      ctx.blocks[block->index].active_lane_x4 = jay_null();
    }
 
    u_sparse_bitset_init(&ctx.W, ctx.n, memctx);
@@ -851,9 +857,9 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
    global_next_use_distances(&ctx, memctx);
 
    /* Reserve a memory variable for every regular variable */
-   func->ssa_alloc *= 2;
+   f->ssa_alloc *= 2;
 
-   jay_foreach_block(func, block) {
+   jay_foreach_block(f, block) {
       ctx.nW = 0;
       ctx.ip = 0;
 
@@ -894,7 +900,8 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
       min_algorithm(&ctx, block, sb, next_ips, nu_cursor);
 
       /* Handle loop back edges */
-      struct jay_block *loop_head = block->logical_succs[0];
+      struct jay_block *loop_head =
+         *util_dynarray_element(jay_successors(block, GPR), jay_block *, 0);
 
       if ((loop_head && loop_head->loop_header) &&
           loop_head->index < block->index) {
@@ -907,10 +914,10 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
             }
          }
 
-         jay_foreach_block_from(func, loop_head, inside) {
+         jay_foreach_block_from(f, loop_head, inside) {
             bool is_break_block = true;
             jay_foreach_successor(inside, succ, file) {
-               is_break_block &= succ->index > block->index;
+               is_break_block &= (*succ)->index > block->index;
             }
 
             /* Remap to use our phis inside the loop */
@@ -938,11 +945,19 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
 
    ralloc_free(memctx);
 
-   if (file == UGPR) {
-      lower_ugpr_spill(func);
-   }
-
    /* We've inserted invalid dead phis, clean them up. */
-   jay_opt_dead_code(func->shader);
-   jay_validate(func->shader, "spill");
+   jay_opt_dead_code(f->shader);
+   jay_validate(f->shader, "spill");
+
+   /* ...and finally recalculate demands for the caller */
+   jay_compute_liveness(f);
+   jay_calculate_last_use(f);
+   jay_calculate_register_demands(f);
+
+   if (f->demand[file] > l) {
+      fprintf(stderr, "file %u limit %u but demand %u\n", file, k,
+              f->demand[file]);
+      fflush(stderr);
+      UNREACHABLE("spiller bug");
+   }
 }

@@ -85,6 +85,7 @@ libagx_memcpy_to_aligned(global uint *dst, constant uchar *src, uint len,
       uint need = 4 - start_unaligned;
       libagx_memcpy_small((global uchar *)dst, src, need, tid);
       src += need;
+      dst = (global uint *)((global uchar *)dst + need);
       len -= need;
    }
 
@@ -162,7 +163,7 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
       /* Allocate memory for the shadow index buffer */
       global uchar *padded;
       if (first) {
-         padded = poly_heap_alloc(heap, out_size_B);
+         padded = poly_heap_alloc(heap, out_size_B, 16);
       }
       padded = (global uchar *)sub_group_broadcast((uintptr_t)padded, 0);
 

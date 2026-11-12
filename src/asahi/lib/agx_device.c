@@ -649,6 +649,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
    util_vma_heap_init(&dev->main_heap, user_start, user_size);
    util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
 
+   /* Capture heap overlap with main heap and is allocated in reverse */
+   util_vma_heap_init(&dev->capture_heap, user_start, user_size);
+   dev->capture_heap.alloc_high = false;
+
    dev->vm_id = vm_create.vm_id;
 
    glsl_type_singleton_init_or_ref();

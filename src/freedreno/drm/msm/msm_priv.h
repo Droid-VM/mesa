@@ -22,6 +22,8 @@
 
 #include "drm-uapi/msm_drm.h"
 
+#include "msm_common.h"
+
 struct msm_device {
    struct fd_device base;
 };
@@ -62,11 +64,19 @@ struct fd_bo *msm_bo_from_handle(struct fd_device *dev, uint32_t size,
 static inline void
 msm_dump_submit(struct drm_msm_gem_submit *req)
 {
-   for (unsigned i = 0; i < req->nr_bos; i++) {
+   /* A submit can reference tens of thousands of BOs, so only dump the
+    * whole table when debugging, to avoid flooding the log:
+    */
+   unsigned nr_bos = fd_dbg() ? req->nr_bos : MIN2(req->nr_bos, 32);
+
+   ERROR_MSG("  nr_bos=%u, nr_cmds=%u", req->nr_bos, req->nr_cmds);
+   for (unsigned i = 0; i < nr_bos; i++) {
       struct drm_msm_gem_submit_bo *bos = U642VOID(req->bos);
       struct drm_msm_gem_submit_bo *bo = &bos[i];
       ERROR_MSG("  bos[%d]: handle=%u, flags=%x", i, bo->handle, bo->flags);
    }
+   if (nr_bos < req->nr_bos)
+      ERROR_MSG("  ... %u more bos", req->nr_bos - nr_bos);
    for (unsigned i = 0; i < req->nr_cmds; i++) {
       struct drm_msm_gem_submit_cmd *cmds = U642VOID(req->cmds);
       struct drm_msm_gem_submit_cmd *cmd = &cmds[i];
@@ -166,23 +176,6 @@ msm_dump_rd(struct fd_pipe *pipe, struct drm_msm_gem_submit *req)
    }
 
    fd_rd_output_end(rd);
-}
-
-static inline void
-get_abs_timeout(struct drm_msm_timespec *tv, uint64_t ns)
-{
-   struct timespec t;
-
-   if (ns == OS_TIMEOUT_INFINITE)
-      ns = 3600ULL * NSEC_PER_SEC; /* 1 hour timeout is almost infinite */
-
-   clock_gettime(CLOCK_MONOTONIC, &t);
-   tv->tv_sec = t.tv_sec + ns / NSEC_PER_SEC;
-   tv->tv_nsec = t.tv_nsec + ns % NSEC_PER_SEC;
-   if (tv->tv_nsec >= NSEC_PER_SEC) { /* handle nsec overflow */
-      tv->tv_nsec -= NSEC_PER_SEC;
-      tv->tv_sec++;
-   }
 }
 
 #endif /* MSM_PRIV_H_ */

@@ -663,4 +663,5 @@ nv30_vbo_init(struct pipe_context *pipe)
    pipe->delete_vertex_elements_state = nv30_vertex_state_delete;
    pipe->bind_vertex_elements_state = nv30_vertex_state_bind;
    pipe->draw_vbo = nv30_draw_vbo;
+   pipe->draw_vbo_buffers = util_draw_vbo_buffers;
 }

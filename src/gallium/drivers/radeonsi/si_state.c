@@ -916,11 +916,15 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
                               SI_NGG_CULL_CLIP_PLANE_ENABLE(state->clip_plane_enable);
 
    if (!state->front_ccw) {
-      rs->ngg_cull_front = state->cull_face & PIPE_FACE_FRONT || rs->rasterizer_discard;
-      rs->ngg_cull_back = state->cull_face & PIPE_FACE_BACK || rs->rasterizer_discard;
+      rs->ngg_cull_face_negative_determinant = state->cull_face & PIPE_FACE_FRONT ||
+                                               rs->rasterizer_discard;
+      rs->ngg_cull_face_positive_determinant = state->cull_face & PIPE_FACE_BACK ||
+                                               rs->rasterizer_discard;
    } else {
-      rs->ngg_cull_front = state->cull_face & PIPE_FACE_BACK || rs->rasterizer_discard;
-      rs->ngg_cull_back = state->cull_face & PIPE_FACE_FRONT || rs->rasterizer_discard;
+      rs->ngg_cull_face_negative_determinant = state->cull_face & PIPE_FACE_BACK ||
+                                               rs->rasterizer_discard;
+      rs->ngg_cull_face_positive_determinant = state->cull_face & PIPE_FACE_FRONT ||
+                                               rs->rasterizer_discard;
    }
 
    /* Force gl_FrontFacing to true or false if the other face is culled. */
@@ -1678,10 +1682,10 @@ static void si_set_active_query_state(struct pipe_context *ctx, bool enable)
    if (enable) {
       /* Disable pipeline stats if there are no active queries. */
       if (sctx->num_hw_pipestat_streamout_queries)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_STOP, SI_BARRIER_EVENT_PIPELINESTAT_START);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_STOP, AC_BARRIER_PIPELINESTAT_START);
    } else {
       if (sctx->num_hw_pipestat_streamout_queries)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_START, SI_BARRIER_EVENT_PIPELINESTAT_STOP);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_START, AC_BARRIER_PIPELINESTAT_STOP);
    }
 
    /* Occlusion queries. */
@@ -1951,12 +1955,12 @@ static unsigned si_tex_mipfilter(unsigned filter)
 {
    switch (filter) {
    case PIPE_TEX_MIPFILTER_NEAREST:
-      return V_008F38_SQ_TEX_Z_FILTER_POINT;
+      return V_008F38_SQ_TEX_MIP_FILTER_POINT;
    case PIPE_TEX_MIPFILTER_LINEAR:
-      return V_008F38_SQ_TEX_Z_FILTER_LINEAR;
+      return V_008F38_SQ_TEX_MIP_FILTER_LINEAR;
    default:
    case PIPE_TEX_MIPFILTER_NONE:
-      return V_008F38_SQ_TEX_Z_FILTER_NONE;
+      return V_008F38_SQ_TEX_MIP_FILTER_NONE;
    }
 }
 
@@ -2476,10 +2480,8 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
     * when PA_SU_HARDWARE_SCREEN_OFFSET != 0 and any_scissor.BR_X/Y <= 0.
     * We could implement the full workaround here, but it's a useless case.
     */
-   if ((!state->width || !state->height) && (state->nr_cbufs || state->zsbuf.texture)) {
-      UNREACHABLE("the framebuffer shouldn't have zero area");
+   if ((!state->width || !state->height) && (state->nr_cbufs || state->zsbuf.texture))
       return;
-   }
 
    ASSERTED bool is_msaa_resolve = state->nr_cbufs == 2 &&
                                    state->cbufs[0].texture && state->cbufs[0].texture->nr_samples > 1 &&
@@ -2533,12 +2535,19 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 
    sctx->framebuffer.compressed_cb_mask = 0;
    sctx->framebuffer.uncompressed_cb_mask = 0;
+   unsigned old_log_samples = sctx->framebuffer.log_samples;
    sctx->framebuffer.nr_samples = util_framebuffer_get_num_samples(state);
    sctx->framebuffer.nr_color_samples = sctx->framebuffer.nr_samples;
    sctx->framebuffer.log_samples = util_logbase2(sctx->framebuffer.nr_samples);
+
+   /* Gfx11 writes the sample count to DB_Z_INFO.NUM_SAMPLES when no Z/S is bound. */
+   if (sctx->gfx_level >= GFX11 && sctx->gfx_level < GFX12 && !state->zsbuf.texture &&
+       sctx->framebuffer.log_samples != old_log_samples)
+      sctx->framebuffer.dirty_zsbuf = true;
    sctx->framebuffer.any_dst_linear = false;
    sctx->framebuffer.CB_has_shader_readable_metadata = false;
    sctx->framebuffer.DB_has_shader_readable_metadata = false;
+   sctx->framebuffer.DB_meta_pipe_misaligned = false;
    sctx->framebuffer.all_DCC_pipe_aligned = true;
    sctx->framebuffer.has_dcc_msaa = false;
    sctx->framebuffer.min_bytes_per_pixel = 0;
@@ -2598,7 +2607,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
        * This gives the best results for slow clears for AMD_TEST=blitperf on Navi31.
        */
       if ((sctx->framebuffer.nr_samples == 8 && tex->surface.bpe != 2) ||
-          (tex->surface.thick_tiling && tex->surface.bpe == 4 &&
+          (tex->surface.block256B_extent.depth > 1 && tex->surface.bpe == 4 &&
            util_format_get_nr_components(psurf->format) == 4))
          sctx->framebuffer.disable_vrs_flat_shading = true;
    }
@@ -2611,8 +2620,10 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
       si_init_depth_surface(sctx);
 
       if (sctx->gfx_level < GFX12 &&
-          vi_tc_compat_htile_enabled(zstex, state->zsbuf.level, PIPE_MASK_ZS))
+          vi_tc_compat_htile_enabled(zstex, state->zsbuf.level, PIPE_MASK_ZS)) {
          sctx->framebuffer.DB_has_shader_readable_metadata = true;
+         sctx->framebuffer.DB_meta_pipe_misaligned = zstex->htile_pipe_misaligned;
+      }
 
       /* Update the minimum but don't keep 0. */
       if (!sctx->framebuffer.min_bytes_per_pixel ||
@@ -3487,7 +3498,7 @@ static void si_set_min_samples(struct pipe_context *ctx, unsigned min_samples)
 
 /**
  * Build the sampler view descriptor for a buffer texture.
- * @param state 256-bit descriptor; only the high 128 bits are filled in
+ * @param state 256-bit descriptor
  */
 void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf,
                                enum pipe_format format, unsigned offset, unsigned num_elements,
@@ -4597,6 +4608,15 @@ static void si_set_vertex_buffers(struct pipe_context *ctx, unsigned count,
       si_vs_key_update_inputs(sctx);
 }
 
+static void si_vertex_state_destroy(struct pipe_screen *screen,
+                                    struct pipe_vertex_state *state)
+{
+   pipe_vertex_buffer_unreference(&state->input.vbuffer);
+   pipe_resource_reference(&state->input.indexbuf, NULL);
+   FREE(state);
+}
+
+
 static struct pipe_vertex_state *
 si_create_vertex_state(struct pipe_screen *screen,
                        struct pipe_vertex_buffer *buffer,
@@ -4608,6 +4628,9 @@ si_create_vertex_state(struct pipe_screen *screen,
    struct si_screen *sscreen = (struct si_screen *)screen;
    struct si_vertex_state *state = CALLOC_STRUCT(si_vertex_state);
 
+   if (!state)
+      return NULL;
+
    util_init_pipe_vertex_state(screen, buffer, elements, num_elements, indexbuf, full_velem_mask,
                                &state->b);
 
@@ -4617,6 +4640,12 @@ si_create_vertex_state(struct pipe_screen *screen,
    struct si_context ctx = {};
    ctx.b.screen = screen;
    struct si_vertex_elements *velems = si_create_vertex_elements(&ctx.b, num_elements, elements);
+
+   if (!velems) {
+      si_vertex_state_destroy(screen, &state->b);
+      return NULL;
+   }
+
    state->velems = *velems;
    si_delete_vertex_element(&ctx.b, velems);
 
@@ -4637,14 +4666,6 @@ si_create_vertex_state(struct pipe_screen *screen,
    }
 
    return &state->b;
-}
-
-static void si_vertex_state_destroy(struct pipe_screen *screen,
-                                    struct pipe_vertex_state *state)
-{
-   pipe_vertex_buffer_unreference(&state->input.vbuffer);
-   pipe_resource_reference(&state->input.indexbuf, NULL);
-   FREE(state);
 }
 
 static struct pipe_vertex_state *
@@ -4705,7 +4726,9 @@ static void si_pm4_emit_sqtt_pipeline(struct si_context *sctx, unsigned index)
 {
    struct si_pm4_state *state = sctx->queued.array[index];
 
-   si_pm4_emit_state(sctx, index);
+   /* like the rasterizer, this is re-emitted while it's bound */
+   si_pm4_emit_commands(sctx, &state->base);
+   sctx->emitted.array[index] = state;
 
    radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, ((struct si_sqtt_fake_pipeline*)state)->bo,
                              RADEON_USAGE_READ | RADEON_PRIO_SHADER_BINARY);

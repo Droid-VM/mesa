@@ -139,7 +139,7 @@
 /* p161 */
 #define _3DSTATE_DST_BUF_VARS_CMD (CMD_3D | (0x1d << 24) | (0x85 << 16))
 /* Dword 1 */
-#define CLASSIC_EARLY_DEPTH         (1 << 31)
+#define CLASSIC_EARLY_DEPTH         (1u << 31)
 #define TEX_DEFAULT_COLOR_OGL       (0 << 30)
 #define TEX_DEFAULT_COLOR_D3D       (1 << 30)
 #define ZR_EARLY_DEPTH              (1 << 29)
@@ -205,7 +205,7 @@
 /* _3DSTATE_FOG_MODE, p174 */
 #define _3DSTATE_FOG_MODE_CMD (CMD_3D | (0x1d << 24) | (0x89 << 16) | 2)
 /* Dword 1 */
-#define FMC1_FOGFUNC_MODIFY_ENABLE  (1 << 31)
+#define FMC1_FOGFUNC_MODIFY_ENABLE  (1u << 31)
 #define FMC1_FOGFUNC_VERTEX         (0 << 28)
 #define FMC1_FOGFUNC_PIXEL_EXP      (1 << 28)
 #define FMC1_FOGFUNC_PIXEL_EXP2     (2 << 28)
@@ -369,11 +369,11 @@
    (S4_VFMT_POINT_WIDTH | S4_VFMT_SPEC_FOG | S4_VFMT_COLOR |                   \
     S4_VFMT_DEPTH_OFFSET | S4_VFMT_XYZW_MASK | S4_VFMT_FOG_PARAM)
 
-#define S5_WRITEDISABLE_ALPHA         (1 << 31)
+#define S5_WRITEDISABLE_ALPHA         (1u << 31)
 #define S5_WRITEDISABLE_RED           (1 << 30)
 #define S5_WRITEDISABLE_GREEN         (1 << 29)
 #define S5_WRITEDISABLE_BLUE          (1 << 28)
-#define S5_WRITEDISABLE_MASK          (0xf << 28)
+#define S5_WRITEDISABLE_MASK          (0xfu << 28)
 #define S5_FORCE_DEFAULT_POINT_SIZE   (1 << 27)
 #define S5_LAST_PIXEL_ENABLE          (1 << 26)
 #define S5_GLOBAL_DEPTH_OFFSET_ENABLE (1 << 25)
@@ -393,7 +393,7 @@
 #define S5_COLOR_DITHER_ENABLE        (1 << 1)
 #define S5_LOGICOP_ENABLE             (1 << 0)
 
-#define S6_ALPHA_TEST_ENABLE         (1 << 31)
+#define S6_ALPHA_TEST_ENABLE         (1u << 31)
 #define S6_ALPHA_TEST_FUNC_SHIFT     28
 #define S6_ALPHA_TEST_FUNC_MASK      (0x7 << 28)
 #define S6_ALPHA_REF_SHIFT           20
@@ -565,7 +565,7 @@
 #define SRC_ZERO 4
 #define SRC_ONE  5
 
-#define A1_SRC0_CHANNEL_X_NEGATE (1 << 31)
+#define A1_SRC0_CHANNEL_X_NEGATE (1u << 31)
 #define A1_SRC0_CHANNEL_X_SHIFT  28
 #define A1_SRC0_CHANNEL_Y_NEGATE (1 << 27)
 #define A1_SRC0_CHANNEL_Y_SHIFT  24
@@ -580,7 +580,7 @@
 #define A1_SRC1_CHANNEL_Y_NEGATE (1 << 3)
 #define A1_SRC1_CHANNEL_Y_SHIFT  0
 
-#define A2_SRC1_CHANNEL_Z_NEGATE (1 << 31)
+#define A2_SRC1_CHANNEL_Z_NEGATE (1u << 31)
 #define A2_SRC1_CHANNEL_Z_SHIFT  28
 #define A2_SRC1_CHANNEL_W_NEGATE (1 << 27)
 #define A2_SRC1_CHANNEL_W_SHIFT  24
@@ -677,7 +677,7 @@
 #define MS1_MAPMASK_SHIFT 0
 #define MS1_MAPMASK_MASK  (0x8fff << 0)
 
-#define MS2_UNTRUSTED_SURFACE    (1 << 31)
+#define MS2_UNTRUSTED_SURFACE    (1u << 31)
 #define MS2_ADDRESS_MASK         0xfffffffc
 #define MS2_VERTICAL_LINE_STRIDE (1 << 1)
 #define MS2_VERTICAL_OFFSET      (1 << 1)
@@ -762,7 +762,7 @@
 #define SS1_MAPMASK_SHIFT 0
 #define SS1_MAPMASK_MASK  (0x8fff << 0)
 
-#define SS2_REVERSE_GAMMA_ENABLE    (1 << 31)
+#define SS2_REVERSE_GAMMA_ENABLE    (1u << 31)
 #define SS2_PACKED_TO_PLANAR_ENABLE (1 << 30)
 #define SS2_COLORSPACE_CONVERSION   (1 << 29)
 #define SS2_CHROMAKEY_SHIFT         27

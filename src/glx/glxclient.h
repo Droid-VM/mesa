@@ -31,7 +31,9 @@
 #include "glxhash.h"
 #include "util/macros.h"
 #include "util/u_thread.h"
+#include "util/list.h"
 #include "util/set.h"
+#include "util/simple_mtx.h"
 #include "loader.h"
 #include "glxextensions.h"
 
@@ -288,6 +290,10 @@ struct glx_context
 
    struct glx_screen *psc;
 
+   /** link in glx_display::contexts */
+   struct list_head link;
+   bool in_display_list;
+
     /**
      * \c GL_TRUE if the context was created with ImportContext, which
      * means the server-side context was created by another X client.
@@ -427,6 +433,12 @@ extern Bool
 glx_context_init(struct glx_context *gc,
 		 struct glx_screen *psc, struct glx_config *fbconfig);
 
+extern void
+glx_display_add_context(struct glx_context *gc);
+
+extern void
+glx_display_remove_context(struct glx_context *gc);
+
 #define __glXSetError(gc,code)  \
    if (!(gc)->error) {          \
       (gc)->error = code;       \
@@ -541,6 +553,7 @@ struct glx_screen
    bool force_direct_context;
    bool allow_invalid_glx_destroy_window;
    bool keep_native_window_glx_drawable;
+   bool client_side_glx_window;
    bool can_EXT_texture_from_pixmap;
 
    char *driverName;
@@ -615,6 +628,10 @@ struct glx_display
    struct glx_screen **screens;
 
    __glxHashTable *glXDrawHash;
+
+   /** contexts returned to the application, destroyed with the display */
+   struct list_head contexts;
+   simple_mtx_t contexts_lock;
 
 #if defined(GLX_DIRECT_RENDERING)
    __glxHashTable *drawHash;

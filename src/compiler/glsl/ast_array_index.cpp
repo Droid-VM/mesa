@@ -123,7 +123,7 @@ get_implicit_array_size(struct _mesa_glsl_parse_state *state,
     */
    if (state->stage == MESA_SHADER_TESS_CTRL &&
        var->data.mode == ir_var_shader_in) {
-      return state->Const.MaxPatchVertices;
+      return MAX_PATCH_VERTICES;
    }
 
    /* Non-patch inputs in evaluation shader are implicitly sized
@@ -132,7 +132,7 @@ get_implicit_array_size(struct _mesa_glsl_parse_state *state,
    if (state->stage == MESA_SHADER_TESS_EVAL &&
        var->data.mode == ir_var_shader_in &&
        !var->data.patch) {
-      return state->Const.MaxPatchVertices;
+      return MAX_PATCH_VERTICES;
    }
 
    return 0;

@@ -29,7 +29,6 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_serialize.h"
 #include "main/uniforms.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_memory.h"
 #include "util/perf/cpu_trace.h"
 
@@ -152,7 +151,7 @@ st_deserialise_nir_program(struct gl_context *ctx,
 
    MESA_TRACE_FUNC();
 
-   st_set_prog_affected_state_flags(prog);
+   st_set_prog_affected_state_flags(st, prog);
 
    /* Avoid reallocation of the program parameter list, because the uniform
     * storage is only associated with the original parameter list.
@@ -240,12 +239,4 @@ st_load_nir_from_disk_cache(struct gl_context *ctx,
    }
 
    return true;
-}
-
-void
-st_serialise_nir_program_binary(struct gl_context *ctx,
-                                struct gl_shader_program *shProg,
-                                struct gl_program *prog)
-{
-   st_serialise_nir_program(ctx, prog);
 }

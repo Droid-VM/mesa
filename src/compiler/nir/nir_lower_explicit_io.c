@@ -151,6 +151,7 @@ build_addr_for_var(nir_builder *b, nir_variable *var,
                             nir_var_mem_task_payload |
                             nir_var_mem_global |
                             nir_var_shader_temp | nir_var_function_temp |
+                            nir_var_shader_call_data_in | nir_var_shader_call_data_out |
                             nir_var_mem_push_const | nir_var_mem_constant));
 
    const nir_address_format base_addr_format =
@@ -709,6 +710,8 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
          break;
       case nir_var_shader_temp:
       case nir_var_function_temp:
+      case nir_var_shader_call_data_in:
+      case nir_var_shader_call_data_out:
          if (addr_format_is_offset(addr_format, mode)) {
             op = nir_intrinsic_load_scratch;
          } else {
@@ -959,6 +962,8 @@ build_explicit_io_store(nir_builder *b, nir_intrinsic_instr *intrin,
          break;
       case nir_var_shader_temp:
       case nir_var_function_temp:
+      case nir_var_shader_call_data_in:
+      case nir_var_shader_call_data_out:
          if (addr_format_is_offset(addr_format, mode)) {
             op = nir_intrinsic_store_scratch;
          } else {
@@ -1148,9 +1153,6 @@ build_explicit_io_atomic(nir_builder *b, nir_intrinsic_instr *intrin,
       atomic->src[src++] = nir_src_for_ssa(intrin->src[1 + i].ssa);
    }
 
-   /* Global atomics don't have access flags because they assume that the
-    * address may be non-uniform.
-    */
    if (nir_intrinsic_has_access(atomic))
       nir_intrinsic_set_access(atomic, nir_intrinsic_access(intrin));
 
@@ -1395,7 +1397,8 @@ static unsigned
 get_max_shift(nir_intrinsic_instr *intrin,
               const nir_shader_compiler_options *options)
 {
-   if (options->max_offset_shift) {
+   if (intrin->intrinsic != nir_intrinsic_deref_buffer_address &&
+       options->max_offset_shift) {
       return options->max_offset_shift(intrin, options->cb_data);
    }
 
@@ -1443,6 +1446,21 @@ nir_lower_explicit_io_instr(nir_builder *b,
                             nir_address_format addr_format)
 {
    b->cursor = nir_after_instr(&intrin->instr);
+
+   if (intrin->intrinsic == nir_intrinsic_deref_buffer_address) {
+      nir_io_offset addr = build_addr(b, intrin, base_addr, addr_format, 0, 1, 0);
+      if (addr_format_is_global(addr_format, nir_var_mem_ssbo)) {
+         nir_def_replace(&intrin->def, addr_to_global(b, addr.def, addr_format));
+      } else {
+         nir_def *index = addr_to_index(b, addr.def, addr_format);
+         nir_def *offset = addr_to_offset(b, addr.def, addr_format);
+         nir_def *res = nir_load_ssbo_address(b, intrin->def.num_components,
+                                              intrin->def.bit_size, index, offset,
+                                              .access = nir_intrinsic_access(intrin));
+         nir_def_replace(&intrin->def, res);
+      }
+      return;
+   }
 
    nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
    unsigned vec_stride = glsl_get_explicit_stride(deref->type);
@@ -1820,7 +1838,8 @@ nir_lower_explicit_io_impl(nir_function_impl *impl, nir_variable_mode modes,
             case nir_intrinsic_store_deref_block_intel:
             case nir_intrinsic_load_deref_transpose_amd:
             case nir_intrinsic_deref_atomic:
-            case nir_intrinsic_deref_atomic_swap: {
+            case nir_intrinsic_deref_atomic_swap:
+            case nir_intrinsic_deref_buffer_address: {
                nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
                if (nir_deref_mode_is_in_set(deref, modes)) {
                   lower_explicit_io_access(&b, intrin, addr_format);
@@ -1992,6 +2011,7 @@ lower_vars_to_explicit(nir_shader *shader,
       break;
    case nir_var_function_temp:
    case nir_var_shader_temp:
+   case nir_var_shader_call_data_out:
       offset = shader->scratch_size;
       break;
    case nir_var_mem_shared:
@@ -2010,7 +2030,7 @@ lower_vars_to_explicit(nir_shader *shader,
    case nir_var_mem_constant:
       offset = shader->constant_data_size;
       break;
-   case nir_var_shader_call_data:
+   case nir_var_shader_call_data_in:
    case nir_var_ray_hit_attrib:
    case nir_var_mem_node_payload_in:
       offset = 0;
@@ -2051,6 +2071,7 @@ lower_vars_to_explicit(nir_shader *shader,
       break;
    case nir_var_shader_temp:
    case nir_var_function_temp:
+   case nir_var_shader_call_data_out:
       shader->scratch_size = offset;
       break;
    case nir_var_mem_shared:
@@ -2068,7 +2089,7 @@ lower_vars_to_explicit(nir_shader *shader,
    case nir_var_mem_constant:
       shader->constant_data_size = offset;
       break;
-   case nir_var_shader_call_data:
+   case nir_var_shader_call_data_in:
    case nir_var_ray_hit_attrib:
    case nir_var_mem_node_payload_in:
       break;
@@ -2155,7 +2176,7 @@ nir_lower_vars_to_explicit_types(nir_shader *shader,
    ASSERTED nir_variable_mode supported =
       nir_var_mem_shared | nir_var_mem_global | nir_var_mem_constant |
       nir_var_shader_temp | nir_var_function_temp | nir_var_uniform |
-      nir_var_shader_call_data | nir_var_ray_hit_attrib |
+      nir_var_shader_call_data_in | nir_var_shader_call_data_out | nir_var_ray_hit_attrib |
       nir_var_mem_task_payload | nir_var_mem_node_payload |
       nir_var_mem_node_payload_in;
    assert(!(modes & ~supported) && "unsupported");
@@ -2181,8 +2202,10 @@ nir_lower_vars_to_explicit_types(nir_shader *shader,
       progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_shader_temp, type_info);
    if (modes & nir_var_mem_constant)
       progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_mem_constant, type_info);
-   if (modes & nir_var_shader_call_data)
-      progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_shader_call_data, type_info);
+   if (modes & nir_var_shader_call_data_in)
+      progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_shader_call_data_in, type_info);
+   if (modes & nir_var_shader_call_data_out)
+      progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_shader_call_data_out, type_info);
    if (modes & nir_var_ray_hit_attrib)
       progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_ray_hit_attrib, type_info);
    if (modes & nir_var_mem_task_payload)

@@ -8,102 +8,138 @@
 
 namespace {
 
-class nir_opt_varyings_test_dead_output : public nir_opt_varyings_test
-{};
+class nir_opt_varyings_test_dead_output : public nir_opt_varyings_test {
+ public:
+   nir_intrinsic_instr *intr;
+   nir_def *output;
+   gl_varying_slot slot;
+   unsigned bitsize;
+
+   void setup_store(mesa_shader_stage producer, mesa_shader_stage consumer,
+                    gl_varying_slot in_slot, nir_alu_type ty, unsigned in_bitsize)
+   {
+      slot = in_slot;
+      bitsize = in_bitsize;
+
+      create_shaders(producer, consumer);
+      intr = store_output(b1, slot, 0, ty,
+                          nir_imm_floatN_t(b1, 0, bitsize), 0, false);
+   }
+
+   void setup_load(mesa_shader_stage producer, mesa_shader_stage consumer,
+                   gl_varying_slot in_slot, nir_alu_type ty, unsigned in_bitsize)
+   {
+      slot = in_slot;
+      bitsize = in_bitsize;
+
+      create_shaders(producer, consumer);
+      output = load_output(b1, slot, 0, ty, 0);
+      store_ssbo(b1, output);
+   }
+
+   void check_dead_output_removed()
+   {
+      ASSERT_EQ(opt_varyings(), nir_progress_producer);
+      ASSERT_TRUE(b1->shader->info.outputs_written == 0 &&
+                  b1->shader->info.patch_outputs_written == 0 &&
+                  b1->shader->info.outputs_written_16bit == 0);
+      ASSERT_TRUE(!shader_contains_instr(b1, &intr->instr));
+   }
+
+   void check_dead_output_kept()
+   {
+      ASSERT_EQ(opt_varyings(), nir_progress_producer);
+      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(slot));
+      ASSERT_TRUE(shader_contains_instr(b1, &intr->instr));
+      ASSERT_EQ(nir_intrinsic_io_semantics(intr).no_varying,
+                (slot != VARYING_SLOT_POS &&
+                 slot != VARYING_SLOT_PSIZ &&
+                 slot != VARYING_SLOT_CLIP_VERTEX));
+   }
+
+   void check_dead_output_kept_xfb()
+   {
+      struct nir_io_xfb xfb;
+      memset(&xfb, 0, sizeof(xfb));
+      xfb.out[0].num_components = 1;
+      nir_intrinsic_set_io_xfb(intr, xfb);
+
+      /* Compaction moves COL1 to COL0. */
+      unsigned index = slot;
+      if (index == VARYING_SLOT_COL1 || index == VARYING_SLOT_BFC1)
+         index--;
+
+      /* Compaction moves all these to VAR0. */
+      /* It's correct for TEX0 because it's not used by FS. */
+      if (index == VARYING_SLOT_FOGC || index == VARYING_SLOT_PRIMITIVE_ID ||
+          index == VARYING_SLOT_TEX0 || index == VARYING_SLOT_VAR0_16BIT)
+         index = VARYING_SLOT_VAR0;
+
+      if (index == VARYING_SLOT_POS || index == VARYING_SLOT_PSIZ ||
+          index == VARYING_SLOT_CLIP_VERTEX)
+         ASSERT_EQ(opt_varyings(), 0);
+      else
+         ASSERT_EQ(opt_varyings(), nir_progress_producer);
+
+      if (index >= VARYING_SLOT_VAR0_16BIT) {
+         ASSERT_EQ(b1->shader->info.outputs_written_16bit,
+                   BITFIELD_BIT(index - VARYING_SLOT_VAR0_16BIT));
+      } else {
+         ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(index));
+      }
+      ASSERT_TRUE(shader_contains_instr(b1, &intr->instr));
+      ASSERT_EQ(nir_intrinsic_io_semantics(intr).no_varying,
+                (slot != VARYING_SLOT_POS &&
+                 slot != VARYING_SLOT_PSIZ &&
+                 slot != VARYING_SLOT_CLIP_VERTEX));
+      ASSERT_EQ(nir_intrinsic_io_xfb(intr).out[0].num_components, 1);
+   }
+
+   void check_dead_output_load_to_undef()
+   {
+      ASSERT_EQ(opt_varyings(), nir_progress_producer);
+      ASSERT_TRUE(b1->shader->info.outputs_read == 0 &&
+                  b1->shader->info.patch_outputs_read == 0 &&
+                  b1->shader->info.outputs_read_16bit == 0);
+      ASSERT_TRUE(!shader_contains_def(b1, output));
+      ASSERT_TRUE(shader_contains_undef(b1, bitsize));
+   }
+};
 
 #define TEST_DEAD_OUTPUT_REMOVED(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_output, \
        store_##producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_intrinsic_instr *intr = \
-      store_output(b1, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, \
-                   nir_imm_floatN_t(b1, 0, bitsize), 0, false); \
-   \
-   ASSERT_EQ(opt_varyings(), nir_progress_producer); \
-   ASSERT_TRUE(b1->shader->info.outputs_written == 0 && \
-               b1->shader->info.patch_outputs_written == 0 && \
-               b1->shader->info.outputs_written_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_instr(b1, &intr->instr)); \
+   setup_store(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+               VARYING_SLOT_##slot, nir_type_float##bitsize, bitsize); \
+   check_dead_output_removed(); \
 }
 
 #define TEST_DEAD_OUTPUT_KEPT(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_output, \
        store_##producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_intrinsic_instr *intr = \
-      store_output(b1, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, \
-                   nir_imm_floatN_t(b1, 0, bitsize), 0, false); \
-   \
-   ASSERT_EQ(opt_varyings(), nir_progress_producer); \
-   ASSERT_EQ(b1->shader->info.outputs_written, VARYING_BIT_##slot); \
-   ASSERT_TRUE(shader_contains_instr(b1, &intr->instr)); \
-   ASSERT_EQ(nir_intrinsic_io_semantics(intr).no_varying, \
-               (VARYING_SLOT_##slot != VARYING_SLOT_POS && \
-                VARYING_SLOT_##slot != VARYING_SLOT_PSIZ && \
-                VARYING_SLOT_##slot != VARYING_SLOT_CLIP_VERTEX)); \
+   setup_store(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+               VARYING_SLOT_##slot, nir_type_float##bitsize, bitsize); \
+   check_dead_output_kept(); \
 }
 
 #define TEST_DEAD_OUTPUT_KEPT_XFB(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_output, \
        xfb_store_##producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_intrinsic_instr *intr = \
-      store_output(b1, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, \
-                   nir_imm_floatN_t(b1, 0, bitsize), 0, false); \
-   \
-   struct nir_io_xfb xfb; \
-   memset(&xfb, 0, sizeof(xfb)); \
-   xfb.out[0].num_components = 1; \
-   nir_intrinsic_set_io_xfb(intr, xfb); \
-   \
-   /* Compaction moves COL1 to COL0. */ \
-   unsigned index = VARYING_SLOT_##slot; \
-   if (index == VARYING_SLOT_COL1 || index == VARYING_SLOT_BFC1) \
-      index--; \
-   \
-   /* Compaction moves all these to VAR0. */ \
-   /* It's correct for TEX0 because it's not used by FS. */ \
-   if (index == VARYING_SLOT_FOGC || index == VARYING_SLOT_PRIMITIVE_ID || \
-       index == VARYING_SLOT_TEX0 || index == VARYING_SLOT_VAR0_16BIT) \
-      index = VARYING_SLOT_VAR0; \
-      \
-   if (index == VARYING_SLOT_POS || index == VARYING_SLOT_PSIZ || \
-       index == VARYING_SLOT_CLIP_VERTEX) \
-      ASSERT_EQ(opt_varyings(), 0); \
-   else \
-      ASSERT_EQ(opt_varyings(), nir_progress_producer); \
-   \
-   if (index >= VARYING_SLOT_VAR0_16BIT) { \
-      ASSERT_EQ(b1->shader->info.outputs_written_16bit, \
-                  BITFIELD_BIT(index - VARYING_SLOT_VAR0_16BIT)); \
-   } else { \
-      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(index)); \
-   } \
-   ASSERT_TRUE(shader_contains_instr(b1, &intr->instr)); \
-   ASSERT_EQ(nir_intrinsic_io_semantics(intr).no_varying, \
-               (VARYING_SLOT_##slot != VARYING_SLOT_POS && \
-                VARYING_SLOT_##slot != VARYING_SLOT_PSIZ && \
-                VARYING_SLOT_##slot != VARYING_SLOT_CLIP_VERTEX)); \
-   ASSERT_EQ(nir_intrinsic_io_xfb(intr).out[0].num_components, 1); \
+   setup_store(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+               VARYING_SLOT_##slot, nir_type_float##bitsize, bitsize); \
+   check_dead_output_kept_xfb(); \
 }
 
 #define TEST_DEAD_OUTPUT_LOAD_TO_UNDEF(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_output, \
        load_##producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_def *output = load_output(b1, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, 0); \
-   store_ssbo(b1, output); \
-   \
-   ASSERT_EQ(opt_varyings(), nir_progress_producer); \
-   ASSERT_TRUE(b1->shader->info.outputs_read == 0 && \
-               b1->shader->info.patch_outputs_read == 0 && \
-               b1->shader->info.outputs_read_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_def(b1, output)); \
-   ASSERT_TRUE(shader_contains_undef(b1, bitsize)); \
+   setup_load(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+              VARYING_SLOT_##slot, nir_type_float##bitsize, bitsize); \
+   check_dead_output_load_to_undef(); \
 }
 
 TEST_DEAD_OUTPUT_REMOVED(VERTEX, TESS_CTRL, POS, 32)

@@ -78,6 +78,7 @@
 #include "c11/threads.h"
 #include "util/u_debug.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_string.h"
 
 #include "lp_bld_misc.h"
 #include "lp_bld_debug.h"
@@ -118,7 +119,9 @@ void lp_bld_init_native_targets()
          char *option;
          char *options[64] = {(char *) "llc"};      // Warning without cast
          int   n;
-         for (n = 0, option = strtok(env_llc_options, " "); option; n++, option = strtok(NULL, " ")) {
+         char *saveptr;
+         for (n = 0, option = strtok_r(env_llc_options, " ", &saveptr); option;
+              n++, option = strtok_r(NULL, " ", &saveptr)) {
             options[n + 1] = option;
          }
          if (gallivm_debug & (GALLIVM_DEBUG_IR | GALLIVM_DEBUG_ASM | GALLIVM_DEBUG_DUMP_BC)) {
@@ -313,7 +316,7 @@ void
 lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
 {
 
-#if DETECT_ARCH_ARM
+#if DETECT_ARCH_ARM || DETECT_ARCH_AARCH64
    /* llvm-3.3+ implements sys::getHostCPUFeatures for Arm,
     * which allows us to enable/disable code generation based
     * on the results of cpuid on these architectures.
@@ -373,8 +376,11 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    MAttrs.push_back(util_get_cpu_caps()->has_avx512dq ? "+avx512dq"  : "-avx512dq");
    MAttrs.push_back(util_get_cpu_caps()->has_avx512vl ? "+avx512vl"  : "-avx512vl");
    MAttrs.push_back(util_get_cpu_caps()->has_avx512vbmi ? "+avx512vbmi"  : "-avx512vbmi");
+   MAttrs.push_back(util_get_cpu_caps()->has_avx512fp16 ? "+avx512fp16"  : "-avx512fp16");
+   /* turn off APX for now */
+   MAttrs.push_back("-ppx");
 #endif
-#if DETECT_ARCH_ARM
+#if DETECT_ARCH_ARM || DETECT_ARCH_AARCH64
    if (!util_get_cpu_caps()->has_neon) {
       MAttrs.push_back("-neon");
       MAttrs.push_back("-crypto");
@@ -397,6 +403,15 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    if (util_get_cpu_caps()->has_altivec) {
       MAttrs.push_back(util_get_cpu_caps()->has_vsx ? "+vsx" : "-vsx");
    }
+#if !DETECT_ARCH_PPC_64
+   /*
+    * RuntimeDyld implements only the ADDR16 relocations on 32-bit PowerPC,
+    * so it can't resolve the R_PPC_REL24 of a direct call to a function
+    * outside of the module. A long call loads the address of the callee with
+    * a pair of ADDR16 relocations instead.
+    */
+   MAttrs.push_back("+longcall");
+#endif
 #endif
 
 #if DETECT_ARCH_MIPS64
@@ -414,7 +429,7 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    MAttrs.push_back(util_get_cpu_caps()->has_rv_v ? "+v" : "-v");
    MAttrs.push_back(util_get_cpu_caps()->has_rv_zba ? "+zba" : "-zba");
    MAttrs.push_back(util_get_cpu_caps()->has_rv_zbb ? "+zbb" : "-zbb");
-   MAttrs.push_back(util_get_cpu_caps()->has_rv_zbs ? "+zbb" : "-zbs");
+   MAttrs.push_back(util_get_cpu_caps()->has_rv_zbs ? "+zbs" : "-zbs");
 #endif
 
 #if DETECT_ARCH_LOONGARCH64 == 1

@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Collabora Ltd.
+ * Copyright © 2026 Arm Ltd.
  * SPDX-License-Identifier: MIT
  */
 
@@ -24,6 +25,14 @@ struct pan_model;
 struct pan_blendable_format;
 struct pan_format;
 struct panvk_instance;
+
+struct panvk_heap_budget {
+   uint32_t ref_count;
+   struct list_head link;
+   dev_t rdev;
+
+   alignas(8) uint64_t heap_used;
+};
 
 struct panvk_physical_device {
    struct vk_physical_device vk;
@@ -65,7 +74,8 @@ struct panvk_physical_device {
       uint32_t type_count;
 
       uint64_t max_supported_va;
-      alignas(8) uint64_t heap_used;
+
+      struct panvk_heap_budget *budget;
    } memory;
 
    struct vk_sync_type drm_syncobj_type;

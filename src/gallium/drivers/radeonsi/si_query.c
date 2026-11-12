@@ -432,13 +432,13 @@ static bool si_query_sw_get_result(struct si_context *sctx, struct si_query *squ
    }
 
    case SI_QUERY_GFX_BO_LIST_SIZE:
-      result->u64 =
-         (query->end_result - query->begin_result) / (query->end_time - query->begin_time);
+      result->u64 = query->end_time != query->begin_time ?
+         (query->end_result - query->begin_result) / (query->end_time - query->begin_time) : 0;
       return true;
    case SI_QUERY_CS_THREAD_BUSY:
    case SI_QUERY_GALLIUM_THREAD_BUSY:
-      result->u64 =
-         (query->end_result - query->begin_result) * 100 / (query->end_time - query->begin_time);
+      result->u64 = query->end_time != query->begin_time ?
+         (query->end_result - query->begin_result) * 100 / (query->end_time - query->begin_time) : 0;
       return true;
    case SI_QUERY_GPIN_ASIC_ID:
       result->u32 = 0;
@@ -898,11 +898,11 @@ static void si_update_hw_pipeline_stats(struct si_context *sctx, unsigned type, 
 
       /* Enable/disable pipeline stats if we have any queries. */
       if (diff == 1 && sctx->num_hw_pipestat_streamout_queries == 1)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_STOP,
-                                        SI_BARRIER_EVENT_PIPELINESTAT_START);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_STOP,
+                                        AC_BARRIER_PIPELINESTAT_START);
       else if (diff == -1 && sctx->num_hw_pipestat_streamout_queries == 0)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_START,
-                                        SI_BARRIER_EVENT_PIPELINESTAT_STOP);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_START,
+                                        AC_BARRIER_PIPELINESTAT_STOP);
    }
 }
 
@@ -1609,8 +1609,8 @@ static void si_query_hw_get_result_resource(struct si_context *sctx, struct si_q
       break;
    }
 
-   si_set_barrier_flags(sctx, SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM |
-                                 (sctx->gfx_level <= GFX8 ? SI_BARRIER_INV_L2 : 0));
+   si_set_barrier_flags(sctx, AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM |
+                                 (sctx->gfx_level <= GFX8 ? AC_BARRIER_INV_L2 : 0));
 
    for (qbuf = &query->buffer; qbuf; qbuf = qbuf_prev) {
       if (query->b.type != PIPE_QUERY_TIMESTAMP) {
@@ -1651,7 +1651,7 @@ static void si_query_hw_get_result_resource(struct si_context *sctx, struct si_q
          va = qbuf->buf->gpu_address + qbuf->results_end - query->result_size;
          va += params.fence_offset;
 
-         si_cp_wait_mem(sctx, &sctx->gfx_cs, va, 0x80000000, 0x80000000, WAIT_REG_MEM_EQUAL);
+         ac_emit_cp_wait_mem(&sctx->gfx_cs.current, va, 0x80000000, 0x80000000, WAIT_REG_MEM_EQUAL);
       }
 
       unsigned writable_bitmask = 0x4;
@@ -1707,7 +1707,7 @@ static void si_render_condition(struct pipe_context *ctx, struct pipe_query *que
          /* Settings this in the render cond atom is too late,
           * so set it here. */
          if (sctx->gfx_level <= GFX8 || sctx->screen->info.cp_sdma_ge_use_system_memory_scope)
-            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+            si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
 
          sctx->render_cond_enabled = old_render_cond_enabled;
       }

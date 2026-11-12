@@ -218,6 +218,7 @@ v3dv_pipeline_get_nir_options(const struct v3d_device_info *devinfo)
          nir_divergence_multiple_workgroup_per_compute_subgroup,
       .discard_is_demote = true,
       .scalarize_ddx = true,
+      .lower_int64_options = (nir_lower_int64_options)~0,
    };
 
    if (!initialized) {
@@ -262,7 +263,9 @@ static bool
 try_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 {
    switch (intrin->intrinsic) {
-   case nir_intrinsic_load_input_attachment_coord: {
+   case nir_intrinsic_load_input_attachment_coord:
+   case nir_intrinsic_load_depth_input_attachment_coord:
+   case nir_intrinsic_load_stencil_input_attachment_coord: {
       b->cursor = nir_before_instr(&intrin->instr);
 
       nir_variable *pos_var =
@@ -294,6 +297,70 @@ lower_intrinsics(nir_shader *s)
                                        nir_metadata_control_flow, NULL);
 }
 
+static bool
+lower_tlb_input_attachment_instr(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   /* When reading input attachments in a regular render pass,
+    * input_attachment_index is set to True and texture_index has
+    * the input attachment index for both color and depth/stencil
+    * input attachments.
+    * When reading depth/stencil input attachments via the
+    * VK_KHR_dynamic_rendering_local_read extension,
+    * input_attachment_index is set to False, and
+    * input_attachment_{depth/stencil} are set to True instead. In
+    * this scenario, texture_index is not set at all and the driver
+    * needs to figure out the index of the attachments implicitly.
+    */
+   /* FIXME: Handle constant texture offsets before lower_tex_src. */
+   if (!tex->input_attachment_index ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_offset) >= 0) {
+      return false;
+   }
+
+   const struct v3dv_subpass *subpass = data;
+   if (tex->texture_index >= subpass->input_count ||
+       tex->texture_index >= MAX_INPUT_ATTACHMENTS) {
+      return false;
+   }
+
+   uint32_t location =
+      subpass->tlb_input_attachment_location[tex->texture_index];
+   if (location == UINT8_MAX)
+      return false;
+
+   /* We map both depth and stencil input attachment reads to FRAG_RESULT_DEPTH.
+    * Use the result type to tell whether we want DEPTH or STENCIL.
+    */
+   if (location == FRAG_RESULT_DEPTH &&
+       nir_alu_type_get_base_type(tex->dest_type) != nir_type_float) {
+      location = FRAG_RESULT_STENCIL;
+   }
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   int sample_src = nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   nir_def *sample = sample_src >= 0 ? tex->src[sample_src].src.ssa :
+                                       nir_imm_int(b, 0);
+   nir_def *result = nir_load_tile_image(b, tex->def.num_components,
+                                         tex->def.bit_size,
+                                         nir_imm_int(b, 0), sample,
+                                         .dest_type = tex->dest_type,
+                                         .io_semantics = (nir_io_semantics) {
+                                           .location = location,
+                                           .num_slots = 1,
+                                         });
+
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+static bool
+lower_tlb_input_attachments(nir_shader *nir, struct v3dv_subpass *subpass)
+{
+   return nir_shader_tex_pass(nir, lower_tlb_input_attachment_instr,
+                              nir_metadata_control_flow, subpass);
+}
+
 static void
 preprocess_nir(nir_shader *nir)
 {
@@ -323,6 +390,11 @@ preprocess_nir(nir_shader *nir)
 
       NIR_PASS(_, nir, lower_intrinsics);
    }
+
+   const nir_opt_access_options access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &access_options);
 
    NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
             nir_shader_get_entrypoint(nir), nir_var_shader_out);
@@ -760,7 +832,7 @@ lower_sampler(nir_builder *b,
       return false;
 
    /* If the instruction doesn't have a sampler (i.e. txf) we use backend_flags
-    * to bind a default sampler state to configure precission.
+    * to bind a default sampler state to configure precision.
     */
    if (sampler_idx < 0) {
       state->needs_default_sampler_state = true;
@@ -1493,7 +1565,11 @@ upload_assembly(struct v3dv_pipeline *pipeline)
          total_size += variant->qpu_insts_size;
    }
 
-   struct v3dv_bo *bo = v3dv_bo_alloc(pipeline->device, total_size,
+   /* Shaders for each pipeline stage are packed with no gap, so pad after
+    * the last one.
+    */
+   struct v3dv_bo *bo = v3dv_bo_alloc(pipeline->device,
+                                      total_size + V3D_QPU_PREFETCH_PAD,
                                       "pipeline shader assembly", true,
                                       VK_OBJECT_TYPE_PIPELINE,
                                       vk_object_to_u64_handle(&pipeline->base));
@@ -2045,6 +2121,18 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
    }
 
    key->software_blend = pipeline->blend.use_software;
+
+   struct v3dv_render_pass *pass =
+      v3dv_render_pass_from_handle(pCreateInfo->renderPass);
+   if (pass) {
+      const struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
+      memcpy(key->tlb_input_attachment_location,
+             subpass->tlb_input_attachment_location,
+             sizeof(key->tlb_input_attachment_location));
+   } else {
+      memset(key->tlb_input_attachment_location, UINT8_MAX,
+             sizeof(key->tlb_input_attachment_location));
+   }
 
    struct vk_render_pass_state *ri = &pipeline->rendering_info;
    for (uint32_t i = 0; i < ri->color_attachment_count; i++) {
@@ -2653,6 +2741,11 @@ pipeline_compile_graphics(struct v3dv_pipeline *pipeline,
       link_shaders(p_stage_vs->nir, p_stage_fs->nir);
    }
 
+   V3DV_FROM_HANDLE(v3dv_render_pass, pass, pCreateInfo->renderPass);
+   if (pass) {
+      struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
+      NIR_PASS(_, p_stage_fs->nir, lower_tlb_input_attachments, subpass);
+   }
    pipeline_lower_nir(pipeline, p_stage_fs, pipeline->layout);
    lower_fs_io(p_stage_fs->nir);
 
@@ -2838,11 +2931,10 @@ pipeline_setup_rendering_info(struct v3dv_device *device,
    struct vk_render_pass_state *rp = &pipeline->rendering_info;
    struct vk_multiview_state *mv = &pipeline->multiview_info;
 
-   if (pipeline->pass) {
-      assert(pipeline->subpass);
-      struct v3dv_render_pass *pass = pipeline->pass;
-      struct v3dv_subpass *subpass = pipeline->subpass;
-      const uint32_t attachment_idx = subpass->ds_attachment.attachment;
+   if (pCreateInfo->renderPass) {
+      struct v3dv_render_pass *pass = v3dv_render_pass_from_handle(pCreateInfo->renderPass);
+      struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
+      const uint32_t attachment_idx = subpass->ds_attachment;
 
       mv->view_mask = subpass->view_mask;
 
@@ -2863,7 +2955,7 @@ pipeline_setup_rendering_info(struct v3dv_device *device,
 
       rp->color_attachment_count = subpass->color_count;
       for (uint32_t i = 0; i < subpass->color_count; i++) {
-         const uint32_t attachment_idx = subpass->color_attachments[i].attachment;
+         const uint32_t attachment_idx = subpass->color_attachments[i];
          if (attachment_idx == VK_ATTACHMENT_UNUSED) {
             rp->color_attachment_formats[i] = VK_FORMAT_UNDEFINED;
             continue;
@@ -2941,7 +3033,7 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
 
    if (BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_VIEWPORTS) ||
        BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_SCISSORS)) {
-      /* FIXME: right now we don't support multiViewport so viewporst[0] would
+      /* FIXME: right now we don't support multiViewport so viewports[0] would
        * work now, but would need to change if we allow multiple viewports.
        */
       v3d_X((&device->devinfo), viewport_compute_xform)(&dyn->vp.viewports[0],
@@ -3003,8 +3095,6 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    V3DV_FROM_HANDLE(v3dv_render_pass, render_pass, pCreateInfo->renderPass);
    if (render_pass) {
       assert(pCreateInfo->subpass < render_pass->subpass_count);
-      pipeline->pass = render_pass;
-      pipeline->subpass = &render_pass->subpasses[pCreateInfo->subpass];
    }
 
    pipeline_setup_rendering_info(device, pipeline, pCreateInfo, pAllocator);
@@ -3708,8 +3798,8 @@ v3dv_GetPipelineExecutableStatisticsKHR(
          .instrs = qpu_inst_count,
          .thread_count = prog_data->threads,
          .spill_size = prog_data->spill_size,
-         .spills = prog_data->spill_size,
-         .fills = prog_data->spill_size,
+         .spills = prog_data->tmu_spills,
+         .fills = prog_data->tmu_fills,
          .read_stalls = prog_data->qpu_read_stalls,
       };
 

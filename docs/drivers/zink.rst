@@ -16,7 +16,8 @@ as well as the capabilities of the Vulkan driver.
 
 The feature-levels implemented by Zink are exposed by `Vulkan Profiles
 <https://dev.vulkan.org/tools#vulkan-profiles>`__ in the
-:file:`VP_ZINK_requirements.json` profiles file.
+:file:`VP_ZINK_requirements.json` profiles file, for OpenGL, OpenGL ES, and
+OpenCL through Rusticl.
 
 Used with the `Vulkan Profiles tools <https://github.com/KhronosGroup/Vulkan-Profiles>`__,
 we can compare the ZINK profiles with Vulkan devices profiles generated with
@@ -45,6 +46,7 @@ Here's a list of those requirements:
   * :vk-feat:`fillModeNonSolid`
   * :vk-feat:`alphaToOne`
   * :vk-feat:`shaderClipDistance`
+  * :vk-feat:`independentBlend`
 
 * Device extensions:
 
@@ -53,6 +55,8 @@ Here's a list of those requirements:
   * :ext:`VK_KHR_create_renderpass2`
   * :ext:`VK_KHR_imageless_framebuffer`
   * :ext:`VK_KHR_timeline_semaphore`
+  * :ext:`VK_KHR_dynamic_rendering`
+  * :ext:`VK_EXT_robustness2` or :ext:`VK_KHR_robustness2` with ``nullDescriptor``
   * :ext:`VK_EXT_custom_border_color` with ``customBorderColorWithoutFormat``
   * :ext:`VK_EXT_provoking_vertex`
   * :ext:`VK_EXT_line_rasterization`, with the following ``VkPhysicalDeviceLineRasterizationFeaturesEXT``:
@@ -81,14 +85,20 @@ OpenGL 3.0
 For OpenGL 3.0 support, the following additional requirements must be
 met:
 
-* ``VkPhysicalDeviceFeatures``:
-
-  * :vk-feat:`independentBlend`
-
 * Device extensions:
 
   * :ext:`VK_EXT_transform_feedback`
   * :ext:`VK_EXT_conditional_rendering`
+
+* Formats requiring ``VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT``:
+
+  * ``VK_FORMAT_D32_SFLOAT``
+  * ``VK_FORMAT_D32_SFLOAT_S8_UINT``, which also requires
+    ``VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT``
+
+* Formats requiring ``VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT``:
+
+  * ``VK_FORMAT_B10G11R11_UFLOAT_PACK32``
 
 OpenGL 3.1
 ^^^^^^^^^^
@@ -97,6 +107,7 @@ For OpenGL 3.1 support, the following additional ``VkPhysicalDeviceLimits``
 are required:
 
 * ``maxPerStageDescriptorSamplers`` ≥ 16
+* ``maxPerStageDescriptorUniformBuffers`` ≥ 13
 
 OpenGL 3.2
 ^^^^^^^^^^
@@ -124,9 +135,23 @@ met, although some of these might not actually get verified:
 
   * :vk-feat:`dualSrcBlend`
 
+* ``VkPhysicalDeviceLimits``:
+
+  * ``timestampComputeAndGraphics``
+
 * Device extensions:
 
-  * :ext:`VK_EXT_vertex_attribute_divisor`
+  * :ext:`VK_EXT_vertex_attribute_divisor` or :ext:`VK_KHR_vertex_attribute_divisor`
+
+* Formats requiring ``VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT``:
+
+  * ``VK_FORMAT_A2R10G10B10_UNORM_PACK32``
+  * ``VK_FORMAT_A2B10G10R10_SNORM_PACK32``
+  * ``VK_FORMAT_A2R10G10B10_SNORM_PACK32``
+  * ``VK_FORMAT_A2B10G10R10_USCALED_PACK32``
+  * ``VK_FORMAT_A2R10G10B10_USCALED_PACK32``
+  * ``VK_FORMAT_A2B10G10R10_SSCALED_PACK32``
+  * ``VK_FORMAT_A2R10G10B10_SSCALED_PACK32``
 
 OpenGL 4.0
 ^^^^^^^^^^
@@ -207,6 +232,14 @@ met:
 
   * :vk-feat:`robustBufferAccess`
 
+* :vk-feat:`robustImageAccess2` from :ext:`VK_EXT_robustness2` or
+  :ext:`VK_KHR_robustness2`, or :vk-feat:`robustImageAccess`
+
+* ``VkPhysicalDeviceLimits``:
+
+  * ``maxPerStageDescriptorUniformBuffers`` ≥ 15
+  * ``maxComputeWorkGroupInvocations`` ≥ 1024
+
 * Formats requiring ``VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT``:
 
    * ``VK_FORMAT_R8G8B8A8_UNORM``
@@ -215,7 +248,6 @@ met:
    * ``VK_FORMAT_R16G16_UNORM``
    * ``VK_FORMAT_R16_SNORM``
    * ``VK_FORMAT_R16G16_SNORM``
-   * ``VK_FORMAT_D32_SFLOAT_S8_UINT``
 
 OpenGL 4.4
 ^^^^^^^^^^
@@ -261,6 +293,33 @@ met:
 * Device extensions:
 
   * :ext:`VK_KHR_draw_indirect_count`
+
+* ``VK_SUBGROUP_FEATURE_VOTE_BIT`` in compute shaders, or
+  :ext:`VK_EXT_shader_subgroup_vote`
+
+OpenGL ES
+^^^^^^^^^
+
+OpenGL ES 2.0 has the same requirements as OpenGL 2.1. OpenGL ES 3.0 also
+requires :ext:`VK_EXT_transform_feedback`, a vertex attribute divisor
+extension, and the limits and formats listed for OpenGL 3.0 and 3.1. OpenGL
+ES 3.1 also requires :vk-feat:`shaderStorageImageExtendedFormats` and
+:vk-feat:`shaderStorageImageWriteWithoutFormat`. OpenGL ES 3.2 also requires
+geometry and tessellation shaders, :ext:`VK_KHR_dynamic_rendering_local_read`
+for advanced blending, and most of the OpenGL 4.0 to 4.3 requirements.
+
+OpenCL
+^^^^^^
+
+Rusticl reports the embedded profile on Zink for devices with image support,
+since Zink exposes at most 32 sampled images per stage, fewer than the 128
+the full profile requires. OpenCL 3.0 with the embedded profile requires
+``maxImageDimension3D`` ≥ 2048, and with the full profile
+``maxComputeSharedMemorySize`` ≥ 32768. OpenCL 3.1 also requires
+:ext:`VK_KHR_shader_subgroup_rotate` and the subgroup shuffle operations in
+compute shaders. Every OpenCL profile requires :vk-feat:`shaderInt8`, for
+8-bit integers, and :ext:`VK_KHR_buffer_device_address` with
+:vk-feat:`bufferDeviceAddress`, since kernels use 64-bit global pointers.
 
 Performance
 -----------
@@ -350,11 +409,14 @@ in the link above.
 Apple macOS and MoltenVK
 ------------------------
 
-Zink on macOS is experimental with very limited capabilities.
-The Vulkan SDK (1.3.250 or newer) is required to build Zink.
-Set the build option ``-Dmoltenvk-dir=<directory>`` to point at your Vulkan SDK install or MoltenVK build.
+Zink on macOS is experimental with very limited capabilities. It runs on a macOS
+Vulkan driver such as KosmicKrisp or MoltenVK.
+
 Add Zink to the Gallium drivers build option ``-Dgallium-drivers=zink``.
-If installed using ``brew``, you can set ``-D moltenvk-dir=$(brew --prefix molten-vk)``.
+
+If using MoltenVK, set the build option ``-Dmoltenvk-dir=<directory>`` to point
+at your Vulkan SDK (1.3.250 or newer) install or MoltenVK build. If installed
+using ``brew``, you can set ``-D moltenvk-dir=$(brew --prefix molten-vk)``.
 
 
 IRC

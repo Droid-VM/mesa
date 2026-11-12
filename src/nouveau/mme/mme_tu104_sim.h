@@ -24,11 +24,12 @@ struct mme_tu104_sim_mem {
 
 void mme_tu104_sim_core(uint32_t inst_count, const struct mme_tu104_inst *insts,
                         const struct mme_sim_state_ops *state_ops,
-                        void *state_handler);
+                        void *state_handler, uint32_t cls_eng3d);
 
 void mme_tu104_sim(uint32_t inst_count, const struct mme_tu104_inst *insts,
                    uint32_t param_count, const uint32_t *params,
-                   uint32_t mem_count, struct mme_tu104_sim_mem *mems);
+                   uint32_t mem_count, struct mme_tu104_sim_mem *mems,
+                   uint32_t cls_eng3d);
 
 #ifdef __cplusplus
 }

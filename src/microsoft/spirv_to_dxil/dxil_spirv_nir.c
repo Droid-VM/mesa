@@ -141,7 +141,7 @@ dxil_spirv_nir_prep(nir_shader *nir)
 
    NIR_PASS(_, nir, nir_remove_dead_variables,
               nir_var_shader_in | nir_var_shader_out | nir_var_system_value |
-              nir_var_shader_call_data | nir_var_ray_hit_attrib,
+              nir_var_shader_call_data_in | nir_var_ray_hit_attrib,
               NULL);
    
    /* This needs to happen after remove_dead_vars because GLSLang likes to
@@ -1045,6 +1045,8 @@ dxil_spirv_nir_passes(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_var_copies);
    NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
 
+   if (conf->depth_clip_negative_one_to_one)
+      NIR_PASS(_, nir, nir_lower_clip_halfz);
 
    if (conf->yz_flip.mode != DXIL_SPIRV_YZ_FLIP_NONE) {
       assert(nir->info.stage == MESA_SHADER_VERTEX ||

@@ -28,6 +28,7 @@
 #include <main/mtypes.h>
 #include <main/texobj.h>
 #include <state_tracker/st_context.h>
+#include <main/glthread.h>
 #include <state_tracker/st_texture.h>
 
 #include "stw_image.h"
@@ -41,6 +42,8 @@ stw_create_image_from_texture(struct stw_context *ctx, GLenum gl_target, GLuint 
    struct gl_texture_object *obj;
    struct pipe_resource *tex;
    GLuint face = 0;
+
+   _mesa_glthread_finish(gl_ctx);
 
    obj = _mesa_lookup_texture(gl_ctx, texture);
    if (!obj || obj->Target != gl_target) {
@@ -92,6 +95,8 @@ stw_create_image_from_renderbuffer(struct stw_context *ctx, GLuint renderbuffer,
    struct gl_context *gl_ctx = st_ctx->ctx;
    struct gl_renderbuffer *rb;
    struct pipe_resource *tex;
+
+   _mesa_glthread_finish(gl_ctx);
 
    /* Section 3.9 (EGLImage Specification and Management) of the EGL 1.5
     * specification says:

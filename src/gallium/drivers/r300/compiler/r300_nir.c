@@ -172,6 +172,33 @@ remove_clip_vertex(nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static bool
+r300_should_scalarize_bcsel(const nir_alu_instr *alu)
+{
+   /* Scalarize bcsels that update a single vector component, such as:
+    *
+    * 32x3 %a = vec3 %new1, %old.y, %old.z
+    * 32x3 %b = vec3 %new2, %old.y, %old.z
+    * 32x3 %c = bcsel %cond.xxx, %a, %b
+    *
+    * The selects for the unchanged components fold away and the remaining
+    * scalar select can expose optimizations such as fmin/fmax.
+    */
+   unsigned num_different = 0;
+
+   for (unsigned i = 0; i < alu->def.num_components; i++) {
+      nir_scalar src1 = nir_scalar_resolved(alu->src[1].src.ssa,
+                                            alu->src[1].swizzle[i]);
+      nir_scalar src2 = nir_scalar_resolved(alu->src[2].src.ssa,
+                                            alu->src[2].swizzle[i]);
+
+      if (!nir_scalar_equal(src1, src2) && ++num_different > 1)
+         return false;
+   }
+
+   return num_different == 1;
+}
+
+static bool
 r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
 {
    if (instr->type != nir_instr_type_alu)
@@ -179,6 +206,34 @@ r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
 
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    switch (alu->op) {
+   case nir_op_fdot2:
+      /* Expose MADs in normal reconstruction from squared vec2 lengths. */
+      return *(const bool *)data && nir_alu_srcs_equal(alu, alu, 0, 1);
+   case nir_op_fmul:
+   case nir_op_fadd:
+   case nir_op_fneg: {
+      if (!*(const bool *)data)
+         return false;
+
+      /* Scalarize zeros mixed with computed components to allow per-channel
+       * constant folding, but leave constant vectors intact to avoid extra
+       * moves rebuilding their users.
+       */
+      unsigned zero_components = 0;
+      for (unsigned i = 0; i < alu->def.num_components; i++) {
+         for (unsigned j = 0; j < nir_op_infos[alu->op].num_inputs; j++) {
+            if (nir_src_is_const(alu->src[j].src))
+               continue;
+            nir_scalar src = nir_scalar_resolved(alu->src[j].src.ssa,
+                                                 alu->src[j].swizzle[i]);
+            if (nir_scalar_is_const(src) && nir_scalar_as_float(src) == 0.0) {
+               zero_components++;
+               break;
+            }
+         }
+      }
+      return zero_components && zero_components < alu->def.num_components;
+   }
    case nir_op_ball_fequal2:
    case nir_op_ball_fequal3:
    case nir_op_ball_fequal4:
@@ -192,6 +247,8 @@ r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
    case nir_op_bany_inequal3:
    case nir_op_bany_inequal4:
       return true;
+   case nir_op_bcsel:
+      return r300_should_scalarize_bcsel(alu);
    default:
       break;
    }
@@ -203,6 +260,7 @@ void
 r300_optimize_nir(struct nir_shader *s, struct r300_screen *screen)
 {
    bool is_r500 = screen->caps.is_r500;
+   bool scalarize_fs_alu = s->info.stage == MESA_SHADER_FRAGMENT && !is_r500;
 
    if (s->info.stage == MESA_SHADER_VERTEX && screen->caps.has_tcl) {
       /* There is no HW support for gl_ClipVertex, so we just remove it early. */
@@ -234,12 +292,15 @@ r300_optimize_nir(struct nir_shader *s, struct r300_screen *screen)
    if (s->info.stage == MESA_SHADER_FRAGMENT && !is_r500)
       NIR_PASS(_, s, r300_nir_stub_deriv);
 
+   NIR_PASS(_, s, nir_opt_reassociate_matrix_mul);
+
    bool progress;
    do {
       progress = false;
       NIR_PASS(_, s, nir_lower_vars_to_ssa);
 
-      NIR_PASS(progress, s, nir_lower_alu_to_scalar, r300_alu_to_scalar_filter_cb, NULL);
+      NIR_PASS(progress, s, nir_lower_alu_to_scalar, r300_alu_to_scalar_filter_cb,
+               &scalarize_fs_alu);
       NIR_PASS(progress, s, nir_opt_copy_prop);
       NIR_PASS(progress, s, r300_nir_lower_flrp);
       NIR_PASS(progress, s, nir_opt_algebraic);

@@ -29,6 +29,7 @@
 #include "util/u_math.h"
 #include "util/u_inlines.h"
 #include "lp_texture.h"
+#include "lp_texture_handle.h"
 
 static bool
 binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
@@ -107,9 +108,6 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    VK_FROM_HANDLE(lvp_device, device, _device);
    struct lvp_descriptor_set_layout *set_layout;
 
-   const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
-      vk_find_struct_const(pCreateInfo->pNext, MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
-
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -149,14 +147,15 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    set_layout->shader_stages = 0;
    set_layout->size = 0;
 
-   VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings,
-                                               pCreateInfo->bindingCount,
-                                               &bindings, NULL, NULL);
+   struct vk_sorted_bindings *sorted;
+   VkResult result =
+      vk_create_sorted_bindings(&device->vk, pCreateInfo, pAllocator, &sorted);
    if (result != VK_SUCCESS) {
       vk_descriptor_set_layout_unref(&device->vk, &set_layout->vk);
       return vk_error(device, result);
    }
+
+   const VkDescriptorSetLayoutBinding *bindings = sorted->bindings;
 
    uint32_t uniform_block_size = 0;
 
@@ -205,9 +204,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
       set_layout->binding[b].max_plane_count = max_plane_count;
 
       uint32_t descriptor_size = lvp_get_descriptor_size(binding->descriptorType);
-      if (binding->descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT && mutable_info) {
+      if (binding->descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
          descriptor_size = 0;
-         const VkMutableDescriptorTypeListEXT *type_list = &mutable_info->pMutableDescriptorTypeLists[j];
+         const VkMutableDescriptorTypeListEXT *type_list = &sorted->mutable_type_lists[j];
          for (uint32_t k = 0; k < type_list->descriptorTypeCount; k++)
             descriptor_size = MAX2(descriptor_size, lvp_get_descriptor_size(type_list->pDescriptorTypes[k]));
       }
@@ -227,7 +226,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++)
       set_layout->binding[i].uniform_block_offset += set_layout->size;
 
-   free(bindings);
+   vk_destroy_sorted_bindings(&device->vk, pAllocator, sorted);
 
    set_layout->dynamic_offset_count = dynamic_offset_count;
 
@@ -276,9 +275,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreatePipelineLayout(
 }
 
 static struct pipe_resource *
-get_buffer_resource(struct pipe_context *ctx, VkDeviceAddress address, size_t range)
+get_buffer_resource(struct pipe_screen *pscreen, VkDeviceAddress address, size_t range)
 {
-   struct pipe_screen *pscreen = ctx->screen;
    struct pipe_resource templ = {0};
 
    templ.screen = pscreen;
@@ -307,9 +305,7 @@ get_buffer_resource(struct pipe_context *ctx, VkDeviceAddress address, size_t ra
 static struct lp_texture_handle
 get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t range, enum pipe_format format)
 {
-   struct pipe_context *ctx = device->queue.ctx;
-
-   struct pipe_resource *pres = get_buffer_resource(ctx, address, range);
+   struct pipe_resource *pres = get_buffer_resource(device->pscreen, address, range);
 
    struct pipe_sampler_view templ;
    memset(&templ, 0, sizeof(templ));
@@ -321,17 +317,13 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
    templ.format = format;
    templ.u.buf.size = range;
    templ.texture = pres;
-   templ.context = ctx;
-   struct pipe_sampler_view *view = ctx->create_sampler_view(ctx, pres, &templ);
 
-   simple_mtx_lock(&device->queue.lock);
+   struct lp_texture_handle *handle = llvmpipe_create_texture_handle(device->drv_pscreen, &templ, NULL);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_texture_handle(ctx, view, NULL);
+   simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_texture_handles, handle);
+   simple_mtx_unlock(&device->bda_lock);
 
-   simple_mtx_unlock(&device->queue.lock);
-
-   ctx->sampler_view_destroy(ctx, view);
    pipe_resource_reference(&pres, NULL);
 
    return *handle;
@@ -340,20 +332,17 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
 static struct lp_texture_handle
 get_image_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t range, enum pipe_format format)
 {
-   struct pipe_context *ctx = device->queue.ctx;
-
-   struct pipe_resource *pres = get_buffer_resource(ctx, address, range);
+   struct pipe_resource *pres = get_buffer_resource(device->pscreen, address, range);
    struct pipe_image_view view = {0};
    view.resource = pres;
    view.format = format;
    view.u.buf.size = range;
 
-   simple_mtx_lock(&device->queue.lock);
+   struct lp_texture_handle *handle = llvmpipe_create_image_handle(device->drv_pscreen, &view);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_image_handle(ctx, &view);
+   simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_image_handles, handle);
-
-   simple_mtx_unlock(&device->queue.lock);
+   simple_mtx_unlock(&device->bda_lock);
 
    pipe_resource_reference(&pres, NULL);
 

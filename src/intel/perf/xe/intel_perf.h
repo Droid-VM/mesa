@@ -32,6 +32,7 @@ int xe_perf_stream_set_metrics_id(int perf_stream_fd, int drm_fd,
                                   struct intel_bind_timeline *timeline);
 int xe_perf_stream_read_samples(struct intel_perf_config *perf_config, int perf_stream_fd,
                                 uint8_t *buffer, size_t buffer_len);
+void *xe_perf_stream_map_oa_buffer(int perf_stream_fd, uint64_t *size);
 int xe_perf_eustall_stream_open(int drm_fd, uint32_t sample_rate,
                                 uint32_t min_event_count);
 int xe_perf_eustall_stream_record_size(int drm_fd);

@@ -691,7 +691,9 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
          fprintf(f, "    fill va hi = %08x\n", fill_va_hi);
          uint32_t value = ac_ib_get(ib);
          fprintf(f, "    fill value = %u\n", value);
-         uint32_t byte_count = ac_ib_get(ib) + 1;
+         uint32_t byte_count = ac_ib_get(ib);
+         if (ib->sdma_version >= SDMA_4_0)
+            ++byte_count;
          fprintf(f, "    fill byte count = %u\n", byte_count);
          break;
       }
@@ -704,13 +706,29 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
          uint32_t va_hi = ac_ib_get(ib);
          fprintf(f, "    va hi = %08x\n", va_hi);
 
-         uint32_t dwords = ac_ib_get(ib) + 1;
+         uint32_t dwords = ac_ib_get(ib);
+         if (ib->sdma_version >= SDMA_4_0)
+            dwords = (dwords & SDMA_4_0_WRITE_MAX_COUNT) + 1;
          fprintf(f, "    written dword count = %u\n", dwords);
 
          for (unsigned i = 0; i < dwords; ++i) {
             ac_ib_get(ib);
             fprintf(f, "\n");
          }
+
+         break;
+      }
+      case SDMA_OPCODE_FENCE: {
+         fprintf(f, "FENCE (mtype = %u)\n", header >> 16);
+
+         /* VA */
+         uint32_t va_lo = ac_ib_get(ib);
+         fprintf(f, "    va lo = %08x\n", va_lo);
+         uint32_t va_hi = ac_ib_get(ib);
+         fprintf(f, "    va hi = %08x\n", va_hi);
+
+         uint32_t fence_val = ac_ib_get(ib);
+         fprintf(f, "    fence value = %08x\n", fence_val);
 
          break;
       }
@@ -754,12 +772,44 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
             break;
          }
          case SDMA_COPY_SUB_OPCODE_LINEAR_SUB_WINDOW: {
-            fprintf(f, "COPY LINEAR_SUB_WINDOW\n");
+            fprintf(f, "COPY LINEAR_SUB_WINDOW element_size=%u\n", 1 << (header >> 29));
+            uint32_t pitch_shift = (ib->sdma_version >= SDMA_7_0 || ib->sdma_version < SDMA_4_0) ? 16 : 13;
 
-            for (unsigned i = 0; i < 12; ++i) {
-               ac_ib_get(ib);
-               fprintf(f, "\n");
-            }
+            ac_ib_get(ib);
+            fprintf(f, "    src VA low\n");
+            ac_ib_get(ib);
+            fprintf(f, "    src VA high\n");
+
+            uint32_t dw3 = ac_ib_get(ib);
+            fprintf(f, "    src offset x = %u, y = %u\n", dw3 & 0xffff, dw3 >> 16);
+            uint32_t dw4 = ac_ib_get(ib);
+            fprintf(f, "    src offset z = %u, pitch = %u\n", dw4 & BITFIELD_MASK(pitch_shift), (dw4 >> pitch_shift) + 1);
+            uint32_t dw5 = ac_ib_get(ib);
+            fprintf(f, "    src slice pitch = %u\n", dw5 + 1);
+
+            ac_ib_get(ib);
+            fprintf(f, "    dst VA low\n");
+            ac_ib_get(ib);
+            fprintf(f, "    dst VA high\n");
+
+            uint32_t dw8 = ac_ib_get(ib);
+            fprintf(f, "    dst offset x = %u, y = %u\n", dw8 & 0xffff, dw8 >> 16);
+            uint32_t dw9 = ac_ib_get(ib);
+            fprintf(f, "    dst offset z = %u, pitch = %u\n", dw9& BITFIELD_MASK(pitch_shift), (dw9 >> pitch_shift) + 1);
+            uint32_t dw10 = ac_ib_get(ib);
+            fprintf(f, "    dst slice pitch = %u\n", dw10 + 1);
+
+            uint32_t dw11 = ac_ib_get(ib);
+            if (ib->sdma_version >= SDMA_2_4)
+               fprintf(f, "    width = %u, height = %u\n", (dw11 & 0xffff) + 1, (dw11 >> 16) + 1);
+            else
+               fprintf(f, "    width = %u, height = %u\n", dw11 & 0xffff, dw11 >> 16);
+            uint32_t dw12 = ac_ib_get(ib);
+            if (ib->sdma_version >= SDMA_2_4)
+               fprintf(f, "    depth = %u\n", dw12 + 1);
+            else
+               fprintf(f, "    depth = %u\n", dw12);
+
             break;
          }
          case SDMA_COPY_SUB_OPCODE_TILED_SUB_WINDOW: {
@@ -775,13 +825,39 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
             uint32_t dw3 = ac_ib_get(ib);
             fprintf(f, "    tiled offset x = %u, y=%u\n", dw3 & 0xffff, dw3 >> 16);
             uint32_t dw4 = ac_ib_get(ib);
-            fprintf(f, "    tiled offset z = %u, tiled width = %u\n", dw4 & 0xffff, (dw4 >> 16) + 1);
+            if (ib->sdma_version >= SDMA_4_0)
+               fprintf(f, "    tiled offset z = %u, tiled width = %u\n", dw4 & 0xffff, (dw4 >> 16) + 1);
+            else
+               fprintf(f, "    tiled offset z = %u, max pitch in tile = %u\n", dw4 & 0xffff, ((dw4 >> 16) & 0xfff) + 1);
             uint32_t dw5 = ac_ib_get(ib);
-            fprintf(f, "    tiled height = %u, tiled depth = %u\n", (dw5 & 0xffff) + 1, (dw5 >> 16) + 1);
+            if (ib->sdma_version >= SDMA_4_0)
+               fprintf(f, "    tiled height = %u, tiled depth = %u\n", (dw5 & 0xffff) + 1, (dw5 >> 16) + 1);
+            else
+               fprintf(f, "    max slice pitch in tile = %u\n", (dw5 & 0x3fffff) + 1);
 
             /* Tiled image info */
-            ac_ib_get(ib);
+            uint32_t dw6 = ac_ib_get(ib);
             fprintf(f, "    (tiled image info)\n");
+            if (ib->sdma_version >= SDMA_4_0) {
+               fprintf(f, "        element size = %u\n", dw6 & 0x3);
+            } else {
+               const uint32_t array_mode = (dw6 >> 3) & 0xf;
+
+               fprintf(f, "        element size = %u\n", dw6 & 0x3);
+               fprintf(f, "        ARRAY_MODE = %u\n", array_mode);
+               fprintf(f, "        MICRO_TILE_MODE = %u\n", (dw6 >> 8) & 0x7);
+
+               if (array_mode >= V_009910_ARRAY_2D_TILED_THIN1) {
+                  const uint32_t tile_split = (dw6 >> 11) & 0x7;
+
+                  fprintf(f, "        TILE_SPLIT = %u (%u bytes)\n", tile_split, tile_split * 64);
+                  fprintf(f, "        BANK_WIDTH = %u\n", (dw6 >> 15) & 0x3);
+                  fprintf(f, "        BANK_HEIGHT = %u\n", (dw6 >> 18) & 0x3);
+                  fprintf(f, "        NUM_BANKS = %u\n", (dw6 >> 21) & 0x3);
+                  fprintf(f, "        MACRO_TILE_ASPECT = %u\n", (dw6 >> 24) & 0x3);
+                  fprintf(f, "        PIPE_CONFIG = %u\n", (dw6 >> 26) & 0x1f);
+               }
+            }
 
             /* Linear VA */
             ac_ib_get(ib);
@@ -796,9 +872,15 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
             uint32_t dw11 = ac_ib_get(ib);
             fprintf(f, "    linear slice pitch = %u\n", dw11 + 1);
             uint32_t dw12 = ac_ib_get(ib);
-            fprintf(f, "    copy width = %u, copy height = %u\n", (dw12 & 0xffff) + 1, (dw12 >> 16) + 1);
+            if (ib->sdma_version >= SDMA_2_4)
+               fprintf(f, "    copy width = %u, copy height = %u\n", (dw12 & 0xffff) + 1, (dw12 >> 16) + 1);
+            else
+               fprintf(f, "    copy width = %u, copy height = %u\n", (dw12 & 0xffff), (dw12 >> 16));
             uint32_t dw13 = ac_ib_get(ib);
-            fprintf(f, "    copy depth = %u\n", dw13 + 1);
+            if (ib->sdma_version >= SDMA_2_4)
+               fprintf(f, "    copy depth = %u\n", dw13 + 1);
+            else
+               fprintf(f, "    copy depth = %u\n", dw13);
 
             if (dcc) {
                if (ib->gfx_level >= GFX12) {
@@ -819,9 +901,90 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
             fprintf(f, "COPY T2T_SUB_WINDOW\n");
             uint32_t dcc = (header >> 19) & 1;
 
-            for (unsigned i = 0; i < 14; ++i) {
-               ac_ib_get(ib);
-               fprintf(f, "\n");
+            ac_ib_get(ib);
+            fprintf(f, "    src VA low\n");
+            ac_ib_get(ib);
+            fprintf(f, "    src VA high\n");
+
+            uint32_t dw3 = ac_ib_get(ib);
+            uint32_t src_offset_x = dw3 & 0xffff;
+            uint32_t src_offset_y = (dw3 >> 16) & 0xffff;
+            fprintf(f, "    src offset x = %u, y = %u\n", src_offset_x, src_offset_y);
+
+            uint32_t dw4 = ac_ib_get(ib);
+            uint32_t src_offset_z = dw4 & 0xffff;
+            if (ib->sdma_version >= SDMA_4_0) {
+               uint32_t src_extent_w = ((dw4 >> 16) & 0xffff) + 1;
+               fprintf(f, "    src offset z = %u, extent w = %u\n", src_offset_z, src_extent_w);
+            } else {
+               uint32_t pitch_in_tile_max = ((dw4 >> 16) & 0xffff) + 1;
+               fprintf(f, "    src offset z = %u, pitch in tile max = %u\n", src_offset_z, pitch_in_tile_max);
+            }
+
+            uint32_t dw5 = ac_ib_get(ib);
+            if (ib->sdma_version >= SDMA_4_0) {
+               uint32_t src_extent_h = (dw5 & 0xffff) + 1;
+               uint32_t src_extent_d = ((dw5 >> 16) & 0xffff) + 1;
+               fprintf(f, "    src extent h = %u, d = %u\n", src_extent_h, src_extent_d);
+            } else {
+               uint32_t slice_pitch_in_tile_max = dw4 + 1;
+               fprintf(f, "    src slice pitch in tile max = %u\n", slice_pitch_in_tile_max);
+            }
+
+            ac_ib_get(ib);
+            fprintf(f, "    src info dword\n");
+
+            ac_ib_get(ib);
+            fprintf(f, "    dst VA low\n");
+            ac_ib_get(ib);
+            fprintf(f, "    dst VA high\n");
+
+            uint32_t dw9 = ac_ib_get(ib);
+            uint32_t dst_offset_x = dw9 & 0xffff;
+            uint32_t dst_offset_y = (dw9 >> 16) & 0xffff;
+            fprintf(f, "    dst offset x = %u, y = %u\n", dst_offset_x, dst_offset_y);
+
+            uint32_t dw10 = ac_ib_get(ib);
+            uint32_t dst_offset_z = dw10 & 0xffff;
+            if (ib->sdma_version >= SDMA_4_0) {
+               uint32_t dst_extent_w = ((dw10 >> 16) & 0xffff) + 1;
+               fprintf(f, "    dst offset z = %u, extent w = %u\n", dst_offset_z, dst_extent_w);
+            } else {
+               uint32_t pitch_in_tile_max = ((dw10 >> 16) & 0xffff) + 1;
+               fprintf(f, "    dst offset z = %u, pitch in tile max = %u\n", src_offset_z, pitch_in_tile_max);
+            }
+
+            uint32_t dw11 = ac_ib_get(ib);
+            if (ib->sdma_version >= SDMA_4_0) {
+               uint32_t dst_extent_h = (dw11 & 0xffff) + 1;
+               uint32_t dst_extent_d = ((dw11 >> 16) & 0xffff) + 1;
+               fprintf(f, "    dst extent h = %u, d = %u\n", dst_extent_h, dst_extent_d);
+            } else {
+               uint32_t slice_pitch_in_tile_max = dw11 + 1;
+               fprintf(f, "    dst slice pitch in tile max = %u\n", slice_pitch_in_tile_max);
+            }
+
+            ac_ib_get(ib);
+            fprintf(f, "    dst info dword\n");
+
+            uint32_t dw13 = ac_ib_get(ib);
+            uint32_t copy_w = dw13 & 0xffff;
+            uint32_t copy_h = (dw13 >> 16) & 0xffff;
+            if (ib->sdma_version >= SDMA_4_0) {
+               copy_w += 1;
+               copy_h += 1;
+               fprintf(f, "    copy width = %u, height = %u\n", copy_w, copy_h);
+            } else if (ib->sdma_version >= SDMA_2_4) {
+               copy_w += 8;
+               copy_h += 8;
+            }
+            fprintf(f, "    copy width = %u, height = %u\n", copy_w, copy_h);
+
+            uint32_t dw14 = ac_ib_get(ib);
+            if (ib->sdma_version >= SDMA_2_4) {
+               fprintf(f, "    copy depth = %u\n", dw14 + 1);
+            } else {
+               fprintf(f, "    copy depth = %u\n", dw14);
             }
 
             if (dcc) {

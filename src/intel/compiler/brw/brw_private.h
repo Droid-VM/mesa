@@ -20,23 +20,23 @@ extern const char *const conditional_modifier[16];
 extern const char *const pred_ctrl_align16[16];
 
 const unsigned *brw_compile_vs(const struct brw_compiler *compiler,
-                               struct brw_compile_vs_params *params);
+                               struct brw_compile_params *params);
 const unsigned *brw_compile_tcs(const struct brw_compiler *compiler,
-                                struct brw_compile_tcs_params *params);
+                                struct brw_compile_params *params);
 const unsigned *brw_compile_tes(const struct brw_compiler *compiler,
-                                struct brw_compile_tes_params *params);
+                                struct brw_compile_params *params);
 const unsigned *brw_compile_gs(const struct brw_compiler *compiler,
-                               struct brw_compile_gs_params *params);
+                               struct brw_compile_params *params);
 const unsigned *brw_compile_task(const struct brw_compiler *compiler,
-                                 struct brw_compile_task_params *params);
+                                 struct brw_compile_params *params);
 const unsigned *brw_compile_mesh(const struct brw_compiler *compiler,
-                                 struct brw_compile_mesh_params *params);
+                                 struct brw_compile_params *params);
 const unsigned *brw_compile_fs(const struct brw_compiler *compiler,
-                               struct brw_compile_fs_params *params);
+                               struct brw_compile_params *params);
 const unsigned *brw_compile_cs(const struct brw_compiler *compiler,
-                               struct brw_compile_cs_params *params);
+                               struct brw_compile_params *params);
 const unsigned *brw_compile_bs(const struct brw_compiler *compiler,
-                               struct brw_compile_bs_params *params);
+                               struct brw_compile_params *params);
 
 unsigned brw_geometry_stage_dispatch_width(const struct intel_device_info *devinfo);
 
@@ -47,6 +47,8 @@ typedef struct brw_pass_tracker {
    const struct brw_compiler *compiler;
 
    const struct brw_base_prog_key *key;
+
+   enum intel_code_motion code_motion;
 
    bool progress;
 
@@ -144,6 +146,7 @@ struct brw_simd_selection_state {
 
    bool compiled[SIMD_COUNT];
    bool spilled[SIMD_COUNT];
+   bool failed[SIMD_COUNT];
    bool beyond_threshold[SIMD_COUNT];
 };
 
@@ -165,13 +168,15 @@ bool brw_simd_should_compile(brw_simd_selection_state &state, unsigned simd);
 
 void brw_simd_mark_compiled(brw_simd_selection_state &state, unsigned simd, bool spilled);
 
+void brw_simd_mark_failed(brw_simd_selection_state &state, unsigned simd, const char *error);
+
 int brw_simd_select(const brw_simd_selection_state &state);
 
 int brw_simd_select_for_workgroup_size(const struct intel_device_info *devinfo,
                                        const struct brw_cs_prog_data *prog_data,
                                        const unsigned *sizes);
 
-bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag, uint32_t source_hash);
+bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag, uint64_t source_hash);
 
 void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
                         const struct brw_compile_params *params);

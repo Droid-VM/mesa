@@ -241,19 +241,18 @@ bool pan_nir_lower_image_64bit(nir_shader *shader);
 
 bool pan_nir_lower_var_special_pan(nir_shader *shader);
 bool pan_nir_lower_noperspective_vs(nir_shader *shader);
-bool pan_nir_lower_noperspective_fs(nir_shader *shader,
-                                    uint32_t *noperspective_varyings);
 
-bool pan_nir_lower_vs_inputs(nir_shader *shader, uint64_t gpu_id);
+bool pan_nir_lower_vs_inputs(nir_shader *shader);
 
-bool pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_vs_outputs(nir_shader *shader, unsigned arch,
                               const struct pan_varying_layout *varying_layout,
                               bool has_idvs, bool *needs_extended_fifo);
 
-bool pan_nir_lower_fs_inputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_fs_inputs(nir_shader *shader, unsigned arch,
                              const struct pan_varying_layout *varying_layout,
                              struct pan_shader_info *info);
 
+bool pan_nir_lower_trig(nir_shader *shader);
 bool pan_nir_lower_helper_invocation(nir_shader *shader);
 bool pan_nir_lower_sample_pos(nir_shader *shader);
 bool pan_nir_remove_xfb(nir_shader *nir);
@@ -263,6 +262,13 @@ bool pan_nir_lower_image_index(nir_shader *shader,
 bool pan_nir_lower_texel_buffer_fetch_index(nir_shader *shader,
                                             unsigned attrib_offset);
 bool pan_nir_lower_divergent_scratch(nir_shader *shader, unsigned arch);
+
+#define PAN_AS_U32(x) ({\
+   static_assert(sizeof(x) == 4, "x must be 4 bytes"); \
+   uint32_t _u; \
+   memcpy(&_u, &(x), 4); \
+   _u; \
+})
 
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
@@ -285,10 +291,16 @@ nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
    return flags;
 }
 
+enum pan_bi_sample_loc {
+   PAN_SAMPLE_LOC_CENTER,
+   PAN_SAMPLE_LOC_CENTROID,
+   PAN_SAMPLE_LOC_SAMPLE,
+   PAN_SAMPLE_LOC_EXPLICIT,
+};
+
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
-   bool skip : 1;
    bool wide_indices : 1;
    bool array_enable : 1;
    bool texel_offset : 1;
@@ -298,15 +310,40 @@ struct pan_va_tex_flags {
    bool force_delta_enable : 1;
    bool lod_bias_disable : 1;
    bool lod_clamp_disable : 1;
-   unsigned _pad : 20;
+   /* For 1D, 2D and 3D textures, this makes the hardware read an extra q
+    * coordinate and divide the other coordinates by it. For cube maps, it
+    * instead makes the hardware build the cube map descriptor internally
+    * from the raw direction vector.
+    */
+   bool projection_enable : 1;
+   enum pan_bi_sample_loc var_sample_loc : 2;
+   bool var_buf_src_f16 : 1;
+   unsigned _pad : 17;
 };
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct pan_va_tex_flags) == 4, "Must fit in uint32_t");
 
+enum pan_bi_varying_name {
+   PAN_VARYING_NAME_POINT = 0,
+   PAN_VARYING_NAME_FRAG_W = 2,
+   PAN_VARYING_NAME_FRAG_Z = 3,
+};
+
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
+struct pan_bi_var_special_flags {
+   enum pan_bi_varying_name name : 2;
+   enum pan_bi_sample_loc sample_loc : 2;
+   unsigned _pad : 28;
+};
+PRAGMA_DIAGNOSTIC_POP
+static_assert(sizeof(struct pan_bi_var_special_flags) == 4, "Must fit in uint32_t");
+
 void pan_nir_lower_mediump_io(nir_shader *nir);
 
-bool pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id);
-bool pan_nir_lower_image(nir_shader *nir, uint64_t gpu_id);
+bool pan_nir_lower_tex(nir_shader *nir, unsigned arch);
+bool pan_nir_lower_image(nir_shader *nir, unsigned arch);
+bool pan_nir_opt_var_tex(nir_shader *nir, unsigned arch);
 
 bool pan_nir_lower_mem_to_global(nir_shader *nir);
 
@@ -325,10 +362,10 @@ bool pan_nir_lower_fs_outputs(nir_shader *shader, bool skip_atest,
 uint32_t pan_nir_collect_noperspective_varyings_fs(nir_shader *s);
 
 bool pan_nir_resize_varying_io(nir_shader *nir,
-                               const struct pan_varying_layout *varying_fmt,
+                               struct pan_varying_layout *varying_fmt,
                                const struct pan_varying_layout *varying_layout);
 
-bool pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
+bool pan_nir_fuse_io_cvt(nir_shader *nir,
                          const struct pan_varying_layout *layout);
 
 bool pan_nir_opt_push_ubo(nir_shader *nir,

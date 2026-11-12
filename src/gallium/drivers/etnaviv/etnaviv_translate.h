@@ -24,6 +24,7 @@
 #ifndef H_TRANSLATE
 #define H_TRANSLATE
 
+#include "layout/eil_format.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
 #include "pipe/p_state.h"
@@ -37,6 +38,7 @@
 #include "hw/state_3d.xml.h"
 #include "hw/state_blt.xml.h"
 
+#include "util/blend.h"
 #include "util/format/u_format.h"
 #include "util/u_math.h"
 #include "util/u_pack_color.h"
@@ -160,6 +162,45 @@ translate_blend_factor(unsigned blend_factor)
    }
 }
 
+/* Advanced blend modes the PE blends natively, as a bitmask of
+ * BITFIELD_BIT(enum pipe_advanced_blend_mode). The remaining
+ * KHR_blend_equation_advanced modes need shader lowering.
+ */
+#define ETNA_ADVANCED_BLEND_MODES \
+   (BITFIELD_BIT(PIPE_ADVANCED_BLEND_MULTIPLY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_SCREEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_OVERLAY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DARKEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_LIGHTEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_HARDLIGHT) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DIFFERENCE) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_EXCLUSION))
+
+static inline uint32_t
+translate_advanced_blend_mode(enum pipe_advanced_blend_mode mode)
+{
+   switch (mode) {
+   case PIPE_ADVANCED_BLEND_MULTIPLY:
+      return ADVANCED_BLEND_MODE_MULTIPLY;
+   case PIPE_ADVANCED_BLEND_SCREEN:
+      return ADVANCED_BLEND_MODE_SCREEN;
+   case PIPE_ADVANCED_BLEND_OVERLAY:
+      return ADVANCED_BLEND_MODE_OVERLAY;
+   case PIPE_ADVANCED_BLEND_DARKEN:
+      return ADVANCED_BLEND_MODE_DARKEN;
+   case PIPE_ADVANCED_BLEND_LIGHTEN:
+      return ADVANCED_BLEND_MODE_LIGHTEN;
+   case PIPE_ADVANCED_BLEND_HARDLIGHT:
+      return ADVANCED_BLEND_MODE_HARDLIGHT;
+   case PIPE_ADVANCED_BLEND_DIFFERENCE:
+      return ADVANCED_BLEND_MODE_DIFFERENCE;
+   case PIPE_ADVANCED_BLEND_EXCLUSION:
+      return ADVANCED_BLEND_MODE_EXCLUSION;
+   default:
+      UNREACHABLE("advanced blend mode without hardware support");
+   }
+}
+
 static inline uint32_t
 translate_texture_wrapmode(unsigned wrap)
 {
@@ -241,7 +282,7 @@ translate_depth_format(enum pipe_format fmt)
 static inline uint32_t
 translate_ts_format(enum pipe_format fmt)
 {
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -276,23 +317,31 @@ translate_ts_format(enum pipe_format fmt)
 
 /* formats directly supported in the RS engine */
 static inline uint32_t
-translate_rs_format(enum pipe_format fmt)
+translate_rs_format(enum pipe_format fmt, bool halti5)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
    case PIPE_FORMAT_Z16_UNORM:
+      if (!halti5)
+         return ETNA_NO_MATCH;
       return RS_FORMAT_D16;
    case PIPE_FORMAT_X8Z24_UNORM:
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+      if (!halti5)
+         return ETNA_NO_MATCH;
       return RS_FORMAT_D32;
    case PIPE_FORMAT_S8_UINT:
       return RS_FORMAT_S8;
    case PIPE_FORMAT_B4G4R4X4_UNORM:
       return RS_FORMAT_X4R4G4B4;
    case PIPE_FORMAT_B4G4R4A4_UNORM:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8_UINT:
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16_UINT:
       return RS_FORMAT_A4R4G4B4;
    case PIPE_FORMAT_B5G5R5X1_UNORM:
       return RS_FORMAT_X1R5G5B5;
@@ -305,7 +354,16 @@ translate_rs_format(enum pipe_format fmt)
       return RS_FORMAT_X8R8G8B8;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
       return RS_FORMAT_A8R8G8B8;
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+   case PIPE_FORMAT_R10G10B10X2_UNORM:
+      return RS_FORMAT_A2R10G10B10;
    default:
       return ETNA_NO_MATCH;
    }
@@ -316,7 +374,7 @@ static inline uint32_t
 translate_blt_format(enum pipe_format fmt)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -338,11 +396,26 @@ translate_blt_format(enum pipe_format fmt)
       return BLT_FORMAT_A8R8G8B8;
    case PIPE_FORMAT_R10G10B10A2_UNORM:
    case PIPE_FORMAT_R10G10B10X2_UNORM:
+   case PIPE_FORMAT_R10G10B10A2_UINT:
       return BLT_FORMAT_A2R10G10B10;
    case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R8_SINT:
+   case PIPE_FORMAT_R8_UINT:
       return BLT_FORMAT_R8;
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16_UINT:
+      return BLT_FORMAT_A4R4G4B4;
    case PIPE_FORMAT_R8G8_UNORM:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8_UINT:
       return BLT_FORMAT_R8G8;
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
+      return BLT_FORMAT_A8R8G8B8;
    case PIPE_FORMAT_A8_UNORM:
    case PIPE_FORMAT_S8_UINT:
       return BLT_FORMAT_A8;
@@ -478,7 +551,7 @@ static inline uint32_t
 translate_clear_depth_stencil(enum pipe_format format, double depth,
                               uint8_t stencil)
 {
-   format = translate_emulated_format_z32f(format);
+   format = eil_format_emulated(format);
 
    uint32_t clear_value = util_pack_z_stencil(format, depth, stencil);
 

@@ -38,7 +38,9 @@
 #include "virtio/intel_virtio.h"
 
 #include "common/intel_gem.h"
+#include "util/driconf.h"
 #include "util/u_debug.h"
+#include "util/u_string.h"
 #include "util/log.h"
 #include "util/macros.h"
 
@@ -1265,7 +1267,8 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
 #define XE3P_FEATURES                                           \
    XE3_FEATURES,                                                \
    .ver = 35,                                                   \
-   .verx10 = 350
+   .verx10 = 350,                                               \
+   .has_integer_dword_mul = true
 
 #define XE3P_CONFIG(platform_suffix)                            \
    XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
@@ -1407,6 +1410,98 @@ intel_device_info_get_eu_count_first_subslice(const struct intel_device_info *de
    return eu_count;
 }
 
+void
+intel_device_info_update_topology(struct intel_device_info *devinfo,
+                                  uint32_t max_slices,
+                                  uint32_t max_subslices,
+                                  uint32_t max_eus_per_subslice,
+                                  uint32_t subslice_stride,
+                                  uint32_t eu_subslice_stride,
+                                  const void *slice_masks,
+                                  const void *subslice_masks,
+                                  const void *eu_masks)
+{
+   intel_device_info_topology_reset_masks(devinfo);
+
+   assert(max_slices > 0);
+   assert(max_subslices > 0);
+   assert(max_eus_per_subslice > 0);
+
+   devinfo->subslice_slice_stride = subslice_stride;
+
+   devinfo->eu_subslice_stride = DIV_ROUND_UP(max_eus_per_subslice, 8);
+   devinfo->eu_slice_stride = max_subslices * devinfo->eu_subslice_stride;
+
+   assert(sizeof(devinfo->slice_masks) >= DIV_ROUND_UP(max_slices, 8));
+   memcpy(&devinfo->slice_masks, slice_masks, DIV_ROUND_UP(max_slices, 8));
+   devinfo->max_slices = max_slices;
+   devinfo->max_subslices_per_slice = max_subslices;
+   devinfo->max_eus_per_subslice = max_eus_per_subslice;
+
+   uint32_t subslice_mask_len = max_slices * subslice_stride;
+   assert(sizeof(devinfo->subslice_masks) >= subslice_mask_len);
+   memcpy(devinfo->subslice_masks, subslice_masks, subslice_mask_len);
+
+   uint32_t eu_mask_len = eu_subslice_stride * max_subslices * max_slices;
+   assert(sizeof(devinfo->eu_masks) >= eu_mask_len);
+   memcpy(devinfo->eu_masks, eu_masks, eu_mask_len);
+
+   /* Now that all the masks are in place, update the counts. */
+   intel_device_info_topology_update_counts(devinfo);
+   intel_device_info_update_pixel_pipes(devinfo, devinfo->subslice_masks);
+   intel_device_info_update_l3_banks(devinfo);
+}
+
+void
+intel_device_info_update_from_masks(struct intel_device_info *devinfo,
+                                    uint32_t slice_mask,
+                                    uint32_t subslice_mask,
+                                    uint32_t n_eus)
+{
+   uint8_t slice_masks[INTEL_DEVICE_MAX_SLICES] = { 0 };
+   uint8_t subslice_masks[INTEL_DEVICE_MAX_SUBSLICE_MASKS] = { 0 };
+   uint8_t eu_masks[INTEL_DEVICE_MAX_EU_MASKS] = { 0 };
+
+   assert((slice_mask & 0xff) == slice_mask);
+
+   uint32_t max_slices = util_last_bit(slice_mask);
+   uint32_t max_subslices = util_last_bit(subslice_mask);
+
+   uint32_t slice_stride = DIV_ROUND_UP(max_slices, 8);
+   uint32_t subslice_stride = DIV_ROUND_UP(max_subslices, 8);
+
+   uint32_t n_subslices = __builtin_popcount(slice_mask) *
+      __builtin_popcount(subslice_mask);
+   uint32_t max_eus_per_subslice = DIV_ROUND_UP(n_eus, n_subslices);
+   uint32_t eu_mask = (1U << max_eus_per_subslice) - 1;
+
+   uint32_t eu_subslice_stride = DIV_ROUND_UP(max_eus_per_subslice, 8);
+
+   for (int b = 0; b < slice_stride; b++)
+      slice_masks[b] = (slice_mask >> (b * 8)) & 0xff;
+
+   for (int s = 0; s < max_slices; s++) {
+      for (int b = 0; b < subslice_stride; b++) {
+         int subslice_offset = s * subslice_stride + b;
+
+         subslice_masks[subslice_offset] = (subslice_mask >> (b * 8)) & 0xff;
+      }
+
+      for (int ss = 0; ss < max_subslices; ss++) {
+         for (int b = 0; b < eu_subslice_stride; b++) {
+            int eu_offset = (s * max_subslices + ss) * eu_subslice_stride + b;
+
+            eu_masks[eu_offset] = (eu_mask >> (b * 8)) & 0xff;
+         }
+      }
+   }
+
+   intel_device_info_update_topology(devinfo, max_slices, max_subslices,
+                                     max_eus_per_subslice,
+                                     subslice_stride, eu_subslice_stride,
+                                     slice_masks, subslice_masks, eu_masks);
+}
+
 /* Generate mask from the device data. */
 static void
 fill_masks(struct intel_device_info *devinfo)
@@ -1417,11 +1512,11 @@ fill_masks(struct intel_device_info *devinfo)
    for (int s = 1; s < devinfo->num_slices; s++)
       assert(devinfo->num_subslices[0] == devinfo->num_subslices[s]);
 
-   intel_device_info_i915_update_from_masks(devinfo,
-                          (1U << devinfo->num_slices) - 1,
-                          (1U << devinfo->num_subslices[0]) - 1,
-                          devinfo->num_slices * devinfo->num_subslices[0] *
-                          devinfo->max_eus_per_subslice);
+   intel_device_info_update_from_masks(devinfo,
+                                       (1U << devinfo->num_slices) - 1,
+                                       (1U << devinfo->num_subslices[0]) - 1,
+                                       devinfo->num_slices * devinfo->num_subslices[0] *
+                                       devinfo->max_eus_per_subslice);
 }
 
 void
@@ -1488,28 +1583,66 @@ parse_force_probe_entry(int pci_id, const char *entry, bool *force_on,
    return matched;
 }
 
+static const driOptionDescription dri_config_opts[] = {
+    DRI_CONF_SECTION_INITIALIZATION
+        DRI_CONF_INTEL_FORCE_PROBE
+    DRI_CONF_SECTION_END
+};
+
+/* Get force-probe value from either INTEL_FORCE_PROBE env-var or
+ * intel_force_probe driconf.
+ *
+ * The returned string must be freed by caller.
+ */
+static char *get_intel_force_probe_str()
+{
+   driOptionCache default_init_options;
+   driOptionCache user_init_options;
+   char *force_probe = NULL;
+
+   /* INTEL_FORCE_PROBE has first priority */
+   const char *str = os_get_option("INTEL_FORCE_PROBE");
+   if (str != NULL && str[0] != '\0') {
+      force_probe = strdup(str);
+      if (force_probe != NULL)
+         return force_probe;
+   }
+
+   /* Try intel_force_probe driconf option */
+   driParseOptionInfo(&default_init_options, dri_config_opts,
+                      ARRAY_SIZE(dri_config_opts));
+   driParseConfigFiles(&user_init_options, &default_init_options,
+                       &(driConfigFileParseParams) {
+                          .driverName = "intel",
+                       });
+   force_probe = NULL;
+   if (driCheckOption(&user_init_options, "intel_force_probe", DRI_STRING)) {
+      char *str = driQueryOptionstr(&user_init_options, "intel_force_probe");
+      if (str[0] != '\0')
+         force_probe = strdup(str);
+   }
+   driDestroyOptionCache(&user_init_options);
+   driDestroyOptionInfo(&default_init_options);
+
+   return force_probe;
+}
+
 static void
 scan_for_force_probe(int pci_id, bool *force_on, bool *force_off)
 {
    *force_on = false;
    *force_off = false;
 
-   const char *env = os_get_option("INTEL_FORCE_PROBE");
-   if (env == NULL)
+   char *str = get_intel_force_probe_str();
+   if (str == NULL || str[0] == '\0')
       return;
 
-   size_t len = strlen(env);
-   if (len == 0)
-      return;
-
-   char *dup = strndup(env, len);
-   if (dup == NULL)
-      return;
-
-   for (char *entry = strtok(dup, ","); entry; entry = strtok(NULL, ","))
+   char *saveptr;
+   for (char *entry = strtok_r(str, ",", &saveptr); entry;
+        entry = strtok_r(NULL, ",", &saveptr))
       parse_force_probe_entry(pci_id, entry, force_on, force_off);
 
-   free(dup);
+   free(str);
    assert(!*force_on || !*force_off);
 }
 

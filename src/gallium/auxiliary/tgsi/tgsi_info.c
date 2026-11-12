@@ -129,8 +129,6 @@ tgsi_opcode_infer_type(enum tgsi_opcode opcode)
    case TGSI_OPCODE_UBFE:
    case TGSI_OPCODE_BFI:
    case TGSI_OPCODE_BREV:
-   case TGSI_OPCODE_IMG2HND:
-   case TGSI_OPCODE_SAMP2HND:
       return TGSI_TYPE_UNSIGNED;
    case TGSI_OPCODE_ARL:
    case TGSI_OPCODE_ARR:
@@ -241,8 +239,7 @@ tgsi_opcode_infer_src_type(enum tgsi_opcode opcode, unsigned src_idx)
       return TGSI_TYPE_UNSIGNED;
 
    if (src_idx == 1 &&
-       ((opcode >= TGSI_OPCODE_ATOMUADD && opcode <= TGSI_OPCODE_ATOMIMAX) ||
-       opcode == TGSI_OPCODE_ATOMINC_WRAP || opcode == TGSI_OPCODE_ATOMDEC_WRAP))
+       ((opcode >= TGSI_OPCODE_ATOMUADD && opcode <= TGSI_OPCODE_ATOMIMAX)))
       return TGSI_TYPE_UNSIGNED;
 
    switch (opcode) {

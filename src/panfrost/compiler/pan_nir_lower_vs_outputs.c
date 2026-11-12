@@ -7,7 +7,6 @@
 #include "pan_nir.h"
 #include "nir_builder.h"
 
-#include "panfrost/model/pan_model.h"
 #include "bifrost/valhall/valhall.h"
 #include "util/bitscan.h"
 
@@ -265,7 +264,7 @@ gather_vs_outputs(struct nir_builder *b,
 }
 
 bool
-pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
+pan_nir_lower_vs_outputs(nir_shader *shader, unsigned arch,
                          const struct pan_varying_layout *varying_layout,
                          bool has_idvs, bool *needs_extended_fifo)
 {
@@ -273,7 +272,7 @@ pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
    struct lower_vs_outputs_ctx ctx = {
-      .arch = pan_arch(gpu_id),
+      .arch = arch,
       .varying_layout = varying_layout,
       .has_idvs = has_idvs,
       .has_extended_fifo = false, /* computed after gather_vs_outputs */

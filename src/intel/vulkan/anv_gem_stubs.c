@@ -103,12 +103,6 @@ stub_gem_create_userptr(struct anv_device *device, void *mem, uint64_t size)
 }
 
 int
-anv_gem_wait(struct anv_device *device, uint32_t gem_handle, int64_t *timeout_ns)
-{
-   return 0;
-}
-
-int
 anv_gem_set_tiling(struct anv_device *device,
                    uint32_t gem_handle, uint32_t stride, uint32_t tiling)
 {

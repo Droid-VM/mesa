@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -52,7 +52,7 @@ union SwizzleModeFlags
 
         UINT_32 isT             : 1;    // T mode
 
-        // GFX10
+        /// GFX10
         UINT_32 isRtOpt         : 1;    // mode opt for render target
 
         UINT_32 reserved        : 20;   // Reserved bits

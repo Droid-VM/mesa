@@ -11,6 +11,8 @@
 #include "mme_fermi.h"
 #include "mme_tu104.h"
 
+#include "clc597.h"
+#include "clcd97.h"
 
 int main(int argc, char **argv) {
   const char *arch_name;
@@ -21,7 +23,7 @@ int main(int argc, char **argv) {
 
   if (argc != 3) {
     fprintf(stderr, "Usage: nv_mme_dump file.bin "
-                    "<FERMI|TURING>\n");
+                    "<FERMI|TURING|BLACKWELL>\n");
     return 1;
   }
 
@@ -61,7 +63,8 @@ int main(int argc, char **argv) {
    if (!strcmp(arch_name, "FERMI")) {
       mme_fermi_dump(stdout, data, file_size);
    } else {
-      mme_tu104_dump(stdout, data, file_size);
+      mme_tu104_dump(stdout, data, file_size,
+                     !strcmp(arch_name, "BLACKWELL") ? BLACKWELL_A : TURING_A);
    }
 
    free(data);

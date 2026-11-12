@@ -289,6 +289,7 @@ extern const struct nvk_mme_test_case nvk_mme_set_tess_params_tests[];
 extern const struct nvk_mme_test_case nvk_mme_set_shading_rate_control_tests[];
 extern const struct nvk_mme_test_case nvk_mme_set_anti_alias_tests[];
 extern const struct nvk_mme_test_case nvk_mme_set_statistics_counters_tests[];
+extern const struct nvk_mme_test_case nvk_mme_set_write_mask_tests[];
 
 void nvk_test_all_mmes(const struct nv_device_info *devinfo);
 

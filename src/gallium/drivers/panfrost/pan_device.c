@@ -40,8 +40,11 @@ panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev)
    }
 
    dev->arch = pan_arch(dev->kmod.dev->props.gpu_id);
+   dev->core_count = pan_query_core_count(&dev->kmod.dev->props);
    dev->model = pan_get_model(dev->kmod.dev->props.gpu_id,
-                              dev->kmod.dev->props.gpu_variant);
+                              dev->kmod.dev->props.gpu_variant,
+                              dev->core_count,
+                              dev->kmod.dev->props.gpu_features);
 
    /* If we don't recognize the model, bail early */
    if (!dev->model)
@@ -61,7 +64,6 @@ panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev)
    if (!dev->kmod.vm)
       goto err_free_kmod_dev;
 
-   dev->core_count = pan_query_core_count(&dev->kmod.dev->props);
    dev->core_id_range = pan_query_core_id_range(&dev->kmod.dev->props);
    dev->thread_tls_alloc = pan_query_thread_tls_alloc(&dev->kmod.dev->props);
    dev->optimal_tib_size = pan_query_optimal_tib_size(dev->arch, dev->model);

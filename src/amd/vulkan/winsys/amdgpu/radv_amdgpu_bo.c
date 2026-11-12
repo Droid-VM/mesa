@@ -11,7 +11,6 @@
 
 #include <stdio.h>
 
-#include "tools/radv_debug.h"
 #include "radv_amdgpu_bo.h"
 
 #include <inttypes.h>
@@ -384,6 +383,13 @@ radv_amdgpu_winsys_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo
       radv_amdgpu_global_bo_list_del(ws, bo);
 
    const uint64_t va_size = radv_amdgpu_bo_va_size(bo->base.size, bo->flags);
+
+   if (bo->flags & RADEON_FLAG_VM_PAD_1PAGE) {
+      /* Unmap the VM padding separately because the ioctl can only unmap one mapping at a time. */
+      radv_amdgpu_bo_va_op(ws, bo->bo_handle, 0, 4096, bo->base.va + align64(bo->base.size, 4096), 0, 0,
+                           AMDGPU_VA_OP_UNMAP);
+   }
+
    radv_amdgpu_bo_va_op(ws, bo->bo_handle, 0, va_size, bo->base.va, 0, 0, AMDGPU_VA_OP_UNMAP);
    ac_drm_bo_free(ws->dev, bo->bo);
 
@@ -418,7 +424,7 @@ radv_amdgpu_init_null_prt_bo(struct radv_amdgpu_winsys *ws)
        * at creation or when explicitly unmapped.
        */
       result = ws->base.buffer_create(&ws->base, 8 * 1024 * 1024 /* 8MiB */, 4096, RADEON_DOMAIN_VRAM,
-                                      RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_READ_ONLY |
+                                      RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_READ_ONLY |
                                          RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO,
                                       RADV_BO_PRIORITY_VIRTUAL, 0, &bo);
       if (result != VK_SUCCESS) {
@@ -548,8 +554,8 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
                              (flags & RADEON_FLAG_REPLAYABLE ? AMDGPU_VA_RANGE_REPLAYABLE : 0);
    uint64_t va_gap_size = ws->debug_vm ? MAX2(4 * virt_alignment, 64 * 1024) : 0;
 
-   r = ac_drm_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general, va_size + va_gap_size, virt_alignment, replay_address,
-                             &va, &va_handle, va_flags);
+   r = ac_drm_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general, va_size + va_gap_size, virt_alignment,
+                             replay_address, &va, &va_handle, va_flags);
    if (r) {
       result = replay_address ? VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_va_alloc;
@@ -564,6 +570,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
 
    if (initial_domain & RADEON_DOMAIN_VRAM) {
       request.preferred_heap |= AMDGPU_GEM_DOMAIN_VRAM;
+      request.flags |= AMDGPU_GEM_CREATE_CPU_GTT_USWC;
 
       /* Since VRAM and GTT have almost the same performance on
        * APUs, we could just set GTT. However, in order to decrease
@@ -580,7 +587,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
        * e.g. Horizon Zero Dawn allocates more memory than we have
        * VRAM.
        */
-      if (!(ws->perftest & RADV_PERFTEST_NO_GTT_SPILL))
+      if (ws->gtt_spill)
          request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
    }
 
@@ -602,7 +609,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    if (!(flags & RADEON_FLAG_IMPLICIT_SYNC))
       request.flags |= AMDGPU_GEM_CREATE_EXPLICIT_SYNC;
    if ((initial_domain & RADEON_DOMAIN_VRAM_GTT) && (flags & RADEON_FLAG_NO_INTERPROCESS_SHARING) &&
-       ((ws->perftest & RADV_PERFTEST_LOCAL_BOS) || (flags & RADEON_FLAG_PREFER_LOCAL_BO))) {
+       (ws->always_valid_bos || (flags & RADEON_FLAG_PREFER_LOCAL_BO))) {
       bo->base.is_local = true;
       request.flags |= AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
    }
@@ -610,15 +617,11 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    if (ws->info.is_virtio && (initial_domain & RADEON_DOMAIN_VRAM_GTT) &&
        (flags & RADEON_FLAG_NO_INTERPROCESS_SHARING) == 0)
       request.flags |= AMDGPU_GEM_CREATE_VIRTIO_SHARED;
-   if (initial_domain & RADEON_DOMAIN_VRAM) {
-      if (ws->zero_all_vram_allocs || (flags & RADEON_FLAG_ZERO_VRAM))
-         request.flags |= AMDGPU_GEM_CREATE_VRAM_CLEARED;
-   }
 
    if (flags & RADEON_FLAG_DISCARDABLE)
       request.flags |= AMDGPU_GEM_CREATE_DISCARDABLE;
 
-   if (flags & RADEON_FLAG_GFX12_ALLOW_DCC && ws->info.drm_minor >= 58) {
+   if (flags & RADEON_FLAG_GFX12_ALLOW_DCC) {
       assert(ws->info.gfx_level >= GFX12 && (initial_domain & RADEON_DOMAIN_VRAM) &&
              (flags & RADEON_FLAG_NO_CPU_ACCESS));
       bo->base.gfx12_allow_dcc = true;
@@ -1036,8 +1039,6 @@ radv_amdgpu_bo_get_flags_from_fd(struct radeon_winsys *_ws, int fd, enum radeon_
       *flags |= RADEON_FLAG_GTT_WC;
    if (info.alloc_flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID)
       *flags |= RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO;
-   if (info.alloc_flags & AMDGPU_GEM_CREATE_VRAM_CLEARED)
-      *flags |= RADEON_FLAG_ZERO_VRAM;
    if (info.alloc_flags & AMDGPU_GEM_CREATE_DISCARDABLE)
       *flags |= RADEON_FLAG_DISCARDABLE;
    if (info.alloc_flags & AMDGPU_GEM_CREATE_GFX12_DCC)

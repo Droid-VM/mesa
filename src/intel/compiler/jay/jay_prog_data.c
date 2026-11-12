@@ -5,9 +5,9 @@
 #include "compiler/brw/brw_compiler.h"
 #include "compiler/brw/brw_nir.h"
 #include "compiler/intel_nir.h"
+#include "compiler/intel_prim.h"
 #include "jay_private.h"
 #include "nir.h"
-#include "compiler/intel_prim.h"
 
 static inline enum intel_barycentric_mode
 brw_barycentric_mode(const struct brw_fs_prog_data *prog_data,
@@ -66,6 +66,7 @@ gather_fs_info(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_load_barycentric_at_offset:
       ctx->offset_interp_modes |=
          BITFIELD_BIT(brw_barycentric_mode(ctx->prog_data, intr));
+      prog_data->uses_src_xy = true;
       break;
 
    case nir_intrinsic_load_frag_coord_z:
@@ -365,11 +366,12 @@ populate_fs_prog_data(nir_shader *shader,
    prog_data->dual_src_blend =
       shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DUAL_SRC_BLEND);
 
-   /* Currently only the Vulkan API allows alpha_to_coverage to be dynamic. If
-    * persample_dispatch & multisample_fbo are not dynamic, Anv should be able
-    * to definitively tell whether alpha_to_coverage is on or off.
-    */
-   prog_data->alpha_to_coverage = key->alpha_to_coverage;
+   /* Gate alpha to coverage with the draw buffer 0 being written. */
+   prog_data->alpha_to_coverage = (shader->info.outputs_written &
+                                   (BITFIELD64_BIT(FRAG_RESULT_COLOR) |
+                                    BITFIELD64_BIT(FRAG_RESULT_DATA0))) != 0 ?
+                                     key->alpha_to_coverage :
+                                     INTEL_NEVER;
 
    assert(devinfo->verx10 >= 125 || key->mesh_input == INTEL_NEVER);
 
@@ -476,6 +478,7 @@ populate_fs_prog_data(nir_shader *shader,
 
    if (prog_data->coarse_pixel_dispatch) {
       prog_data->uses_depth_w_coefficients |= prog_data->uses_src_depth;
+      prog_data->uses_src_xy |= prog_data->uses_src_depth;
       prog_data->uses_src_depth = false;
    }
 
@@ -498,7 +501,6 @@ populate_vs_prog_data(nir_shader *nir,
       bool *data;
       gl_system_value val;
    } bool_sysvals[] = {
-      { &prog_data->uses_is_indexed_draw, SYSTEM_VALUE_IS_INDEXED_DRAW     },
       { &prog_data->uses_firstvertex,     SYSTEM_VALUE_FIRST_VERTEX        },
       { &prog_data->uses_baseinstance,    SYSTEM_VALUE_BASE_INSTANCE       },
       { &prog_data->uses_vertexid,        SYSTEM_VALUE_VERTEX_ID_ZERO_BASE },
@@ -533,22 +535,23 @@ populate_tcs_prog_data(nir_shader *nir,
 }
 
 /* TODO: this is copied in two places right now. probably dedup it? */
-static const uint32_t gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY + 1] = {
-   [MESA_PRIM_POINTS] = _3DPRIM_POINTLIST,
-   [MESA_PRIM_LINES] = _3DPRIM_LINELIST,
-   [MESA_PRIM_LINE_LOOP] = _3DPRIM_LINELOOP,
-   [MESA_PRIM_LINE_STRIP] = _3DPRIM_LINESTRIP,
-   [MESA_PRIM_TRIANGLES] = _3DPRIM_TRILIST,
-   [MESA_PRIM_TRIANGLE_STRIP] = _3DPRIM_TRISTRIP,
-   [MESA_PRIM_TRIANGLE_FAN] = _3DPRIM_TRIFAN,
-   [MESA_PRIM_QUADS] = _3DPRIM_QUADLIST,
-   [MESA_PRIM_QUAD_STRIP] = _3DPRIM_QUADSTRIP,
-   [MESA_PRIM_POLYGON] = _3DPRIM_POLYGON,
-   [MESA_PRIM_LINES_ADJACENCY] = _3DPRIM_LINELIST_ADJ,
-   [MESA_PRIM_LINE_STRIP_ADJACENCY] = _3DPRIM_LINESTRIP_ADJ,
-   [MESA_PRIM_TRIANGLES_ADJACENCY] = _3DPRIM_TRILIST_ADJ,
-   [MESA_PRIM_TRIANGLE_STRIP_ADJACENCY] = _3DPRIM_TRISTRIP_ADJ,
-};
+static const uint32_t
+   gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY + 1] = {
+      [MESA_PRIM_POINTS] = _3DPRIM_POINTLIST,
+      [MESA_PRIM_LINES] = _3DPRIM_LINELIST,
+      [MESA_PRIM_LINE_LOOP] = _3DPRIM_LINELOOP,
+      [MESA_PRIM_LINE_STRIP] = _3DPRIM_LINESTRIP,
+      [MESA_PRIM_TRIANGLES] = _3DPRIM_TRILIST,
+      [MESA_PRIM_TRIANGLE_STRIP] = _3DPRIM_TRISTRIP,
+      [MESA_PRIM_TRIANGLE_FAN] = _3DPRIM_TRIFAN,
+      [MESA_PRIM_QUADS] = _3DPRIM_QUADLIST,
+      [MESA_PRIM_QUAD_STRIP] = _3DPRIM_QUADSTRIP,
+      [MESA_PRIM_POLYGON] = _3DPRIM_POLYGON,
+      [MESA_PRIM_LINES_ADJACENCY] = _3DPRIM_LINELIST_ADJ,
+      [MESA_PRIM_LINE_STRIP_ADJACENCY] = _3DPRIM_LINESTRIP_ADJ,
+      [MESA_PRIM_TRIANGLES_ADJACENCY] = _3DPRIM_TRILIST_ADJ,
+      [MESA_PRIM_TRIANGLE_STRIP_ADJACENCY] = _3DPRIM_TRISTRIP_ADJ,
+   };
 
 static void
 populate_gs_prog_data(nir_shader *nir,
@@ -596,18 +599,21 @@ void
 jay_populate_prog_data(const struct intel_device_info *devinfo,
                        nir_shader *nir,
                        union brw_any_prog_data *prog_data,
-                       union brw_any_prog_key *key)
+                       union brw_any_prog_key *key,
+                       struct jay_fs_perprim_data *fs_perprim)
 {
+   prog_data->base.is_jay = true;
+
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       populate_vs_prog_data(nir, devinfo, &key->vs, &prog_data->vs);
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
       populate_tcs_prog_data(nir, &key->tcs, &prog_data->tcs);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      int per_primitive_offsets[VARYING_SLOT_MAX];
-      memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
+      int32_t *per_primitive_offsets = fs_perprim->per_primitive_offsets;
+      memset(per_primitive_offsets, -1, VARYING_SLOT_MAX * sizeof(int));
 
       populate_fs_prog_data(nir, devinfo, &key->fs, &prog_data->fs,
-                            NULL /* TODO: mue_map */, per_primitive_offsets);
+                            fs_perprim->mue, per_primitive_offsets);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       populate_gs_prog_data(nir, &key->gs, &prog_data->gs);
    }

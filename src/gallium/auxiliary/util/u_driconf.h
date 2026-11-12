@@ -35,6 +35,9 @@ void
 u_driconf_fill_st_options(struct st_config_options *options,
                           const struct driOptionCache *optionCache);
 
+bool
+u_driconf_glthread_enabled(const struct driOptionCache *optionCache);
+
 #ifdef __cplusplus
 }
 #endif

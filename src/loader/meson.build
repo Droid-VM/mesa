@@ -7,7 +7,7 @@ if with_platform_wayland
   wp_protos = {
     'fifo-v1': mod_wl.find_protocol('fifo', state : 'staging', version : 1),
     'commit-timing-v1': mod_wl.find_protocol('commit-timing', state : 'staging', version : 1),
-    'linux-dmabuf-unstable-v1': mod_wl.find_protocol('linux-dmabuf', state : 'unstable', version : 1),
+    'linux-dmabuf-v1': mod_wl.find_protocol('linux-dmabuf', state : 'stable', version : 1),
     'presentation-time': mod_wl.find_protocol('presentation-time'),
     'tearing-control-v1': mod_wl.find_protocol('tearing-control', state : 'staging', version : 1),
     'linux-drm-syncobj-v1': mod_wl.find_protocol('linux-drm-syncobj', state : 'staging', version : 1),

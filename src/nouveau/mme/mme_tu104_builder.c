@@ -7,12 +7,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "clcd97.h"
+
 #define MME_TU104_MAX_REGS 23
 
 void
 mme_tu104_builder_init(struct mme_builder *b)
 {
    mme_reg_alloc_init(&b->reg_alloc, BITFIELD_MASK(MME_TU104_MAX_REGS));
+   b->tu104.cls_eng3d = b->devinfo->cls_eng3d;
 }
 
 static void
@@ -103,14 +106,14 @@ mme_tu104_next_inst_can_add_alu(struct mme_tu104_builder *tb,
       util_bitcount(tb->inst_parts & (MME_TU104_INSTR_PART_IMM0 |
                                       MME_TU104_INSTR_PART_IMM1));
 
-   const unsigned num_imms = mme_tu104_alu_op_has_implicit_imm(alu->op) +
-                             mme_tu104_reg_num_imms(alu->src[0]) +
-                             mme_tu104_reg_num_imms(alu->src[1]);
+   const unsigned num_imms =
+      (mme_tu104_alu_op_has_implicit_imm(tb->cls_eng3d, alu->op) ? 1 : 0) +
+      mme_tu104_reg_num_imms(alu->src[0]) + mme_tu104_reg_num_imms(alu->src[1]);
    assert(num_imms <= 2);
    if (num_imms + used_imms > 2)
       return false;
 
-   if (mme_tu104_alu_op_has_implicit_imm(alu->op) &&
+   if (mme_tu104_alu_op_has_implicit_imm(tb->cls_eng3d, alu->op) &&
        (tb->inst_parts & MME_TU104_INSTR_PART_ALU0) &&
        (tb->inst_parts & MME_TU104_INSTR_PART_IMM1))
       return false;
@@ -140,7 +143,7 @@ mme_tu104_push_alu(struct mme_tu104_builder *tb,
    if (!mme_tu104_next_inst_can_add_alu(tb, alu, must_be_alu0))
       mme_tu104_new_inst(tb);
 
-   if (mme_tu104_alu_op_has_implicit_imm(alu->op) &&
+   if (mme_tu104_alu_op_has_implicit_imm(tb->cls_eng3d, alu->op) &&
        (tb->inst_parts & MME_TU104_INSTR_PART_IMM0))
       tb->inst_parts |= MME_TU104_INSTR_PART_ALU0;
 
@@ -181,7 +184,7 @@ mme_tu104_push_alu(struct mme_tu104_builder *tb,
    const unsigned num_imms = mme_tu104_reg_num_imms(alu->src[0]) +
                              mme_tu104_reg_num_imms(alu->src[1]);
 
-   if (mme_tu104_alu_op_has_implicit_imm(alu->op)) {
+   if (mme_tu104_alu_op_has_implicit_imm(tb->cls_eng3d, alu->op)) {
       mme_tu104_set_inst_parts(tb, MME_TU104_INSTR_PART_IMM0 << alu_idx);
       inst->imm[alu_idx] = implicit_imm;
       assert(num_imms <= 1);
@@ -244,9 +247,9 @@ build_alu_to(struct mme_builder *b,
    enum mme_tu104_reg x_reg = mme_value_alu_reg(x);
    enum mme_tu104_reg y_reg = mme_value_alu_reg(y);
 
-   unsigned num_imms = mme_tu104_alu_op_has_implicit_imm(op) +
-                       mme_tu104_reg_num_imms(x_reg) +
-                       mme_tu104_reg_num_imms(y_reg);
+   unsigned num_imms =
+      (mme_tu104_alu_op_has_implicit_imm(b->devinfo->cls_eng3d, op) ? 1 : 0) +
+      mme_tu104_reg_num_imms(x_reg) + mme_tu104_reg_num_imms(y_reg);
    while (num_imms > 2) {
       if (y_reg == MME_TU104_REG_IMM32) {
          y = mme_mov(b, y);
@@ -789,7 +792,7 @@ mme_tu104_builder_finish(struct mme_tu104_builder *tb, size_t *size_out)
    tb->insts[tb->inst_count - 2].end_next = true;
 
    if (0)
-      mme_tu104_print(stderr, tb->insts, tb->inst_count);
+      mme_tu104_print(stderr, tb->insts, tb->inst_count, tb->cls_eng3d);
 
    size_t enc_size = tb->inst_count * 3 * sizeof(uint32_t);
    uint32_t *enc = malloc(enc_size);
@@ -805,5 +808,5 @@ mme_tu104_builder_dump(struct mme_builder *b, FILE *fp)
 {
    struct mme_tu104_builder *tb = &b->tu104;
 
-   mme_tu104_print(stderr, tb->insts, tb->inst_count);
+   mme_tu104_print(stderr, tb->insts, tb->inst_count, tb->cls_eng3d);
 }

@@ -198,7 +198,8 @@ emit_vgpr_spills_reloads(spill_preserved_ctx& ctx, Builder& bld,
                   Operand(stack_reg.advance(4), s1), Operand::c32(0), Operand(scc, s1));
       bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(scc, s1), Operand(stack_reg, s1),
                Operand::c32(0));
-      bld.sop1(aco_opcode::s_bitset0_b32, Definition(stack_reg, s1), Operand::c32(0), Operand(stack_reg, s1));
+      bld.sop1(aco_opcode::s_bitset0_b32, Definition(stack_reg, s1), Operand::c32(0),
+               Operand(stack_reg, s1));
    }
 
    for (const auto& spill : spills) {
@@ -323,7 +324,7 @@ emit_spills_reloads(spill_preserved_ctx& ctx, std::vector<aco_ptr<Instruction>>&
 
       bool found_reg = false;
       unsigned start_reg, end_reg;
-      BITSET_FOREACH_RANGE(start_reg, end_reg, unused_sgprs, 256) {
+      BITSET_FOREACH_RANGE (start_reg, end_reg, unused_sgprs, 256) {
          if (ctx.program->lane_mask.size() > 1 && (start_reg & 0x1))
             ++start_reg;
 
@@ -362,7 +363,7 @@ emit_spills_reloads(spill_preserved_ctx& ctx, std::vector<aco_ptr<Instruction>>&
       ++insert_point;
 
    insert_point = instructions.insert(insert_point, std::move_iterator(spill_instructions.begin()),
-                       std::move_iterator(spill_instructions.end()));
+                                      std::move_iterator(spill_instructions.end()));
 }
 
 void
@@ -488,7 +489,8 @@ init_block_info(spill_preserved_ctx& ctx)
        * VGPRs used to spill preserved SGPRs to the set of used linear VGPRs, as add_instr might not
        * have seen any actual uses of these VGPRs yet.
        */
-      unsigned linear_vgprs_needed = DIV_ROUND_UP(ctx.preserved_sgprs.size(), ctx.program->wave_size);
+      unsigned linear_vgprs_needed =
+         DIV_ROUND_UP(ctx.preserved_sgprs.size(), ctx.program->wave_size);
 
       for (auto spill_reg : ctx.sgpr_spill_regs) {
          for (unsigned i = 0; i < linear_vgprs_needed; ++i)
@@ -676,8 +678,8 @@ emit_preserved_spills(spill_preserved_ctx& ctx)
       emit_spills_reloads(ctx, ctx.program->blocks[i].instructions, end_instr, block_reloads[i],
                           lvgpr_block_reloads[i], true);
       if (spill_reg) {
-         emit_sgpr_spills_reloads(ctx, ctx.program->blocks[i].instructions, end_instr,
-                                  *spill_reg, sgpr_block_reloads[i], true);
+         emit_sgpr_spills_reloads(ctx, ctx.program->blocks[i].instructions, end_instr, *spill_reg,
+                                  sgpr_block_reloads[i], true);
       }
    }
 }

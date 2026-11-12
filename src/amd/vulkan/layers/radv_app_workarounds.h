@@ -9,9 +9,6 @@
 
 #include <vulkan/vulkan.h>
 
-VKAPI_ATTR VkResult VKAPI_CALL metro_exodus_GetSemaphoreCounterValue(VkDevice _device, VkSemaphore _semaphore,
-                                                                     uint64_t *pValue);
-
 VKAPI_ATTR VkResult VKAPI_CALL no_mans_sky_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
                                                            const VkAllocationCallbacks *pAllocator, VkImageView *pView);
 
@@ -26,5 +23,10 @@ VKAPI_ATTR void VKAPI_CALL strange_brigade_CmdPipelineBarrier2(VkCommandBuffer c
 
 VKAPI_ATTR void VKAPI_CALL gfxbench5_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                                                          const VkDependencyInfo *pDependencyInfo);
+
+VKAPI_ATTR void VKAPI_CALL ue5_CmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport,
+                                              uint32_t viewportCount, const VkViewport *pViewports);
+VKAPI_ATTR void VKAPI_CALL ue5_CmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor,
+                                             uint32_t scissorCount, const VkRect2D *pScissors);
 
 #endif /* RADV_APP_WORKAROUNDS_H */

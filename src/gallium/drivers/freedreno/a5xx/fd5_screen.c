@@ -41,6 +41,11 @@ fd5_screen_is_format_supported(struct pipe_screen *pscreen,
 {
    unsigned retval = 0;
 
+   /* rusticl ORs this into every query and the result is compared against
+    * usage exactly, so it has to go or nothing is ever supported.
+    */
+   usage &= ~PIPE_BIND_OPENCL;
+
    if ((target >= PIPE_MAX_TEXTURE_TYPES) ||
        !valid_sample_count(sample_count)) {
       DBG("not supported: format=%s, target=%d, sample_count=%d, usage=%x",

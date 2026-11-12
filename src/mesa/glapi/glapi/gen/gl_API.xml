@@ -11133,4 +11133,6 @@
 
 <xi:include href="EXT_mesh_shader.xml" xmlns:xi="http://www.w3.org/2001/XInclude"/>
 
+<xi:include href="MESA_map_buffer_client_pointer.xml" xmlns:xi="http://www.w3.org/2001/XInclude"/>
+
 </OpenGLAPI>

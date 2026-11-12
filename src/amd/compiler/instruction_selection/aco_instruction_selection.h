@@ -274,7 +274,7 @@ Temp as_vgpr(isel_context* ctx, Temp val);
 Temp emit_extract_vector(isel_context* ctx, Temp src, uint32_t idx, RegClass dst_rc);
 void emit_split_vector(isel_context* ctx, Temp vec_src, unsigned num_components);
 void expand_vector(isel_context* ctx, Temp vec_src, Temp dst, unsigned num_components,
-                   unsigned mask, bool zero_padding = false);
+                   unsigned mask, bool zero_padding = false, bool unpacked_d16 = false);
 Temp convert_int(isel_context* ctx, Builder& bld, Temp src, unsigned src_bits, unsigned dst_bits,
                  bool sign_extend, Temp dst = Temp());
 Temp convert_pointer_to_64_bit(isel_context* ctx, Temp ptr, bool non_uniform = false);
@@ -286,7 +286,7 @@ Temp create_vec_from_array(isel_context* ctx, Temp arr[], unsigned cnt, RegType 
 void emit_interp_instr(isel_context* ctx, unsigned idx, unsigned component, Temp src, Temp dst,
                        Temp prim_mask, bool high_16bits);
 void emit_interp_mov_instr(isel_context* ctx, unsigned idx, unsigned component, unsigned vertex_id,
-                           Temp dst, Temp prim_mask, bool high_16bits);
+                           Temp dst, Temp prim_mask);
 std::vector<Temp> emit_pack_v1(isel_context* ctx, const std::vector<Temp>& unpacked);
 MIMG_instruction* emit_mimg(Builder& bld, aco_opcode op, std::vector<Temp> dsts, Temp rsrc,
                             Operand samp, std::vector<Temp> coords, bool disable_wqm,

@@ -4,6 +4,7 @@
  */
 
 #include "ethosu_device.h"
+#include "ethosu_encode.h"
 #include "ethosu_ml.h"
 #include "ethosu_public.h"
 
@@ -24,6 +25,7 @@ static const struct debug_named_value ethosu_debug_options[] = {
    {"disable_sram", ETHOSU_DBG_DISABLE_SRAM, "Disable SRAM"},
    {"force_u85", ETHOSU_DBG_FORCE_U85, "Force U85 behavior even on U65 hardware"},
    {"dump_perf", ETHOSU_DBG_DUMP_PERF, "Dump performance counters for each submit"},
+   {"dump_lowering", ETHOSU_DBG_DUMP_LOWERING, "Dump the operation list after each lowering pass"},
    DEBUG_NAMED_VALUE_END};
 
 DEBUG_GET_ONCE_FLAGS_OPTION(ethosu_debug, "ETHOSU_DEBUG", ethosu_debug_options, 0)
@@ -34,6 +36,7 @@ ethosu_destroy_screen(struct pipe_screen *pscreen)
 {
    struct ethosu_screen *screen = ethosu_screen(pscreen);
 
+   ethosu_weight_cache_destroy(&screen->ml_device);
    ralloc_free(screen);
 }
 
@@ -239,6 +242,7 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 2;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 3;
+      device->ofm_scale_bits = 32;
    } else {
       device->ifm_ublock.width = 4;
       device->ifm_ublock.height = 4;
@@ -247,12 +251,14 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 1;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 7;
+      device->ofm_scale_bits = 31;
    }
 }
 
 static void
 ethosu_ml_device_destroy(struct pipe_ml_device *pdev)
 {
+   ethosu_weight_cache_destroy(ethosu_ml_device(pdev));
    ralloc_free(pdev);
 }
 

@@ -495,7 +495,6 @@ private:
 
     BOOL_32 IsBlock256kb(AddrSwizzleMode swizzleMode) const { return IsBlockVariable(swizzleMode); }
 
-    // TODO: figure out if there is any Column bits on GFX11...
     static const UINT_32 ColumnBits       = 2;
     static const UINT_32 BankBits         = 4;
     static const UINT_32 UnalignedDccType = 3;

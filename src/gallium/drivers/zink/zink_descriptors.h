@@ -38,6 +38,8 @@ enum zink_pipeline_idx;
 
 
 #define ZINK_BINDLESS_IS_BUFFER(HANDLE) (HANDLE >= ZINK_MAX_BINDLESS_HANDLES)
+/* buffer handle ids are offset by ZINK_MAX_BINDLESS_HANDLES for internal tracking */
+#define ZINK_BINDLESS_SLOT(HANDLE) (ZINK_BINDLESS_IS_BUFFER(HANDLE) ? (HANDLE) - ZINK_MAX_BINDLESS_HANDLES : (HANDLE))
 
 static inline enum zink_descriptor_size_index
 zink_vktype_to_size_idx(VkDescriptorType type)

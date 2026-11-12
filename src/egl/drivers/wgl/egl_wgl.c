@@ -199,14 +199,6 @@ wgl_display_destroy(_EGLDisplay *disp)
    free(wgl_dpy);
 }
 
-static int
-wgl_egl_st_get_param(struct pipe_frontend_screen *fscreen,
-                     enum st_manager_param param)
-{
-   /* no-op */
-   return 0;
-}
-
 static bool
 wgl_get_egl_image(struct pipe_frontend_screen *fscreen, void *image,
                   struct st_egl_image *out)
@@ -254,7 +246,6 @@ wgl_initialize_impl(_EGLDisplay *disp, HDC hdc)
    wgl_dpy->screen = stw_dev->screen;
 
    wgl_dpy->base.screen = stw_dev->screen;
-   wgl_dpy->base.get_param = wgl_egl_st_get_param;
    wgl_dpy->base.get_egl_image = wgl_get_egl_image;
    wgl_dpy->base.validate_egl_image = wgl_validate_egl_image;
 

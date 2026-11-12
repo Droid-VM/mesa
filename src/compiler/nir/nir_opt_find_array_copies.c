@@ -584,7 +584,8 @@ opt_find_array_copies_block(nir_builder *b, nir_block *block,
       } else {
          assert(intrin->intrinsic == nir_intrinsic_store_deref);
          nir_intrinsic_instr *load = nir_src_as_intrinsic(intrin->src[1]);
-         if (load == NULL || load->intrinsic != nir_intrinsic_load_deref) {
+         if (load == NULL || load->intrinsic != nir_intrinsic_load_deref ||
+             load->instr.block != intrin->instr.block) {
             src_deref = NULL;
          } else {
             src_deref = nir_src_as_deref(load->src[0]);

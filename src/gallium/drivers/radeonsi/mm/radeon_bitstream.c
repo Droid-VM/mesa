@@ -709,6 +709,8 @@ static void radeon_bs_code_leb128(uint8_t *buf, uint32_t value, uint32_t num_byt
       num_bytes--;
       i++;
    } while((leb128_byte & 0x80));
+
+   assert(!value);
 }
 
 void radeon_bs_av1_seq(struct radeon_bitstream *bs, uint8_t *obu_bytes, struct pipe_av1_enc_seq_param *seq)
@@ -719,9 +721,9 @@ void radeon_bs_av1_seq(struct radeon_bitstream *bs, uint8_t *obu_bytes, struct p
    if (obu_bytes[0] & 0x4) /* obu_extension_flag */
       radeon_bs_code_fixed_bits(bs, obu_bytes[1], 8);
 
-   /* obu_size, use one byte for header, the size will be written in afterwards */
+   /* obu_size, use two bytes for header, the size will be written in afterwards */
    uint8_t *size_offset = &out[bs->bits_output / 8];
-   radeon_bs_code_fixed_bits(bs, 0, 8);
+   radeon_bs_code_fixed_bits(bs, 0, 16);
 
    radeon_bs_code_fixed_bits(bs, seq->profile, 3);
    radeon_bs_code_fixed_bits(bs, seq->seq_bits.still_picture, 1);
@@ -842,6 +844,6 @@ void radeon_bs_av1_seq(struct radeon_bitstream *bs, uint8_t *obu_bytes, struct p
    radeon_bs_code_fixed_bits(bs, 1, 1); /* trailing_one_bit */
    radeon_bs_byte_align(bs);
 
-   uint32_t obu_size = (uint32_t)(&out[bs->bits_output / 8] - size_offset - 1);
-   radeon_bs_code_leb128(size_offset, obu_size, 1);
+   uint32_t obu_size = (uint32_t)(&out[bs->bits_output / 8] - size_offset - 2);
+   radeon_bs_code_leb128(size_offset, obu_size, 2);
 }

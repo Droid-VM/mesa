@@ -20,6 +20,7 @@ class Opcode:
     cmod: bool
     side_effects: bool
     _2src_commutative: bool
+    no_mask: bool
     extra_struct: list[tuple[str, str]]
 
 
@@ -36,6 +37,7 @@ class Props(enum.IntEnum):
     NO_DEST_ = 1 << 8
     NEGATE = NEGATE0 | NEGATE1 | NEGATE2 | NEGATE3
     NO_DEST = SIDE_EFFECTS | NO_DEST_
+    NO_MASK = 1 << 9
 
 
 _opcodes: dict[str, Opcode] = {}
@@ -59,6 +61,7 @@ def op(name: str, num_srcs: int, types: str | None = None,
                             bool(props & Props.SAT), bool(props & Props.CMOD),
                             bool(props & Props.SIDE_EFFECTS),
                             bool(props & Props.COMMUTATIVE),
+                            bool(props & Props.NO_MASK),
                             extra_struct_)
 
 
@@ -113,7 +116,10 @@ op('mul',        2, 'u16 s16 f32 f64 f16 bf16',
    Props.NEGATE | Props.SAT | Props.CMOD | Props.COMMUTATIVE)
 op('mul_high',   2, 'u32 s32', Props.COMMUTATIVE)
 op('mul_32x16',  2, 'u32 s32')
+op('mul_32_part', 2, 'u32 s32')
 op('mul_32',     2, 'u32 s32', Props.COMMUTATIVE, ['bool high'])
+op('macl',       3, 'u32 s32')
+op('mach',       3, 'u32 s32')
 op('sel',        3, 'u32 f32 s32 u1 s16 u16 f16', Props.NEGATE)
 op('csel',       3, 'u16 u32 s32 f16 f32', Props.NEGATE)
 op('dp4a_uu',    3, 'u32', Props.SAT)
@@ -142,44 +148,48 @@ for n in ['brd', 'illegal', 'goto', 'join', 'if', 'else',
 op('halt', 0, None, Props.NO_DEST, ['bool predicate_all'])
 
 op('send', 4, None, Props.SIDE_EFFECTS, [
+    'uint32_t desc_imm',
+    'uint32_t ex_desc_imm',
     'gen_sfid sfid',
-    'uint8_t sbid',
     'bool eot',
     'bool check_tdr',
     'bool bindless',
     'bool pure',
     'bool skip_helpers',
+    'bool has_header',
     'enum jay_type type_0',
     'enum jay_type type_1',
-    'uint8_t mlen',
-    'uint8_t ex_mlen',
-    'bool pad[1]',
-    'uint32_t ex_desc_imm',
+    'uint8_t explicit_simd_width',
+    'bool pad[2]',
 ])
+
+# Used during RA to model the register cost for packing mlen/ex_mlen
+# src0 = indirect descriptor, src1 = null
+op('pack_mlen', 2, 'u32', Props.NEGATE)
 
 op('reloc',   0, 'u32 u64', 0, ['unsigned param', 'unsigned base'])
 op('preload', 0, 'u32',     0, ['unsigned reg'])
-op('deswizzle_odd', 2, 'f32', 0, ['bool src2_hi'])
-op('deswizzle_even', 1, 'f32', 0, ['bool src_hi'])
+op('deswizzle_odd', 2, 'f32', Props.NO_MASK, ['bool src2_hi'])
+op('deswizzle_even', 1, 'f32', Props.NO_MASK, ['bool src_hi'])
 
 # Return the UGPR[4] vector base + (0, 1, 2, 3, 4, 5, 6, 7) as packed 16-bit.
 op('lane_id_8', 0, 'u16', 0, ['unsigned base'])
 
-# Build a GPR from two UGPR[16] ranges.
-op('zip_ugpr16', 2, 'u32')
+# Build a GPR by pasting UGPR ranges.
+op('zip', 4, 'u32')
 
 # Sample ID calculation
 op('extract_byte_per_8lanes', 2, 'u32')
 op('shr_odd_subspans_by_4', 1, 'u16')
 op('and_u32_u16', 2, 'u32')
-op('and_s32_sN', 2, 's32', 0, ['unsigned n'])
+op('and_sN_s32', 2, 's32', 0, ['unsigned n'])
 
 # Pixel coord calculations. expand_quad replicates out the per-2x2 values from
 # its source g0.[10...13] and - in the case of SIMD32 - g1.[10...13] into a
 # per-lane value. Then offset_packed_pixel_coords adds the appropriate packed
 # 2x16-bit offset within each quad, giving 2x16-bit per-lane coordinates.
 op('expand_quad', 2, 'u32')
-op('offset_packed_pixel_coords', 2, 'u32')
+op('offset_packed_pixel_coords', 2, 'u32', Props.NO_MASK)
 op("coarse_pixel_corners", 1, 'u32')
 op('extract_subspan_info', 2, 'u32', Props.CMOD, ['uint16_t mask'])
 
@@ -207,9 +217,9 @@ op('extract_subspan_info', 2, 'u32', Props.CMOD, ['uint16_t mask'])
 # indicate that the r3 phi's value is r1 when coming from B1, and r2 when coming
 # from B2. This would traditionally be written r3 = 𝜙(r1, r2).
 #
-# Phis operate on whole 32-bit lane values. Phis are not allowed to mix files.
-op('phi_src', 1, 'u1 u32', Props.NO_DEST, ['uint32_t index'])
-op('phi_dst', 0, 'u1 u32')
+# Phis are not allowed to mix files.
+op('phi_src', 1, 'u1 u16 u32', Props.NO_DEST, ['uint32_t index'])
+op('phi_dst', 0, 'u1 u16 u32')
 
 # Output from a unit test to prevent dead code elimination.
 op('unit_test', 1, 'u32', Props.NO_DEST)
@@ -221,30 +231,30 @@ op('not', 1, 'u1 u32', Props.CMOD)
 
 op('mov_imm64', 0, 'u64', 0, ['uint64_t imm'])
 
-# Cross-lane shuffle. src0=data, src1=offset in bytes. Clobbers an address reg.
-op('shuffle', 2, 'u1 u32')
-
 # Indirect move. src0=data, src1=offset in bytes. Clobbers an address reg.
-op('vector_extract', 2, 'u8 u16 u32')
+op('shuffle', 2, 'u1 u8 u16 u32')
+
+# Indirect move directly from the register file. src0=data vector. src1=offset
+# in bytes inside the register file (as an address register).
+op('mov_indirect', 2, 'u8 u16 u32')
 
 # Shuffle with a constant lane index.
 op('broadcast_imm', 1, 'u1 u32', 0, ['unsigned lane'])
 
 # Follows hardware source order: C B A.  Data is already packed u32 slots
 # by NIR, types are used when making the gen_inst.
-op('dpas', 3, 'u32', 0, [
+op('dpas', 3, 'u32', Props.NO_MASK, [
     'uint8_t sdepth',
     'uint8_t rcount',
     'enum jay_type acc_type',
     'enum jay_type src_type',
-    'uint8_t sbid',
-    'uint8_t pad[3]',
 ])
 
 # Pack/unpack multiple sources to/from a single 32-bit def.
-op('slice_repack', 1, 'u32', 0, [
+op('slice_repack', 1, 'u32', Props.NO_MASK, [
    'uint8_t factor_log2',
    'bool unpack',
+   'uint8_t index',
    ])
 
 # Active lanes select source 0, inactive lanes select the constant value
@@ -256,6 +266,9 @@ op('demote', 2, 'u1 u16 u32 u64 s16 s32 s64 f16 f32 f64', Props.NEGATE | Props.N
 # Copy the is_helper flag.
 op('is_helper', 0, 'u1 u32')
 
+# Swap two registers. Pseudo-instruction during RA.
+op('swap', 2, 'u32', Props.NO_DEST)
+
 OPCODES = _opcodes
 
 ENUMS: 'Mapping[str, tuple[str, list[str]]]' = {
@@ -263,7 +276,7 @@ ENUMS: 'Mapping[str, tuple[str, list[str]]]' = {
                                               'xyxy', 'zwzw', 'xxzz', 'yyww']),
     'jay_rounding_mode': ('JAY', ['round', 'rne', 'ru', 'rd', 'rtz']),
     'jay_math': ('JAY_MATH', ['_', 'inv', 'log', 'exp', 'sqrt', 'rsq', 'sin', 'cos']),
-    'gen_sfid': ('GEN_SFID', ['null', 'sampler', 'message_gateway',
+    'gen_sfid': ('GEN_SFID', ['null', '1?', 'sampler', 'message_gateway',
                               'render_cache', 'urb', 'bindless_thread_dispatch',
                               'ray_trace_accelerator', 'hdc0',
                               'pixel_interpolator', 'tgm', 'slm', 'ugm']),

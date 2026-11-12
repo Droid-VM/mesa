@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2022 Advanced Micro Devices, Inc.  All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc.  All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -71,69 +71,69 @@ protected:
     // Hwl interface
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceInfo(
         const ADDR_COMPUTE_SURFACE_INFO_INPUT* pIn,
-        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const;
+        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceAddrFromCoord(
         const ADDR_COMPUTE_SURFACE_ADDRFROMCOORD_INPUT* pIn,
-        ADDR_COMPUTE_SURFACE_ADDRFROMCOORD_OUTPUT* pOut) const;
+        ADDR_COMPUTE_SURFACE_ADDRFROMCOORD_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSurfaceCoordFromAddr(
         const ADDR_COMPUTE_SURFACE_COORDFROMADDR_INPUT* pIn,
-        ADDR_COMPUTE_SURFACE_COORDFROMADDR_OUTPUT* pOut) const;
+        ADDR_COMPUTE_SURFACE_COORDFROMADDR_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeSliceTileSwizzle(
         const ADDR_COMPUTE_SLICESWIZZLE_INPUT* pIn,
-        ADDR_COMPUTE_SLICESWIZZLE_OUTPUT* pOut) const;
+        ADDR_COMPUTE_SLICESWIZZLE_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlExtractBankPipeSwizzle(
         const ADDR_EXTRACT_BANKPIPE_SWIZZLE_INPUT* pIn,
-        ADDR_EXTRACT_BANKPIPE_SWIZZLE_OUTPUT* pOut) const;
+        ADDR_EXTRACT_BANKPIPE_SWIZZLE_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlCombineBankPipeSwizzle(
         UINT_32 bankSwizzle, UINT_32 pipeSwizzle, ADDR_TILEINFO*  pTileInfo,
-        UINT_64 baseAddr, UINT_32* pTileSwizzle) const;
+        UINT_64 baseAddr, UINT_32* pTileSwizzle) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeBaseSwizzle(
         const ADDR_COMPUTE_BASE_SWIZZLE_INPUT* pIn,
-        ADDR_COMPUTE_BASE_SWIZZLE_OUTPUT* pOut) const;
+        ADDR_COMPUTE_BASE_SWIZZLE_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlConvertTileInfoToHW(
         const ADDR_CONVERT_TILEINFOTOHW_INPUT* pIn,
-        ADDR_CONVERT_TILEINFOTOHW_OUTPUT* pOut) const;
+        ADDR_CONVERT_TILEINFOTOHW_OUTPUT* pOut) const override;
 
     virtual UINT_32 HwlComputeHtileBpp(
-        BOOL_32 isWidth8, BOOL_32 isHeight8) const;
+        BOOL_32 isWidth8, BOOL_32 isHeight8) const override;
 
     virtual UINT_32 HwlComputeHtileBaseAlign(
-        BOOL_32 isTcCompatible, BOOL_32 isLinear, ADDR_TILEINFO* pTileInfo) const;
+        BOOL_32 isTcCompatible, BOOL_32 isLinear, ADDR_TILEINFO* pTileInfo) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeFmaskInfo(
         const ADDR_COMPUTE_FMASK_INFO_INPUT* pIn,
-        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pOut);
+        ADDR_COMPUTE_FMASK_INFO_OUTPUT* pOut) override;
 
     virtual ADDR_E_RETURNCODE HwlComputeFmaskAddrFromCoord(
         const ADDR_COMPUTE_FMASK_ADDRFROMCOORD_INPUT* pIn,
-        ADDR_COMPUTE_FMASK_ADDRFROMCOORD_OUTPUT* pOut) const;
+        ADDR_COMPUTE_FMASK_ADDRFROMCOORD_OUTPUT* pOut) const override;
 
     virtual ADDR_E_RETURNCODE HwlComputeFmaskCoordFromAddr(
         const ADDR_COMPUTE_FMASK_COORDFROMADDR_INPUT* pIn,
-        ADDR_COMPUTE_FMASK_COORDFROMADDR_OUTPUT* pOut) const;
+        ADDR_COMPUTE_FMASK_COORDFROMADDR_OUTPUT* pOut) const override;
 
     virtual BOOL_32 HwlGetAlignmentInfoMacroTiled(
         const ADDR_COMPUTE_SURFACE_INFO_INPUT* pIn,
-        UINT_32* pPitchAlign, UINT_32* pHeightAlign, UINT_32* pSizeAlign) const;
+        UINT_32* pPitchAlign, UINT_32* pHeightAlign, UINT_32* pSizeAlign) const override;
 
     virtual UINT_32 HwlComputeQbStereoRightSwizzle(
-        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pInfo) const;
+        ADDR_COMPUTE_SURFACE_INFO_OUTPUT* pInfo) const override;
 
     virtual VOID HwlComputePixelCoordFromOffset(
         UINT_32 offset, UINT_32 bpp, UINT_32 numSamples,
         AddrTileMode tileMode, UINT_32 tileBase, UINT_32 compBits,
         UINT_32* pX, UINT_32* pY, UINT_32* pSlice, UINT_32* pSample,
-        AddrTileType microTileType, BOOL_32 isDepthSampleOrder) const;
+        AddrTileType microTileType, BOOL_32 isDepthSampleOrder) const override;
 
     /// Return Cmask block max
-    virtual BOOL_32 HwlGetMaxCmaskBlockMax() const
+    virtual BOOL_32 HwlGetMaxCmaskBlockMax() const override
     {
         return 0x3FFF; // 14 bits, 0n16383
     }

@@ -857,10 +857,8 @@ emit_alu_bundle(compiler_context *ctx, midgard_block *block,
    }
 
    /* Emit padding (all zero) */
-   if (bundle->padding) {
-      memset(util_dynarray_grow_bytes(emission, bundle->padding, 1), 0,
-             bundle->padding);
-   }
+   if (bundle->padding)
+      util_dynarray_grow_zero(emission, uint8_t, bundle->padding);
 
    /* Tack on constants */
 
@@ -994,7 +992,7 @@ emit_binary_bundle(compiler_context *ctx, midgard_block *block,
 
       mir_pack_swizzle_tex(ins);
 
-      if (!(ctx->quirks & MIDGARD_NO_OOO))
+      if (ctx->inputs->arch >= 5)
          mir_pack_tex_ooo(block, bundle, ins);
 
       unsigned osz = nir_alu_type_get_type_size(ins->dest_type);

@@ -116,6 +116,12 @@ struct tu_shader
          /* If per_layer_viewport is true, the maximum number of layers written to.
           */
          uint8_t max_fdm_layers;
+
+         /* Whether there are read-only input attachments, i.e. input
+          * attachments that are not patched to read from GMEM. Only used for
+          * dynamic rendering.
+          */
+         bool read_only_input_attachments;
       } fs;
    };
 };
@@ -158,6 +164,12 @@ tu_destroy_softfloat(struct tu_device *device);
 bool
 tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, struct tu_device *dev,
                        bool last_stage);
+
+bool
+tu_nir_lower_multiview_sw_vs(nir_shader *nir);
+
+bool
+tu_nir_lower_multiview_sw_fs(nir_shader *nir);
 
 bool
 tu_nir_lower_ray_queries(nir_shader *nir);

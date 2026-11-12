@@ -45,6 +45,9 @@ enum agx_va_flags {
 
    /* VA must be fixed, otherwise allocated by the driver. */
    AGX_VA_FIXED = (1 << 1),
+
+   /* VA allocated that way should be replayable when possible. */
+   AGX_VA_CAPTURE = (1 << 2),
 };
 
 struct agx_va {

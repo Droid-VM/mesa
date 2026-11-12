@@ -187,16 +187,9 @@ validate_ir(Program* program)
             num_defs = MIN2(num_defs, instr->definitions.size());
 
             for (unsigned i = 0; i < num_defs; i++) {
-               aco_type type;
-               fixed_reg fixed_reg;
-               if (instr->isVOPC() && program->gfx_level < GFX10 &&
-                   opcode_info.def_fixed_reg[0] == fixed_exec) {
-                  type = opcode_info.def_types[0];
-                  fixed_reg = i == 0 ? not_fixed : fixed_exec;
-               } else {
-                  type = opcode_info.def_types[i];
-                  fixed_reg = opcode_info.def_fixed_reg[i];
-               }
+               aco_type type = opcode_info.get_def_type(i);
+               fixed_reg fixed_reg =
+                  opcode_info.get_def_fixed_reg(instr.get(), program->gfx_level, i);
 
                if (fixed_reg == fixed_m0) {
                   check(instr->definitions[i].isFixed() && instr->definitions[i].physReg() == m0,
@@ -891,8 +884,8 @@ validate_ir(Program* program)
                      "VMEM definitions[0] (VDATA) must be VGPR", instr.get());
                check(d16 || !instr->definitions[0].regClass().is_subdword(),
                      "Only D16 opcodes can load subdword values.", instr.get());
-               check(instr->definitions[0].bytes() <= 8 || !d16,
-                     "D16 opcodes can only load up to 8 bytes.", instr.get());
+               check(instr->definitions[0].bytes() <= 8 || !d16 || program->dev.has_unpacked_d16,
+                     "Packed D16 opcodes can only load up to 8 bytes.", instr.get());
             }
             break;
          }
@@ -964,8 +957,9 @@ validate_ir(Program* program)
                      "MIMG definitions[0] (VDATA) must be VGPR", instr.get());
                check(instr->mimg().d16 || !instr->definitions[0].regClass().is_subdword(),
                      "Only D16 MIMG instructions can load subdword values.", instr.get());
-               check(instr->definitions[0].bytes() <= 8 || !instr->mimg().d16,
-                     "D16 MIMG instructions can only load up to 8 bytes.", instr.get());
+               check(instr->definitions[0].bytes() <= 8 || !instr->mimg().d16 ||
+                        program->dev.has_unpacked_d16,
+                     "Packed D16 MIMG instructions can only load up to 8 bytes.", instr.get());
             }
             break;
          }
@@ -1092,7 +1086,8 @@ validate_ir(Program* program)
          // skipped check_block(num_p_logical_start == 1 || (block.index != 0 &&
          // block.logical_preds.empty()),
          //             "Missing p_logical_start / p_logical_end in logical block", &block);
-         check_block(num_p_logical_start == 0 || block.index == 0 || !block.logical_preds.empty(),
+         check_block(num_p_logical_start == 0 || block.index == 0 ||
+                        (block.kind & block_kind_resume) || !block.logical_preds.empty(),
                      "p_logical_start and p_logical_end are only allowed in logical blocks",
                      &block);
       }
@@ -1505,7 +1500,7 @@ get_subdword_bytes_written(Program* program, const aco_ptr<Instruction>& instr, 
       return {0, 4};
    }
 
-   if (program->dev.sram_ecc_enabled)
+   if (program->dev.sram_ecc_enabled || gfx_level < GFX9)
       return {0, def.size() * 4};
 
    if (instr->isMIMG() && instr->mimg().d16)
@@ -1572,10 +1567,9 @@ validate_instr_defs(Program* program, std::array<unsigned, 2048>& regs,
       PhysReg reg = assignments[tmp.id()].reg;
       for (unsigned j = 0; j < tmp.bytes(); j++) {
          if (regs[reg.reg_b + j])
-            err |=
-               ra_fail(program, loc, assignments[regs[reg.reg_b + j]].defloc,
-                       "Assignment of byte %d of %%%d already taken by %%%d from instruction", j,
-                       tmp.id(), regs[reg.reg_b + j]);
+            err |= ra_fail(program, loc, assignments[regs[reg.reg_b + j]].defloc,
+                           "Assignment of byte %d of %%%d already taken by %%%d from instruction",
+                           j, tmp.id(), regs[reg.reg_b + j]);
          regs[reg.reg_b + j] = tmp.id();
       }
       if (def.regClass().is_subdword()) {
@@ -1761,8 +1755,8 @@ validate_ra(Program* program)
          for (unsigned i = 0; i < tmp.bytes(); i++) {
             if (regs[reg.reg_b + i]) {
                err |= ra_fail(program, loc, Location(),
-                              "Assignment of byte %d of %%%d already taken by %%%d in live-in",
-                              i, id, regs[reg.reg_b + i]);
+                              "Assignment of byte %d of %%%d already taken by %%%d in live-in", i,
+                              id, regs[reg.reg_b + i]);
             }
             regs[reg.reg_b + i] = id;
          }

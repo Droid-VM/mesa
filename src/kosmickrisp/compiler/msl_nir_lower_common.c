@@ -220,12 +220,12 @@ msl_lower_robustness2_images(nir_shader *nir)
 }
 
 bool
-msl_lower_textures(nir_shader *nir)
+msl_lower_textures(nir_shader *nir, bool lower_lod_bias)
 {
    bool progress = false;
    nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0u,
-      .lower_sampler_lod_bias = true,
+      .lower_sampler_lod_bias = lower_lod_bias,
 
       /* We don't use 1D textures because they are really limited in Metal */
       .lower_1d = true,
@@ -292,6 +292,72 @@ msl_lower_static_sample_mask(nir_shader *nir, uint32_t sample_mask)
       nir_metadata_control_flow, static_sample_mask);
 
    return true;
+}
+
+static bool
+is_color_output(const nir_intrinsic_instr *intr)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const unsigned location = nir_intrinsic_io_semantics(intr).location;
+   return location == FRAG_RESULT_COLOR ||
+          (location >= FRAG_RESULT_DATA0 && location <= FRAG_RESULT_DATA7);
+}
+
+/* See issue: https://github.com/KhronosGroup/Vulkan-Portability/issues/54
+ * Writing sample mask is more expensive than using barycentric coordinates.
+ * Find a color store and "rewrite" store value to be a bcsel based on a false
+ * value using barycentric coordinates so the MSL compiler does not optimise it.
+ * Use sample mask write as a fallback when no color is present.
+ */
+bool
+msl_disable_triangle_merge(nir_shader *nir)
+{
+   assert(nir->info.stage == MESA_SHADER_FRAGMENT);
+
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
+
+   nir_intrinsic_instr *store = NULL;
+   nir_foreach_block(block, entrypoint) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (is_color_output(intr)) {
+            store = intr;
+            break;
+         }
+      }
+      if (store)
+         break;
+   }
+
+   if (store == NULL)
+      return msl_lower_static_sample_mask(nir, 0xFFFFFFFF);
+
+   nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
+
+   nir_def *barycentric = nir_load_barycentric_coord_pixel(
+      &b, 32u, .interp_mode = INTERP_MODE_SMOOTH);
+   BITSET_SET(nir->info.system_values_read,
+              SYSTEM_VALUE_BARYCENTRIC_PERSP_COORD);
+
+   nir_def *all_negative =
+      nir_flt_imm(&b, nir_channel(&b, barycentric, 0u), 0.0);
+   for (unsigned i = 1u; i < 3u; ++i) {
+      nir_def *weight = nir_channel(&b, barycentric, i);
+      all_negative = nir_iand(&b, all_negative, nir_flt_imm(&b, weight, 0.0));
+   }
+
+   b.cursor = nir_before_instr(&store->instr);
+   nir_def *value = store->src[0u].ssa;
+   nir_def *unchanged = nir_bcsel(
+      &b, all_negative,
+      nir_imm_zero(&b, value->num_components, value->bit_size), value);
+   nir_src_rewrite(&store->src[0u], unchanged);
+
+   return nir_progress(true, entrypoint, nir_metadata_control_flow);
 }
 
 bool
@@ -880,4 +946,49 @@ msl_nir_lower_fs_combined_depth_clamp_clip(nir_shader *s)
    nir_instr_remove(&depth_store->instr);
 
    return nir_progress(true, b->impl, nir_metadata_none);
+}
+
+static bool lower_demote_samples(nir_builder *b, nir_intrinsic_instr *intr,
+                                 UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_demote_samples)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   /* Determine if the current sample is masked out after this op */
+   nir_def *to_keep = nir_u2u32(b, nir_inot(b, intr->src[0].ssa));
+   nir_def *mask = nir_ishl(b, nir_imm_int(b, 1), nir_load_sample_id(b));
+   mask = nir_iand(b, mask, nir_load_sample_mask_in(b));
+   mask = nir_iand(b, mask, to_keep);
+
+   /* Demote if the current sample has been discarded */
+   nir_demote_if(b, nir_ieq_imm(b, mask, 0));
+
+   nir_instr_remove(&intr->instr);
+
+   return true;
+}
+
+/* TODO_KOSMICKRISP: Support dynamic state. nir_lower_alpha_to_coverage
+ * already has inputs for this, nir_lower_alpha_to_one does not. */
+bool
+msl_nir_lower_multisample_alpha(nir_shader *s, bool alpha_to_coverage,
+                                bool alpha_to_one)
+{
+   bool progress = false;
+
+   if (alpha_to_coverage) {
+      NIR_PASS(progress, s, nir_lower_alpha_to_coverage, false,
+               NULL);
+
+      /* Lower the resulting demote samples intrinsics */
+      NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_demote_samples,
+               nir_metadata_control_flow, NULL);
+   }
+
+   if (alpha_to_one)
+      NIR_PASS(progress, s, nir_lower_alpha_to_one);
+
+   return progress;
 }

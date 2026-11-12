@@ -25,6 +25,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #if defined(MAJOR_IN_SYSMACROS)
 #include <sys/sysmacros.h>
@@ -1593,6 +1594,7 @@ intel_perf_init_metrics(struct intel_perf_config *perf_cfg,
 {
    perf_cfg->devinfo = devinfo;
    perf_cfg->oa_sample_size = intel_perf_get_oa_format_size(devinfo);
+   perf_cfg->use_metrics_library = debug_get_bool_option("INTEL_USE_METRICS_LIBRARY", false);
 
    intel_perf_init_query_fields(perf_cfg, devinfo, use_register_snapshots);
 
@@ -1698,6 +1700,26 @@ intel_perf_stream_set_state(struct intel_perf_config *perf_config,
          UNREACHABLE("missing");
          return -1;
    }
+}
+
+void *
+intel_perf_stream_map_oa_buffer(struct intel_perf_config *perf_config,
+                                int perf_stream_fd, uint64_t *size)
+{
+   switch (perf_config->devinfo->kmd_type) {
+   case INTEL_KMD_TYPE_XE:
+      return xe_perf_stream_map_oa_buffer(perf_stream_fd, size);
+   default:
+      /* i915 has no uapi to map the OA buffer. */
+      return NULL;
+   }
+}
+
+void
+intel_perf_stream_unmap_oa_buffer(void *map, uint64_t size)
+{
+   if (map)
+      munmap(map, size);
 }
 
 int

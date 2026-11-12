@@ -15,6 +15,10 @@ or to build a tool to analyze the raw performance data.
 Drivers which support u_trace:
    - Intel drivers: ANV, Iris
    - Adreno drivers: Freedreno, Turnip
+   - AMD drivers: RADV, RadeonSI
+   - Arm Mali drivers: Panfrost, PanVK (v10+)
+   - Broadcom drivers: V3DV
+   - Imagination drivers: PowerVR
 
 Usage
 -----
@@ -50,7 +54,25 @@ u_trace is controlled by environment variables:
 
 .. envvar:: MESA_GPU_TRACEFILE
 
-   specifies a file where to write the output instead of ``stdout``
+   specifies a file where to write the output instead of ``stdout``.
+   The output identifies the trace context (e.g. the Vulkan device) that
+   wrote it: a final ``ctx=`` field on each CSV row, a ``ctx`` field on
+   each JSON frame and a ``(ctx N)`` suffix on the text end-of-frame
+   marker.
+
+   If the value contains ``%i``, each context writes to its own file,
+   with ``%i`` replaced by its ID; otherwise all contexts share a single
+   file. ``print_json`` needs ``%i`` to produce valid JSON with more than
+   one context.
+
+   ``%p`` is replaced by the process ID, in every mode. Context IDs are
+   only unique within a process, so a variable set for a whole session
+   needs this to keep one process from truncating another's trace.
+
+   If the file name ends in ``.gz`` the output is gzip-compressed (needs
+   a zlib-enabled build). It is flushed every batch, so a trace stays
+   readable up to the last processed submit even if the application
+   crashes before exiting.
 
 .. envvar:: *_GPU_TRACEPOINT
 
@@ -74,3 +96,15 @@ u_trace is controlled by environment variables:
       * - ANV
         - .. envvar:: INTEL_GPU_TRACEPOINT
         - ``src/intel/ds/intel_tracepoints.py``
+      * - RADV
+        - .. envvar:: RADV_GPU_TRACEPOINT
+        - ``src/amd/vulkan/radv_tracepoints.py``
+      * - RadeonSI
+        - .. envvar:: SI_GPU_TRACEPOINT
+        - ``src/gallium/drivers/radeonsi/si_tracepoints.py``
+      * - Panfrost
+        - .. envvar:: PANFROST_GPU_TRACEPOINT
+        - ``src/gallium/drivers/panfrost/panfrost_tracepoints.py``
+      * - PowerVR
+        - .. envvar:: PVR_GPU_TRACEPOINT
+        - ``src/imagination/ds/pvr_tracepoints.py``

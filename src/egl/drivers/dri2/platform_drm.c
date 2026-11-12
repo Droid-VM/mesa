@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "util/format/u_format.h"
 #include "util/os_file.h"
 
 #include "main/glconfig.h"
@@ -89,9 +90,13 @@ has_free_buffers(struct gbm_surface *_surf)
    struct gbm_dri_surface *surf = gbm_dri_surface(_surf);
    struct dri2_egl_surface *dri2_surf = surf->dri_private;
 
-   for (unsigned i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++)
-      if (!dri2_surf->color_buffers[i].locked)
+   for (unsigned i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++) {
+      struct dri2_egl_buffer *buffer = &dri2_surf->color_buffers[i];
+
+      if (!buffer->locked &&
+          dri2_surf->current != buffer)
          return 1;
+   }
 
    return 0;
 }
@@ -119,6 +124,8 @@ dri2_drm_config_is_compatible(struct dri2_egl_display *dri2_dpy,
    if (i == dri2_dpy->gbm_dri->num_visuals)
       return false;
 
+   if (visual->pipe_format == PIPE_FORMAT_NONE)
+      return false;
 
    const struct util_format_description *fmt_c =
       util_format_description(gl_config->color_format);
@@ -348,14 +355,17 @@ dri2_drm_flush_front_buffer(struct dri_drawable *driDrawable, void *loaderPrivat
    (void)loaderPrivate;
 }
 
+/* Damage is ignored for this SwapBuffers implementation, as it does not
+ * actually post any updates. */
 static EGLBoolean
-dri2_drm_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
+dri2_drm_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+		      const EGLint *rects, EGLint n_rects)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
 
    if (dri2_dpy->swrast_not_kms) {
-      driSwapBuffers(dri2_surf->dri_drawable);
+      driSwapBuffers(dri2_surf->dri_drawable, n_rects, rects);
       return EGL_TRUE;
    }
 
@@ -587,7 +597,6 @@ static const struct dri2_egl_display_vtbl dri2_drm_display_vtbl = {
    .create_image = dri2_drm_create_image_khr,
    .swap_buffers = dri2_drm_swap_buffers,
    .query_buffer_age = dri2_drm_query_buffer_age,
-   .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
 static int
@@ -712,8 +721,10 @@ dri2_initialize_drm(_EGLDisplay *disp)
    disp->Extensions.EXT_buffer_age = EGL_TRUE;
 
 #ifdef HAVE_WAYLAND_PLATFORM
-   dri2_dpy->device_name =
-      loader_get_device_name_for_fd(dri2_dpy->fd_render_gpu);
+   if (dri2_dpy->fd_render_gpu >= 0) {
+      dri2_dpy->device_name =
+         loader_get_device_name_for_fd(dri2_dpy->fd_render_gpu);
+   }
 #endif
    dri2_set_WL_bind_wayland_display(disp);
 

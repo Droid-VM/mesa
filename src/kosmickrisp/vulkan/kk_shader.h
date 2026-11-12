@@ -13,6 +13,8 @@
 
 #include "kosmickrisp/bridge/mtl_format.h"
 
+#include "poly/nir/poly_nir.h"
+
 #include "vk_pipeline_cache.h"
 
 #include "vk_shader.h"
@@ -52,6 +54,9 @@ struct kk_shader_info {
    /* Required for fragment shader cull distance discards. */
    uint8_t num_cull_distances;
 
+   /* Outputs a VS, or a TES followed by a GS, writes for the next stage */
+   uint64_t outputs_written;
+
    union {
       /* Vertex shader is the pipeline, store all relevant data here. */
       struct {
@@ -64,7 +69,6 @@ struct kk_shader_info {
          /* Data needed to start render pass and bind pipeline. */
          uint32_t attribs_read;
          uint32_t sample_count;
-         uint64_t outputs_written;
 
          /* Data needed for serialization. */
          enum mtl_primitive_topology_class topology;
@@ -83,8 +87,6 @@ struct kk_shader_info {
          } stencil_front, stencil_back;
          uint8_t color_attachment_count;
          bool has_ms;
-         bool has_alpha_to_coverage_enabled;
-         bool has_alpha_to_one_enabled;
          bool has_ds;
          bool has_depth_write;
          bool has_stencil_test;
@@ -99,6 +101,8 @@ struct kk_shader_info {
          struct kk_tess_info info;
       } tess;
 
+      struct poly_gs_info gs;
+
       struct {
          bool uses_flat_varyings;
       } fs;
@@ -109,13 +113,18 @@ struct kk_shader_info {
    };
 };
 
+/* Threadgroup size the VS, TES and GS compute passes are compiled for and
+ * dispatched with */
+#define KK_POLY_WG_SIZE 64u
+
 /* Metal handles for binding. */
 struct kk_pipeline_handles {
    union {
       struct {
          mtl_render_pipeline_state *render;
-         /* Vertex, tess ctrl and tess eval at most needed before pre-render. */
-         mtl_compute_pipeline_state *pre_render[3];
+         /* VS, TCS, TES and the GS compute pass at most run before the render
+          * pipeline. */
+         mtl_compute_pipeline_state *pre_render[4];
          mtl_depth_stencil_state *ds_handle;
          uint32_t pre_render_count;
       } gfx;
@@ -134,6 +143,9 @@ struct kk_shader {
    struct kk_pipeline_handles pipeline;
    struct kk_shader_info info;
    struct msl_compile_data msl_data[MESA_SHADER_STAGES];
+   /* Compute pass of a GS. Its rasterization VS is in
+    * msl_data[MESA_SHADER_GEOMETRY]. */
+   struct msl_compile_data gs_main;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
@@ -160,6 +172,9 @@ kk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
                          struct vk_descriptor_set_layout *const *set_layouts);
+
+/* KK_WORKAROUND_18 */
+bool kk_nir_add_device_barrier_workaround(nir_shader *nir);
 
 bool kk_nir_lower_poly(struct nir_shader *nir);
 bool kk_nir_lower_null_images(nir_shader *nir);

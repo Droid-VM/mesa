@@ -93,7 +93,6 @@
 
 #define ANV_SAMPLER_STATE_SIZE (32)
 #define ANV_SAMPLER_STATE_DWORDS (ANV_SAMPLER_STATE_SIZE / sizeof(uint32_t))
-#define ANV_SAMPLER_STATE_GPU_SIZE(verx10) (16)
 
 /* For gfx12 we set the streamout buffers using 4 separate commands
  * (3DSTATE_SO_BUFFER_INDEX_*) instead of 3DSTATE_SO_BUFFER. However the layout
@@ -130,10 +129,21 @@ struct anv_drv_push_data {
 
    union {
       struct {
-         /** Dynamic MSAA value */
+         /** Dynamic FS configuration value (see intel_fs_config) */
          uint32_t fs_config;
 
-         /** Dynamic TCS/TES configuration */
+         /** Fragment shader attachments RENDER_SURFACE_STATE location in
+          * internal heap (Gfx35+)
+          */
+         uint32_t fs_color_offset;
+
+         /** Fragment shader output remapping (Gfx35+)
+          *
+          * 8 elements of 4bits for each color output
+          */
+         uint32_t fs_color_map;
+
+         /** Dynamic TCS/TES configuration (see intel_tess_configs) */
          uint32_t tess_config;
 
          /** Robust access pushed registers. */
@@ -149,14 +159,20 @@ struct anv_drv_push_data {
       } gfx;
 
       struct {
+         /** gl_NumWorkgroups.
+          *
+          * Either directly specified or (if the last channel is the sentinel
+          * UINT_MAX) an indirect 64-bit address to load.  Putting this first
+          * helps reduce copies required in the shader by ensuring this is
+          * GRF-aligned if ray query is not used.
+          */
+         uint32_t num_workgroups[3];
+
          /** Base workgroup ID
           *
           * Used for vkCmdDispatchBase.
           */
          uint32_t base_workgroup[3];
-
-         /** gl_NumWorkgroups */
-         uint32_t num_workgroups[3];
 
          /** Unaligned invocation lane disabling
           *
@@ -166,6 +182,9 @@ struct anv_drv_push_data {
       } cs;
    };
 };
+
+static_assert(offsetof(struct anv_drv_push_data, cs.num_workgroups[0]) == 8,
+              "comes first if there is no ray query");
 
 struct anv_binding_heap_data {
    /** Base offset of the surface descriptors */
@@ -278,6 +297,7 @@ struct anv_push_constants {
 
 #define ANV_DRIVER_PUSH_CONSTANTS_SIZE (sizeof(struct anv_push_constants) - MAX_PUSH_CONSTANTS_SIZE)
 
+#define ANV_MAX_INLINE_DWORDS (16)
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_LDW      (UINT8_MAX - 0)
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_UDW      (UINT8_MAX - 1)
 
@@ -471,7 +491,7 @@ struct anv_dgc_gfx_descriptor {
             struct anv_dgc_push_bindless_stage {
                uint16_t push_data_offset;
                uint16_t inline_dwords_count;
-               uint8_t  inline_dwords[8];
+               uint8_t  inline_dwords[ANV_MAX_INLINE_DWORDS];
             } bindless;
          };
       } stages[ANV_DGC_N_GFX_STAGES];
@@ -508,8 +528,12 @@ struct anv_dgc_gfx_state {
 struct anv_dgc_cs_descriptor {
    union {
       struct {
+         uint32_t compute_walker_2[64];
+         uint8_t  inline_dwords[16];
+      } gfx350;
+
+      struct {
          uint32_t compute_walker[40];
-         uint32_t inline_dwords_count;
          uint8_t  inline_dwords[8];
       } gfx125;
 
@@ -536,7 +560,7 @@ struct anv_dgc_cs_descriptor {
    uint32_t push_data_offset;
 
    /* Align the struct to 64B */
-   uint32_t pad[1];
+   uint32_t pad[8];
 };
 
 /**
@@ -552,4 +576,83 @@ struct anv_dgc_rt_indirect_descriptor {
    uint64_t hit_sbt;
    uint64_t miss_sbt;
    uint64_t callable_sbt;
+};
+
+/** Struct representing an indirect image descriptor
+ *
+ * This descriptor layout is used for sampled images, bare sampler, and
+ * combined image/sampler descriptors.
+
+ * Only with legacy descriptors, pre Gfx12.5.
+ */
+struct anv_image_descriptor {
+   /** Bindless image handle
+    *
+    * This is expected to already be shifted such that the 20-bit
+    * SURFACE_STATE table index is in the top 20 bits.
+    */
+   uint32_t image;
+
+   /** Bindless sampler handle
+    *
+    * This is assumed to be a 32B-aligned SAMPLER_STATE pointer relative
+    * to the dynamic state base address.
+    *
+    * Unused for storage images.
+    */
+   uint32_t sampler;
+
+   /** Width */
+   uint32_t width;
+
+   /** Height */
+   uint16_t height;
+
+   /** Depth */
+   uint16_t depth_or_layer_count;
+
+   /** Slice count for VK_EXT_image_sliced_view_of_3d */
+   uint16_t z_slice_count;
+
+   /** Image tiling mode
+    *
+    * 0 for linear, ~0 otherwise.
+    */
+   uint16_t tile_mode;
+
+   /** Image row pitch in bytes */
+   uint32_t row_pitch_B;
+
+   /** Image Q pitch (rows between array slices) */
+   uint32_t qpitch;
+
+   /** Address */
+   uint64_t address;
+
+   /** Image Format (enum isl_format) */
+   uint16_t format;
+
+   /** Image View VkImageSubresourceRange::baseMipLevel */
+   uint16_t base_mip_level;
+
+   /** Image View VkImageSubresourceRange::levelCount */
+   uint16_t level_count;
+
+   /** Image View VkImageSubresourceRange::baseArrayLayer */
+   uint16_t base_array_layer;
+};
+
+/** Struct representing an indirect address/range descriptor
+ *
+ * The fields of this struct correspond directly to the data layout of
+ * nir_address_format_64bit_bounded_global addresses.  The last field is the
+ * offset in the NIR address so it must be zero so that when you load the
+ * descriptor you get a pointer to the start of the range.
+ *
+ * Only with legacy descriptors, pre Gfx12.5.
+ */
+struct anv_address_range_descriptor {
+   uint64_t address;
+   uint32_t range;
+   uint32_t zero;
 };

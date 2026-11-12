@@ -142,7 +142,7 @@ main()
                DEREF(REF(vk_ir_node)OFFSET(args.intermediate_bvh,
                                              ir_id_to_offset(children[i]))).aabb;
 
-            float surface_area = aabb_surface_area(bounds);
+            float surface_area = aabb_half_surface_area(bounds);
             if (surface_area > largest_surface_area || collapsed_child_index == -1) {
                largest_surface_area = surface_area;
                collapsed_child_index = i;
@@ -192,8 +192,8 @@ main()
 
          if (type == vk_ir_node_internal) {
             radv_aabb16 child_aabb16 = radv_aabb_f32_to_f16(child_aabb);
-            float surface_area_f16 = aabb_surface_area(radv_aabb_f16_to_f32(child_aabb16));
-            float surface_area_f32 = aabb_surface_area(child_aabb);
+            float surface_area_f16 = aabb_half_surface_area(radv_aabb_f16_to_f32(child_aabb16));
+            float surface_area_f32 = aabb_half_surface_area(child_aabb);
             bool child_use_f16 = RADV_TEST_BUILD_FLAG_USE_BOX16 && surface_area_f16 < surface_area_f32 * 1.5;
 
             uint32_t dst_offset = atomicAdd(DEREF(args.header).dst_node_offset,

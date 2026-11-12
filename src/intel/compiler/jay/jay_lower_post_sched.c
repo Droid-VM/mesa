@@ -12,10 +12,56 @@ set_cr0(jay_function *f, jay_cursor cursor, uint32_t *existing, uint32_t desired
    /* Only touch cr0 if we are changing bits */
    if ((*existing) != desired) {
       jay_builder b = jay_init_builder(f, cursor);
-      jay_def cr0 = jay_scalar(J_ARF, GEN_ARF_CONTROL);
+      jay_def cr0 = jay_scalar(J_ARF, 32, GEN_ARF_CONTROL);
 
       jay_XOR(&b, JAY_TYPE_U32, cr0, cr0, (*existing) ^ desired);
       *existing = desired;
+   }
+}
+
+static bool
+is_mul(jay_inst *I)
+{
+   return I->op == JAY_OPCODE_MUL_32_PART ||
+          I->op == JAY_OPCODE_MUL_32X16 ||
+          I->op == JAY_OPCODE_MUL;
+}
+
+static bool
+is_maclh(jay_inst *I)
+{
+   return I->op == JAY_OPCODE_MACL || I->op == JAY_OPCODE_MACH;
+}
+
+/* Wa_18035690555
+ *
+ * Issue 1: If we have mul <-> mac or macl <-> mach and src1 is
+ * the same in current and previous inst, we need to insert a
+ * dummy mov in between.
+ *
+ * Other conditions listed in the issue for mul <-> mac case:
+ *    "prev instruction src1 has regioning/scalar" (not flat)
+ *    "current instruction src1 is flat and shares the same src1 as prev"
+ *
+ * Issue 2: prev inst is non-mul or non-macl and src1 is
+ * the same in current and previous inst, we need to insert a
+ * dummy mov in between.
+ */
+static void
+insert_dummy_mov(jay_builder *b, jay_inst *u, jay_inst *v)
+{
+   bool issue_1 = ((is_mul(u) && is_mul(v)) || (is_maclh(u) && is_maclh(v))) &&
+                  (u->src[1].file == UGPR && jay_num_values(u->src[1]) > 1) &&
+                  (v->src[1].file == UGPR && jay_num_values(v->src[1]) == 1) &&
+                  (u->src[1].reg >> 1) == (v->src[1].reg >> 1);
+
+   bool issue_2 = !(is_mul(u) || is_maclh(u)) &&
+                  jay_num_isa_srcs(u) > 1 && is_maclh(v) &&
+                  u->src[1].file == v->src[1].file &&
+                  (u->src[1].reg >> 1) == (v->src[1].reg >> 1);
+
+   if (issue_1 || issue_2) {
+      jay_MOV(b, jay_null(), 0);
    }
 }
 
@@ -63,13 +109,14 @@ jay_lower_post_sched(jay_shader *shader, uint32_t api, uint32_t float_sizes)
    jay_foreach_function(shader, func) {
       jay_foreach_block(func, block) {
          uint32_t current = cr0;
-         bool a0_valid_for_shuffle = false;
+         jay_inst *last = NULL;
 
          jay_foreach_inst_in_block(block, I) {
             uint32_t required = cr0;
             enum jay_rounding_mode round =
-               (I->op == JAY_OPCODE_CVT) ? jay_cvt_rounding_mode(I) :
-               (I->op == JAY_OPCODE_ADD_RTNE) ? JAY_RNE : JAY_ROUND;
+               (I->op == JAY_OPCODE_CVT)      ? jay_cvt_rounding_mode(I) :
+               (I->op == JAY_OPCODE_ADD_RTNE) ? JAY_RNE :
+                                                JAY_ROUND;
 
             if (round != JAY_ROUND) {
                required &= ~BRW_CR0_RND_MODE_MASK;
@@ -80,21 +127,13 @@ jay_lower_post_sched(jay_shader *shader, uint32_t api, uint32_t float_sizes)
                set_cr0(func, jay_before_inst(I), &current, required);
             }
 
-            /* For a non-uniform shuffle, we need to make sure a0 has valid
-             * contents in all lanes, not just active lanes, due to hardware
-             * bugs. brw & igc do the same.
-             */
-            if (I->op == JAY_OPCODE_SHUFFLE ||
-                I->op == JAY_OPCODE_VECTOR_EXTRACT) {
-               if (!jay_is_uniform(I->src[1]) && !a0_valid_for_shuffle) {
-                  jay_builder b = jay_init_builder(func, jay_before_inst(I));
-                  jay_MOV(&b, jay_bare_regs(J_ADDRESS, 0, 8), 0);
-                  a0_valid_for_shuffle = true;
-               }
-            } else if (I->dst.file == J_ADDRESS) {
-               /* Assume we're writing a message descriptor or something */
-               a0_valid_for_shuffle = false;
+            jay_builder b = jay_init_builder(func, jay_before_inst(I));
+
+            if (intel_needs_workaround(shader->devinfo, 18035690555) && last) {
+               insert_dummy_mov(&b, last, I);
             }
+
+            last = I;
          }
 
          /* Restore to global state on block boundaries */

@@ -18,11 +18,8 @@
 
 namespace pps {
 
-PanfrostPerf::PanfrostPerf(const PanfrostDevice &dev)
+PanfrostPerf::PanfrostPerf()
 {
-   assert(dev.fd >= 0);
-   perf = pan_perf_create(dev.fd);
-   assert(perf);
 }
 
 PanfrostPerf::~PanfrostPerf()
@@ -43,6 +40,14 @@ PanfrostPerf::operator=(PanfrostPerf &&o)
 {
    std::swap(perf, o.perf);
    return *this;
+}
+
+bool
+PanfrostPerf::init(const PanfrostDevice &dev)
+{
+   assert(dev.fd >= 0);
+   perf = pan_perf_create(dev.fd);
+   return perf != nullptr;
 }
 
 int
@@ -116,6 +121,8 @@ convert_pan_units(enum mali_perf_counter_units unit)
       return Counter::Units::Byte;
    case MALI_PERF_COUNTER_UNITS_PIXELS:
       return Counter::Units::Pixel;
+   case MALI_PERF_COUNTER_UNITS_PERCENT:
+      return Counter::Units::Percent;
    default:
       return Counter::Units::None;
    }
@@ -211,8 +218,10 @@ PanfrostPerf::next()
 uint32_t
 PanfrostPerf::gpu_clock_id() const
 {
-   assert(pan_perf_gpu_clock_id(perf) == CLOCK_MONOTONIC_RAW);
-   return perfetto::protos::pbzero::BUILTIN_CLOCK_MONOTONIC_RAW;
+   /* This is a sequence scoped clock.
+    * See: https://perfetto.dev/docs/concepts/clock-sync
+    */
+   return 64;
 }
 
 uint64_t

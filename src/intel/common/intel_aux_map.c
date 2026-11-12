@@ -87,13 +87,13 @@
 
 #include "util/list.h"
 #include "util/ralloc.h"
+#include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 #include "util/u_math.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <pthread.h>
 
 #define INTEL_AUX_MAP_FORMAT_BITS_MASK   0xfff0000000000000ull
 
@@ -200,7 +200,7 @@ struct intel_aux_level {
 
 struct intel_aux_map_context {
    void *driver_ctx;
-   pthread_mutex_t mutex;
+   simple_mtx_t mutex;
    struct intel_aux_level *l3_level;
    struct intel_mapped_pinned_buffer_alloc *buffer_alloc;
    uint32_t num_buffers;
@@ -375,8 +375,7 @@ intel_aux_map_init(void *driver_ctx,
    if (!ctx)
       return NULL;
 
-   if (pthread_mutex_init(&ctx->mutex, NULL))
-      return NULL;
+   simple_mtx_init(&ctx->mutex, mtx_plain);
 
    ctx->format = get_format(format);
    ctx->driver_ctx = driver_ctx;
@@ -407,7 +406,7 @@ intel_aux_map_finish(struct intel_aux_map_context *ctx)
    if (!ctx)
       return;
 
-   pthread_mutex_destroy(&ctx->mutex);
+   simple_mtx_destroy(&ctx->mutex);
    list_for_each_entry_safe(struct aux_map_buffer, buf, &ctx->buffers, link) {
       ctx->buffer_alloc->free(ctx->driver_ctx, buf->buffer);
       list_del(&buf->link);
@@ -635,11 +634,11 @@ intel_aux_map_get_entry(struct intel_aux_map_context *ctx,
                         uint64_t main_address,
                         uint64_t *aux_entry_address)
 {
-   pthread_mutex_lock(&ctx->mutex);
+   simple_mtx_lock(&ctx->mutex);
    uint64_t *l1_entry_map;
    get_aux_entry(ctx, main_address, NULL, aux_entry_address, &l1_entry_map,
                  NULL, true);
-   pthread_mutex_unlock(&ctx->mutex);
+   simple_mtx_unlock(&ctx->mutex);
 
    return l1_entry_map;
 }
@@ -711,7 +710,7 @@ intel_aux_map_add_mapping(struct intel_aux_map_context *ctx, uint64_t main_addre
                           uint64_t format_bits)
 {
    bool state_changed = false;
-   pthread_mutex_lock(&ctx->mutex);
+   simple_mtx_lock(&ctx->mutex);
    uint64_t main_inc_addr = main_address;
    uint64_t aux_inc_addr = aux_address;
    const uint64_t main_page_size = ctx->format->main_page_size;
@@ -733,7 +732,7 @@ intel_aux_map_add_mapping(struct intel_aux_map_context *ctx, uint64_t main_addre
                             main_inc_addr - main_address,
                             false /* reset_refcount */, &state_changed);
    }
-   pthread_mutex_unlock(&ctx->mutex);
+   simple_mtx_unlock(&ctx->mutex);
    if (state_changed)
       p_atomic_inc(&ctx->state_num);
 
@@ -746,10 +745,10 @@ intel_aux_map_del_mapping(struct intel_aux_map_context *ctx, uint64_t main_addre
                           uint64_t size)
 {
    bool state_changed = false;
-   pthread_mutex_lock(&ctx->mutex);
+   simple_mtx_lock(&ctx->mutex);
    remove_mapping_locked(ctx, main_address, size, false /* reset_refcount */,
                          &state_changed);
-   pthread_mutex_unlock(&ctx->mutex);
+   simple_mtx_unlock(&ctx->mutex);
    if (state_changed)
       p_atomic_inc(&ctx->state_num);
 }
@@ -759,10 +758,10 @@ intel_aux_map_unmap_range(struct intel_aux_map_context *ctx, uint64_t main_addre
                           uint64_t size)
 {
    bool state_changed = false;
-   pthread_mutex_lock(&ctx->mutex);
+   simple_mtx_lock(&ctx->mutex);
    remove_mapping_locked(ctx, main_address, size, true /* reset_refcount */,
                          &state_changed);
-   pthread_mutex_unlock(&ctx->mutex);
+   simple_mtx_unlock(&ctx->mutex);
    if (state_changed)
       p_atomic_inc(&ctx->state_num);
 }

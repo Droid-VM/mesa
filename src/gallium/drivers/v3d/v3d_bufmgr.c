@@ -46,17 +46,10 @@ v3d_bo_dump_stats(struct v3d_screen *screen)
 {
         struct v3d_bo_cache *cache = &screen->bo_cache;
 
-        uint32_t cache_count = 0;
-        uint32_t cache_size = 0;
-        list_for_each_entry(struct v3d_bo, bo, &cache->time_list, time_list) {
-                cache_count++;
-                cache_size += bo->size;
-        }
-
         mesa_logd("  BOs allocated:   %d", screen->bo_count);
         mesa_logd("  BOs size:        %dkb", screen->bo_size / 1024);
-        mesa_logd("  BOs cached:      %d", cache_count);
-        mesa_logd("  BOs cached size: %dkb", cache_size / 1024);
+        mesa_logd("  BOs cached:      %d", cache->cache_count);
+        mesa_logd("  BOs cached size: %dkb", cache->cache_size / 1024);
 
         if (!list_is_empty(&cache->time_list)) {
                 struct v3d_bo *first = list_first_entry(&cache->time_list,
@@ -80,6 +73,9 @@ v3d_bo_remove_from_cache(struct v3d_bo_cache *cache, struct v3d_bo *bo)
 {
         list_del(&bo->time_list);
         list_del(&bo->size_list);
+
+        cache->cache_count--;
+        cache->cache_size -= bo->size;
 }
 
 static struct v3d_bo *
@@ -277,7 +273,13 @@ v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time)
         struct v3d_bo_cache *cache = &screen->bo_cache;
         uint32_t page_index = bo->size / 4096 - 1;
 
-        if (!bo->private) {
+        if (bo->private &&
+            bo->size > cache->max_cache_size - cache->cache_size) {
+                free_stale_bos(screen, time);
+        }
+
+        if (!bo->private ||
+            bo->size > cache->max_cache_size - cache->cache_size) {
                 v3d_bo_free(bo);
                 return;
         }
@@ -310,6 +312,10 @@ v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time)
         bo->free_time = time;
         list_addtail(&bo->size_list, &cache->size_list[page_index]);
         list_addtail(&bo->time_list, &cache->time_list);
+
+        cache->cache_count++;
+        cache->cache_size += bo->size;
+
         if (dump_stats) {
                 mesa_logd("Freed %s %dkb to cache:", bo->name, bo->size / 1024);
                 v3d_bo_dump_stats(screen);

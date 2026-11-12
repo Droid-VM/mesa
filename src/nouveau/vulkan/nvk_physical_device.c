@@ -18,7 +18,6 @@
 #include "nvkmd/nvkmd.h"
 #include "nvkmd/nouveau/nvkmd_nouveau.h"
 #include "git_sha1.h"
-#include "util/detect_os.h"
 #include "util/disk_cache.h"
 #include "util/hex.h"
 #include "util/mesa-blake3.h"
@@ -114,6 +113,12 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
                           bool has_tiled_bos,
                           struct vk_device_extension_table *ext)
 {
+   const bool h264dec = nvk_video_enabled(instance, info);
+   /* The queue and the maintenance extensions are not codec specific, so
+    * they follow whether any decode codec is built.
+    */
+   const bool video = h264dec;
+
    *ext = (struct vk_device_extension_table) {
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
@@ -129,6 +134,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_depth_clamp_zero_one = true,
       .KHR_depth_stencil_resolve = true,
       .KHR_descriptor_update_template = true,
+      .KHR_device_address_commands = true,
       .KHR_device_group = true,
       .KHR_draw_indirect_count = info->cls_eng3d >= TURING_A,
       .KHR_driver_properties = true,
@@ -151,6 +157,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_incremental_present = true,
 #endif
       .KHR_index_type_uint8 = true,
+      .KHR_internally_synchronized_queues = true,
       .KHR_line_rasterization = true,
       .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
@@ -163,6 +170,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
+      .KHR_maintenance11 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_binary = true,
@@ -211,6 +219,11 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_variable_pointers = true,
       .KHR_vertex_attribute_divisor = true,
+      .KHR_video_queue = video,
+      .KHR_video_decode_queue = video,
+      .KHR_video_decode_h264 = h264dec,
+      .KHR_video_maintenance1 = video,
+      .KHR_video_maintenance2 = video,
       .KHR_vulkan_memory_model = info->cls_eng3d >= MAXWELL_A,
       .KHR_workgroup_memory_explicit_layout = true,
       .KHR_zero_initialize_workgroup_memory = true,
@@ -274,6 +287,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
 #ifdef NVK_USE_WSI_PLATFORM
       .EXT_present_timing = true,
 #endif
+      .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = true,
@@ -307,7 +321,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
       .AMD_buffer_marker = true,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .ANDROID_native_buffer = vk_android_get_ugralloc() != NULL,
 #endif
       .GOOGLE_decorate_string = true,
@@ -503,6 +517,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       .computeDerivativeGroupQuads = info->cls_eng3d >= TURING_A,
       .computeDerivativeGroupLinear = info->cls_eng3d >= TURING_A,
 
+      /* VK_KHR_device_address_commands */
+      .deviceAddressCommands = true,
+
       /* VK_KHR_fragment_shader_barycentric */
       .fragmentShaderBarycentric = info->cls_eng3d >= TURING_A,
 
@@ -510,6 +527,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       .pipelineFragmentShadingRate = info->cls_eng3d >= TURING_A,
       .primitiveFragmentShadingRate = info->cls_eng3d >= TURING_A,
       .attachmentFragmentShadingRate = info->cls_eng3d >= TURING_A,
+
+      /* VK_KHR_internally_synchronized_queues */
+      .internallySynchronizedQueues = true,
 
       /* VK_KHR_maintenance7 */
       .maintenance7 = true,
@@ -522,6 +542,9 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_KHR_maintenance10 */
       .maintenance10 = true,
+
+      /* VK_KHR_maintenance11 */
+      .maintenance11 = true,
 
       /* VK_KHR_pipeline_binary */
       .pipelineBinaries = true,
@@ -559,6 +582,12 @@ nvk_get_device_features(const struct nv_device_info *info,
       /* VK_KHR_unified_image_layouts */
       .unifiedImageLayouts = true,
       .unifiedImageLayoutsVideo = true,
+
+      /* VK_KHR_video_maintenance1 */
+      .videoMaintenance1 = true,
+
+      /* VK_KHR_video_maintenance2 */
+      .videoMaintenance2 = true,
 
       /* VK_KHR_workgroup_memory_explicit_layout */
       .workgroupMemoryExplicitLayout = true,
@@ -721,6 +750,9 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_EXT_non_seamless_cube_map */
       .nonSeamlessCubeMap = true,
+
+      /* VK_EXT_primitive_restart_index */
+      .primitiveRestartIndex = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
@@ -1368,12 +1400,22 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
       VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
       VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+      /* Keep the video layouts last: they are only reported when the video
+       * extensions are enabled and are trimmed off otherwise.
+       */
+      VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR,
+      VK_IMAGE_LAYOUT_VIDEO_DECODE_SRC_KHR,
+      VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR,
    };
 
+   uint32_t supported_layout_count = ARRAY_SIZE(supported_layouts);
+   if (!nvk_video_enabled(instance, info))
+      supported_layout_count -= 3;
+
    properties->pCopySrcLayouts = (VkImageLayout *)supported_layouts;
-   properties->copySrcLayoutCount = ARRAY_SIZE(supported_layouts);
+   properties->copySrcLayoutCount = supported_layout_count;
    properties->pCopyDstLayouts = (VkImageLayout *)supported_layouts;
-   properties->copyDstLayoutCount = ARRAY_SIZE(supported_layouts);
+   properties->copyDstLayoutCount = supported_layout_count;
 
    STATIC_ASSERT(sizeof(instance->driver_build_sha) >= VK_UUID_SIZE);
    memcpy(properties->optimalTilingLayoutUUID,
@@ -1684,6 +1726,13 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
          .queue_count = 2,
       };
    }
+   if (nvk_video_enabled(instance, &pdev->info)) {
+      pdev->queue_families[pdev->queue_family_count++] = (struct nvk_queue_family) {
+         .queue_flags = VK_QUEUE_VIDEO_DECODE_BIT_KHR |
+                        VK_QUEUE_SPARSE_BINDING_BIT,
+         .queue_count = 1,
+      };
+   }
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
 
    pdev->vk.supported_sync_types = nvkmd->sync_types;
@@ -1746,11 +1795,11 @@ nvk_GetPhysicalDeviceMemoryProperties2(
       pMemoryProperties->memoryProperties.memoryTypes[i] = pdev->mem_types[i];
    }
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext)
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext)
    {
-      switch (ext->sType) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
-         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
          const struct nvk_instance *instance =
             nvk_physical_device_instance(pdev);
 
@@ -1802,7 +1851,7 @@ nvk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1834,29 +1883,45 @@ nvk_GetPhysicalDeviceQueueFamilyProperties2(
          p->queueFamilyProperties.minImageTransferGranularity =
             (VkExtent3D){1, 1, 1};
 
-         vk_foreach_struct(ext, p->pNext) {
-            switch (ext->sType) {
+         vk_foreach_struct(sType, ext, p->pNext) {
+            switch (sType) {
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
-               VkQueueFamilyGlobalPriorityProperties *p = (void *)ext;
+               VkQueueFamilyGlobalPriorityProperties *p = ext;
                p->priorityCount = 1;
                p->priorities[0] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
                break;
             }
 
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR: {
-                VkQueueFamilyQueryResultStatusPropertiesKHR *p = (void *)ext;
+                VkQueueFamilyQueryResultStatusPropertiesKHR *p = ext;
                 p->queryResultStatusSupport = VK_FALSE;
                 break;
             }
 
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR: {
-               VkQueueFamilyOwnershipTransferPropertiesKHR *p = (void *)ext;
+               VkQueueFamilyOwnershipTransferPropertiesKHR *p = ext;
                p->optimalImageTransferToQueueFamilies = ~0;
                break;
             }
 
+            case VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR: {
+               VkQueueFamilyVideoPropertiesKHR *p = (void *)ext;
+               if (queue_family->queue_flags & VK_QUEUE_VIDEO_DECODE_BIT_KHR &&
+                   VIDEO_CODEC_H264DEC)
+                  p->videoCodecOperations =
+                     VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+               break;
+            }
+
+            case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR: {
+               VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *prop =
+                  (VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *)ext;
+               prop->optimalImageTransferGranularity = (VkExtent3D){ 1, 1, 1, };
+               break;
+            }
+
             default:
-               vk_debug_ignored_stype(ext->sType);
+               vk_debug_ignored_stype(sType);
                break;
             }
          }

@@ -17,8 +17,7 @@ struct pan_jc;
 struct pan_pool;
 
 struct pan_fb_preload_cache {
-   uint64_t gpu_id;
-   uint32_t gpu_variant;
+   const struct pan_model *model;
    struct {
       struct pan_pool *pool;
       struct hash_table *preload;
@@ -34,7 +33,7 @@ struct pan_fb_preload_cache {
 
 #ifdef PAN_ARCH
 void GENX(pan_fb_preload_cache_init)(
-   struct pan_fb_preload_cache *cache, uint64_t gpu_id, uint32_t gpu_variant,
+   struct pan_fb_preload_cache *cache, const struct pan_model *model,
    struct pan_blend_shader_cache *blend_shader_cache, struct pan_pool *bin_pool,
    struct pan_pool *desc_pool);
 

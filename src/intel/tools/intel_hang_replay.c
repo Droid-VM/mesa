@@ -54,6 +54,7 @@
 
 #include "intel_hang_replay_xe.h"
 #include "intel_hang_replay_lib.h"
+#include "intel_hang_replay_rt.h"
 
 #include "intel_tools.h"
 
@@ -583,7 +584,7 @@ main(int argc, char *argv[])
       case INTEL_HANG_DUMP_BLOCK_TYPE_MAP: {
          struct gem_bo *bo = util_dynarray_grow(&buffers, struct gem_bo, 1);
          *bo = (struct gem_bo) {
-            .file_offset = 0,
+            .file_offset = -1,
             .offset = block_header.map.offset,
             .size = block_header.map.size,
          };
@@ -621,13 +622,8 @@ main(int argc, char *argv[])
    fprintf(stderr, "total_vma: 0x%016"PRIx64"\n", total_vma);
 
    if (check_addr != -1) {
-      struct gem_bo *check_bo = NULL;
-      util_dynarray_foreach(&buffers, struct gem_bo, bo) {
-         if (check_addr >= bo->offset && check_addr < (bo->offset + bo->size)) {
-            check_bo = bo;
-            break;
-         }
-      }
+      struct gem_bo *check_bo =
+         intel_hang_replay_find_bo(&buffers, check_addr);
 
       if (check_bo) {
          fprintf(stderr, "address=0x%016"PRIx64" found in buffer 0x%016"PRIx64" size=0x%016"PRIx64"\n",
@@ -639,33 +635,35 @@ main(int argc, char *argv[])
 
    util_dynarray_foreach(&shader_addresses, uint64_t, addr) {
       bool found = false;
-      util_dynarray_foreach(&buffers, struct gem_bo, bo) {
-         if (*addr < bo->offset || *addr >= (bo->offset + bo->size))
-            continue;
-         if (!bo->file_offset)
-            break;
+      struct gem_bo *bo = intel_hang_replay_find_bo(&buffers, *addr);
 
+      if (bo && bo->file_offset != -1) {
          uint64_t aligned_offset = ROUND_DOWN_TO(bo->file_offset, 4096);
          uint64_t remaining_length = file_stats.st_size - aligned_offset;
          void *map = mmap(NULL, remaining_length, PROT_READ, MAP_PRIVATE,
                           file_fd, aligned_offset);
-         if (map == MAP_FAILED)
-            break;
-
-         found = true;
-         fprintf(stderr, "shader at 0x%016"PRIx64" file_offset=0%016"PRIx64" addr_offset=%016"PRIx64":\n", *addr,
-                 (bo->file_offset - aligned_offset), (*addr - bo->offset));
-         intel_disassemble(&devinfo, map + (bo->file_offset - aligned_offset) + (*addr - bo->offset),
-                           0, stderr);
-         munmap(map, remaining_length);
+         if (map != MAP_FAILED) {
+            found = true;
+            fprintf(stderr, "shader at 0x%016"PRIx64" file_offset=0%016"PRIx64" addr_offset=%016"PRIx64":\n", *addr,
+                    (bo->file_offset - aligned_offset), (*addr - bo->offset));
+            intel_disassemble(&devinfo, map + (bo->file_offset - aligned_offset) + (*addr - bo->offset),
+                              0, stderr);
+            munmap(map, remaining_length);
+         }
       }
 
       if (!found)
          fprintf(stderr, "shader at 0x%016"PRIx64" not found\n", *addr);
    }
 
-   if (!list && util_dynarray_num_elements(&shader_addresses, uint64_t) == 0)
-      replay_dmp_file(file_fd, drm_fd, &devinfo, &buffers, mem_ctx, &init, &exec, vm_flags, bo_dumpable, scratch);
+   if (!list && util_dynarray_num_elements(&shader_addresses, uint64_t) == 0) {
+      /* Validate captured RT state before proceeding with execution. */
+      intel_hang_replay_validate_rt(file_fd, file_stats.st_size,
+                                    &devinfo, &buffers, &exec);
+
+      replay_dmp_file(file_fd, drm_fd, &devinfo, &buffers, mem_ctx,
+                      &init, &exec, vm_flags, bo_dumpable, scratch);
+   }
 
    close(drm_fd);
    close(file_fd);

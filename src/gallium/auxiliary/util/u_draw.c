@@ -278,3 +278,15 @@ util_draw_multi(struct pipe_context *pctx, const struct pipe_draw_info *info,
          drawid++;
    }
 }
+
+void
+util_draw_vbo_buffers(struct pipe_context *pipe,
+                      const struct pipe_draw_info *info,
+                      const struct pipe_vertex_buffer *buffers,
+                      unsigned buffer_count,
+                      const struct pipe_draw_start_count_bias *draws,
+                      unsigned num_draws)
+{
+   pipe->set_vertex_buffers(pipe, buffer_count, buffers);
+   pipe->draw_vbo(pipe, info, 0, NULL, draws, num_draws);
+}

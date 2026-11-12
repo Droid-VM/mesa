@@ -27,6 +27,8 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/u_printf.h"
 #include <sys/stat.h>
 
@@ -45,6 +47,7 @@ typedef int regex_t;
 #define REG_NOMATCH 1
 static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
 static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
+static inline size_t regerror(int e, const regex_t *r, char *b, size_t s) { return 0; }
 static inline void regfree(regex_t* r) {}
 #else
 #include <regex.h>
@@ -245,6 +248,7 @@ anv_device_print_init(struct anv_device *device)
    if (result != VK_SUCCESS)
       return result;
 
+   device->vk.debug_output = stderr;
    u_printf_init(&device->printf, bo, (uint32_t*)bo->map);
    return VK_SUCCESS;
 }
@@ -262,12 +266,12 @@ create_directory(const char *dir, const char *sub_dir)
    char full_path[PATH_MAX];
    snprintf(full_path, sizeof(full_path), "%s/%s", dir, sub_dir);
 
-   if (mkdir(dir, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(dir, 0777) == -1 && errno != EEXIST) {
       perror("Error creating directory");
       return;
    }
 
-   if (mkdir(full_path, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(full_path, 0777) == -1 && errno != EEXIST) {
       perror("Error creating sub directory");
       return;
    }
@@ -380,7 +384,7 @@ void anv_wait_for_attach() {
       if (wait_for_attach) {
          fprintf(stderr, "Sleeping 30 seconds for debugger attach...\n");
          fprintf(stderr, "PID for debugger: %d\n", getpid());
-         sleep(30);
+         os_time_sleep(30 * 1000 * 1000);
       }
    }
 }
@@ -424,6 +428,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
       struct brw_cs_prog_key key;
    } trampoline_key = {
       .name = "rt-trampoline",
+      .key.base.use_efficient_64bit = device->physical->uses_efficient_64bit,
    };
 
    device->rt_trampoline =
@@ -434,7 +439,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
 
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trampoline_nir =
-         brw_nir_create_raygen_trampoline(device->physical->compiler, tmp_ctx);
+         brw_nir_create_raygen_trampoline(device->physical->compiler,
+                                          &trampoline_key.key, tmp_ctx);
 
       unsigned require_size = device->info->ver >= 20 ? 16 : 8;
       trampoline_nir->info.api_subgroup_size = require_size;
@@ -448,28 +454,41 @@ anv_device_init_rt_shaders(struct anv_device *device)
       struct brw_cs_prog_data trampoline_prog_data = {
          .uses_btd_stack_ids = true,
       };
-      struct brw_compile_cs_params params = {
-         .base = {
+
+      char *error_str = NULL;
+      const unsigned *tramp_data = NULL;
+      if (intel_use_jay(device->info, trampoline_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = trampoline_nir,
+            .prog_data = (union brw_any_prog_data *)&trampoline_prog_data,
+            .key = (union brw_any_prog_key *)&trampoline_key.key,
+            .archiver = debug_archiver,
+            .error_str = &error_str,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         tramp_data = bin ? bin->kernel : NULL;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = trampoline_nir,
             .key = &trampoline_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&trampoline_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
             .archiver = debug_archiver,
-         },
-      };
+         };
 
-      const unsigned *tramp_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_COMPUTE)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, trampoline_nir,
-                        (union brw_any_prog_data *)&trampoline_prog_data,
-                        (union brw_any_prog_key *)&trampoline_key.key.base,
-                        debug_archiver);
+         tramp_data = brw_compile(device->physical->compiler, &params);
+         error_str = params.error_str;
+      }
 
-         tramp_data = bin->kernel;
-      } else {
-         tramp_data = brw_compile(device->physical->compiler, &params.base);
+      if (!tramp_data) {
+         VkResult result =
+            vk_errorf(device, VK_ERROR_UNKNOWN, "%s",
+                      error_str ?: "Shader compilation failed");
+         debug_archiver_close(debug_archiver);
+         ralloc_free(tmp_ctx);
+         return result;
       }
 
       struct anv_shader_upload_params upload_params = {
@@ -513,7 +532,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
    if (device->rt_trivial_return == NULL) {
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trivial_return_nir =
-         brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
+         brw_nir_create_trivial_return_shader(device->physical->compiler,
+                                              &return_key.key, tmp_ctx);
 
       debug_archiver *debug_archiver =
          anv_rt_debug_archiver_open(tmp_ctx, trivial_return_nir,
@@ -523,28 +543,40 @@ anv_device_init_rt_shaders(struct anv_device *device)
                  &return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
-      struct brw_compile_bs_params params = {
-         .base = {
+      char *error_str = NULL;
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, trivial_return_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = trivial_return_nir,
+            .key = (union brw_any_prog_key *)&return_key.key,
+            .prog_data = (union brw_any_prog_data *)&return_prog_data,
+            .archiver = debug_archiver,
+            .error_str = &error_str,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         return_data = bin ? bin->kernel : NULL;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = trivial_return_nir,
             .key = &return_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&return_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
             .archiver = debug_archiver,
-         },
-      };
+         };
 
-      const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_CALLABLE)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, trivial_return_nir,
-                        (union brw_any_prog_data *)&return_prog_data,
-                        (union brw_any_prog_key *)&return_key.key.base,
-                        debug_archiver);
+         return_data = brw_compile(device->physical->compiler, &params);
+         error_str = params.error_str;
+      }
 
-         return_data = bin->kernel;
-      } else {
-         return_data = brw_compile(device->physical->compiler, &params.base);
+      if (!return_data) {
+         VkResult result =
+            vk_errorf(device, VK_ERROR_UNKNOWN, "%s",
+                      error_str ?: "Shader compilation failed");
+         debug_archiver_close(debug_archiver);
+         ralloc_free(tmp_ctx);
+         return result;
       }
 
       struct anv_shader_upload_params upload_params = {
@@ -588,7 +620,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
    if (device->rt_null_ahs == NULL) {
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *null_ahs_nir =
-         brw_nir_create_null_ahs_shader(device->physical->compiler, tmp_ctx);
+         brw_nir_create_null_ahs_shader(device->physical->compiler,
+                                        &null_return_key.key, tmp_ctx);
 
       debug_archiver *debug_archiver =
          anv_rt_debug_archiver_open(tmp_ctx, null_ahs_nir,
@@ -597,28 +630,39 @@ anv_device_init_rt_shaders(struct anv_device *device)
                  &null_return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
-      struct brw_compile_bs_params params = {
-         .base = {
+      char *error_str = NULL;
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, null_ahs_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = null_ahs_nir,
+            .key = (union brw_any_prog_key *)&null_return_key.key,
+            .prog_data = (union brw_any_prog_data *)&return_prog_data,
+            .archiver = debug_archiver,
+            .error_str = &error_str,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         return_data = bin ? bin->kernel : NULL;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = null_ahs_nir,
             .key = &null_return_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&return_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
-         },
-      };
-      const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_CALLABLE)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, null_ahs_nir,
-                        (union brw_any_prog_data *)&return_prog_data,
-                        (union brw_any_prog_key *)&null_return_key.key.base,
-                        debug_archiver);
-
-         return_data = bin->kernel;
-      } else {
-         return_data = brw_compile(device->physical->compiler, &params.base);
+         };
+         return_data = brw_compile(device->physical->compiler, &params);
+         error_str = params.error_str;
       }
 
+      if (!return_data) {
+         VkResult result =
+            vk_errorf(device, VK_ERROR_UNKNOWN, "%s",
+                      error_str ?: "Shader compilation failed");
+         debug_archiver_close(debug_archiver);
+         ralloc_free(tmp_ctx);
+         return result;
+      }
 
       struct anv_shader_upload_params upload_params = {
          .stage               = MESA_SHADER_CALLABLE,
@@ -718,7 +762,6 @@ anv_cmd_buffer_dump_commands(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };

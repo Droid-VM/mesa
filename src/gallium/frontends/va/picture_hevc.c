@@ -59,6 +59,9 @@ static void vlVaSortRefPicSet(vlVaContext *context, uint8_t *refs, uint8_t num_r
 void vlVaHandlePictureParameterBufferHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf)
 {
    VAPictureParameterBufferHEVC *hevc = buf->data;
+   VAPictureParameterBufferHEVCExtension *ext = NULL;
+   if (buf->size >= sizeof(VAPictureParameterBufferHEVCExtension))
+      ext = (VAPictureParameterBufferHEVCExtension*)hevc;
    unsigned i;
 
    assert(buf->size >= sizeof(VAPictureParameterBufferHEVC) && buf->num_elements == 1);
@@ -115,6 +118,24 @@ void vlVaHandlePictureParameterBufferHEVC(vlVaDriver *drv, vlVaContext *context,
       hevc->slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag;
    context->desc.h265.pps->sps->strong_intra_smoothing_enabled_flag =
       hevc->pic_fields.bits.strong_intra_smoothing_enabled_flag;
+   if (ext) {
+      context->desc.h265.pps->sps->transform_skip_rotation_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.transform_skip_rotation_enabled_flag;
+      context->desc.h265.pps->sps->transform_skip_context_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.transform_skip_context_enabled_flag;
+      context->desc.h265.pps->sps->implicit_rdpcm_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.implicit_rdpcm_enabled_flag;
+      context->desc.h265.pps->sps->explicit_rdpcm_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.explicit_rdpcm_enabled_flag;
+      context->desc.h265.pps->sps->intra_smoothing_disabled_flag =
+         ext->rext.range_extension_pic_fields.bits.intra_smoothing_disabled_flag;
+      context->desc.h265.pps->sps->high_precision_offsets_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.high_precision_offsets_enabled_flag;
+      context->desc.h265.pps->sps->persistent_rice_adaptation_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.persistent_rice_adaptation_enabled_flag;
+      context->desc.h265.pps->sps->cabac_bypass_alignment_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.cabac_bypass_alignment_enabled_flag;
+   }
 
    context->desc.h265.pps->dependent_slice_segments_enabled_flag =
       hevc->slice_parsing_fields.bits.dependent_slice_segments_enabled_flag;
@@ -172,6 +193,26 @@ void vlVaHandlePictureParameterBufferHEVC(vlVaDriver *drv, vlVaContext *context,
       hevc->log2_parallel_merge_level_minus2;
    context->desc.h265.pps->slice_segment_header_extension_present_flag =
       hevc->slice_parsing_fields.bits.slice_segment_header_extension_present_flag;
+   if (ext) {
+      context->desc.h265.pps->log2_max_transform_skip_block_size_minus2 =
+         ext->rext.log2_max_transform_skip_block_size_minus2;
+      context->desc.h265.pps->cross_component_prediction_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.cross_component_prediction_enabled_flag;
+      context->desc.h265.pps->chroma_qp_offset_list_enabled_flag =
+         ext->rext.range_extension_pic_fields.bits.chroma_qp_offset_list_enabled_flag;
+      context->desc.h265.pps->diff_cu_chroma_qp_offset_depth =
+         ext->rext.diff_cu_chroma_qp_offset_depth;
+      context->desc.h265.pps->chroma_qp_offset_list_len_minus1 =
+         ext->rext.chroma_qp_offset_list_len_minus1;
+      for (i = 0; i < 6; i++) {
+         context->desc.h265.pps->cb_qp_offset_list[i] = ext->rext.cb_qp_offset_list[i];
+         context->desc.h265.pps->cr_qp_offset_list[i] = ext->rext.cr_qp_offset_list[i];
+      }
+      context->desc.h265.pps->log2_sao_offset_scale_luma =
+         ext->rext.log2_sao_offset_scale_luma;
+      context->desc.h265.pps->log2_sao_offset_scale_chroma =
+         ext->rext.log2_sao_offset_scale_chroma;
+   }
 
    context->desc.h265.IDRPicFlag = hevc->slice_parsing_fields.bits.IdrPicFlag;
    context->desc.h265.RAPPicFlag = hevc->slice_parsing_fields.bits.RapPicFlag;
@@ -405,9 +446,9 @@ void vlVaDecoderHEVCBitstreamHeader(vlVaContext *context, vlVaBuffer *buf)
                ltr_tmp[ltr_idx++].msb = delta_poc_msb_present_flag;
             }
          }
-         if (sps->sps_temporal_mvp_enabled_flag)
-            vl_rbsp_u(&rbsp, 1); /* temporal_mvp_enable */
       }
+      if (sps->sps_temporal_mvp_enabled_flag)
+         vl_rbsp_u(&rbsp, 1); /* slice_temporal_mvp_enabled_flag */
    }
 
    /* We don't know how many SPS LTRs are used, but we do know how many LTRs

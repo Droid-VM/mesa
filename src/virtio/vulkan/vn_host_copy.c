@@ -116,7 +116,8 @@ vn_get_copy_size(VkImage img_handle,
 {
    VK_FROM_HANDLE(vk_image, img_vk, img_handle);
 
-   VkFormat format = img_vk->format;
+   VkFormat format = vk_format_get_plane_aspect_format(
+      img_vk->format, subres_layers->aspectMask);
 
    /* Per spec: Table 30. Depth/Stencil Aspect Copy Table */
    const bool copy_depth =

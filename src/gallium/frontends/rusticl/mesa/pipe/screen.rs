@@ -359,7 +359,7 @@ impl PipeScreen {
         modifier: u64,
         target: pipe_texture_target,
         format: pipe_format,
-        stride: u32,
+        strides: (u32, u32),
         width: u32,
         height: u32,
         depth: u16,
@@ -372,9 +372,15 @@ impl PipeScreen {
             handle: handle,
             modifier: modifier,
             format: format as u64,
-            stride: stride,
+            stride: strides.0,
             ..Default::default()
         };
+
+        if array_size > 1 {
+            handle.array_stride = strides.1;
+        } else {
+            handle.image_stride = strides.1;
+        }
 
         tmpl.set_target(target);
         tmpl.set_format(format);
@@ -483,6 +489,14 @@ impl PipeScreen {
                 .get_timestamp
                 .unwrap_or(u_default_get_timestamp)(self.pipe())
         }
+    }
+
+    pub fn is_convert_timestamp_supported(&self) -> bool {
+        self.screen().convert_timestamp.is_some()
+    }
+
+    pub fn convert_timestamp(&self, raw_timestamp: u64) -> u64 {
+        unsafe { self.screen().convert_timestamp.unwrap()(self.pipe(), raw_timestamp) }
     }
 
     pub fn is_res_handle_supported(&self) -> bool {

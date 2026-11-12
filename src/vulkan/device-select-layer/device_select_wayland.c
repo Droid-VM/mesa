@@ -31,7 +31,7 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include "device_select.h"
-#include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "linux-dmabuf-v1-client-protocol.h"
 
 struct device_select_wayland_info {
 #ifdef HAVE_BIND_WL_DISPLAY

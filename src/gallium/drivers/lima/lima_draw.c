@@ -1231,4 +1231,5 @@ lima_draw_init(struct lima_context *ctx)
 {
    ctx->base.clear = lima_clear;
    ctx->base.draw_vbo = lima_draw_vbo;
+   ctx->base.draw_vbo_buffers = util_draw_vbo_buffers;
 }

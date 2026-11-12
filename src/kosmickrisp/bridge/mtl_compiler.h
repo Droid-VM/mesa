@@ -21,6 +21,7 @@ mtl_compiler *mtl_new_compiler(mtl_device *device);
 /* Library */
 mtl_library *
 mtl_new_library(mtl_compiler *compiler, const char *src,
+                enum mtl_language_version msl_version,
                 enum mtl_math_mode math_mode,
                 enum mtl_math_floating_point_functions math_fp_fns);
 mtl_function_descriptor *
@@ -52,12 +53,6 @@ void mtl_render_pipeline_descriptor_set_color_attachment_format(
 
 void mtl_render_pipeline_descriptor_set_raster_sample_count(
    mtl_render_pipeline_descriptor *descriptor, uint32_t sample_count);
-
-void mtl_render_pipeline_descriptor_set_alpha_to_coverage(
-   mtl_render_pipeline_descriptor *descriptor, bool enabled);
-
-void mtl_render_pipeline_descriptor_set_alpha_to_one(
-   mtl_render_pipeline_descriptor *descriptor, bool enabled);
 
 void mtl_render_pipeline_descriptor_set_rasterization_enabled(
    mtl_render_pipeline_descriptor *descriptor, bool enabled);

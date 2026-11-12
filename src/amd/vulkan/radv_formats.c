@@ -515,10 +515,10 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
 
    if (radv_host_image_copy_enabled(pdev)) {
       if (linear & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)
-         linear |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+         linear |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
 
       if (tiled & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)
-         tiled |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+         tiled |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
    }
 
    if (pdev->video_encode_enabled) {
@@ -663,16 +663,14 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
    features &= ~VK_FORMAT_FEATURE_2_DISJOINT_BIT;
 
    /* Unconditionally disable HOST_TRANSFER support for modifiers for now */
-   features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+   features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
 
    /* Unconditionally disable COPY_IMAGE_INDIRECT_DST support for modifiers for now */
    features &= ~VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
 
    if (!ac_modifier_supports_video(&pdev->info, modifier))
-      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
                     VK_FORMAT_FEATURE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR);
 
    if (ac_modifier_has_dcc(modifier)) {
@@ -687,7 +685,7 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
           radv_is_atomic_format_supported(format) || pdev->drirc.debug.disable_dcc_stores)
          features &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
 
-      if (radv_is_dcc_disabled(pdev) || instance->debug_flags & RADV_DEBUG_NO_DISPLAY_DCC)
+      if (radv_is_dcc_disabled(pdev) || RADV_DEBUG(instance, NO_DISPLAY_DCC))
          return 0;
    }
 
@@ -867,22 +865,15 @@ radv_check_modifier_support(struct radv_physical_device *pdev, const VkPhysicalD
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       bool need_dcc_sign_reinterpret = false;
-      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format,
-                                                 info->flags, &need_dcc_sign_reinterpret);
+      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format, info->flags, &need_dcc_sign_reinterpret);
       if (!ret && !need_dcc_sign_reinterpret)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
    const bool video =
       image_usage & (VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR);
-   if (video) {
-      if (!ac_modifier_supports_video(&pdev->info, modifier))
-         return VK_ERROR_FORMAT_NOT_SUPPORTED;
-
-      /* Decode DPB and output coincide (tier3) requires tiling. */
-      if (image_usage & VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR && modifier == DRM_FORMAT_MOD_LINEAR)
-         return VK_ERROR_FORMAT_NOT_SUPPORTED;
-   }
+   if (video && !ac_modifier_supports_video(&pdev->info, modifier))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* QP map needs linear. */
    if (image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR && modifier != DRM_FORMAT_MOD_LINEAR)
@@ -1014,7 +1005,8 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    if (tiling == VK_IMAGE_TILING_OPTIMAL && info->type == VK_IMAGE_TYPE_2D &&
        (format_feature_flags &
         (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-       !(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) &&
+       (!(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) ||
+        (image_flags & VK_IMAGE_CREATE_2_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT)) &&
        !(image_usage & VK_IMAGE_USAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT;
    }
@@ -1107,7 +1099,7 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    }
 
    if (image_usage & VK_IMAGE_USAGE_2_HOST_TRANSFER_BIT_KHR) {
-      if (!(format_feature_flags & VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT))
+      if (!(format_feature_flags & VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT))
          goto unsupported;
    }
 
@@ -1223,7 +1215,7 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
 
       flags = VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
 
-      /* advertise EXPORTABLE only when radv_create_ahb_memory supports the format */
+      /* advertise EXPORTABLE only when radv supports the format */
       if (radv_android_gralloc_supports_format(pImageFormatInfo->format, image_usage))
          flags |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
 
@@ -1256,7 +1248,7 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkTextureLODGatherFormatPropertiesAMD *texture_lod_props = NULL;
    VkImageCompressionPropertiesEXT *image_compression_props = NULL;
-   VkHostImageCopyDevicePerformanceQueryEXT *host_perf_props = NULL;
+   VkHostImageCopyDevicePerformanceQuery *host_perf_props = NULL;
    VkResult result;
    VkFormat format = radv_select_android_external_format(base_info->pNext, base_info->format);
 
@@ -1268,10 +1260,10 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    const VkImageUsageFlags2KHR image_usage = vk_image_format_info_2_usage(base_info);
 
    /* Extract input structs */
-   vk_foreach_struct_const (s, base_info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const (sType, s, base_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *)s;
+         external_info = s;
          break;
       default:
          break;
@@ -1279,25 +1271,25 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    }
 
    /* Extract output structs */
-   vk_foreach_struct (s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct (sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *)s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *)s;
+         ycbcr_props = s;
          break;
       case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
-         android_usage = (void *)s;
+         android_usage = s;
          break;
       case VK_STRUCTURE_TYPE_TEXTURE_LOD_GATHER_FORMAT_PROPERTIES_AMD:
-         texture_lod_props = (void *)s;
+         texture_lod_props = s;
          break;
       case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
-         image_compression_props = (void *)s;
+         image_compression_props = s;
          break;
-      case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT:
-         host_perf_props = (void *)s;
+      case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY:
+         host_perf_props = s;
          break;
       default:
          break;
@@ -1668,4 +1660,12 @@ radv_dcc_formats_compatible(enum amd_gfx_level gfx_level, VkFormat format1, VkFo
       *sign_reinterpret = true;
 
    return true;
+}
+
+bool
+radv_dcc_formats_sign_compatible(enum amd_gfx_level gfx_level, VkFormat format1, VkFormat format2)
+{
+   bool sign_reinterpret = false;
+
+   return radv_dcc_formats_compatible(gfx_level, format1, format2, &sign_reinterpret) && !sign_reinterpret;
 }

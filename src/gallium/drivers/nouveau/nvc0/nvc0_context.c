@@ -21,6 +21,7 @@
  */
 
 #include "pipe/p_defines.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_upload_mgr.h"
 
@@ -447,6 +448,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->destroy = nvc0_destroy;
 
    pipe->draw_vbo = nvc0_draw_vbo;
+   pipe->draw_vbo_buffers = util_draw_vbo_buffers;
    pipe->clear = nvc0_clear;
    pipe->launch_grid = (nvc0->screen->base.class_3d >= NVE4_3D_CLASS) ?
       nve4_launch_grid : nvc0_launch_grid;

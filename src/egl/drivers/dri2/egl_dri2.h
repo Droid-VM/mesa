@@ -132,12 +132,9 @@ struct dri2_egl_display_vtbl {
                               const EGLint *attr_list);
 
    /* mandatory */
-   EGLBoolean (*swap_buffers)(_EGLDisplay *disp, _EGLSurface *surf);
-
-   /* optional - falls back to .swap_buffers */
-   EGLBoolean (*swap_buffers_with_damage)(_EGLDisplay *disp,
-                                          _EGLSurface *surface,
-                                          const EGLint *rects, EGLint n_rects);
+   EGLBoolean (*swap_buffers)(_EGLDisplay *disp,
+                              _EGLSurface *surface,
+                              const EGLint *rects, EGLint n_rects);
 
    /* optional */
    EGLBoolean (*copy_buffers)(_EGLDisplay *disp, _EGLSurface *surf,
@@ -162,9 +159,6 @@ struct dri2_egl_display_vtbl {
    /* optional */
    EGLBoolean (*get_msc_rate)(_EGLDisplay *display, _EGLSurface *surface,
                               EGLint *numerator, EGLint *denominator);
-
-   /* mandatory */
-   struct dri_drawable *(*get_dri_drawable)(_EGLSurface *surf);
 
    /* optional */
    void (*close_screen_notify)(_EGLDisplay *disp);
@@ -252,11 +246,10 @@ struct dri2_egl_display {
 
    char *driver_name;
 
-   const __DRIextension **loader_extensions;
+   const struct dri_loader_funcs *loader_funcs;
 
    bool has_dmabuf_import;
    bool has_dmabuf_export;
-   bool explicit_modifiers;
    bool multibuffers_available;
 #ifdef HAVE_X11_PLATFORM
    xcb_connection_t *conn;
@@ -285,8 +278,9 @@ struct dri2_egl_display {
    struct wp_presentation *wp_presentation;
    struct dri2_wl_formats formats;
    struct zwp_linux_dmabuf_feedback_v1 *wl_dmabuf_feedback;
-   struct dmabuf_feedback_format_table format_table;
+   struct dmabuf_feedback dmabuf_feedback;
    char *device_name;
+   dev_t display_device_dev;
    bool is_render_node;
    clockid_t presentation_clock_id;
 #endif
@@ -308,8 +302,6 @@ struct dri2_egl_context {
 struct dri2_egl_surface {
    _EGLSurface base;
    struct dri_drawable *dri_drawable;
-   __DRIbuffer buffers[5];
-   bool have_fake_front;
 
 #ifdef HAVE_X11_PLATFORM
    xcb_drawable_t drawable;

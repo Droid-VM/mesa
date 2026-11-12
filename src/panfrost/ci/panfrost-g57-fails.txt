@@ -46,10 +46,7 @@ spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type
 spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8I,Fail
 spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_SRGB8_ALPHA8,Fail
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
-spec@egl_mesa_configless_context@basic,Fail
 spec@ext_transform_feedback2@draw-auto,Fail
 spec@ext_transform_feedback@builtin-varyings gl_clipdistance,Fail
 spec@ext_transform_feedback@change-size base-shrink,Fail
@@ -112,7 +109,6 @@ spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full 
 spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
 spec@!opengl 1.1@linestipple@Factor 3x,Fail
 spec@!opengl 1.1@linestipple,Fail
@@ -149,9 +145,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,
 spec@!opengl 1.1@polygon-mode-offset,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 spec@!opengl 3.1@primitive-restart-xfb written,Fail
@@ -326,7 +319,6 @@ afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-afbcp-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 afbcp-spec@!opengl 1.0@rasterpos,Crash
 afbcp-spec@!opengl 1.1@linestipple@Factor 2x,Fail
 afbcp-spec@!opengl 1.1@linestipple@Factor 3x,Fail
@@ -364,9 +356,6 @@ afbcp-spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top
 afbcp-spec@!opengl 1.1@polygon-mode-offset,Fail
 afbcp-spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 afbcp-spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-afbcp-spec@!opengl 2.1@pbo,Fail
-afbcp-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-afbcp-spec@!opengl 2.1@polygon-stipple-fs,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb written,Fail
@@ -434,8 +423,8 @@ spec@ext_framebuffer_multisample@sample-alpha-to-coverage 6 color,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 8 color,Fail
 
 # uprev Piglit in Mesa
-afbcp-spec@arb_texture_view@tex-view,Fail
 spec@!opengl 1.1@large-tex,Fail
 spec@arb_framebuffer_object@framebuffer-blit-oblong tall,Fail
 spec@arb_framebuffer_object@framebuffer-blit-oblong wide,Fail
-spec@arb_texture_view@tex-view,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
+

@@ -27,15 +27,19 @@
 
 #include "etnaviv_debug.h"
 #include "etnaviv_disk_cache.h"
+#include "etnaviv_screen.h"
 #include "nir_serialize.h"
+#include "util/perf/cpu_trace.h"
 
 #define debug 0
 
 void
-etna_disk_cache_init(struct etna_compiler *compiler, const char *renderer)
+etna_disk_cache_init(struct etna_screen *screen)
 {
    if (DBG_ENABLED(ETNA_DBG_NOCACHE))
       return;
+
+   const char *renderer = screen->base.get_name(&screen->base);
 
    const struct build_id_note *note =
          build_id_find_nhdr_for_addr(etna_disk_cache_init);
@@ -47,13 +51,13 @@ etna_disk_cache_init(struct etna_compiler *compiler, const char *renderer)
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_sha1_format(timestamp, id_sha1);
 
-   compiler->disk_cache = disk_cache_create(renderer, timestamp, etna_mesa_debug);
+   screen->disk_cache = disk_cache_create(renderer, timestamp, etna_mesa_debug);
 }
 
 void
-etna_disk_cache_init_shader_key(struct etna_compiler *compiler, struct etna_shader *shader)
+etna_disk_cache_init_shader_key(struct etna_screen *screen, struct etna_shader *shader)
 {
-   if (!compiler->disk_cache)
+   if (!screen->disk_cache)
       return;
 
    blake3_hasher ctx;
@@ -76,7 +80,7 @@ etna_disk_cache_init_shader_key(struct etna_compiler *compiler, struct etna_shad
 }
 
 static void
-compute_variant_key(struct etna_compiler *compiler, struct etna_shader_variant *v,
+compute_variant_key(struct etna_screen *screen, struct etna_shader_variant *v,
                     cache_key cache_key)
 {
    struct blob blob;
@@ -86,7 +90,7 @@ compute_variant_key(struct etna_compiler *compiler, struct etna_shader_variant *
    blob_write_bytes(&blob, &v->shader->cache_key, sizeof(v->shader->cache_key));
    blob_write_bytes(&blob, &v->key, sizeof(v->key));
 
-   disk_cache_compute_key(compiler->disk_cache, blob.data, blob.size, cache_key);
+   disk_cache_compute_key(screen->disk_cache, blob.data, blob.size, cache_key);
 
    blob_finish(&blob);
 }
@@ -105,6 +109,11 @@ retrieve_variant(struct blob_reader *blob, struct etna_shader_variant *v)
 
    blob_copy_bytes(blob, v->uniforms.contents, v->uniforms.count * sizeof(*v->uniforms.contents));
    blob_copy_bytes(blob, v->uniforms.data, v->uniforms.count * sizeof(*v->uniforms.data));
+
+   if (v->constant_data_size) {
+      v->constant_data = malloc(v->constant_data_size);
+      blob_copy_bytes(blob, v->constant_data, v->constant_data_size);
+   }
 }
 
 static void
@@ -118,17 +127,20 @@ store_variant(struct blob *blob, const struct etna_shader_variant *v)
    blob_write_bytes(blob, &v->uniforms.count, sizeof(v->uniforms.count));
    blob_write_bytes(blob, v->uniforms.contents, imm_count * sizeof(*v->uniforms.contents));
    blob_write_bytes(blob, v->uniforms.data, imm_count * sizeof(*v->uniforms.data));
+   if (v->constant_data_size)
+      blob_write_bytes(blob, v->constant_data, v->constant_data_size);
 }
 
 bool
-etna_disk_cache_retrieve(struct etna_compiler *compiler, struct etna_shader_variant *v)
+etna_disk_cache_retrieve(struct etna_screen *screen, struct etna_shader_variant *v)
 {
-   if (!compiler->disk_cache)
+   MESA_TRACE_FUNC();
+   if (!screen->disk_cache)
       return false;
 
    cache_key cache_key;
 
-   compute_variant_key(compiler, v, cache_key);
+   compute_variant_key(screen, v, cache_key);
 
    if (debug) {
       char blake3[BLAKE3_HEX_LEN];
@@ -138,7 +150,7 @@ etna_disk_cache_retrieve(struct etna_compiler *compiler, struct etna_shader_vari
    }
 
    size_t size;
-   void *buffer = disk_cache_get(compiler->disk_cache, cache_key, &size);
+   void *buffer = disk_cache_get(screen->disk_cache, cache_key, &size);
 
    if (debug)
       fprintf(stderr, "%s\n", buffer ? "found" : "missing");
@@ -157,14 +169,15 @@ etna_disk_cache_retrieve(struct etna_compiler *compiler, struct etna_shader_vari
 }
 
 void
-etna_disk_cache_store(struct etna_compiler *compiler, struct etna_shader_variant *v)
+etna_disk_cache_store(struct etna_screen *screen, struct etna_shader_variant *v)
 {
-   if (!compiler->disk_cache)
+   MESA_TRACE_FUNC();
+   if (!screen->disk_cache)
       return;
 
    cache_key cache_key;
 
-   compute_variant_key(compiler, v, cache_key);
+   compute_variant_key(screen, v, cache_key);
 
    if (debug) {
       char blake3[BLAKE3_HEX_LEN];
@@ -178,6 +191,6 @@ etna_disk_cache_store(struct etna_compiler *compiler, struct etna_shader_variant
 
    store_variant(&blob, v);
 
-   disk_cache_put(compiler->disk_cache, cache_key, blob.data, blob.size, NULL);
+   disk_cache_put(screen->disk_cache, cache_key, blob.data, blob.size, NULL);
    blob_finish(&blob);
 }

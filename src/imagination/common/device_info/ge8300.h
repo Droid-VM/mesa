@@ -20,7 +20,7 @@ static const struct pvr_device_features pvr_device_features_22_V_54_30 = {
    .has_common_store_size_in_dwords = true,
    .has_compute = true,
    .has_compute_overlap = true,
-   /* .has_gs_rta_support = true, */
+   .has_gs_rta_support = true,
    .has_ipf_creq_pf = true,
    .has_isp_max_tiles_in_flight = true,
    .has_isp_samples_per_pixel = true,
@@ -42,6 +42,7 @@ static const struct pvr_device_features pvr_device_features_22_V_54_30 = {
    .has_tile_size_x = true,
    .has_tile_size_y = true,
    .has_tpu_parallel_instances = true,
+   .has_transform_feedback_query_bits = true,
    .has_unified_store_depth = true,
    .has_usc_f16sop_u8 = true,
    .has_usc_itrsmp = true,
@@ -68,6 +69,7 @@ static const struct pvr_device_features pvr_device_features_22_V_54_30 = {
    .tile_size_x = 16U,
    .tile_size_y = 16U,
    .tpu_parallel_instances = 4U,
+   .transform_feedback_query_bits = 32U,
    .unified_store_depth = 208U,
    .usc_itr_parallel_instances = 16U,
    .usc_min_output_registers_per_pix = 2U,
@@ -135,14 +137,15 @@ static const struct pvr_device_info pvr_device_info_22_68_54_30 = {
 };
 
 #define PVR_DEVICE_IDENT_22_V_54_38 \
-   .device_id = 0x22054038, .series_name = "Rogue", .public_name = "GE8300"
+   .device_id = 0x22054038, .series_name = "Rogue", \
+   .public_name = "GE8300", .arch = PVR_DEVICE_ARCH_ROGUE
 
 static const struct pvr_device_features pvr_device_features_22_V_54_38 = {
    .has_astc = true,
    .has_common_store_size_in_dwords = true,
    .has_compute = true,
    .has_compute_overlap = true,
-   /* .has_gs_rta_support = true, */
+   .has_gs_rta_support = true,
    .has_ipf_creq_pf = true,
    .has_isp_max_tiles_in_flight = true,
    .has_isp_samples_per_pixel = true,
@@ -164,10 +167,12 @@ static const struct pvr_device_features pvr_device_features_22_V_54_38 = {
    .has_tile_size_x = true,
    .has_tile_size_y = true,
    .has_tpu_parallel_instances = true,
+   .has_transform_feedback_query_bits = true,
    .has_unified_store_depth = true,
    .has_usc_f16sop_u8 = true,
    .has_usc_itrsmp = true,
    .has_usc_itrsmp_enhanced = true,
+   .has_usc_itr_parallel_instances = true,
    .has_usc_min_output_registers_per_pix = true,
    .has_usc_slots = true,
    .has_uvs_banks = true,
@@ -189,7 +194,9 @@ static const struct pvr_device_features pvr_device_features_22_V_54_38 = {
    .tile_size_x = 16U,
    .tile_size_y = 16U,
    .tpu_parallel_instances = 4U,
+   .transform_feedback_query_bits = 32U,
    .unified_store_depth = 208U,
+   .usc_itr_parallel_instances = 16U,
    .usc_min_output_registers_per_pix = 2U,
    .usc_slots = 64U,
    .uvs_banks = 4U,
@@ -198,9 +205,6 @@ static const struct pvr_device_features pvr_device_features_22_V_54_38 = {
    .vdm_cam_size = 64U,
 
    .has_s8xe = true,
-   .has_usc_itr_parallel_instances = true,
-
-   .usc_itr_parallel_instances = 16U,
 };
 
 static const struct pvr_device_enhancements

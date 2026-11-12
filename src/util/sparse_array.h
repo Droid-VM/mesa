@@ -77,7 +77,69 @@ void util_sparse_array_init(struct util_sparse_array *arr,
 
 void util_sparse_array_finish(struct util_sparse_array *arr);
 
-void *util_sparse_array_get(struct util_sparse_array *arr, uint64_t idx);
+/* Aligning our allocations to 64 has two advantages:
+ *
+ *  1. On x86 platforms, it means that they are cache-line aligned so we
+ *     reduce the likelihood that one of our allocations shares a cache line
+ *     with some other allocation.
+ *
+ *  2. It lets us use the bottom 6 bits of the pointer to store the tree level
+ *     of the node so we can avoid some pointer indirections.
+ */
+#define UTIL_SPARSE_ARRAY_NODE_ALIGN 64
+#define UTIL_SPARSE_ARRAY_NODE_LEVEL_MASK \
+   ((uintptr_t)UTIL_SPARSE_ARRAY_NODE_ALIGN - 1)
+
+static inline void *
+_util_sparse_array_node_data(uintptr_t handle)
+{
+   return (void *)(handle & ~UTIL_SPARSE_ARRAY_NODE_LEVEL_MASK);
+}
+
+static inline unsigned
+_util_sparse_array_node_level(uintptr_t handle)
+{
+   return handle & UTIL_SPARSE_ARRAY_NODE_LEVEL_MASK;
+}
+
+/* Out-of-line part of util_sparse_array_get() which allocates any missing
+ * nodes on the way to the element.
+ */
+void *_util_sparse_array_get_slow(struct util_sparse_array *arr, uint64_t idx);
+
+/* This only walks nodes which already exist, which is the common case, and
+ * calls _util_sparse_array_get_slow() for everything else.
+ */
+static inline void *
+util_sparse_array_get(struct util_sparse_array *arr, uint64_t idx)
+{
+   const unsigned node_size_log2 = arr->node_size_log2;
+   const uint64_t node_mask = (1ull << node_size_log2) - 1;
+   uintptr_t node = p_atomic_read(&arr->root);
+
+   if (unlikely(!node))
+      return _util_sparse_array_get_slow(arr, idx);
+
+   unsigned level = _util_sparse_array_node_level(node);
+
+   /* The root is not deep enough to contain this index yet. */
+   if (unlikely((idx >> (level * node_size_log2)) > node_mask))
+      return _util_sparse_array_get_slow(arr, idx);
+
+   while (level > 0) {
+      uintptr_t *children = (uintptr_t *)_util_sparse_array_node_data(node);
+      const uint64_t child_idx = (idx >> (level * node_size_log2)) & node_mask;
+
+      node = p_atomic_read(&children[child_idx]);
+      if (unlikely(!node))
+         return _util_sparse_array_get_slow(arr, idx);
+
+      level = _util_sparse_array_node_level(node);
+   }
+
+   return (char *)_util_sparse_array_node_data(node) +
+          (idx & node_mask) * arr->elem_size;
+}
 
 void util_sparse_array_validate(struct util_sparse_array *arr);
 

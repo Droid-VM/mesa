@@ -45,6 +45,7 @@ struct si_query_pc {
 static void si_pc_wait_idle(struct si_context *sctx)
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
+   enum ac_rgp_flush_bits flush_bits = 0;
    uint32_t coher_cntl_stall_all = 0;
 
    if (sctx->gfx_level != GFX9)
@@ -63,71 +64,9 @@ static void si_pc_wait_idle(struct si_context *sctx)
    radeon_emit(EVENT_TYPE(V_028A90_CS_PARTIAL_FLUSH | EVENT_INDEX(4)));
    radeon_end();
 
-   si_cp_acquire_mem(sctx, cs, coher_cntl_stall_all, V_581A_PREFETCH_PARSER);
-}
-
-static void si_pc_emit_instance(struct si_context *sctx, int se, int instance)
-{
-   struct radeon_cmdbuf *cs = &sctx->gfx_cs;
-   unsigned value = S_030800_SH_BROADCAST_WRITES(1);
-
-   if (se >= 0) {
-      value |= S_030800_SE_INDEX(se);
-   } else {
-      value |= S_030800_SE_BROADCAST_WRITES(1);
-   }
-
-   if (sctx->gfx_level >= GFX10) {
-      /* TODO: Expose counters from each shader array separately if needed. */
-      value |= S_030800_SA_BROADCAST_WRITES(1);
-   }
-
-   if (instance >= 0) {
-      value |= S_030800_INSTANCE_INDEX(instance);
-   } else {
-      value |= S_030800_INSTANCE_BROADCAST_WRITES(1);
-   }
-
-   radeon_begin(cs);
-   radeon_set_uconfig_reg(R_030800_GRBM_GFX_INDEX, value);
-   radeon_end();
-}
-
-void si_pc_emit_shaders(struct radeon_cmdbuf *cs, unsigned shaders)
-{
-   radeon_begin(cs);
-   radeon_set_uconfig_reg_seq(R_036780_SQ_PERFCOUNTER_CTRL, 2);
-   radeon_emit(shaders & 0x7f);
-   radeon_emit(0xffffffff);
-   radeon_end();
-}
-
-static void si_pc_emit_select(struct si_context *sctx, struct ac_pc_block *block, unsigned count,
-                              unsigned *selectors)
-{
-   struct ac_pc_block_base *regs = block->b->b;
-   struct radeon_cmdbuf *cs = &sctx->gfx_cs;
-   unsigned idx;
-
-   assert(count <= regs->num_counters);
-
-   /* Fake counters. */
-   if (!regs->select0)
-      return;
-
-   radeon_begin(cs);
-
-   for (idx = 0; idx < count; ++idx) {
-      radeon_set_uconfig_reg_seq(regs->select0[idx], 1);
-      radeon_emit(selectors[idx] | regs->select_or);
-   }
-
-   for (idx = 0; idx < regs->num_spm_modules; idx++) {
-      radeon_set_uconfig_reg_seq(regs->select1[idx], 1);
-      radeon_emit(0);
-   }
-
-   radeon_end();
+   ac_emit_cp_acquire_mem(&cs->current, sctx->gfx_level, AMD_IP_GFX,
+                          V_581A_PREFETCH_PARSER, coher_cntl_stall_all,
+                          &sctx->context_roll, &flush_bits);
 }
 
 static void si_pc_emit_start(struct si_context *sctx, struct si_resource *buffer, uint64_t va)
@@ -152,10 +91,11 @@ static void si_pc_emit_stop(struct si_context *sctx, struct si_resource *buffer,
 
    si_cp_release_mem(sctx, cs, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM, EOP_INT_SEL_NONE,
                      EOP_DATA_SEL_VALUE_32BIT, buffer, va, 0, SI_NOT_QUERY);
-   si_cp_wait_mem(sctx, cs, va, 0, 0xffffffff, WAIT_REG_MEM_EQUAL);
+   ac_emit_cp_wait_mem(&cs->current, va, 0, 0xffffffff, WAIT_REG_MEM_EQUAL);
+
+   ac_pc_emit_sample(&cs->current);
 
    radeon_begin(cs);
-   radeon_event_write(V_028A90_PERFCOUNTER_SAMPLE);
 
    /*
     * The recommended sampling procedure:
@@ -221,11 +161,6 @@ static void si_pc_query_destroy(struct si_context *sctx, struct si_query *squery
    FREE(query);
 }
 
-void si_inhibit_clockgating(struct si_context *sctx, struct radeon_cmdbuf *cs, bool inhibit)
-{
-   ac_emit_cp_inhibit_clockgating(&sctx->gfx_cs.current, sctx->gfx_level, inhibit);
-}
-
 static void si_pc_query_resume(struct si_context *sctx, struct si_query *squery)
 /*
                                    struct si_query_hw *hwquery,
@@ -248,9 +183,9 @@ static void si_pc_query_resume(struct si_context *sctx, struct si_query *squery)
    radeon_end();
 
    if (query->shaders)
-      si_pc_emit_shaders(&sctx->gfx_cs, query->shaders);
+      ac_pc_emit_shaders(sctx->screen->info.gfx_level, &sctx->gfx_cs.current, query->shaders);
 
-   si_inhibit_clockgating(sctx, &sctx->gfx_cs, true);
+   ac_emit_cp_inhibit_clockgating(&sctx->gfx_cs.current, sctx->gfx_level, true);
 
    for (struct si_query_group *group = query->groups; group; group = group->next) {
       struct ac_pc_block *block = group->block;
@@ -258,14 +193,15 @@ static void si_pc_query_resume(struct si_context *sctx, struct si_query *squery)
       if (group->se != current_se || group->instance != current_instance) {
          current_se = group->se;
          current_instance = group->instance;
-         si_pc_emit_instance(sctx, group->se, group->instance);
+         ac_pc_emit_instance(&sctx->gfx_cs.current, group->se, group->instance);
       }
 
-      si_pc_emit_select(sctx, block, group->num_counters, group->selectors);
+      ac_pc_emit_select(sctx->screen->info.gfx_level, sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                        &sctx->gfx_cs.current, block, group->num_counters, group->selectors);
    }
 
    if (current_se != -1 || current_instance != -1)
-      si_pc_emit_instance(sctx, -1, -1);
+      ac_pc_emit_instance(&sctx->gfx_cs.current, -1, -1);
 
    uint64_t va = query->buffer.buf->gpu_address + query->buffer.results_end;
    si_pc_emit_start(sctx, query->buffer.buf, va);
@@ -297,16 +233,16 @@ static void si_pc_query_suspend(struct si_context *sctx, struct si_query *squery
          unsigned instance = group->instance >= 0 ? group->instance : 0;
 
          do {
-            si_pc_emit_instance(sctx, se, instance);
+            ac_pc_emit_instance(&sctx->gfx_cs.current, se, instance);
             si_pc_emit_read(sctx, block, group->num_counters, va);
             va += sizeof(uint64_t) * group->num_counters;
          } while (group->instance < 0 && ++instance < block->num_scoped_instances);
       } while (++se < se_end);
    }
 
-   si_pc_emit_instance(sctx, -1, -1);
+   ac_pc_emit_instance(&sctx->gfx_cs.current, -1, -1);
 
-   si_inhibit_clockgating(sctx, &sctx->gfx_cs, false);
+   ac_emit_cp_inhibit_clockgating(&sctx->gfx_cs.current, sctx->gfx_level, false);
 }
 
 static bool si_pc_query_begin(struct si_context *ctx, struct si_query *squery)
@@ -571,15 +507,19 @@ error:
    return NULL;
 }
 
+static bool si_init_perfcounters(struct si_screen *screen);
+
 int si_get_perfcounter_info(struct si_screen *screen, unsigned index,
                             struct pipe_driver_query_info *info)
 {
-   struct si_perfcounters *pc = screen->perfcounters;
+   struct si_perfcounters *pc;
    struct ac_pc_block *block;
    unsigned base_gid, sub;
 
-   if (!pc)
+   if (!si_init_perfcounters(screen))
       return 0;
+
+   pc = screen->perfcounters;
 
    if (!info) {
       unsigned bid, num_queries = 0;
@@ -614,11 +554,13 @@ int si_get_perfcounter_info(struct si_screen *screen, unsigned index,
 int si_get_perfcounter_group_info(struct si_screen *screen, unsigned index,
                                   struct pipe_driver_query_group_info *info)
 {
-   struct si_perfcounters *pc = screen->perfcounters;
+   struct si_perfcounters *pc;
    struct ac_pc_block *block;
 
-   if (!pc)
+   if (!si_init_perfcounters(screen))
       return 0;
+
+   pc = screen->perfcounters;
 
    if (!info)
       return pc->base.num_groups;
@@ -649,16 +591,19 @@ void si_destroy_perfcounters(struct si_screen *screen)
    screen->perfcounters = NULL;
 }
 
-void si_init_perfcounters(struct si_screen *screen)
+static bool si_init_perfcounters(struct si_screen *screen)
 {
    bool separate_se, separate_instance;
+
+   if (screen->perfcounters)
+      return true;
 
    separate_se = debug_get_bool_option("RADEON_PC_SEPARATE_SE", false);
    separate_instance = debug_get_bool_option("RADEON_PC_SEPARATE_INSTANCE", false);
 
    screen->perfcounters = CALLOC_STRUCT(si_perfcounters);
    if (!screen->perfcounters)
-      return;
+      return false;
 
    screen->perfcounters->num_stop_cs_dwords = 14 + si_cp_write_fence_dwords(screen);
    screen->perfcounters->num_instance_cs_dwords = 3;
@@ -666,61 +611,56 @@ void si_init_perfcounters(struct si_screen *screen)
    if (!ac_init_perfcounters(&screen->info, separate_se, separate_instance,
                              &screen->perfcounters->base)) {
       si_destroy_perfcounters(screen);
+      return false;
    }
+   return true;
 }
 
 static bool
-si_spm_init_bo(struct si_context *sctx)
+si_spm_init_bo(struct si_context *sctx, struct ac_spm *spm)
 {
    uint64_t size = 32 * 1024 * 1024; /* Default to 32MB. */
 
-   sctx->spm.buffer_size = size;
+   spm->buffer_size = size;
 
-   sctx->spm.bo =
+   spm->bo =
       pipe_aligned_buffer_create(&sctx->screen->b, SI_RESOURCE_FLAG_DRIVER_INTERNAL,
                                  PIPE_USAGE_DEFAULT, size, 4096);
 
-   return sctx->spm.bo != NULL;
+   return spm->bo != NULL;
 }
 
 void
-si_emit_spm_setup(struct si_context *sctx, struct radeon_cmdbuf *cs)
+si_emit_spm_setup(struct si_context *sctx, struct ac_spm *spm, struct radeon_cmdbuf *cs)
 {
    const enum amd_ip_type ip_type = sctx->ws->cs_get_ip_type(cs);
-   struct ac_spm *spm = &sctx->spm;
    uint64_t va = si_resource(spm->bo)->gpu_address;
 
    ac_emit_spm_setup(&cs->current, sctx->gfx_level, ip_type, spm, va);
 }
 
 bool
-si_spm_init(struct si_context *sctx)
+si_spm_init(struct si_context *sctx, struct ac_spm *spm)
 {
    const struct radeon_info *info = &sctx->screen->info;
 
-   sctx->screen->perfcounters = CALLOC_STRUCT(si_perfcounters);
-   sctx->screen->perfcounters->num_stop_cs_dwords = 14 + si_cp_write_fence_dwords(sctx->screen);
-   sctx->screen->perfcounters->num_instance_cs_dwords = 3;
-
-   struct ac_perfcounters *pc = &sctx->screen->perfcounters->base;
-
-   if (!ac_init_perfcounters(info, false, false, pc))
+   if (!si_init_perfcounters(sctx->screen))
       return false;
 
-   if (!ac_init_spm(info, pc, &sctx->spm))
+   if (!ac_init_spm(info, &sctx->screen->perfcounters->base, spm))
       return false;
 
-   if (!si_spm_init_bo(sctx))
+   if (!si_spm_init_bo(sctx, spm))
       return false;
 
    return true;
 }
 
 void
-si_spm_finish(struct si_context *sctx)
+si_spm_finish(struct si_context *sctx, struct ac_spm *spm)
 {
-   struct pipe_resource *bo = sctx->spm.bo;
+   struct pipe_resource *bo = spm->bo;
    pipe_resource_reference(&bo, NULL);
 
-   ac_destroy_spm(&sctx->spm);
+   ac_destroy_spm(spm);
 }

@@ -603,7 +603,14 @@ zink_clear_render_target(struct pipe_context *pctx, struct pipe_surface *dst,
                          bool render_condition_enabled)
 {
    struct zink_context *ctx = zink_context(pctx);
-   struct pipe_resource *pres = dst->texture;
+   struct zink_resource *res = zink_resource(dst->texture);
+   if (width == 0 || height == 0)
+      return;
+   /* video planes can't be rendered to, and multi-planar formats can't use vkCmdClearColorImage */
+   if (!res->obj->render_target || res->plane > 0) {
+      util_clear_render_target(pctx, dst, color, dstx, dsty, width, height);
+      return;
+   }
    bool render_condition_active = ctx->render_condition_active;
    if (!render_condition_enabled && render_condition_active) {
       zink_stop_conditional_render(ctx);
@@ -612,7 +619,7 @@ zink_clear_render_target(struct pipe_context *pctx, struct pipe_surface *dst,
    util_blitter_save_framebuffer(ctx->blitter, &ctx->fb_state);
    set_clear_fb(pctx, dst, NULL);
    struct pipe_scissor_state scissor = {dstx, dsty, dstx + width, dsty + height};
-   zink_blit_barriers(ctx, NULL, zink_resource(pres), false);
+   zink_blit_barriers(ctx, NULL, res, false);
    ctx->blitting = true;
    pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, &scissor, color, 0, 0);
    util_blitter_restore_fb_state(ctx->blitter);

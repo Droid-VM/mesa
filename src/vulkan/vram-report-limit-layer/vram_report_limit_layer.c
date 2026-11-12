@@ -124,7 +124,7 @@ vram_report_limit_env_get_static_heap_size_or_default()
    const char *const env_var_value_str =
       os_get_option(VK_VRAM_REPORT_LIMIT_HEAP_SIZE_ENV_VAR_NAME);
    if (!env_var_value_str) {
-      goto err_return;
+      return VRAM_REPORT_LIMIT_STATIC_HEAP_SIZE_DEFAULT;
    }
 
    const char *start_ptr = env_var_value_str;
@@ -148,7 +148,7 @@ err_return:
    fprintf(
       stderr,
       VRAM_REPORT_LIMIT_ERROR_LOG_TAG VK_VRAM_REPORT_LIMIT_HEAP_SIZE_ENV_VAR_NAME
-      " is invalid or not set.\n");
+      " is invalid.\n");
 
    return VRAM_REPORT_LIMIT_STATIC_HEAP_SIZE_DEFAULT;
 }
@@ -165,7 +165,7 @@ vram_report_limit_env_get_device_id(VkVendorId *vendor_id_out,
    const char *const env_var_value_str =
       os_get_option(VK_VRAM_REPORT_LIMIT_DEVICE_ID_ENV_VAR_NAME);
    if (!env_var_value_str) {
-      goto err_return;
+      return false;
    }
 
    char *end_ptr;
@@ -198,7 +198,7 @@ err_return:
    fprintf(
       stderr,
       VRAM_REPORT_LIMIT_ERROR_LOG_TAG VK_VRAM_REPORT_LIMIT_DEVICE_ID_ENV_VAR_NAME
-      " is invalid or not set.\n");
+      " is invalid.\n");
    return false;
 }
 
@@ -307,8 +307,8 @@ instance_data_unmap_physical_devices(
 static VkLayerInstanceCreateInfo *
 get_instance_chain_info(const VkInstanceCreateInfo *pCreateInfo)
 {
-   vk_foreach_struct_const (item, pCreateInfo->pNext) {
-      if (item->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
+   vk_foreach_struct_const (sType, item, pCreateInfo->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
           ((VkLayerInstanceCreateInfo *)item)->function == VK_LAYER_LINK_INFO)
          return (VkLayerInstanceCreateInfo *)item;
    }

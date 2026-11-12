@@ -15,116 +15,8 @@
 #include "dev/intel_debug.h"
 #include "dev/intel_wa.h"
 
+#include <algorithm>
 #include <memory>
-
-static brw_fb_write_inst *
-brw_emit_single_fb_write(brw_shader &s, const brw_builder &bld,
-                         brw_reg color0, brw_reg color1,
-                         brw_reg src0_alpha,
-                         unsigned target, unsigned components,
-                         bool null_rt)
-{
-   assert(s.stage == MESA_SHADER_FRAGMENT);
-   struct brw_fs_prog_data *prog_data = brw_fs_prog_data(s.prog_data);
-
-   brw_reg sources[FB_WRITE_LOGICAL_NUM_SRCS];
-   sources[FB_WRITE_LOGICAL_SRC_COLOR0]     = color0;
-   sources[FB_WRITE_LOGICAL_SRC_COLOR1]     = color1;
-   sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] = src0_alpha;
-
-   if (prog_data->uses_omask)
-      sources[FB_WRITE_LOGICAL_SRC_OMASK] = s.sample_mask;
-   if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
-      sources[FB_WRITE_LOGICAL_SRC_SRC_DEPTH] = s.frag_depth;
-   if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
-      sources[FB_WRITE_LOGICAL_SRC_SRC_STENCIL] = s.frag_stencil;
-
-   brw_fb_write_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
-                                       sources, ARRAY_SIZE(sources))->as_fb_write();
-   write->target     = target;
-   write->components = components;
-   write->null_rt    = null_rt;
-   write->last_rt    = false;
-
-   if (prog_data->uses_kill) {
-      write->predicate = BRW_PREDICATE_NORMAL;
-      write->flag_subreg = sample_mask_flag_subreg(s);
-   }
-
-   return write;
-}
-
-static void
-brw_emit_fb_writes(brw_shader &s)
-{
-   assert(s.stage == MESA_SHADER_FRAGMENT);
-   brw_fs_prog_key *key = (brw_fs_prog_key*) s.key;
-   const brw_builder bld = brw_builder(&s);
-
-   /* ANV doesn't know about sample mask output during the wm key creation
-    * so we compute if we need replicate alpha and emit alpha to coverage
-    * workaround here.
-    */
-   const bool replicate_alpha = key->alpha_test_replicate_alpha ||
-      (key->nr_color_regions > 1 && key->alpha_to_coverage &&
-       s.sample_mask.file == BAD_FILE);
-
-   brw_fb_write_inst *write = NULL;
-   for (int target = 0; target < key->nr_color_regions; target++) {
-      /* Skip over outputs that weren't written, unless dual source
-       * blending is at play. The results may be undefined depending
-       * on the blending settings, but that's what the user signed
-       * up for.
-       */
-      if (s.outputs[target].file == BAD_FILE && s.dual_src_output.file == BAD_FILE)
-         continue;
-
-      const brw_builder abld = bld.annotate(
-         ralloc_asprintf(s.mem_ctx, "FB write target %d", target));
-
-      brw_reg src0_alpha;
-      if (replicate_alpha && target != 0)
-         src0_alpha = offset(s.outputs[0], bld, 3);
-
-      write = brw_emit_single_fb_write(s, abld, s.outputs[target],
-                                       s.dual_src_output, src0_alpha,
-                                       target, 4, false);
-   }
-
-   if (write) {
-      write->last_rt = true;
-      write->eot = true;
-   }
-
-   if (write == NULL) {
-      struct brw_fs_prog_data *prog_data = brw_fs_prog_data(s.prog_data);
-      /* Enable null_rt if the shader doesn't write any relevant output.
-       */
-      const bool use_null_rt =
-         prog_data->alpha_to_coverage == INTEL_NEVER &&
-         !prog_data->uses_omask &&
-         (s.nir->info.outputs_written &
-          (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
-           BITFIELD64_BIT(FRAG_RESULT_STENCIL))) == 0;
-
-      /* Even if there's no color buffers enabled, we still need to send alpha
-       * out the pipeline to our null renderbuffer to support alpha-testing,
-       * alpha-to-coverage, and so on.
-       */
-      /* FINISHME: Factor out this frequently recurring pattern into a
-       * helper function.
-       */
-      const brw_reg srcs[] = { reg_undef, reg_undef,
-                               reg_undef, offset(s.outputs[0], bld, 3) };
-      const brw_reg tmp = bld.vgrf(BRW_TYPE_UD, 4);
-      bld.LOAD_PAYLOAD(tmp, srcs, 4, 0);
-
-      write = brw_emit_single_fb_write(s, bld, tmp, reg_undef, reg_undef,
-                                      0, 4, use_null_rt);
-      write->last_rt = true;
-      write->eot = true;
-   }
-}
 
 /** Emits the interpolation for the varying inputs. */
 static void
@@ -378,6 +270,7 @@ brw_emit_interpolation_setup(brw_shader &s)
 static void
 brw_emit_repclear_shader(brw_shader &s)
 {
+   assert(!s.key->use_efficient_64bit);
    brw_fs_prog_key *key = (brw_fs_prog_key*) s.key;
    brw_send_inst *write = NULL;
 
@@ -693,6 +586,15 @@ computed_depth_mode(const nir_shader *shader)
    return BRW_PSCDEPTH_OFF;
 }
 
+static enum intel_sometimes
+alpha_to_coverage_enabled(nir_shader *shader, enum intel_sometimes alpha_to_coverage)
+{
+   return (shader->info.outputs_written &
+           (BITFIELD64_BIT(FRAG_RESULT_COLOR) |
+            BITFIELD64_BIT(FRAG_RESULT_DATA0))) != 0 ?
+      alpha_to_coverage : INTEL_NEVER;
+}
+
 static void
 brw_nir_populate_fs_prog_data(nir_shader *shader,
                               const struct intel_device_info *devinfo,
@@ -759,11 +661,7 @@ brw_nir_populate_fs_prog_data(nir_shader *shader,
 
    /* Gate alpha to coverage with the draw buffer 0 being written.
     */
-   prog_data->alpha_to_coverage =
-      (shader->info.outputs_written &
-       (BITFIELD64_BIT(FRAG_RESULT_COLOR) |
-        BITFIELD64_BIT(FRAG_RESULT_DATA0))) != 0 ?
-      key->alpha_to_coverage : INTEL_NEVER;
+   prog_data->alpha_to_coverage = alpha_to_coverage_enabled(shader, key->alpha_to_coverage);
 
    assert(devinfo->verx10 >= 125 || key->mesh_input == INTEL_NEVER);
 
@@ -1188,10 +1086,6 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
       if (s.failed)
 	 return false;
 
-      brw_emit_fb_writes(s);
-      if (s.failed)
-	 return false;
-
       brw_calculate_cfg(s);
 
       brw_optimize(s);
@@ -1329,31 +1223,31 @@ limit_fs_dispatch_width(const struct intel_device_info *devinfo,
 
 const unsigned *
 brw_compile_fs(const struct brw_compiler *compiler,
-               struct brw_compile_fs_params *params)
+               struct brw_compile_params *params)
 {
-   struct nir_shader *nir = params->base.nir;
+   struct nir_shader *nir = params->nir;
    const struct brw_fs_prog_key *key =
-      (const struct brw_fs_prog_key *)params->base.key;
+      (const struct brw_fs_prog_key *)params->key;
    struct brw_fs_prog_data *prog_data =
-      (struct brw_fs_prog_data *)params->base.prog_data;
+      (struct brw_fs_prog_data *)params->prog_data;
    bool allow_spilling = true;
    const bool debug_enabled =
-      brw_should_print_shader(nir, params->base.debug_flag ?
-                                   params->base.debug_flag : DEBUG_WM,
+      brw_should_print_shader(nir, params->debug_flag ?
+                                   params->debug_flag : DEBUG_WM,
                                    prog_data->base.source_hash);
 
-   brw_prog_data_init(&prog_data->base, &params->base);
+   brw_prog_data_init(&prog_data->base, params);
 
    const struct intel_device_info *devinfo = compiler->devinfo;
    const unsigned max_subgroup_size = 32;
-   unsigned max_polygons = MAX2(1, params->max_polygons);
+   unsigned max_polygons = MAX2(1, params->fs.max_polygons);
 
    brw_pass_tracker pt_ = {
       .nir = nir,
       .dispatch_width = 0,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
@@ -1361,10 +1255,10 @@ brw_compile_fs(const struct brw_compiler *compiler,
    brw_nir_apply_key(pt, &key->base, max_subgroup_size);
 
    if (brw_nir_fragment_shader_needs_wa_18019110168(devinfo, key->mesh_input, nir)) {
-      if (params->mue_map) {
-         if (params->mue_map->wa_18019110168_active) {
+      if (params->fs.mue_map) {
+         if (params->fs.mue_map->wa_18019110168_active) {
             brw_nir_frag_convert_attrs_prim_to_vert(
-               nir, params->mue_map->per_primitive_offsets);
+               nir, params->fs.mue_map->per_primitive_offsets);
          }
       } else {
          BRW_NIR_PASS(brw_nir_frag_convert_attrs_prim_to_vert_indirect,
@@ -1382,7 +1276,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
    BRW_NIR_SNAPSHOT("after_lower_io");
 
    if (!brw_can_coherent_fb_fetch(devinfo))
-      BRW_NIR_PASS(brw_nir_lower_fs_load_output, key);
+      BRW_NIR_PASS(brw_nir_lower_fs_load_output, key, 0);
 
    /* Do this lowering before brw_nir_populate_fs_prog_data(). */
    BRW_NIR_PASS(nir_opt_frag_coord_to_pixel_coord);
@@ -1392,25 +1286,32 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    brw_nir_cleanup_pre_fs_prog_data(pt);
 
-   int per_primitive_offsets[VARYING_SLOT_MAX];
-   memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
-
-   brw_nir_populate_fs_prog_data(nir, compiler->devinfo, key, prog_data,
-                                 params->vue_map, params->mue_map,
-                                 per_primitive_offsets);
-
    /* From the SKL PRM, Volume 7, "Alpha Coverage":
     *  "If Pixel Shader outputs oMask, AlphaToCoverage is disabled in
     *   hardware, regardless of the state setting for this feature."
     */
-   if (prog_data->alpha_to_coverage != INTEL_NEVER) {
-      /* Run constant fold optimization in order to get the correct source
-       * offset to determine render target 0 store instruction in
-       * emit_alpha_to_coverage pass.
-       */
-      BRW_NIR_PASS(nir_opt_constant_folding);
+   if (alpha_to_coverage_enabled(nir, key->alpha_to_coverage) != INTEL_NEVER)
       BRW_NIR_PASS(brw_nir_lower_alpha_to_coverage);
-   }
+
+   /* We need to do this before populate_fs_prog_data because this might
+    * disable sample_mask writes.
+    */
+   BRW_NIR_PASS(intel_nir_lower_fragment_outputs,
+                key->nr_color_regions,
+                key->alpha_test_replicate_alpha ||
+                (key->nr_color_regions > 1 &&
+                 alpha_to_coverage_enabled(nir, key->alpha_to_coverage) &&
+                 !(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))),
+                params->fs.rt_write_cb,
+                params->fs.rt_write_data);
+
+   int per_primitive_offsets[VARYING_SLOT_MAX];
+   memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
+
+   brw_nir_populate_fs_prog_data(nir, compiler->devinfo, key, prog_data,
+                                 params->fs.vue_map, params->fs.mue_map,
+                                 per_primitive_offsets);
+
 
    if (prog_data->coarse_pixel_dispatch)
       BRW_NIR_PASS(brw_nir_lower_frag_coord_z, devinfo);
@@ -1454,15 +1355,11 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    const brw_shader_params base_shader_params = {
       .compiler                = compiler,
-      .mem_ctx                 = params->base.mem_ctx,
+      .compile_params          = params,
       .nir                     = nir,
-      .key                     = &key->base,
-      .prog_data               = &prog_data->base,
       .per_primitive_offsets   = per_primitive_offsets,
-      .needs_register_pressure = params->base.stats != NULL,
-      .log_data                = params->base.log_data,
+      .needs_register_pressure = params->stats != NULL,
       .debug_enabled           = debug_enabled,
-      .archiver                = params->base.archiver,
    };
 
    if (min_dispatch_width == 8) {
@@ -1472,8 +1369,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
       v8 = std::make_unique<brw_shader>(&shader_params);
       if (!run_fs(*v8, allow_spilling, false /* do_rep_send */)) {
-         params->base.error_str = ralloc_strdup(params->base.mem_ctx,
-                                                v8->fail_msg);
+         params->error_str = ralloc_strdup(params->mem_ctx,
+                                           v8->fail_msg);
          return NULL;
       }
 
@@ -1506,7 +1403,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Quad-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1527,7 +1424,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD16 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1548,7 +1445,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1568,7 +1465,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
          v32 = std::make_unique<brw_shader>(&shader_params);
 
          if (!run_fs(*v32, false, false)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD32 shader failed to compile: %s\n",
                                 v32->fail_msg);
             v32.reset();
@@ -1587,8 +1484,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
          shader_params.num_polygons   = 1;
          v16 = std::make_unique<brw_shader>(&shader_params);
 
-         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+         if (!run_fs(*v16, allow_spilling, params->fs.use_rep_send)) {
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD16 shader failed to compile: %s\n",
                                 v16->fail_msg);
             v16.reset();
@@ -1613,8 +1510,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
          v16 = std::make_unique<brw_shader>(&shader_params);
 
-         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+         if (!run_fs(*v16, allow_spilling, params->fs.use_rep_send)) {
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD16 shader failed to compile: %s\n",
                                 v16->fail_msg);
             v16.reset();
@@ -1646,7 +1543,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
          v32 = std::make_unique<brw_shader>(&shader_params);
 
          if (!run_fs(*v32, allow_spilling, false)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD32 shader failed to compile: %s\n",
                                 v32->fail_msg);
             v32.reset();
@@ -1655,7 +1552,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
             if (!INTEL_SIMD_FORCE(32) && !key->prefer_simd32 &&
                 throughput >= perf.throughput) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "SIMD32 shader inefficient\n");
                v32.reset();
             } else {
@@ -1684,8 +1581,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
             shader_params.num_polygons   = 4;
             vmulti = std::make_unique<brw_shader>(&shader_params);
 
-            if (!run_fs(*vmulti, false, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, false, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Quad-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1705,8 +1602,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
             shader_params.num_polygons   = 2;
 
             vmulti = std::make_unique<brw_shader>(&shader_params);
-            if (!run_fs(*vmulti, false, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, false, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD16 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1726,8 +1623,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
             vmulti = std::make_unique<brw_shader>(&shader_params);
 
-            if (!run_fs(*vmulti, allow_spilling, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, allow_spilling, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1745,7 +1642,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    brw_to_binary_params to_binary_params = {
       .compiler = compiler,
-      .params = &params->base,
+      .params = params,
       .prog_data = &prog_data->base,
    };
 
@@ -1782,8 +1679,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
       prog_data->prog_offset_32 = v32->start_offset;
 
    /* Override per-variant max_dispatch_width to make reports more useful. */
-   for (unsigned i = 0; i < num_variants && params->base.stats; i++)
-      params->base.stats[i].max_dispatch_width = max_dispatch_width;
+   for (unsigned i = 0; i < num_variants && params->stats; i++)
+      params->stats[i].max_dispatch_width = max_dispatch_width;
 
    return assembly;
 }

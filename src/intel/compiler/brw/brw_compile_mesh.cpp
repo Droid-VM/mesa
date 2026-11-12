@@ -272,14 +272,14 @@ run_task_mesh(brw_shader &s, bool allow_spilling)
 
 const unsigned *
 brw_compile_task(const struct brw_compiler *compiler,
-                 struct brw_compile_task_params *params)
+                 struct brw_compile_params *params)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
-   struct nir_shader *nir = params->base.nir;
+   struct nir_shader *nir = params->nir;
    const struct brw_task_prog_key *key =
-      (const struct brw_task_prog_key *)params->base.key;
+      (const struct brw_task_prog_key *)params->key;
    struct brw_task_prog_data *prog_data =
-      (struct brw_task_prog_data *)params->base.prog_data;
+      (struct brw_task_prog_data *)params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TASK,
                                                       prog_data->base.base.source_hash);
 
@@ -288,7 +288,7 @@ brw_compile_task(const struct brw_compiler *compiler,
       .dispatch_width = 0,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
@@ -312,7 +312,7 @@ brw_compile_task(const struct brw_compiler *compiler,
    NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
             NULL);
 
-   brw_prog_data_init(&prog_data->base.base, &params->base);
+   brw_prog_data_init(&prog_data->base.base, params);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];
@@ -349,34 +349,32 @@ brw_compile_task(const struct brw_compiler *compiler,
 
       const unsigned dispatch_width = 8 << simd;
 
-      nir_shader *shader = nir_shader_clone(params->base.mem_ctx, nir);
+      nir_shader *shader = nir_shader_clone(params->mem_ctx, nir);
 
       pt_ = {
          .nir = shader,
          .dispatch_width = dispatch_width,
          .compiler = compiler,
-         .archiver = params->base.archiver,
+         .key = &key->base,
+         .archiver = params->archiver,
       };
 
       BRW_NIR_SNAPSHOT("first");
       brw_nir_apply_key(pt, &key->base, dispatch_width);
 
-      brw_nir_optimize(pt);
+      brw_nir_opt_vectorize_urb(pt);
+      brw_nir_optimize(pt, true);
       /* brw_nir_optimize undoes late lowerings. */
       BRW_NIR_PASS(nir_opt_algebraic_late);
       brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
 
       const brw_shader_params shader_params = {
          .compiler                = compiler,
-         .mem_ctx                 = params->base.mem_ctx,
+         .compile_params          = params,
          .nir                     = shader,
-         .key                     = &key->base,
-         .prog_data               = &prog_data->base.base,
          .dispatch_width          = dispatch_width,
-         .needs_register_pressure = params->base.stats != NULL,
-         .log_data                = params->base.log_data,
+         .needs_register_pressure = params->stats != NULL,
          .debug_enabled           = debug_enabled,
-         .archiver                = params->base.archiver,
       };
       v[simd] = std::make_unique<brw_shader>(&shader_params);
 
@@ -388,14 +386,16 @@ brw_compile_task(const struct brw_compiler *compiler,
          if (devinfo->ver >= 30 && !v[simd]->spilled_any_registers)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->mem_ctx,
+                                            v[simd]->fail_msg));
       }
    }
 
    int selected_simd = brw_simd_select(simd_state);
    if (selected_simd < 0) {
-      params->base.error_str =
-         ralloc_asprintf(params->base.mem_ctx,
+      params->error_str =
+         ralloc_asprintf(params->mem_ctx,
                          "Can't compile shader: "
                          "SIMD8 '%s', SIMD16 '%s' and SIMD32 '%s'.\n",
                          simd_state.error[0], simd_state.error[1],
@@ -415,7 +415,7 @@ brw_compile_task(const struct brw_compiler *compiler,
 
    const brw_to_binary_params to_binary_params = {
       .compiler = compiler,
-      .params = &params->base,
+      .params = params,
       .prog_data = &prog_data->base.base,
       .shaders = { &selected },
    };
@@ -949,14 +949,14 @@ brw_mesh_autostrip_enable(const struct brw_compiler *compiler, struct nir_shader
 
 const unsigned *
 brw_compile_mesh(const struct brw_compiler *compiler,
-                 struct brw_compile_mesh_params *params)
+                 struct brw_compile_params *params)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
-   struct nir_shader *nir = params->base.nir;
+   struct nir_shader *nir = params->nir;
    const struct brw_mesh_prog_key *key =
-      (const struct brw_mesh_prog_key *)params->base.key;
+      (const struct brw_mesh_prog_key *)params->key;
    struct brw_mesh_prog_data *prog_data =
-      (struct brw_mesh_prog_data *)params->base.prog_data;
+      (struct brw_mesh_prog_data *)params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_MESH,
                                                       prog_data->base.base.source_hash);
 
@@ -965,12 +965,12 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       .dispatch_width = 0,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
 
-   brw_prog_data_init(&prog_data->base.base, &params->base);
+   brw_prog_data_init(&prog_data->base.base, params);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];
@@ -1003,7 +1003,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    prog_data->uses_drawid =
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
 
-   brw_nir_lower_tue_inputs(pt, params->tue_map);
+   brw_nir_lower_tue_inputs(pt, params->mesh.tue_map);
 
    BRW_NIR_PASS(brw_nir_lower_mesh_primitive_count);
    BRW_NIR_PASS(nir_opt_dce);
@@ -1040,9 +1040,17 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       .per_primitive_byte_offsets = prog_data->map.per_primitive_offsets,
    };
    BRW_NIR_PASS(brw_nir_lower_outputs_to_urb_intrinsics, &cb_data);
-   brw_nir_opt_vectorize_urb(pt);
+
    struct nir_opt_offsets_options offset_options = {};
-   BRW_NIR_PASS(nir_opt_offsets, &offset_options);
+
+   /* The folding can push the base of load/store_global_intel beyond the
+    * immediate offset limits, so re-run the lowering.
+    */
+   if (BRW_NIR_PASS(nir_opt_offsets, &offset_options) &&
+       brw_lsc_supports_base_offset(devinfo)) {
+      BRW_NIR_PASS(brw_nir_lower_immediate_offsets, devinfo,
+                   pt->key->use_efficient_64bit);
+   }
 
    brw_simd_selection_state simd_state{
       .devinfo = compiler->devinfo,
@@ -1062,37 +1070,36 @@ brw_compile_mesh(const struct brw_compiler *compiler,
 
       const unsigned dispatch_width = 8 << simd;
 
-      nir_shader *shader = nir_shader_clone(params->base.mem_ctx, nir);
+      nir_shader *shader = nir_shader_clone(params->mem_ctx, nir);
 
       pt_ = {
          .nir = shader,
          .dispatch_width = dispatch_width,
          .compiler = compiler,
-         .archiver = params->base.archiver,
+         .key = &key->base,
+         .archiver = params->archiver,
       };
 
       BRW_NIR_SNAPSHOT("first");
       brw_nir_apply_key(pt, &key->base, dispatch_width);
 
+      brw_nir_opt_vectorize_urb(pt);
+
       /* Load uniforms can do a better job for constants, so fold before it. */
       BRW_NIR_PASS(nir_opt_constant_folding);
 
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
       /* brw_nir_optimize undoes late lowerings. */
       BRW_NIR_PASS(nir_opt_algebraic_late);
       brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
 
       const brw_shader_params shader_params = {
          .compiler                = compiler,
-         .mem_ctx                 = params->base.mem_ctx,
+         .compile_params          = params,
          .nir                     = shader,
-         .key                     = &key->base,
-         .prog_data               = &prog_data->base.base,
          .dispatch_width          = dispatch_width,
-         .needs_register_pressure = params->base.stats != NULL,
-         .log_data                = params->base.log_data,
+         .needs_register_pressure = params->stats != NULL,
          .debug_enabled           = debug_enabled,
-         .archiver                = params->base.archiver,
       };
       v[simd] = std::make_unique<brw_shader>(&shader_params);
 
@@ -1104,14 +1111,16 @@ brw_compile_mesh(const struct brw_compiler *compiler,
          if (devinfo->ver >= 30 && !v[simd]->spilled_any_registers)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->mem_ctx,
+                                            v[simd]->fail_msg));
       }
    }
 
    int selected_simd = brw_simd_select(simd_state);
    if (selected_simd < 0) {
-      params->base.error_str =
-         ralloc_asprintf(params->base.mem_ctx,
+      params->error_str =
+         ralloc_asprintf(params->mem_ctx,
                          "Can't compile shader: "
                          "SIMD8 '%s', SIMD16 '%s' and SIMD32 '%s'.\n",
                          simd_state.error[0], simd_state.error[1],
@@ -1125,9 +1134,9 @@ brw_compile_mesh(const struct brw_compiler *compiler,
                                         selected.grf_used);
 
    if (unlikely(debug_enabled)) {
-      if (params->tue_map) {
+      if (params->mesh.tue_map) {
          fprintf(stderr, "Mesh Input ");
-         brw_print_tue_map(stderr, params->tue_map);
+         brw_print_tue_map(stderr, params->mesh.tue_map);
       }
       fprintf(stderr, "Mesh Output ");
       brw_print_mue_map(stderr, &prog_data->map, nir);
@@ -1144,7 +1153,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
 
    const brw_to_binary_params to_binary_params = {
       .compiler = compiler,
-      .params = &params->base,
+      .params = params,
       .prog_data = &prog_data->base.base,
       .shaders = { &selected },
       .extra_const_data = prog_data->map.wa_18019110168_active ? remap_table : NULL,

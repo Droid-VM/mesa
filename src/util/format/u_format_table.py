@@ -118,6 +118,7 @@ def has_access(format):
         'x6r10x6g10_x6r10x6b10_422_unorm',
         'x6g10_x6b10x6r10_420_unorm',
         'x4g12_x4b12x4r12_420_unorm',
+        'x6g10_x6b10x6r10_422_unorm',
         'y8_400_unorm',
         'y8_u8_v8_422_unorm',
         'y8_u8_v8_444_unorm',
@@ -180,6 +181,18 @@ def write_format_enum_section(formats, type_name=None, max_formats=None):
             print('   PIPE_FORMAT_%s_END = %s,' % (type_name, f), file=sys.stdout3)
         else:
             print('   %s,' % (f), file=sys.stdout3)
+
+def write_le_byte_order_enum_section(formats):
+    # On little-endian hosts these are aliases of the host-endian formats.
+    print('#if UTIL_ARCH_BIG_ENDIAN', file=sys.stdout3)
+    write_format_enum_section(formats)
+    print('#endif', file=sys.stdout3)
+
+def collect_le_byte_order_formats(formats):
+    le_formats = [name for name, f in formats.items() if f.le_byte_order]
+    for f in le_formats:
+        formats.pop(f)
+    return le_formats
 
 def collect_vertex_formats(formats):
     vertex_formats = []
@@ -260,6 +273,7 @@ def write_format_enum(formats):
     yuv_formats = collect_yuv_formats(remaining_formats)
     compr_formats = collect_compr_formats(remaining_formats)
     zs_formats = collect_zs_formats(remaining_formats)
+    le_formats = collect_le_byte_order_formats(remaining_formats)
 
     print('/**', file=sys.stdout3)
     print(' * Formats for textures, surfaces and vertex data', file=sys.stdout3)
@@ -287,8 +301,18 @@ def write_format_enum(formats):
     print('   /* Other formats. */', file=sys.stdout3)
     write_format_enum_section(remaining_formats)
 
-    print('   PIPE_FORMAT_COUNT,', file=sys.stdout3)
+    print(file=sys.stdout3)
+    print('   /* Formats with a fixed little-endian byte order. */', file=sys.stdout3)
+    write_le_byte_order_enum_section(le_formats)
+
     print('};', file=sys.stdout3)
+    print('', file=sys.stdout3)
+
+    print('#if UTIL_ARCH_BIG_ENDIAN', file=sys.stdout3)
+    print('#define PIPE_FORMAT_COUNT %d' % (len(formats)), file=sys.stdout3)
+    print('#else', file=sys.stdout3)
+    print('#define PIPE_FORMAT_COUNT %d' % (len(formats) - len(le_formats)), file=sys.stdout3)
+    print('#endif', file=sys.stdout3)
 
 def write_format_aliases(formats):
     for f in formats:
@@ -300,6 +324,8 @@ def write_format_aliases(formats):
     for f in formats:
         if f.le_alias:
             print("#define %s %s" % (f.le_alias, f.name), file=sys.stdout3)
+        if f.le_byte_order:
+            print("#define %s %s" % (f.name, f.name.removesuffix('_LE')), file=sys.stdout3)
     print("#elif UTIL_ARCH_BIG_ENDIAN", file=sys.stdout3)
     for f in formats:
         if f.be_alias:
@@ -485,14 +511,17 @@ def write_type_conv_helper(formats, in_type, out_type):
                 if fmt_type != in_type:
                     match += [out_fmt.short_name().replace(out_type, fmt_type)]
 
-        found_match = False
-        for in_fmt in formats:
-            if in_fmt.short_name() in match:
-                print('   case %s:' % in_fmt.name, file=sys.stdout3)
-                found_match = True
+        in_fmts = [f for f in formats if f.short_name() in match]
+        if not in_fmts:
+            continue
 
-        if found_match:
-            print('      return %s;' % out_fmt.name, file=sys.stdout3)
+        # The fixed little-endian formats only convert among themselves.
+        assert all(f.le_byte_order == out_fmt.le_byte_order for f in in_fmts)
+        u_format_pack.print_le_byte_order_guard(out_fmt, '#if UTIL_ARCH_BIG_ENDIAN', sys.stdout3)
+        for in_fmt in in_fmts:
+            print('   case %s:' % in_fmt.name, file=sys.stdout3)
+        print('      return %s;' % out_fmt.name, file=sys.stdout3)
+        u_format_pack.print_le_byte_order_guard(out_fmt, '#endif', sys.stdout3)
     print('   default:', file=sys.stdout3)
     print('      return format;', file=sys.stdout3)
     print('   }', file=sys.stdout3)
@@ -507,7 +536,24 @@ def write_type_conv_helpers(formats):
                 write_type_conv_helper(formats, in_type, out_type)
                 print(file=sys.stdout3)
 
+def write_get_le_byte_order(formats):
+    names = {f.name for f in formats}
+    print('static inline enum pipe_format', file=sys.stdout3)
+    print('util_format_le_byte_order(enum pipe_format format)', file=sys.stdout3)
+    print('{', file=sys.stdout3)
+    print('   switch (format) {', file=sys.stdout3)
+    for f in formats:
+        if f.le_byte_order:
+            host_name = f.name.removesuffix('_LE')
+            assert host_name != f.name and host_name in names
+            print('   case %s: return %s;' % (host_name, f.name), file=sys.stdout3)
+    print('   default: return format;', file=sys.stdout3)
+    print('   }', file=sys.stdout3)
+    print('}', file=sys.stdout3)
+
 def write_format_inline_helpers(formats):
+    write_get_le_byte_order(formats)
+    print(file=sys.stdout3)
     write_get_plane_format(formats)
     print(file=sys.stdout3)
     write_get_plane_width_height(formats)
@@ -617,6 +663,7 @@ def write_format_table(formats):
     for format in formats:
         sn = format.short_name()
 
+        u_format_pack.print_le_byte_order_guard(format, '#if UTIL_ARCH_BIG_ENDIAN', sys.stdout)
         print("   [%s] = {" % (format.name,))
         print("      .format = %s," % (format.name,))
         print("      .name = \"%s\"," % (format.name,))
@@ -629,6 +676,7 @@ def write_format_table(formats):
         print("      .is_mixed = %s,\t/* is_mixed */" % (bool_map(format.is_mixed()),))
         print("      .is_unorm = %s,\t/* is_unorm */" % (bool_map(format.is_unorm()),))
         print("      .is_snorm = %s,\t/* is_snorm */" % (bool_map(format.is_snorm()),))
+        print("      .is_byte_swapped = %s,\t/* is_byte_swapped */" % (bool_map(format.le_byte_order),))
         u_format_pack.print_channels(format, do_channel_array)
         u_format_pack.print_channels(format, do_swizzle_array)
         print("      .colorspace = %s," % (colorspace_map(format.colorspace),))
@@ -640,6 +688,7 @@ def write_format_table(formats):
         else:
             print("      .srgb_equivalent = PIPE_FORMAT_NONE,\t/* srgb_equivalent */")
         print("   },")
+        u_format_pack.print_le_byte_order_guard(format, '#endif', sys.stdout)
         print()
     print("};")
     print()
@@ -654,6 +703,7 @@ def write_format_table(formats):
             print("   [%s] = { 0 }," % (format.name,))
             continue
 
+        u_format_pack.print_le_byte_order_guard(format, '#if UTIL_ARCH_BIG_ENDIAN', sys.stdout)
         print("   [%s] = {" % (format.name,))
         if format.colorspace != ZS and not format.is_pure_color():
             print("      .pack_rgba_8unorm = &util_format_%s_pack_rgba_8unorm," % sn)
@@ -670,6 +720,7 @@ def write_format_table(formats):
             print("      .pack_rgba_uint = &util_format_%s_pack_unsigned," % sn)
             print("      .pack_rgba_sint = &util_format_%s_pack_signed," % sn)
         print("   },")
+        u_format_pack.print_le_byte_order_guard(format, '#endif', sys.stdout)
         print()
     print("};")
     print()
@@ -683,6 +734,7 @@ def write_format_table(formats):
             print("   [%s] = { 0 }," % (format.name,))
             continue
 
+        u_format_pack.print_le_byte_order_guard(format, '#if UTIL_ARCH_BIG_ENDIAN', sys.stdout)
         print("   [%s] = {" % (format.name,))
 
         if format.colorspace != ZS and not format.is_pure_color():
@@ -710,6 +762,7 @@ def write_format_table(formats):
         elif format.is_pure_signed():
             print("      .unpack_rgba = &util_format_%s_unpack_signed," % sn)
         print("   },")
+        u_format_pack.print_le_byte_order_guard(format, '#endif', sys.stdout)
     print("};")
     print()
 
@@ -719,10 +772,12 @@ def write_format_table(formats):
     for format in formats:
         sn = format.short_name()
 
+        u_format_pack.print_le_byte_order_guard(format, '#if UTIL_ARCH_BIG_ENDIAN', sys.stdout)
         if format.colorspace != ZS and has_access(format):
             print("  [%s] = &util_format_%s_fetch_rgba," % (format.name, sn))
         else:
             print("  [%s] = NULL," % format.name)
+        u_format_pack.print_le_byte_order_guard(format, '#endif', sys.stdout)
 
     print("};")
     print()

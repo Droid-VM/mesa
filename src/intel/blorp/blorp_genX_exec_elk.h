@@ -72,12 +72,6 @@ blorp_alloc_dynamic_state(struct blorp_batch *batch,
                           uint32_t alignment,
                           uint32_t *offset);
 
-UNUSED static void *
-blorp_alloc_general_state(struct blorp_batch *batch,
-                          uint32_t size,
-                          uint32_t alignment,
-                          uint32_t *offset);
-
 static void *
 blorp_alloc_vertex_buffer(struct blorp_batch *batch, uint32_t size,
                           struct blorp_address *addr);
@@ -1668,7 +1662,7 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
          uint64_t offset_B;
          isl_surf_get_image_offset_B_tile_sa(info.hiz_surf,
                                              info.view->base_level, 0, 0,
-                                             &offset_B, NULL, NULL);
+                                             &offset_B, NULL, NULL, NULL);
          hiz_address.offset += offset_B;
 #endif
 
@@ -1694,7 +1688,7 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
       uint64_t offset_B;
       isl_surf_get_image_offset_B_tile_sa(info.stencil_surf,
                                           info.view->base_level, 0, 0,
-                                          &offset_B, NULL, NULL);
+                                          &offset_B, NULL, NULL, NULL);
       stencil_address.offset += offset_B;
 #endif
 
@@ -1712,7 +1706,7 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
  * clearing operations without such information.
  * */
 static void
-blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
+blorp_emit_hiz_op(struct blorp_batch *batch,
                        const struct blorp_params *params)
 {
    /* We should be performing an operation on a depth or stencil buffer.
@@ -1839,7 +1833,7 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
 {
 #if GFX_VER >= 8
    if (params->hiz_op != ISL_AUX_OP_NONE) {
-      blorp_emit_gfx8_hiz_op(batch, params);
+      blorp_emit_hiz_op(batch, params);
       return;
    }
 #endif

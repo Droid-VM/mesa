@@ -285,6 +285,8 @@ ForEachMacros:
   - foreach_block
   - foreach_block_safe
   - foreach_block_rev
+  - foreach_block_from
+  - foreach_main_block
   - foreach_array
   - foreach_array_safe
   - foreach_interval
@@ -328,6 +330,7 @@ ForEachMacros:
   - jay_foreach_predecessor
   - jay_foreach_comp
   - jay_foreach_comp_rev
+  - jay_foreach_reg
   - jay_foreach_src
   - jay_foreach_src_rev
   - jay_foreach_ssa_src
@@ -345,6 +348,7 @@ ForEachMacros:
   - jay_dag_foreach_edge
   - jay_foreach_pipe
   - jay_foreach_sbid_dep_type
+  - jay_foreach_in_footprint
 
 # Disable clang formatting by default. Drivers that use clang-format
 # inherit from this .clang-format file and re-enable formatting:

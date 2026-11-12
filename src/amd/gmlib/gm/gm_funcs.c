@@ -1294,20 +1294,44 @@ void gm_gen_3dlut(struct s_gamut_map* ptr_gamut_map, int num_pnts, int bitwidth,
     MATFLOAT rgb_src[3], rgb_dst[3];
     MATFLOAT rgb_src_lin[3], rgb_dst_lin[3];
 
-    #ifdef GM_SIM
-    #pragma omp parallel for private(index, nig, nib, rgb, rgb_src, rgb_dst, rgb_src_lin, rgb_dst_lin)
-    #endif
-    for (nir = 0; nir < num_pnts; nir++) {
+    if (en_merge) {
+        for (nir = 0; nir < num_pnts; nir++) {
+            index = num_pnts * num_pnts * nir * 3;
+            for (nig = 0; nig < num_pnts; nig++) {
+                for (nib = 0; nib < num_pnts; nib++) {
+                    rgb[0] = ptr_3dlut_rgb[index + 0];
+                    rgb_src[0] = mat_int2flt(rgb[0], val_max);
+                    rgb_src_lin[0] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[0]);
+
+                    rgb[1] = ptr_3dlut_rgb[index + 1];
+                    rgb_src[1] = mat_int2flt(rgb[1], val_max);
+                    rgb_src_lin[1] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[1]);
+
+                    rgb[2] = ptr_3dlut_rgb[index + 2];
+                    rgb_src[2] = mat_int2flt(rgb[2], val_max);
+                    rgb_src_lin[2] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[2]);
+
+                    gm_rgb_to_rgb(ptr_gamut_map, rgb_src_lin, rgb_dst_lin);
+                    cs_lin_to_nlin_rgb(&ptr_gamut_map->color_space_dst, rgb_dst_lin, rgb_dst);
+                    cs_flt2short_rgb(rgb_dst, &ptr_3dlut_rgb[index], val_max);
+                    index += 3;
+                }
+            }
+        }
+    } else {
+        for (nir = 0; nir < num_pnts; nir++) {
         index = num_pnts * num_pnts * nir * 3;
-        rgb[0] = en_merge ? ptr_3dlut_rgb[index + 0] : (nir * val_max) / (num_pnts - 1);
+        rgb[0] = (nir * val_max) / (num_pnts - 1);
         rgb_src[0] = mat_int2flt(rgb[0], val_max);
         rgb_src_lin[0] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[0]);
+
         for (nig = 0; nig < num_pnts; nig++) {
-            rgb[1] = en_merge ? ptr_3dlut_rgb[index + 1] : (nig * val_max) / (num_pnts - 1);
+            rgb[1] = (nig * val_max) / (num_pnts - 1);
             rgb_src[1] = mat_int2flt(rgb[1], val_max);
             rgb_src_lin[1] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[1]);
+
             for (nib = 0; nib < num_pnts; nib++) {
-                rgb[2] = en_merge ? ptr_3dlut_rgb[index + 2] : (nib * val_max) / (num_pnts - 1);
+                rgb[2] = (nib * val_max) / (num_pnts - 1);
                 rgb_src[2] = mat_int2flt(rgb[2], val_max);
                 rgb_src_lin[2] = cs_nlin_to_lin(&ptr_gamut_map->color_space_src, rgb_src[2]);
 
@@ -1315,7 +1339,7 @@ void gm_gen_3dlut(struct s_gamut_map* ptr_gamut_map, int num_pnts, int bitwidth,
                 cs_lin_to_nlin_rgb(&ptr_gamut_map->color_space_dst, rgb_dst_lin, rgb_dst);
                 cs_flt2short_rgb(rgb_dst, &ptr_3dlut_rgb[index], val_max);
                 index += 3;
-
+                }
             }
         }
     }

@@ -10,7 +10,7 @@ deqp_args = [
     "--deqp-gl-config-name=rgba8888d24s8ms0",
     "--deqp-visibility=hidden"
 ]
-version_check = "GL ES 3.1.*ANGLE 2.1.1 git"
+version_check = "GL ES 3.2.*ANGLE 2.1.1 git"
 renderer_check = "ANGLE.*llvmpipe"
 
 # AHB test set

@@ -45,6 +45,10 @@
 #ifndef VIRTGPU_BLOB_MEM_GUEST_VRAM
 #define VIRTGPU_BLOB_MEM_GUEST_VRAM 0x0004
 #endif
+/* Device alignment requirement for blob sizes. */
+#ifndef VIRTGPU_PARAM_BLOB_ALIGNMENT
+#define VIRTGPU_PARAM_BLOB_ALIGNMENT 9
+#endif
 
 #ifndef VIRTGPU_BLOB_FLAG_CREATE_GUEST_HANDLE
 /* DroidVM (protected VM): ask the VMM to wrap the guest pages of this blob in
@@ -94,6 +98,8 @@ struct virtgpu {
 
    uint32_t shmem_blob_mem;
    uint32_t bo_blob_mem;
+   /* blob sizes must be multiples of this (a power of two) */
+   uint32_t blob_alignment;
    bool bo_create_guest_handle;
 
    /* note that we use gem_handle instead of res_id to index because
@@ -184,10 +190,15 @@ virtgpu_ioctl_resource_create_blob(struct virtgpu *gpu,
                                    uint64_t blob_id,
                                    uint32_t *res_id)
 {
+   /* The kernel rejects sizes that are not multiples of the blob alignment,
+    * which hosts with pages larger than the guest's (e.g. 16K on macOS) need
+    * to map blobs into the host visible region.  Mappings still use the
+    * requested size.
+    */
    struct drm_virtgpu_resource_create_blob args = {
       .blob_mem = blob_mem,
       .blob_flags = blob_flags,
-      .size = blob_size,
+      .size = align64(blob_size, gpu->blob_alignment),
       .cmd_size = batch ? batch->cs_size : 0,
       .cmd = batch ? (uintptr_t)batch->cs_data : 0,
       .blob_id = blob_id,
@@ -324,7 +335,14 @@ virtgpu_sync_read(struct vn_renderer *renderer,
 {
    struct virtgpu *gpu = (struct virtgpu *)renderer;
 
-   int ret = gpu->sync->query(gpu->sync, &sync->syncobj_handle, val, 1, 0);
+   int ret;
+   if (renderer->info.has_timeline_sync) {
+      ret = gpu->sync->query(gpu->sync, &sync->syncobj_handle, val, 1, 0);
+   } else {
+      ret = gpu->sync->wait(gpu->sync, &sync->syncobj_handle, 1, 0, 0, NULL);
+      *val = !ret;
+      ret = 0;
+   }
 
    return ret ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS;
 }
@@ -497,9 +515,11 @@ virtgpu_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
    mtx_lock(&gpu->dma_buf_import_mutex);
 
    /* Check the refcount again after the import lock is grabbed.  Yes, we use
-    * the double-checked locking anti-pattern.
+    * the double-checked locking anti-pattern. bo->gem_handle can be zero if
+    * another thread has imported and unref to destroy the bo first before the
+    * bo_destroy wakes up on this thread.
     */
-   if (vn_refcount_is_valid(&bo->base.refcount)) {
+   if (vn_refcount_is_valid(&bo->base.refcount) || !bo->gem_handle) {
       mtx_unlock(&gpu->dma_buf_import_mutex);
       return false;
    }
@@ -1120,9 +1140,18 @@ virtgpu_init_params(struct virtgpu *gpu)
       }
    }
 
+   gpu->blob_alignment = 1;
    val = virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_HOST_VISIBLE);
    if (val) {
       gpu->bo_blob_mem = VIRTGPU_BLOB_MEM_HOST3D;
+
+      /* VIRTGPU_PARAM_GUEST_VRAM is a downstream param that shares the value
+       * of VIRTGPU_PARAM_BLOB_ALIGNMENT, so only query it with HOST_VISIBLE.
+       */
+      const uint32_t blob_alignment =
+         virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_BLOB_ALIGNMENT);
+      if (util_is_power_of_two_nonzero(blob_alignment))
+         gpu->blob_alignment = blob_alignment;
    } else {
       val = virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_GUEST_VRAM);
       if (val) {
@@ -1211,6 +1240,18 @@ virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
    }
 
    gpu->fd = fd;
+
+   /* Skip virtio-gpu devices without 3D, such as a 2D-only display device
+    * next to the one Venus should use.
+    */
+   if (!virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_3D_FEATURES)) {
+      if (VN_DEBUG(INIT))
+         vn_log(gpu->instance, "skipping %s without 3D features", node_path);
+      drmFreeVersion(version);
+      close(fd);
+      gpu->fd = -1;
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
    struct stat st;
    if (stat(primary_path, &st) == 0) {

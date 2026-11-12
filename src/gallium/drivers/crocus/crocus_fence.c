@@ -320,7 +320,7 @@ static bool
 crocus_fence_finish(struct pipe_screen *p_screen, struct pipe_context *ctx,
                     struct pipe_fence_handle *fence, uint64_t timeout)
 {
-   ctx = threaded_context_unwrap_sync(ctx);
+   ctx = pipe_get_driver_context(threaded_context_unwrap_sync(ctx));
    struct crocus_context *ice = (struct crocus_context *)ctx;
    struct crocus_screen *screen = (struct crocus_screen *)p_screen;
 

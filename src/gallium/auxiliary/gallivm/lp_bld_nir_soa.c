@@ -184,6 +184,8 @@ struct lp_build_nir_soa_context
    struct lp_build_context scalar_int64_bld;
    struct lp_build_context scalar_bool_bld;
 
+   bool is_callee;
+
    LLVMValueRef *ssa_defs;
    struct hash_table *regs;
    struct hash_table *vars;
@@ -243,6 +245,7 @@ struct lp_build_nir_soa_context
 
    nir_variable_mode indirects;
    struct lp_build_mask_context *mask;
+   bool mask_may_be_zero;
    struct lp_exec_mask exec_mask;
 
    /* We allocate/use this array of inputs if (indirects & nir_var_shader_in) is
@@ -348,8 +351,10 @@ mask_vec(struct lp_build_nir_soa_context *bld)
 static LLVMValueRef
 mask_vec_with_helpers(struct lp_build_nir_soa_context *bld)
 {
-   if (bld->shader->info.stage != MESA_SHADER_FRAGMENT)
+   if (bld->shader->info.stage != MESA_SHADER_FRAGMENT ||
+       !bld->shader->info.fs.needs_coarse_quad_helper_invocations) {
       return mask_vec(bld); /* No helper invocations needed. */
+   }
 
    struct lp_exec_mask *exec_mask = &bld->exec_mask;
    if (exec_mask->has_mask)
@@ -368,13 +373,16 @@ group_op_mask_vec(struct lp_build_nir_soa_context *bld)
    return mask_vec(bld);
 }
 
+/*
+ * Whether a mask is provably not all zero.
+ */
 static bool
-lp_exec_mask_is_nz(struct lp_build_nir_soa_context *bld)
+mask_vec_is_nz(struct lp_build_nir_soa_context *bld)
 {
    if (bld->shader->info.stage == MESA_SHADER_FRAGMENT && bld->shader->info.fs.uses_discard)
       return false;
 
-   return !bld->exec_mask.has_mask;
+   return !bld->exec_mask.has_mask && !bld->mask_may_be_zero;
 }
 
 static bool
@@ -385,6 +393,9 @@ invocation_0_must_be_active(struct lp_build_nir_soa_context *bld)
     * lp_build_tgsi_params.mask setup in draw_llvm.c and lp_state_*.c)
     */
    if (bld->shader->info.stage == MESA_SHADER_FRAGMENT)
+      return false;
+
+   if (bld->is_callee)
       return false;
 
    /* If we're in some control flow right now, then invocation 0 may be
@@ -421,7 +432,17 @@ static LLVMValueRef first_active_invocation(struct lp_build_nir_soa_context *bld
    /* Turn it from N x i1 to iN, then extend it up to i32 so we can use a single
     * cttz intrinsic -- I assume the compiler will drop the extend if there are
     * smaller instructions available, since we have is_zero_poison.
+    *
+    * The bitcast puts element 0 in the most significant bit on big-endian
+    * hosts, so reverse the elements first there.
     */
+   if (UTIL_ARCH_BIG_ENDIAN) {
+      LLVMValueRef shuffles[LP_MAX_VECTOR_LENGTH];
+      for (unsigned i = 0; i < uint_bld->type.length; i++)
+         shuffles[i] = lp_build_const_int32(gallivm, uint_bld->type.length - 1 - i);
+      bitmask = LLVMBuildShuffleVector(builder, bitmask, LLVMGetUndef(LLVMTypeOf(bitmask)),
+                                       LLVMConstVector(shuffles, uint_bld->type.length), "");
+   }
    bitmask = LLVMBuildBitCast(builder, bitmask, LLVMIntTypeInContext(gallivm->context, uint_bld->type.length), "exec_bitmask");
    bitmask = LLVMBuildZExt(builder, bitmask, bld->int_bld.elem_type, "");
 
@@ -461,13 +482,8 @@ emit_fetch_64bit(
    assert(len <= (2 * (LP_MAX_VECTOR_WIDTH/32)));
 
    for (i = 0; i < bld->base.type.length * 2; i+=2) {
-#if UTIL_ARCH_LITTLE_ENDIAN
       shuffles[i] = lp_build_const_int32(gallivm, i / 2);
       shuffles[i + 1] = lp_build_const_int32(gallivm, i / 2 + bld->base.type.length);
-#else
-      shuffles[i] = lp_build_const_int32(gallivm, i / 2 + bld->base.type.length);
-      shuffles[i + 1] = lp_build_const_int32(gallivm, i / 2);
-#endif
    }
    res = LLVMBuildShuffleVector(builder, input, input2, LLVMConstVector(shuffles, len), "");
 
@@ -488,13 +504,8 @@ emit_store_64bit_split(struct lp_build_nir_soa_context *bld,
 
    value = LLVMBuildBitCast(gallivm->builder, value, LLVMVectorType(LLVMFloatTypeInContext(gallivm->context), len), "");
    for (i = 0; i < bld->base.type.length; i++) {
-#if UTIL_ARCH_LITTLE_ENDIAN
       shuffles[i] = lp_build_const_int32(gallivm, i * 2);
       shuffles2[i] = lp_build_const_int32(gallivm, (i * 2) + 1);
-#else
-      shuffles[i] = lp_build_const_int32(gallivm, i * 2 + 1);
-      shuffles2[i] = lp_build_const_int32(gallivm, i * 2);
-#endif
    }
 
    split_values[0] = LLVMBuildShuffleVector(builder, value,
@@ -727,11 +738,15 @@ static void emit_load_var(struct lp_build_nir_soa_context *bld,
             LLVMValueRef result2;
 
             result[i] = bld->gs_iface->fetch_input(bld->gs_iface, &bld->base,
-                                                   false, vertex_index_val, 0, attrib_index_val, swizzle_index_val);
+                                                   indir_vertex_index ? true : false,
+                                                   indir_vertex_index ? indir_vertex_index : vertex_index_val,
+                                                   0, attrib_index_val, swizzle_index_val);
             if (bit_size == 64) {
                LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx + 1);
                result2 = bld->gs_iface->fetch_input(bld->gs_iface, &bld->base,
-                                                    false, vertex_index_val, 0, attrib_index_val, swizzle_index_val);
+                                                    indir_vertex_index ? true : false,
+                                                    indir_vertex_index ? indir_vertex_index : vertex_index_val,
+                                                    0, attrib_index_val, swizzle_index_val);
                result[i] = emit_fetch_64bit(bld, result[i], result2);
             }
          } else if (bld->tes_iface) {
@@ -1291,7 +1306,7 @@ ssbo_base_pointer(struct lp_build_nir_soa_context *bld,
 
    LLVMValueRef ssbo_idx = invocation ? LLVMBuildExtractElement(gallivm->builder, index, invocation, "") : index;
 
-   if (!invocation_0_must_be_active(bld) &&
+   if (!mask_vec_is_nz(bld) &&
        LLVMGetTypeKind(LLVMTypeOf(ssbo_idx)) == LLVMIntegerTypeKind &&
        LLVMGetIntTypeWidth(LLVMTypeOf(ssbo_idx)) == 64) {
       LLVMValueRef exec_mask = mask_vec_with_helpers(bld);
@@ -1710,7 +1725,7 @@ static void emit_image_op(struct lp_build_nir_soa_context *bld,
    params->thread_data_type = bld->thread_data_type;
    params->thread_data_ptr = bld->thread_data_ptr;
    params->exec_mask = mask_vec(bld);
-   params->exec_mask_nz = lp_exec_mask_is_nz(bld);
+   params->exec_mask_nz = mask_vec_is_nz(bld);
 
    bld->image->emit_op(bld->image,
                        bld->base.gallivm,
@@ -1779,7 +1794,7 @@ static void emit_tex(struct lp_build_nir_soa_context *bld,
    params->thread_data_type = bld->thread_data_type;
    params->thread_data_ptr = bld->thread_data_ptr;
    params->exec_mask = mask_vec(bld);
-   params->exec_mask_nz = lp_exec_mask_is_nz(bld);
+   params->exec_mask_nz = mask_vec_is_nz(bld);
 
    if (params->texture_index_offset && bld->shader->info.stage != MESA_SHADER_FRAGMENT) {
       /* this is horrible but this can be dynamic */
@@ -1852,7 +1867,7 @@ static void emit_tex_size(struct lp_build_nir_soa_context *bld,
                                                             lp_build_const_int32(bld->base.gallivm, 0), "");
 
    params->exec_mask = mask_vec(bld);
-   params->exec_mask_nz = lp_exec_mask_is_nz(bld);
+   params->exec_mask_nz = mask_vec_is_nz(bld);
 
    bld->sampler->emit_size_query(bld->sampler,
                                  bld->base.gallivm,
@@ -2371,13 +2386,21 @@ static void emit_reduce(struct lp_build_nir_soa_context *bld, LLVMValueRef src,
    struct lp_build_context *vec_bld = is_flt ? get_flt_bld(bld, bit_size, true) :
       get_int_bld(bld, is_unsigned, bit_size, true);
 
+   /* x86 lacks native FP16 arithmetic (without AVX512-FP16) and LLVM has no
+    * software runtime libcall for f16 fminnum/fmaxnum, leading to a fatal
+    * error during SelectionDAG. Fall back to the element-wise reduction loop
+    * unless AVX512-FP16 is supported. */
+   bool f16_minmax_supported = util_get_cpu_caps()->has_avx512fp16;
+   bool is_f16_minmax = is_flt && bit_size == 16 &&
+                        (reduction_op == nir_op_fmin || reduction_op == nir_op_fmax);
    /*
     * For a reduce operation with the correct cluster size, the llvm
     * intrinsics can be used as long as the exec_mask is taken into account.
     * Values are defaulted in disabled lanes depending on the operation.
     */
    if (instr->intrinsic == nir_intrinsic_reduce &&
-       cluster_size == bld->int_bld.type.length) {
+       cluster_size == bld->int_bld.type.length &&
+       (f16_minmax_supported || !is_f16_minmax)) {
       char intrinsic[64];
       uint32_t length = vec_bld->type.length;
       uint32_t src_width = bit_size;
@@ -3099,17 +3122,16 @@ lp_build_unpack(struct lp_build_context *bld, LLVMValueRef value,
       LLVMVectorType(LLVMIntTypeInContext(gallivm->context, dst_bit_size), num_components * length);
    value = LLVMBuildBitCast(builder, value, vec_type, "");
 
+   /* The bitcast puts the most significant bits first on big-endian. */
+   unsigned elem = UTIL_ARCH_LITTLE_ENDIAN ? component :
+                                             num_components - component - 1;
+
    if (length == 1)
-      return LLVMBuildExtractElement(builder, value, lp_build_const_int32(gallivm, component), "");
+      return LLVMBuildExtractElement(builder, value, lp_build_const_int32(gallivm, elem), "");
 
    LLVMValueRef shuffle[LP_MAX_VECTOR_WIDTH / 32];
-   for (unsigned i = 0; i < length; i++) {
-#if UTIL_ARCH_LITTLE_ENDIAN
-      shuffle[i] = lp_build_const_int32(gallivm, (i * num_components) + component);
-#else
-      shuffle[i] = lp_build_const_int32(gallivm, (i * num_components) + (num_components - component - 1));
-#endif
-   }
+   for (unsigned i = 0; i < length; i++)
+      shuffle[i] = lp_build_const_int32(gallivm, (i * num_components) + elem);
    return LLVMBuildShuffleVector(builder, value, LLVMGetUndef(vec_type),
                                  LLVMConstVector(shuffle, length), "");
 }
@@ -3779,9 +3801,17 @@ get_deref_offset(struct lp_build_nir_soa_context *bld, nir_deref_instr *instr,
 
    if (vertex_index_out != NULL || vertex_index_ref != NULL) {
       if (vertex_index_ref) {
-         *vertex_index_ref = get_src(bld, &path.path[idx_lvl]->arr.index, 0);
-         if (vertex_index_out)
-            *vertex_index_out = 0;
+         nir_src src = path.path[idx_lvl]->arr.index;
+         if (vertex_index_out && nir_src_is_const(src)) {
+            *vertex_index_ref = NULL;
+            *vertex_index_out = nir_src_as_uint(src);
+         } else {
+            LLVMValueRef idx_src = get_src(bld, &src, 0);
+            idx_src = cast_type(bld, idx_src, nir_type_uint, 32);
+            *vertex_index_ref = idx_src;
+            if (vertex_index_out)
+               *vertex_index_out = 0;
+         }
       } else {
          *vertex_index_out = nir_src_as_uint(path.path[idx_lvl]->arr.index);
       }
@@ -4044,7 +4074,7 @@ visit_load_var(struct lp_build_nir_soa_context *bld,
 
       get_deref_offset(bld, deref, vs_in,
                    gs_in ? &vertex_index : NULL,
-                   (tcs_in || tcs_out || tes_in) ? &indir_vertex_index : NULL,
+                   (gs_in || tcs_in || tcs_out || tes_in) ? &indir_vertex_index : NULL,
                    &const_index, &indir_index);
 
       /* Return undef for loads definitely outside of the array bounds
@@ -4108,7 +4138,7 @@ visit_load_ubo(struct lp_build_nir_soa_context *bld,
    LLVMValueRef offset = get_src(bld, &instr->src[1], 0);
 
    bool in_bounds = nir_intrinsic_access(instr) & ACCESS_IN_BOUNDS;
-   if (!lp_exec_mask_is_nz(bld))
+   if (!mask_vec_is_nz(bld))
       in_bounds = false;
 
    struct lp_build_context *uint_bld = get_int_bld(bld, true, 32, lp_value_is_divergent(offset));
@@ -4190,7 +4220,7 @@ visit_load_ssbo(struct lp_build_nir_soa_context *bld,
    LLVMValueRef offset = get_src(bld, &instr->src[1], 0);
 
    bool in_bounds = nir_intrinsic_access(instr) & ACCESS_IN_BOUNDS;
-   if (!lp_exec_mask_is_nz(bld))
+   if (!mask_vec_is_nz(bld))
       in_bounds = false;
 
    emit_load_mem(bld, instr->def.num_components,
@@ -4216,7 +4246,7 @@ visit_store_ssbo(struct lp_build_nir_soa_context *bld,
    int bitsize = nir_src_bit_size(instr->src[0]);
 
    bool in_bounds = nir_intrinsic_access(instr) & ACCESS_IN_BOUNDS;
-   if (!lp_exec_mask_is_nz(bld))
+   if (!mask_vec_is_nz(bld))
       in_bounds = false;
 
    emit_store_mem(bld, writemask, nc, bitsize,
@@ -6011,6 +6041,8 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    bld.fns = params->fns;
    bld.func = params->current_func;
    bld.mask = params->mask;
+   bld.mask_may_be_zero = params->mask_may_be_zero;
+   bld.is_callee = !impl->function->is_entrypoint;
    bld.inputs = params->inputs;
    bld.outputs = outputs;
    bld.consts_ptr = params->consts_ptr;

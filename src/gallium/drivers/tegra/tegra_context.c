@@ -1223,6 +1223,7 @@ tegra_screen_context_create(struct pipe_screen *pscreen, void *priv,
    context->base.destroy = tegra_destroy;
 
    context->base.draw_vbo = tegra_draw_vbo;
+   context->base.draw_vbo_buffers = util_draw_vbo_buffers;
 
    context->base.render_condition = tegra_render_condition;
 

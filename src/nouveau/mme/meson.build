@@ -103,7 +103,7 @@ endif
 executable(
   'nv_mme_dump',
   'nv_mme_dump.c',
-  dependencies : [ idep_mesautil, idep_nouveau_mme ],
+  dependencies : [ idep_mesautil, idep_nouveau_mme, idep_nvidia_headers ],
   build_by_default : with_tools.contains('nouveau'),
   install : with_tools.contains('nouveau'),
 )

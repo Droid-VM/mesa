@@ -102,18 +102,24 @@ tex_index_for_loc(gl_frag_result loc, uint32_t locations_written)
 }
 
 static bool
-compact_tex_indices(nir_builder *b, nir_tex_instr *tex,
-                    const struct panvk_frame_shader_key *key)
+lower_tex(nir_builder *b, nir_tex_instr *tex,
+          const struct panvk_frame_shader_key *key)
 {
    const uint32_t tex_idx =
       tex_index_for_loc(tex->texture_index, key_locations_written(key));
+   assert(tex->sampler_index == 0);
+
+   b->cursor = nir_before_instr(&tex->instr);
 
 #if PAN_ARCH < 9
    tex->sampler_index = 0;
    tex->texture_index = tex_idx;
 #else
-   tex->sampler_index = pan_res_handle(0, 0);
-   tex->texture_index = pan_res_handle(0, tex_idx + 1);
+   tex->texture_index = 0;
+   nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
+                         pan_nir_res_handle(b, 0, 0, NULL));
+   nir_tex_instr_add_src(tex, nir_tex_src_texture_handle,
+                         pan_nir_res_handle(b, 0, tex_idx + 1, NULL));
 #endif
 
    return true;
@@ -164,11 +170,13 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr,
       break;
    case nir_intrinsic_load_layer_id:
       /* On v9+, we have real layered rendering */
-      if (PAN_ARCH >= 9)
-         return false;
-
-      offset = offsetof(struct panvk_fb_sysvals, layer_id);
-      val = nir_u2u32(b, load_sysval(b, 1, 16, offset));
+      if (PAN_ARCH >= 9) {
+         val = nir_load_frame_arg_pan(b);
+         val = nir_extract_u8_imm(b, nir_u2u32(b, val), 0);
+      } else {
+         offset = offsetof(struct panvk_fb_sysvals, layer_id);
+         val = nir_u2u32(b, load_sysval(b, 1, 16, offset));
+      }
       break;
    default:
       return false;
@@ -184,7 +192,7 @@ lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
 {
    switch (instr->type) {
    case nir_instr_type_tex:
-      return compact_tex_indices(b, nir_instr_as_tex(instr), cb_data);
+      return lower_tex(b, nir_instr_as_tex(instr), cb_data);
    case nir_instr_type_intrinsic:
       return lower_sysval(b, nir_instr_as_intrinsic(instr), cb_data);
    default:
@@ -217,13 +225,13 @@ get_frame_shader(struct panvk_device *dev,
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
-      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
+      .arch = PAN_ARCH,
+      .model = phys_dev->model,
       .is_blit = true,
       .fau.reserved = DIV_ROUND_UP(sizeof(struct panvk_fb_sysvals), 4),
    };
 
-   pan_preprocess_nir(nir, inputs.gpu_id);
+   pan_preprocess_nir(nir, PAN_ARCH);
 
    VkResult result = panvk_per_arch(create_internal_shader)(
       dev, nir, &inputs, &shader);

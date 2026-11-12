@@ -17,6 +17,7 @@
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 #include "kosmickrisp/bridge/ns_process_info.h"
+#include "kosmickrisp/compiler/nir_to_msl.h"
 
 #include "util/disk_cache.h"
 #include "util/mesa-blake3.h"
@@ -41,7 +42,7 @@ kk_get_vk_version()
 
 static void
 kk_get_device_extensions(const struct kk_instance *instance,
-                         const struct kk_env_settings *settings,
+                         const struct kk_physical_device *pdev,
                          struct vk_device_extension_table *ext)
 {
    *ext = (struct vk_device_extension_table){
@@ -87,7 +88,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_buffer_device_address = true,
       .EXT_descriptor_indexing = true,
       .EXT_host_query_reset = true,
-      .EXT_sampler_filter_minmax = false,
+      .EXT_sampler_filter_minmax = pdev->info.gpu_apple_family >= 10,
       .EXT_scalar_block_layout = true,
       .EXT_separate_stencil_usage = true,
       .EXT_shader_viewport_index_layer = true,
@@ -142,6 +143,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       /* Optional extensions */
       .KHR_calibrated_timestamps = true,
+      .KHR_deferred_host_operations = true,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
@@ -211,11 +213,13 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_external_semaphore_fd = true,
 
       .AMD_shader_image_load_store_lod = true,
+      .AMD_buffer_marker = true,
    };
 }
 
 static void
 kk_get_device_features(
+   const struct kk_device_info *info, const struct kk_instance *instance,
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
@@ -223,11 +227,14 @@ kk_get_device_features(
       /* Vulkan 1.0 */
       .alphaToOne = true,
       .depthBiasClamp = true,
+      .depthBounds = kk_gpu_supports_depth_bounds(info) ||
+                     instance->drirc.misc.fake_depth_bounds,
       .depthClamp = true,
       .drawIndirectFirstInstance = true,
       .dualSrcBlend = true,
       .fragmentStoresAndAtomics = true,
       .fullDrawIndexUint32 = true,
+      .geometryShader = true,
       .imageCubeArray = true,
       .independentBlend = true,
       .inheritedQueries = true,
@@ -254,7 +261,7 @@ kk_get_device_features(
       .shaderUniformBufferArrayDynamicIndexing = true,
       .tessellationShader = true,
       .textureCompressionASTC_LDR = true,
-      .textureCompressionBC = true,
+      .textureCompressionBC = info->supports_bc_texture_compression,
       .textureCompressionETC2 = true,
       .vertexPipelineStoresAndAtomics = true,
 
@@ -263,11 +270,7 @@ kk_get_device_features(
       .samplerYcbcrConversion = true,
       .shaderDrawParameters = true,
       .storageBuffer16BitAccess = true,
-      /* TODO KOSMICKRISP
-       * Disabled due to failing tests (vertex fragment interface mismatch):
-       * dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.*
-       */
-      .storageInputOutput16 = false,
+      .storageInputOutput16 = true,
       .storagePushConstant16 = true,
       .uniformAndStorageBuffer16BitAccess = true,
       .variablePointers = true,
@@ -290,6 +293,7 @@ kk_get_device_features(
       .imagelessFramebuffer = true,
       .multiDrawIndirect = true,
       .runtimeDescriptorArray = true,
+      .samplerFilterMinmax = supported_extensions->EXT_sampler_filter_minmax,
       .samplerMirrorClampToEdge = true,
       .scalarBlockLayout = true,
       .separateDepthStencilLayouts = true,
@@ -505,6 +509,8 @@ kk_get_device_features(
       .shaderBufferFloat32Atomics = true,
       .shaderBufferFloat32AtomicAdd = true,
       .shaderSharedFloat32Atomics = true,
+      .shaderSharedFloat32AtomicAdd =
+         info->msl_version >= MTL_LANGUAGE_VERSION_4_1,
 
       /* VK_EXT_vertex_attribute_robustness */
       .vertexAttributeRobustness = true,
@@ -515,9 +521,10 @@ kk_get_device_features(
 }
 
 static void
-kk_get_device_properties(const struct kk_physical_device *pdev,
-                         const struct kk_instance *instance,
-                         struct vk_properties *properties)
+kk_get_device_properties(
+   const struct kk_physical_device *pdev, const struct kk_instance *instance,
+   const struct vk_device_extension_table *supported_extensions,
+   struct vk_properties *properties)
 {
    VkSampleCountFlags sample_counts = pdev->info.supported_sample_counts;
 
@@ -530,11 +537,19 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
    float timestamp_period =
       timestamp_frequency ? (1000000000.0f / (float)timestamp_frequency) : 1.0f;
 
+   /* M1 and M2 are restricted to 1024 unique samplers, so there we advertise
+    * the minimum allowed by spec. Otherwise, we advertise the maximum that fit
+    * in our sampler table. */
+   uint32_t max_samplers = pdev->info.max_sampler_count >= MSL_MAX_SAMPLERS
+                              ? MSL_MAX_SAMPLERS
+                              : 4000;
+
    *properties = (struct vk_properties){
       .apiVersion = kk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
-      .vendorID =
-         instance->force_vk_vendor != 0 ? instance->force_vk_vendor : 0x106b,
+      .vendorID = instance->drirc.debug.force_vk_vendor != 0
+                     ? instance->drirc.debug.force_vk_vendor
+                     : 0x106b,
       .deviceID = 100,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
@@ -551,7 +566,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .maxStorageBufferRange = UINT32_MAX,
       .maxPushConstantsSize = KK_MAX_PUSH_SIZE,
       .maxMemoryAllocationCount = 4096,
-      .maxSamplerAllocationCount = 4000,
+      .maxSamplerAllocationCount = max_samplers,
       .bufferImageGranularity = 16,
       .sparseAddressSpaceSize = KK_SPARSE_ADDR_SPACE_SIZE,
       .maxBoundDescriptorSets = KK_MAX_SETS,
@@ -687,7 +702,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_KOSMICKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 4, 3, 2},
+      .conformanceVersion = (VkConformanceVersion){1, 4, 6, 2},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .shaderSignedZeroInfNanPreserveFloat16 = true,
@@ -731,8 +746,10 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .maxDescriptorSetUpdateAfterBindSampledImages = KK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindStorageImages = KK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindInputAttachments = KK_MAX_DESCRIPTORS,
-      .filterMinmaxSingleComponentFormats = false,
-      .filterMinmaxImageComponentMapping = false,
+      .filterMinmaxSingleComponentFormats =
+         supported_extensions->EXT_sampler_filter_minmax,
+      .filterMinmaxImageComponentMapping =
+         supported_extensions->EXT_sampler_filter_minmax,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
 
@@ -768,7 +785,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .advancedBlendAllOperations = true,
 
       /* VK_EXT_custom_border_color */
-      .maxCustomBorderColorSamplers = 4000,
+      .maxCustomBorderColorSamplers = max_samplers,
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,
@@ -1039,8 +1056,19 @@ get_metal_limits(struct kk_physical_device *pdev)
       mtl_device_max_buffer_length(pdev->mtl_dev_handle);
    pdev->info.max_sampler_count =
       mtl_device_max_argument_buffer_sampler_count(pdev->mtl_dev_handle);
+   pdev->info.supports_bc_texture_compression =
+      mtl_device_supports_bc_texture_compression(pdev->mtl_dev_handle);
+   pdev->info.supports_32_bit_float_filtering =
+      mtl_device_supports_32_bit_float_filtering(pdev->mtl_dev_handle);
    pdev->info.gpu_apple_family =
       mtl_device_get_gpu_apple_family(pdev->mtl_dev_handle);
+
+   /* Determine the supported MSL version based on the OS. The version used to
+    * compile determines what features are available. */
+   if (ns_is_os_version_at_least(27, 0, 0))
+      pdev->info.msl_version = MTL_LANGUAGE_VERSION_4_1;
+   else
+      pdev->info.msl_version = MTL_LANGUAGE_VERSION_4_0;
 
    /* See Metal Feature Set Tables. Note that for certain MSAA sample counts the
     * tile size will actually be restricted to a width and/or height of 16, but
@@ -1068,13 +1096,21 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->gpu_capture_enabled =
       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
 
+   if (settings->gpu_capture_enabled) {
+      settings->gpu_capture_dir =
+         debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
+
+      settings->gpu_capture_immediately =
+         debug_get_bool_option("MESA_KK_GPU_CAPTURE_IMMEDIATELY", false);
+   }
+
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
    const size_t all_len = strlen(all_workarounds);
    for (unsigned n; n = strcspn(list, ","), *list; list += MAX2(1, n)) {
       if (n == all_len && !strncmp(list, all_workarounds, n)) {
          settings->disabled_workarounds = UINT64_MAX;
-         break;
+         return;
       }
 
       int index = atoi(list);
@@ -1083,15 +1119,29 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
 
    /* Workarounds resolved on macOS 27 */
    if (ns_is_os_version_at_least(27, 0, 0)) {
+      /* 1-6 */
       settings->disabled_workarounds |= BITFIELD64_MASK(7);
+
+      settings->disabled_workarounds |= BITFIELD64_BIT(8);
+      settings->disabled_workarounds |= BITFIELD64_BIT(11);
       settings->disabled_workarounds |= BITFIELD64_BIT(12);
       settings->disabled_workarounds |= BITFIELD64_BIT(17);
+      settings->disabled_workarounds |= BITFIELD64_BIT(18);
    }
-   /* M5-only workarounds */
+   /* M5 only workarounds */
+   if (pdev->info.gpu_apple_family >= 10) {
+      settings->disabled_workarounds &= ~BITFIELD64_BIT(2);
+   }
    if (pdev->info.gpu_apple_family < 10) {
       settings->disabled_workarounds |= BITFIELD64_BIT(16);
-   } else {
-      settings->disabled_workarounds &= ~BITFIELD64_BIT(2);
+   }
+   /* M3+ only workarounds */
+   if (pdev->info.gpu_apple_family < 9) {
+      settings->disabled_workarounds |= BITFIELD64_BIT(18);
+   }
+   if (pdev->info.gpu_apple_family >= 9) {
+      settings->disabled_workarounds |= BITFIELD64_BIT(10);
+      settings->disabled_workarounds |= BITFIELD64_BIT(19);
    }
 }
 
@@ -1124,13 +1174,14 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
       &dispatch_table, &wsi_physical_device_entrypoints, false);
 
    struct vk_device_extension_table supported_extensions;
-   kk_get_device_extensions(instance, &pdev->settings, &supported_extensions);
+   kk_get_device_extensions(instance, pdev, &supported_extensions);
 
    struct vk_features supported_features;
-   kk_get_device_features(&supported_extensions, &supported_features);
+   kk_get_device_features(&pdev->info, instance, &supported_extensions,
+                          &supported_features);
 
    struct vk_properties properties;
-   kk_get_device_properties(pdev, instance, &properties);
+   kk_get_device_properties(pdev, instance, &supported_extensions, &properties);
 
    properties.drmHasRender = false;
 
@@ -1259,10 +1310,10 @@ kk_GetPhysicalDeviceMemoryProperties2(
       pMemoryProperties->memoryProperties.memoryTypes[i] = pdev->mem_types[i];
    }
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
-         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
 
          for (unsigned i = 0; i < pdev->mem_heap_count; i++) {
             const struct kk_memory_heap *heap = &pdev->mem_heaps[i];
@@ -1285,7 +1336,7 @@ kk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1311,10 +1362,10 @@ kk_GetPhysicalDeviceQueueFamilyProperties2(
          p->queueFamilyProperties.minImageTransferGranularity =
             (VkExtent3D){1, 1, 1};
 
-         vk_foreach_struct(ext, p->pNext) {
-            switch (ext->sType) {
+         vk_foreach_struct(sType, ext, p->pNext) {
+            switch (sType) {
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
-               VkQueueFamilyGlobalPriorityProperties *pSub = (void *)ext;
+               VkQueueFamilyGlobalPriorityProperties *pSub = ext;
                pSub->priorityCount = 1;
                pSub->priorities[0] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
                break;
@@ -1322,14 +1373,14 @@ kk_GetPhysicalDeviceQueueFamilyProperties2(
 
             case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR: {
                VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *pSub =
-                  (void *)ext;
+                  ext;
                pSub->optimalImageTransferGranularity =
                   p->queueFamilyProperties.minImageTransferGranularity;
                break;
             }
 
             default:
-               vk_debug_ignored_stype(ext->sType);
+               vk_debug_ignored_stype(sType);
                break;
             }
          }

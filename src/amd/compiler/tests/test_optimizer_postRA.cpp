@@ -437,8 +437,6 @@ BEGIN_TEST(optimizer_postRA.dpp)
    Temp tmp10 = bld.vop1_dpp(aco_opcode::v_mov_b32, bld.def(v1, reg_v2), a, dpp_row_mirror);
 
    bld.reset(program->create_and_insert_block());
-   program->blocks[0].linear_succs.push_back(1);
-   program->blocks[0].logical_succs.push_back(1);
    program->blocks[1].linear_preds.push_back(0);
    program->blocks[1].logical_preds.push_back(0);
 
@@ -907,6 +905,138 @@ BEGIN_TEST(optimizer_postRA.scc_nocmp_across_cf_partially_overwritten)
                         Operand::zero());
    bld.branch(aco_opcode::p_cbranch_z, bld.scc(scmp));
    writeout(5);
+
+   finish_optimizer_postRA_test();
+END_TEST
+
+BEGIN_TEST(optimizer_postRA.branching_sequence.use_count)
+   //>> s2: %a:vcc = p_startpgm
+   if (!setup_cs("s2", GFX10_3))
+      return;
+
+   aco_ptr<Instruction>& startpgm = bld.instructions->at(0);
+   startpgm->definitions[0].setFixed(vcc);
+
+   Operand a(inputs[0], vcc);
+
+   //! s2: %_:exec, s1: %_:scc = s_not_b64 %a:vcc
+   Temp b = bld.sop1(aco_opcode::s_not_b64, bld.def(s2, vcc), bld.def(s1, scc), a);
+
+   //! p_cbranch_nz BB1, BB2
+   emit_divergent_if_else(
+      program.get(), bld, Operand(b, vcc),
+      [&]() -> void
+      {
+         /* --- logical then --- */
+         //! BB1
+         //! /* logical preds: BB0, / linear preds: BB0, / kind: */
+         //! p_logical_start
+
+         //! p_unit_test 1, %_:exec
+         writeout(1, Operand(exec, bld.lm));
+
+         //! p_logical_end
+         //! p_branch BB3
+
+         /* --- linear then --- */
+         //! BB2
+         //! /* logical preds: / linear preds: BB0, / kind: */
+         //! p_branch BB3
+
+         /* --- invert --- */
+         //! BB3
+         //! /* logical preds: / linear preds: BB1, BB2, / kind: invert, */
+         //! s2: %_:exec, s1: %_:scc = s_andn2_b64 -1, %_:exec
+         //! p_cbranch_nz BB4, BB5
+      },
+      [&]() -> void
+      {
+         /* --- logical else --- */
+         //! BB4
+         //! /* logical preds: BB0, / linear preds: BB3, / kind: */
+         //! p_logical_start
+         //! p_logical_end
+         //! p_branch BB6
+
+         /* --- linear else --- */
+         //! BB5
+         //! /* logical preds: / linear preds: BB3, / kind: */
+         //! p_branch BB6
+      },
+      true);
+
+   /* --- merge block --- */
+   //! BB6
+   //! /* logical preds: BB1, BB4, / linear preds: BB4, BB5, / kind: uniform, top-level, merge, */
+   //! s2: %_:exec = p_parallelcopy -1
+   //! s_endpgm
+
+   bld.sop1(aco_opcode::s_not_b64, bld.def(s2, vcc), bld.def(s1, scc), b);
+
+   finish_optimizer_postRA_test();
+END_TEST
+
+BEGIN_TEST(optimizer_postRA.branching_sequence.tied_defs)
+   //>> s2: %a:vcc = p_startpgm
+   if (!setup_cs("s2", GFX10_3))
+      return;
+
+   aco_ptr<Instruction>& startpgm = bld.instructions->at(0);
+   startpgm->definitions[0].setFixed(vcc);
+
+   Operand a(inputs[0], vcc);
+
+   //! s2: %b:vcc = s_bitset0_b64 0, %a:vcc
+   Temp b = bld.sop1(aco_opcode::s_bitset0_b64, bld.def(s2, vcc), Operand::zero(), a);
+
+   //! s2: %_:exec = p_parallelcopy %b:vcc
+   //! p_cbranch_nz BB1, BB2
+   emit_divergent_if_else(
+      program.get(), bld, Operand(b, vcc),
+      [&]() -> void
+      {
+         /* --- logical then --- */
+         //! BB1
+         //! /* logical preds: BB0, / linear preds: BB0, / kind: */
+         //! p_logical_start
+
+         //! p_unit_test 1, %_:exec
+         writeout(1, Operand(exec, bld.lm));
+
+         //! p_logical_end
+         //! p_branch BB3
+
+         /* --- linear then --- */
+         //! BB2
+         //! /* logical preds: / linear preds: BB0, / kind: */
+         //! p_branch BB3
+
+         /* --- invert --- */
+         //! BB3
+         //! /* logical preds: / linear preds: BB1, BB2, / kind: invert, */
+         //! s2: %_:exec, s1: %_:scc = s_andn2_b64 -1, %_:exec
+         //! p_cbranch_nz BB4, BB5
+      },
+      [&]() -> void
+      {
+         /* --- logical else --- */
+         //! BB4
+         //! /* logical preds: BB0, / linear preds: BB3, / kind: */
+         //! p_logical_start
+         //! p_logical_end
+         //! p_branch BB6
+
+         /* --- linear else --- */
+         //! BB5
+         //! /* logical preds: / linear preds: BB3, / kind: */
+         //! p_branch BB6
+      },
+      true);
+
+   /* --- merge block --- */
+   //! BB6
+   //! /* logical preds: BB1, BB4, / linear preds: BB4, BB5, / kind: uniform, top-level, merge, */
+   //! s2: %_:exec = p_parallelcopy -1
 
    finish_optimizer_postRA_test();
 END_TEST

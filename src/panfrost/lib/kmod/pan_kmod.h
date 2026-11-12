@@ -37,6 +37,7 @@
 #include "util/sparse_array.h"
 #include "util/u_atomic.h"
 #include "util/u_dynarray.h"
+#include "util/u_sync_provider.h"
 
 #include "kmod/panthor_kmod.h"
 #include "pan_props.h"
@@ -196,6 +197,9 @@ struct pan_kmod_dev_props {
 
    /* GPU variant. */
    uint32_t gpu_variant;
+
+   /* GPU features. */
+   uint64_t gpu_features;
 
    /* Bitmask encoding the number of shader cores exposed by the GPU. */
    uint64_t shader_present;
@@ -453,8 +457,7 @@ struct pan_kmod_ops {
    /* Create a pan_kmod_dev object.
     * Return NULL if the creation fails for any reason.
     */
-   struct pan_kmod_dev *(*dev_create)(
-      int fd, uint32_t flags, const struct pan_kmod_driver *drv_info,
+   struct pan_kmod_dev *(*dev_create)(int fd, uint32_t flags,
       const struct pan_kmod_allocator *allocator);
 
    /* Destroy a pan_kmod_dev object. */
@@ -481,17 +484,13 @@ struct pan_kmod_ops {
    /* Import a buffer object.
     * Return NULL if the import fails for any reason.
     */
-   struct pan_kmod_bo *(*bo_import)(struct pan_kmod_dev *dev, uint32_t handle,
-                                    uint64_t size);
+   struct pan_kmod_bo *(*bo_import)(struct pan_kmod_dev *dev, int fd);
 
-   /* Post export operations.
-    * Return 0 on success, -1 otherwise.
-    * This method is optional.
-    */
-   int (*bo_export)(struct pan_kmod_bo *bo, int dmabuf_fd);
+   /* Export buffer object. */
+   int (*bo_export)(struct pan_kmod_bo *bo);
 
-   /* Get the file offset to use to mmap() a buffer object. */
-   off_t (*bo_get_mmap_offset)(struct pan_kmod_bo *bo);
+   /* Map the buffer object to device memory. */
+   void *(*bo_mmap)(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr);
 
    /* Flush the pending BO map syncs. */
    int (*flush_bo_map_syncs)(struct pan_kmod_dev *dev);
@@ -592,6 +591,9 @@ struct pan_kmod_dev {
 
    /* KMD-agnostic device properties. */
    struct pan_kmod_dev_props props;
+
+   /* Kmod sync operations */
+   struct util_sync_provider *sync_ops;
 
    /* kmod backend ops assigned at device creation. */
    const struct pan_kmod_ops *ops;
@@ -702,23 +704,7 @@ struct pan_kmod_bo *pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd);
 static inline int
 pan_kmod_bo_export(struct pan_kmod_bo *bo)
 {
-   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
-
-   int fd;
-
-   if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
-                          &fd)) {
-      mesa_loge("drmPrimeHandleToFD() failed (err=%d)", errno);
-      return -1;
-   }
-
-   if (bo->dev->ops->bo_export && bo->dev->ops->bo_export(bo, fd)) {
-      close(fd);
-      return -1;
-   }
-
-   bo->flags |= PAN_KMOD_BO_FLAG_EXPORTED;
-   return fd;
+   return bo->dev->ops->bo_export(bo);
 }
 
 static inline bool
@@ -751,18 +737,11 @@ pan_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr)
 {
    PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
 
-   off_t mmap_offset;
-
    /* Don't bother trying an mmap() if it's not allowed. */
    if (bo->flags & PAN_KMOD_BO_FLAG_NO_MMAP)
       return MAP_FAILED;
 
-   mmap_offset = bo->dev->ops->bo_get_mmap_offset(bo);
-   if (mmap_offset < 0)
-      return MAP_FAILED;
-
-   host_addr =
-      os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
+   host_addr = bo->dev->ops->bo_mmap(bo, prot, flags, host_addr);
    if (host_addr == MAP_FAILED)
       mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
                 bo->size, prot, flags, strerror(errno));
@@ -856,7 +835,7 @@ pan_kmod_get_dummy_object(struct pan_kmod_vm *vm)
    simple_mtx_lock(&vm->sparse_dummy.lock);
 
    if (!vm->sparse_dummy.bo) {
-      struct pan_kmod_bo *bo = pan_kmod_bo_alloc(vm->dev, NULL, PAN_PGSIZE_2M,
+      struct pan_kmod_bo *bo = pan_kmod_bo_alloc(vm->dev, vm, PAN_PGSIZE_2M,
                                                  PAN_KMOD_BO_FLAG_NO_MMAP);
       if (!bo)
          goto dummy_exit;
@@ -1057,6 +1036,103 @@ static inline void
 pan_kmod_perf_destroy(struct pan_kmod_perf_session *session)
 {
    session->dev->ops->perf_destroy(session);
+}
+
+static inline int
+pan_kmod_sync_reset(const struct pan_kmod_dev *dev, const uint32_t *handles,
+                    uint32_t handle_count)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->reset(sync_ops, handles, handle_count);
+}
+
+static inline int
+pan_kmod_sync_fd_to_handle(const struct pan_kmod_dev *dev, int obj_fd,
+                           uint32_t *handle)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->fd_to_handle(sync_ops, obj_fd, handle);
+}
+
+static inline int
+pan_kmod_sync_create(const struct pan_kmod_dev *dev, uint32_t flags,
+                     uint32_t *handle)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->create(sync_ops, flags, handle);
+}
+
+static inline int
+pan_kmod_sync_destroy(const struct pan_kmod_dev *dev, uint32_t handle)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->destroy(sync_ops, handle);
+}
+
+static inline int
+pan_kmod_sync_wait(const struct pan_kmod_dev *dev, uint32_t *handles,
+                   unsigned num_handles, int64_t timeout_nsec, unsigned flags,
+                   uint32_t *first_signaled)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->wait(sync_ops, handles, num_handles, timeout_nsec, flags,
+                         first_signaled);
+}
+
+static inline int
+pan_kmod_sync_timeline_wait(const struct pan_kmod_dev *dev, uint32_t *handles,
+                            uint64_t *points, unsigned num_handles,
+                            int64_t timeout_nsec, unsigned flags,
+                            uint32_t *first_signaled)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->timeline_wait(sync_ops, handles, points, num_handles,
+                                  timeout_nsec, flags, first_signaled);
+}
+
+static inline int
+pan_kmod_sync_transfer(const struct pan_kmod_dev *dev, uint32_t dst_handle,
+                       uint64_t dst_point, uint32_t src_handle,
+                       uint64_t src_point, uint32_t flags)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->transfer(sync_ops, dst_handle, dst_point, src_handle,
+                             src_point, flags);
+}
+
+static inline int
+pan_kmod_sync_import_file(const struct pan_kmod_dev *dev,
+                          uint32_t handle, int sync_file_fd)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->import_sync_file(sync_ops, handle, sync_file_fd);
+}
+
+static inline int
+pan_kmod_sync_export_file(const struct pan_kmod_dev *dev,
+                          uint32_t handle, int *sync_file_fd)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->export_sync_file(sync_ops, handle, sync_file_fd);
+}
+
+static inline struct util_sync_provider *
+pan_kmod_sync_clone(const struct pan_kmod_dev *dev)
+{
+   struct util_sync_provider *sync_ops = dev->sync_ops;
+
+   return sync_ops->clone(sync_ops);
 }
 
 #if defined(__cplusplus)

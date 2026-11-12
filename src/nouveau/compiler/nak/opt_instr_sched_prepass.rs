@@ -579,8 +579,17 @@ impl<'a> GenerateOrder<'a> {
                 );
                 dep_instr.num_uses -= 1;
                 if dep_instr.num_uses <= 0 {
-                    future_ready_instrs
-                        .insert(FutureReadyInstr::new(g, edge.head_idx));
+                    let label = &g.nodes[edge.head_idx].label;
+                    // dep_instr.ready_cycle is the earliest beginning cycle for the
+                    // instruction, but we need the earliest end cycle for the instruction.
+                    let ready_cycle = dep_instr
+                        .ready_cycle
+                        .saturating_sub(label.exec_latency);
+
+                    future_ready_instrs.insert(FutureReadyInstr {
+                        ready_cycle: Reverse(ready_cycle),
+                        index: edge.head_idx,
+                    });
                 }
             }
 

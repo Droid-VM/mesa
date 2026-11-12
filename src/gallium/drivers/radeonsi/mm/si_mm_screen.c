@@ -26,6 +26,55 @@ static const struct debug_named_value radeonsi_multimedia_debug_options[] = {
    DEBUG_NAMED_VALUE_END /* must be last */
 };
 
+static void si_init_video_caps(struct si_screen *sscreen)
+{
+   const struct ac_video_proc_caps *proc = &sscreen->info.video_caps.proc;
+   struct pipe_video_caps *caps = (struct pipe_video_caps *)&sscreen->b.video_caps;
+
+   if (!proc->supported)
+      return;
+
+   caps->vpp.hdr_tone_mapping_modes =
+      PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_HDR | PIPE_VIDEO_VPP_TONE_MAPPING_HDR_TO_SDR;
+   caps->vpp.color_balance = true;
+   caps->vpp.sharpening = proc->sharpening;
+   caps->vpp.filter_range[PIPE_VIDEO_VPP_FILTER_BRIGHTNESS] =
+      (struct pipe_video_vpp_filter_range) {
+         .min_value = -100.0f,
+         .max_value = 100.0f,
+         .default_value = 0.0f,
+         .step = 0.1f,
+      };
+   caps->vpp.filter_range[PIPE_VIDEO_VPP_FILTER_CONTRAST] =
+      (struct pipe_video_vpp_filter_range) {
+         .min_value = 0.0f,
+         .max_value = 2.0f,
+         .default_value = 1.0f,
+         .step = 0.01f,
+      };
+   caps->vpp.filter_range[PIPE_VIDEO_VPP_FILTER_HUE] =
+      (struct pipe_video_vpp_filter_range) {
+         .min_value = -180.0f,
+         .max_value = 180.0f,
+         .default_value = 0.0f,
+         .step = 1.0f,
+      };
+   caps->vpp.filter_range[PIPE_VIDEO_VPP_FILTER_SATURATION] =
+      (struct pipe_video_vpp_filter_range) {
+         .min_value = 0.0f,
+         .max_value = 3.0f,
+         .default_value = 1.0f,
+         .step = 0.01f,
+      };
+   caps->vpp.filter_range[PIPE_VIDEO_VPP_FILTER_SHARPENING] =
+      (struct pipe_video_vpp_filter_range) {
+         .min_value = 0.0f,
+         .max_value = 10.0f,
+         .default_value = 3.0f,
+         .step = 1.0f,
+      };
+}
+
 static int si_video_get_param(struct pipe_screen *screen, enum pipe_video_profile profile,
                               enum pipe_video_entrypoint entrypoint, enum pipe_video_cap param)
 {
@@ -38,7 +87,7 @@ static int si_video_get_param(struct pipe_screen *screen, enum pipe_video_profil
       return 1;
 
    case PIPE_VIDEO_CAP_SKIP_CLEAR_SURFACE:
-      return sscreen->info.has_default_zerovram_support;
+      return 1;
 
    default:
       break;
@@ -91,6 +140,8 @@ static int si_video_get_param(struct pipe_screen *screen, enum pipe_video_profil
          int blend = PIPE_VIDEO_VPP_BLEND_MODE_NONE;
          if (caps->blend_global_alpha)
             blend |= PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA;
+         if (caps->blend_luma_key)
+            blend |= PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY;
          return blend;
       }
 
@@ -428,6 +479,7 @@ bool si_init_mm_screen(struct si_screen *sscreen)
    for (uint32_t i = 0; i < AMD_NUM_IP_TYPES; i++) {
       if (sscreen->info.video_caps.queue[i].supported) {
          sscreen->b.get_video_param = si_video_get_param;
+         si_init_video_caps(sscreen);
          sscreen->b.is_video_format_supported = si_vid_is_format_supported;
          return true;
       }

@@ -269,6 +269,10 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_IMMD(p, NV9097, SET_RENDER_ENABLE_C, MODE_TRUE);
 
    P_IMMD(p, NV9097, SET_Z_COMPRESSION, ENABLE_TRUE);
+   if (pdev->info.cls_eng3d >= MAXWELL_B) {
+      P_IMMD(p, NVB197, SET_STENCIL_COMPRESSION, ENABLE_TRUE);
+   }
+
    P_MTHD(p, NV9097, SET_COLOR_COMPRESSION(0));
    for (unsigned i = 0; i < 8; i++)
       P_NV9097_SET_COLOR_COMPRESSION(p, i, ENABLE_TRUE);
@@ -596,7 +600,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
     * 32-bit pointer for this in 3D rather than a full 48 like we have for
     * compute.
     */
-   P_IMMD(p, NV9097, SET_SHADER_LOCAL_MEMORY_WINDOW, 0xff << 24);
+   P_IMMD(p, NV9097, SET_SHADER_LOCAL_MEMORY_WINDOW, 0xffu << 24);
 
    for (uint32_t group = 0; group < 5; group++) {
       for (uint32_t slot = 0; slot < 16; slot++) {
@@ -1109,7 +1113,6 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
                                uint32_t plane,
                                uint32_t layer_count,
                                uint64_t *addr_out,
-                               uint32_t *base_array_layer_out,
                                uint32_t *mip_level_out,
                                struct nil_image *image_out)
 {
@@ -1118,7 +1121,6 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
 
    uint64_t addr = nvk_image_base_address(image, plane);
    uint32_t mip_level = iview->vk.base_mip_level;
-   uint32_t base_array_layer = iview->vk.base_array_layer;
 
    if (nil_image.dim == NIL_IMAGE_DIM_3D) {
       uint64_t level_offset_B;
@@ -1126,7 +1128,6 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
                                                  &level_offset_B);
       addr += level_offset_B;
       mip_level = 0;
-      base_array_layer = 0;
       assert(layer_count <= iview->vk.extent.depth);
    } else {
       assert(layer_count <= iview->vk.layer_count);
@@ -1136,7 +1137,6 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
    addr += level->offset_B;
 
    *addr_out = addr;
-   *base_array_layer_out = base_array_layer;
    *mip_level_out = mip_level;
    *image_out = nil_image;
 }
@@ -1224,7 +1224,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    const size_t zcull_count = 47;
    struct nv_push *p = nvk_cmd_buffer_push(
-      cmd, NVK_MAX_RTS * 12 + 44 + zcull_count
+      cmd, NVK_MAX_RTS * 12 + 46 + zcull_count
    );
 
    P_IMMD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_VIEW_MASK),
@@ -1389,10 +1389,10 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
 
       uint64_t addr;
-      uint32_t base_array_layer, mip_level;
+      uint32_t mip_level;
       struct nil_image nil_image;
       get_depth_stencil_plane_params(iview, 0, layer_count, &addr,
-                                     &base_array_layer, &mip_level,
+                                     &mip_level,
                                      &nil_image);
 
       const struct nil_image_level *level = &nil_image.levels[mip_level];
@@ -1446,13 +1446,16 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_NV9097_SET_ZT_SIZE_A(p, row_stride_el);
       P_NV9097_SET_ZT_SIZE_B(p, level_extent_sa.height);
       P_NV9097_SET_ZT_SIZE_C(p, {
-         .third_dimension  = base_array_layer + layer_count,
+         .third_dimension  = iview->vk.base_array_layer + layer_count,
          .control          = CONTROL_THIRD_DIMENSION_DEFINES_ARRAY_SIZE,
       });
 
-      P_IMMD(p, NV9097, SET_ZT_LAYER, base_array_layer);
+      P_IMMD(p, NV9097, SET_ZT_LAYER, iview->vk.base_array_layer);
 
       P_IMMD(p, NV9097, SET_Z_COMPRESSION, image->is_compressed);
+      if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
+         P_IMMD(p, NVB197, SET_STENCIL_COMPRESSION, image->is_compressed);
+      }
 
       if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
          P_IMMD(p, NVC597, SET_ZT_SPARSE, {
@@ -1463,8 +1466,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       if (nvk_cmd_buffer_3d_cls(cmd) >= BLACKWELL_A &&
           (image->separate_zs || image->vk.format == VK_FORMAT_S8_UINT)) {
          get_depth_stencil_plane_params(iview, image->separate_zs, layer_count,
-                                        &addr, &base_array_layer, &mip_level,
-                                        &nil_image);
+                                        &addr, &mip_level, &nil_image);
          struct nil_Extent4D_Samples level_extent_sa =
             nil_image_level_extent_sa(&nil_image, mip_level);
          p_format = nil_image.format.p_format;
@@ -2552,6 +2554,11 @@ nvk_flush_ia_state(struct nvk_cmd_buffer *cmd)
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
       P_IMMD(p, NV9097, SET_DA_PRIMITIVE_RESTART,
              dyn->ia.primitive_restart_enable && !has_mesh_shader);
+   }
+
+   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_INDEX)) {
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+      P_IMMD(p, NV9097, SET_DA_PRIMITIVE_RESTART_INDEX, dyn->ia.primitive_restart_index);
    }
 }
 
@@ -4027,7 +4034,7 @@ nvk_mme_set_write_mask(struct mme_builder *b)
       mme_free_reg(b, val);
 
       /* Check if all masks are common */
-      struct mme_value temp = mme_add(b, mask, mme_imm(BITFIELD_RANGE(0, 4)));
+      struct mme_value temp = mme_and(b, mask, mme_imm(BITFIELD_RANGE(0, 4)));
       mme_if(b, ine, first, temp) {
          mme_mov_to(b, common_mask, mme_zero());
       }
@@ -4041,6 +4048,50 @@ nvk_mme_set_write_mask(struct mme_builder *b)
    mme_mthd(b, NV9097_SET_SINGLE_CT_WRITE_CONTROL);
    mme_emit(b, common_mask);
 }
+
+const struct nvk_mme_test_case nvk_mme_set_write_mask_tests[] = {{
+   .params = (uint32_t[]) { 1, 0x0 },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      { NV9097_SET_CT_WRITE(0), 0x0000 },
+      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
+      { }
+   },
+}, {
+   .params = (uint32_t[]) { 1, 0xf },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      { NV9097_SET_CT_WRITE(0), 0x1111 },
+      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
+      { }
+   },
+}, {
+   .params = (uint32_t[]) { 8, 0x0f0f8421 },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      { NV9097_SET_CT_WRITE(0), 0x0001 },
+      { NV9097_SET_CT_WRITE(1), 0x0010 },
+      { NV9097_SET_CT_WRITE(2), 0x0100 },
+      { NV9097_SET_CT_WRITE(3), 0x1000 },
+      { NV9097_SET_CT_WRITE(4), 0x1111 },
+      { NV9097_SET_CT_WRITE(5), 0x0000 },
+      { NV9097_SET_CT_WRITE(6), 0x1111 },
+      { NV9097_SET_CT_WRITE(7), 0x0000 },
+      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 0 },
+      { }
+   },
+}, {
+   .params = (uint32_t[]) { 8, 0xffffffff },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      { NV9097_SET_CT_WRITE(0), 0x1111 },
+      { NV9097_SET_CT_WRITE(1), 0x1111 },
+      { NV9097_SET_CT_WRITE(2), 0x1111 },
+      { NV9097_SET_CT_WRITE(3), 0x1111 },
+      { NV9097_SET_CT_WRITE(4), 0x1111 },
+      { NV9097_SET_CT_WRITE(5), 0x1111 },
+      { NV9097_SET_CT_WRITE(6), 0x1111 },
+      { NV9097_SET_CT_WRITE(7), 0x1111 },
+      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
+      { }
+   },
+}, {}};
 
 static void
 nvk_flush_cb_state(struct nvk_cmd_buffer *cmd)
@@ -4490,6 +4541,20 @@ nvk_CmdBindIndexBuffer3KHR(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    const VkDeviceAddressRangeKHR addr_range = pInfo->addressRange;
+
+   /* From the Vulkan 1.4.348 spec, vkCmdSetPrimitiveRestartIndexEXT():
+    *
+    *    "Binding an index buffer invalidates the custom index value."
+    *
+    * Index buffer binding can happen via CmdBindIndexBuffer3KHR() or DGC with
+    * VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT and are handled by the
+    * MME macro.
+    *
+    * This macro already invalidate the primitive restart index so we skip
+    * dynanmic state invalidation here.
+    */
+   cmd->vk.dynamic_graphics_state.ia.primitive_restart_index =
+      vk_index_to_restart(pInfo->indexType);
 
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
    P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_BIND_IB));

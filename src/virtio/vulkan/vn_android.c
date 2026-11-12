@@ -113,8 +113,8 @@ vn_android_get_wsi_memory(struct vn_device *dev,
                           const VkBindImageMemoryInfo *bind_info)
 {
    struct vn_image *img = vn_image_from_handle(bind_info->image);
-   VkImageCreateInfo *create_info = img->base.vk.android_deferred_create_info;
-   assert(create_info);
+   assert(img->base.vk.android_deferred_create_info);
+   VkImageCreateInfo create_info = *img->base.vk.android_deferred_create_info;
 
    const VkNativeBufferANDROID *anb_info =
       vk_find_struct_const(bind_info->pNext, NATIVE_BUFFER_ANDROID);
@@ -125,10 +125,10 @@ vn_android_get_wsi_memory(struct vn_device *dev,
     * take ANB directly instead.
     */
    VkNativeBufferANDROID local_anb = *anb_info;
-   local_anb.pNext = create_info->pNext;
-   create_info->pNext = &local_anb;
+   local_anb.pNext = create_info.pNext;
+   create_info.pNext = &local_anb;
    VkResult result = vn_android_image_from_anb_internal(
-      dev, create_info, &dev->base.vk.alloc, &img);
+      dev, &create_info, &dev->base.vk.alloc, &img);
    if (result != VK_SUCCESS)
       return VK_NULL_HANDLE;
 
@@ -145,25 +145,25 @@ vn_android_ahb_image_init(struct vn_device *dev,
                           struct AHardwareBuffer *ahb,
                           struct vn_image *img)
 {
-   VkImageCreateInfo *create_info = img->base.vk.android_deferred_create_info;
+   assert(img->base.vk.android_deferred_create_info);
+   VkImageCreateInfo create_info = *img->base.vk.android_deferred_create_info;
    VkResult result;
-
-   assert(create_info);
 
    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
    VkSubresourceLayout layouts[VN_MAX_PLANES];
    result = vk_android_get_ahb_layout(ahb, &mod_info, layouts, VN_MAX_PLANES);
    if (result != VK_SUCCESS)
       return result;
-   __vk_append_struct(create_info, &mod_info);
 
-   VkExternalMemoryImageCreateInfo external_info = {
+   mod_info.pNext = create_info.pNext;
+   const VkExternalMemoryImageCreateInfo external_info = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .pNext = &mod_info,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
-   __vk_append_struct(create_info, &external_info);
+   create_info.pNext = &external_info;
 
-   return vn_image_init_deferred(dev, create_info, img);
+   return vn_image_init_deferred(dev, &create_info, img);
 }
 
 VkResult
@@ -206,8 +206,10 @@ vn_android_device_import_ahb(struct vn_device *dev,
       mem_reqs.memoryTypeBits = mem_type_bits;
    }
 
-   if (!mem_reqs.memoryTypeBits)
+   if (!mem_reqs.memoryTypeBits) {
+      vn_log(dev->instance, "No compatible AHB mem types");
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
 
    if (!((1 << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
       mem_vk->memory_type_index = ffs(mem_reqs.memoryTypeBits) - 1;
@@ -215,9 +217,12 @@ vn_android_device_import_ahb(struct vn_device *dev,
    mem_vk->size = mem_reqs.size;
 
    int dup_fd = os_dupfd_cloexec(dma_buf_fd);
-   if (dup_fd < 0)
+   if (dup_fd < 0) {
+      vn_log(dev->instance, "os_dupfd_cloexec(%d) failed: %s", dma_buf_fd,
+             strerror(errno));
       return (errno == EMFILE) ? VK_ERROR_TOO_MANY_OBJECTS
                                : VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
 
    /* Spec requires AHB export info to be present, so we must strip it. In
     * practice, the AHB import path here only needs the main allocation info

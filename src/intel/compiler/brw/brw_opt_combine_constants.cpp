@@ -982,7 +982,8 @@ supports_src_as_imm(const struct intel_device_info *devinfo, const brw_inst *ins
 
    case BRW_OPCODE_CSEL:
       /* While MAD can mix F and HF sources on some platforms, CSEL cannot. */
-      return devinfo->ver >= 12 && inst->src[0].type != BRW_TYPE_F;
+      return devinfo->ver >= 12 && src_idx != 1 &&
+             inst->src[0].type != BRW_TYPE_F;
 
    case BRW_OPCODE_MAD:
       switch (devinfo->verx10) {
@@ -1055,15 +1056,17 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, brw_inst *inst,
    }
    case BRW_TYPE_D:
    case BRW_TYPE_UD: {
-      /* ADD3, CSEL, and MAD can mix signed and unsiged types. Only BFE
-       * cannot. BFN only supports unsigned types.
+      /* ADD3 and MAD can mix signed and unsiged types. Only BFE cannot. BFN
+       * only supports unsigned types.
        */
       if (inst->src[src_idx].type == BRW_TYPE_D ||
           (inst->opcode != BRW_OPCODE_BFE &&
            inst->opcode != BRW_OPCODE_BFN)) {
          int16_t w;
          if (representable_as_w(inst->src[src_idx].d, &w)) {
-            inst->src[src_idx] = brw_imm_w(w);
+            /* CSEL cannot mix type sizes, so use D. */
+            inst->src[src_idx] = inst->opcode == BRW_OPCODE_CSEL ?
+               brw_imm_d(w) : brw_imm_w(w);
             can_promote = true;
             break;
          }
@@ -1078,7 +1081,9 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, brw_inst *inst,
           inst->opcode != BRW_OPCODE_BFE) {
          uint16_t uw;
          if (representable_as_uw(inst->src[src_idx].ud, &uw)) {
-            inst->src[src_idx] = brw_imm_uw(uw);
+            /* CSEL cannot mix type sizes, so use UD. */
+            inst->src[src_idx] = inst->opcode == BRW_OPCODE_CSEL ?
+               brw_imm_ud(uw) : brw_imm_uw(uw);
             can_promote = true;
             break;
          }
@@ -1108,8 +1113,8 @@ add_candidate_immediate(struct table *table, brw_inst *inst, unsigned ip,
 
    unsigned box_idx = box_instruction(table, const_ctx, inst, ip);
 
-   v->value.u64 = inst->src[i].d64;
    v->bit_size = brw_type_size_bits(inst->src[i].type);
+   v->value = nir_const_value_for_raw_uint(inst->src[i].d64, v->bit_size);
    v->instr_index = box_idx;
    v->src = i;
    v->allow_one_constant = allow_one_constant;
@@ -1635,7 +1640,7 @@ brw_opt_combine_constants(brw_shader &s)
             assert(reg->d == table.imm[i].d);
             break;
          case BRW_TYPE_W:
-            assert(abs((int16_t) (reg->d & 0xffff)) == table.imm[i].w);
+            assert(abs((int16_t) (reg->d & 0xffff)) == abs(table.imm[i].w));
             break;
          case BRW_TYPE_UW:
             assert(!link->negate);

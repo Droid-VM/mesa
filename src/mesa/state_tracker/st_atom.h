@@ -87,6 +87,9 @@ enum {
 #include "st_atom_list.h"
 #undef ST_STATE
 
+bool st_fp_lower_flatshade(const struct st_context *st);
+bool st_fp_lower_two_sided_color(const struct st_context *st);
+
 typedef BITSET_DECLARE(st_state_bitset, ST_NUM_ATOMS);
 
 #define ST_SET_STATE(bitset, state) BITSET_SET(bitset, state)

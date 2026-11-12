@@ -49,9 +49,9 @@ lower_vs_input_intr(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-pan_nir_lower_vs_inputs(nir_shader *shader, uint64_t gpu_id)
+pan_nir_lower_vs_inputs(nir_shader *shader)
 {
    return nir_shader_intrinsics_pass(shader, lower_vs_input_intr,
-                                    nir_metadata_control_flow,
-                                    (void *)&gpu_id);
+                                     nir_metadata_control_flow,
+                                     NULL);
 }

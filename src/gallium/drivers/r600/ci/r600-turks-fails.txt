@@ -18,8 +18,6 @@ KHR-GLES31.core.layout_binding.image2D_layout_binding_imageLoad_ComputeShader,Fa
 KHR-GLES31.core.shader_atomic_counters.advanced-usage-many-draw-calls2,Fail
 KHR-GLES31.core.shader_atomic_counters.advanced-usage-multi-stage,Fail
 
-KHR-GLES31.core.shader_storage_buffer_object.advanced-readWrite-case1-cs,Fail
-
 # r600_shader.c:10547: fc_pushlevel: Assertion `ctx->bc->fc_sp < ARRAY_SIZE(ctx->bc->fc_stack)' failed.
 # Yeah, that's some deep flow control there.  Previously pipe_shader_caps.max_control_flow_depth would
 # do GLSL lower_if_to_cond_assign (which is incorrect for instructions with side effects) after 32
@@ -357,17 +355,6 @@ dEQP-GLES31.functional.shaders.implicit_conversions.es31.arithmetic.input_before
 dEQP-GLES31.functional.shaders.implicit_conversions.es31.arithmetic.input_before_literal.div.ivec4_to_uvec4_fragment,Fail
 dEQP-GLES31.functional.shaders.implicit_conversions.es31.arithmetic.input_before_literal.div.ivec4_to_uvec4_vertex,Fail
 
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.default_framebuffer,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_rbo_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_rbo_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_rbo_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_rbo_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_texture_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_texture_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_texture_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.multisample_texture_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.singlesample_rbo,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.at_sample_position.singlesample_texture,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.default_framebuffer,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.multisample_rbo_1,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.multisample_rbo_2,Fail
@@ -379,28 +366,6 @@ dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.c
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.multisample_texture_8,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.singlesample_rbo,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.centroid_qualifier.singlesample_texture,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.default_framebuffer,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_rbo_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_rbo_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_rbo_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_rbo_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_texture_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_texture_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_texture_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.multisample_texture_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.singlesample_rbo,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_offset.sample_qualifier.singlesample_texture,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.default_framebuffer,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_1,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_2,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_4,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_8,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.singlesample_rbo,Fail
-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.singlesample_texture,Fail
 
 # Mask bit count in range only on the diagonal.
 dEQP-GLES31.functional.shaders.sample_variables.sample_mask_in.bit_count_per_two_samples.multisample_rbo_4,Fail
@@ -649,8 +614,6 @@ spec@arb_gpu_shader5@execution@built-in-functions@fs-interpolateatsample-block-a
 
 spec@arb_multi_draw_indirect@arb_draw_elements_base_vertex-multidrawelements -indirect,Fail
 
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceiv,Fail
 spec@arb_program_interface_query@arb_program_interface_query-resource-query,Fail
 spec@arb_program_interface_query@arb_program_interface_query-resource-query@GL_BUFFER_VARIABLE,Fail
@@ -1239,7 +1202,6 @@ spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3@oes_egl_image_ext
 spec@oes_shader_io_blocks@compiler@layout-location-aliasing.vert,Fail
 
 spec@!opengl 1.0@gl-1.0-dlist-bitmap,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@gl-1.0-user-clip-all-planes,Fail
 spec@!opengl 1.1@linestipple,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
@@ -1259,11 +1221,5 @@ spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA16- swizzled- borde
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA8- swizzled- border color only,Fail
 
 spec@!opengl 2.0@gl-2.0-vertexattribpointer-size-3,Fail
-
-spec@!opengl 2.1@pbo,Fail
-
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 
 spec@!opengl es 3.0@gles-3.0-transform-feedback-uniform-buffer-object,Fail

@@ -18,7 +18,9 @@
 #include "util/shader_stats.h"
 #include "util/u_math.h"
 #include "brw_isa_info.h"
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_nir.h"
+#include "compiler/intel_shader.h"
+#include "compiler/intel_nir.h"
 #include "nir_shader_compiler_options.h"
 
 #ifdef __cplusplus
@@ -69,6 +71,8 @@ struct brw_compiler {
    void (*shader_perf_log)(void *, unsigned *id, const char *str, ...) PRINTFLIKE(3, 4);
 
    struct nir_shader_compiler_options nir_options[MESA_ALL_SHADER_STAGES];
+   struct nir_shader_compiler_options nir_options_fs_single_prim;
+   struct nir_shader_compiler_options nir_options_cs_uniform_local_id_z;
 
    /**
     * Apply workarounds for SIN and COS output range problems.
@@ -138,13 +142,6 @@ struct brw_compiler {
     */
    uint32_t num_lowered_storage_formats;
    uint32_t *lowered_storage_formats;
-
-   /**
-    * Debug flag for forcing minimum number of threads per EU for shader.
-    * Can optionally only apply to shaders matching source hash.
-    */
-   uint32_t threads_per_eu_min;
-   uint64_t threads_per_eu_srchash;
 };
 
 #define brw_shader_debug_log(compiler, data, fmt, ... ) do {    \
@@ -234,13 +231,23 @@ struct brw_base_prog_key {
     */
    uint32_t view_mask;
 
+   /** Use efficient 64bit bit mode
+    *
+    * Gfx35+ only.
+    */
+   bool use_efficient_64bit : 1;
+
    enum brw_robustness_flags robust_flags:3;
 
    enum intel_vue_layout vue_layout:2;
 
    enum brw_divergent_atomics_flags divergent_atomics_flags:2;
 
-   uint32_t padding:25;
+   enum intel_atomic_branch_cases atomic_branch_flags:3;
+
+   enum intel_code_motion code_motion:2;
+
+   uint32_t padding:19;
 };
 
 /**
@@ -512,6 +519,9 @@ struct brw_stage_prog_data {
    unsigned grf_used;
 
    uint64_t source_hash;
+
+   /* Was this shader compiled with Jay? */
+   bool is_jay;
 };
 
 enum brw_pixel_shader_computed_depth_mode {
@@ -601,6 +611,18 @@ struct brw_fs_prog_data {
    /** Whether this shader uses the FS config push data value */
    bool uses_fs_config;
 
+   /** Whether this shader uses the FS color offset push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_offset;
+
+   /** Whether this shader uses the FS color map push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_map;
+
    /** Should this shader be dispatched per-sample */
    bool persample_dispatch;
 
@@ -627,23 +649,10 @@ struct brw_fs_prog_data {
    enum intel_sometimes provoking_vertex_last;
 
    /**
-    * If the fragment shader reads FullyCovered, it needs to know what the
-    * state of conservative rasterization is.
-    */
-   enum intel_sometimes conservative_raster;
-
-   /**
     * Push constant location of intel_fs_config (dynamic configuration of the
     * pixel shader) in bytes.
     */
    unsigned fs_config_param;
-
-   /**
-    * Push constant location of the remapping offset in the instruction heap
-    * for Wa_18019110168 in bytes (the value read by the compiler is a
-    * uint16_t).
-    */
-   unsigned per_primitive_remap_param;
 
    /**
     * Mask of which interpolation modes are required by the fragment shader.
@@ -946,7 +955,6 @@ struct brw_vs_prog_data {
 
    bool uses_vertexid;
    bool uses_instanceid;
-   bool uses_is_indexed_draw;
    bool uses_firstvertex;
    bool uses_baseinstance;
    bool uses_drawid;
@@ -1269,13 +1277,58 @@ struct brw_compile_params {
    const struct brw_base_prog_key *key;
    struct brw_stage_prog_data *prog_data;
 
+   /** Filled by the compiler, one entry per compiled variant. */
    struct genisa_stats *stats;
 
    void *log_data;
 
+   /** Filled by the compiler when the compilation fails.  Allocated from
+    * mem_ctx.
+    */
    char *error_str;
 
    uint64_t debug_flag;
+
+   struct {
+      const struct intel_vue_map *input_vue_map;
+   } tes;
+
+   struct {
+      const struct brw_tue_map *tue_map;
+
+      /** Load provoking vertex for wa_18019110168
+       *
+       * The callback returns a 32bit integer representing the provoking vertex.
+       */
+      void *wa_18019110168_data;
+      nir_def *(*wa_18019110168_load_provoking_vertex)(nir_builder *b,
+                                                       void *data);
+   } mesh;
+
+   struct {
+      const struct intel_vue_map *vue_map;
+      const struct brw_mue_map *mue_map;
+
+      bool use_rep_send;
+      uint8_t max_polygons;
+
+      /** Load per primitive remapping offset for wa_18019110168
+       *
+       * The callback returns a 32bit integer representing the offset of the
+       * table in the instruction heap.
+       */
+      void *wa_18019110168_data;
+      nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(
+         nir_builder *b, void *data);
+
+      void *rt_write_data;
+      intel_nir_rt_write_cb rt_write_cb;
+   } fs;
+
+   struct {
+      unsigned num_resume_shaders;
+      struct nir_shader **resume_shaders;
+   } bs;
 
    debug_archiver *archiver;
 };
@@ -1283,118 +1336,6 @@ struct brw_compile_params {
 const unsigned *
 brw_compile(const struct brw_compiler *compiler,
             struct brw_compile_params *params);
-
-/**
- * Parameters for compiling a vertex shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_vs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a tessellation control shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_tcs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a tessellation evaluation shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_tes_params {
-   struct brw_compile_params base;
-
-   const struct intel_vue_map *input_vue_map;
-};
-
-/**
- * Parameters for compiling a geometry shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_gs_params {
-   struct brw_compile_params base;
-};
-
-struct brw_compile_task_params {
-   struct brw_compile_params base;
-};
-
-struct brw_compile_mesh_params {
-   struct brw_compile_params base;
-
-   const struct brw_tue_map *tue_map;
-
-   /** Load provoking vertex for wa_18019110168
-    *
-    * The callback returns a 32bit integer representing the provoking vertex.
-    */
-   void *wa_18019110168_data;
-   nir_def *(*wa_18019110168_load_provoking_vertex)(nir_builder *b, void *data);
-};
-
-/**
- * Parameters for compiling a fragment shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_fs_params {
-   struct brw_compile_params base;
-
-   const struct intel_vue_map *vue_map;
-   const struct brw_mue_map *mue_map;
-
-   bool use_rep_send;
-   uint8_t max_polygons;
-
-   /** Load per primitive remapping offset for wa_18019110168
-    *
-    * The callback returns a 32bit integer representing the offset of the
-    * table in the instruction heap.
-    */
-   void *wa_18019110168_data;
-   nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(nir_builder *b, void *data);
-};
-
-/**
- * Parameters for compiling a compute shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_cs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a Bindless shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_bs_params {
-   struct brw_compile_params base;
-
-   unsigned num_resume_shaders;
-   struct nir_shader **resume_shaders;
-};
-
-union brw_any_compile_params {
-   struct brw_compile_params base;
-   struct brw_compile_vs_params vs;
-   struct brw_compile_tcs_params tcs;
-   struct brw_compile_tes_params tes;
-   struct brw_compile_gs_params gs;
-   struct brw_compile_fs_params fs;
-   struct brw_compile_cs_params cs;
-   struct brw_compile_bs_params bs;
-   struct brw_compile_task_params task;
-   struct brw_compile_mesh_params mesh;
-};
 
 unsigned
 brw_cs_push_const_total_size(const struct brw_cs_prog_data *cs_prog_data,
@@ -1444,7 +1385,7 @@ brw_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
     * enabled by setting the macro below to true.
     */
    #define ENABLE_TEST_DISPATCH_PACKING false
-   assert(devinfo->ver <= 30);
+   assert(devinfo->ver <= 35);
 
    switch (stage) {
    case MESA_SHADER_FRAGMENT: {
@@ -1543,6 +1484,44 @@ enum brw_topology_id
    /* A value composed of EU ID, thread ID & SIMD lane ID. */
    BRW_TOPOLOGY_ID_EU_THREAD_SIMD,
 };
+
+static inline unsigned
+intel_vrt_register_file_size(const struct intel_device_info *devinfo,
+                             uint64_t source_hash,
+                             unsigned size)
+{
+   if (!intel_has_vrt(devinfo))
+      return 128;
+
+   unsigned vrt_size = MIN2(align(size, size > 192 ? 64 : 32), 256);
+
+   // Jay uses vrt_size here to determine its number of GRFs before its RA stage
+   if (unlikely(intel_threads_per_eu_set != (uint32_t)-1)) {
+      if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == source_hash) {
+         fprintf(stderr,
+                 "INTEL_THREADS_PER_EU: set=%u for src_hash=0x%" PRIx64 "\n",
+                 intel_threads_per_eu_set, source_hash);
+         vrt_size = ROUND_DOWN_TO(1024 / intel_threads_per_eu_set, 32);
+      }
+   } else if (unlikely(intel_threads_per_eu_min != (uint32_t)-1)) {
+      if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == source_hash) {
+         fprintf(stderr,
+                 "INTEL_THREADS_PER_EU: min=%u for src_hash=0x%" PRIx64 "\n",
+                 intel_threads_per_eu_min, source_hash);
+         vrt_size = MIN2(vrt_size, ROUND_DOWN_TO(1024 / intel_threads_per_eu_min, 32));
+      }
+   }
+
+   return vrt_size;
+}
+
+static inline unsigned
+intel_max_vrt_threads(const struct intel_device_info *devinfo, unsigned grfs)
+{
+   return devinfo->ver >= 30 ? MIN2(1024 / grfs, 10) : UINT32_MAX;
+}
 
 #ifdef __cplusplus
 } /* extern "C" */

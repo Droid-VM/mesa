@@ -245,6 +245,22 @@ vk_image_format_info_2_usage(const VkPhysicalDeviceImageFormatInfo2 *info)
 }
 
 static inline VkImageUsageFlags2KHR
+vk_image_format_info_2_stencil_usage(const VkPhysicalDeviceImageFormatInfo2 *info)
+{
+   const VkImageStencilUsage2CreateInfoKHR *stencil_usage2_info =
+      vk_find_struct_const(info->pNext, IMAGE_STENCIL_USAGE_2_CREATE_INFO_KHR);
+   if (stencil_usage2_info)
+      return stencil_usage2_info->stencilUsage;
+
+   const VkImageStencilUsageCreateInfo *stencil_usage_info =
+      vk_find_struct_const(info->pNext, IMAGE_STENCIL_USAGE_CREATE_INFO);
+   if (stencil_usage_info)
+      return stencil_usage_info->stencilUsage;
+
+   return vk_image_format_info_2_usage(info);
+}
+
+static inline VkImageUsageFlags2KHR
 vk_sparse_image_format_info_2_usage(const VkPhysicalDeviceSparseImageFormatInfo2 *info)
 {
    const VkImageUsageFlags2CreateInfoKHR *usage_create_info =

@@ -24,7 +24,6 @@
 
 #include "tu_acceleration_structure.h"
 
-#include "radix_sort/radix_sort_u64.h"
 #include "util/u_hexdump.h"
 #include "vk_acceleration_structure.h"
 
@@ -162,15 +161,16 @@ tu_encode(VkCommandBuffer commandBuffer,
           struct vk_meta_device *meta,
           const struct vk_acceleration_structure_build_args *args,
           struct vk_acceleration_structure_build_state *states,
-          uint32_t build_count,
-          bool flushed_cp_after_init_update_scratch,
-          bool flushed_compute_after_init_update_scratch)
+          uint32_t build_count, bool flushed_compute_after_init_update_scratch)
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmdbuf, commandBuffer);
    struct tu_device *device = cmdbuf->device;
    VkResult result;
    VkPipeline pipeline;
    VkPipelineLayout layout;
+
+   /* Insert barrier so that build data gets reflected properly for encode pass */
+   vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
 
    result = get_pipeline_spv(device, "encode", encode_spv, sizeof(encode_spv), sizeof(encode_args), &pipeline, &layout);
    if (result != VK_SUCCESS) {
@@ -282,7 +282,7 @@ tu_encode(VkCommandBuffer commandBuffer,
       size_t header_size = sizeof(struct tu_accel_struct_header) - base;
       assert(base % sizeof(uint32_t) == 0);
       assert(header_size % sizeof(uint32_t) == 0);
-      uint32_t *header_ptr = (uint32_t *) ((char *) &header + base);
+      uint32_t *header_ptr = reinterpret_cast<uint32_t *>(reinterpret_cast<char *>(&header) + base);
 
       tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 2 + header_size / sizeof(uint32_t));
       tu_cs_emit_qw(cs, header_addr + base);
@@ -295,75 +295,6 @@ const struct vk_acceleration_structure_build_ops tu_as_build_ops = {
    .get_as_size = get_bvh_size,
    .encode = tu_encode,
 };
-
-const struct radix_sort_vk_target_config tu_radix_sort_config_128 = {
-   .keyval_dwords = 2,
-   .init = { .workgroup_size_log2 = 8, },
-   .fill = { .workgroup_size_log2 = 8, .block_rows = 8 },
-   .histogram = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 7,
-      .block_rows = 14, /* TODO tune this */
-   },
-   .prefix = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 7,
-   },
-   .scatter = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 7,
-      .block_rows = 14, /* TODO tune this */
-   },
-   .nonsequential_dispatch = false,
-};
-
-const struct radix_sort_vk_target_config tu_radix_sort_config_64 = {
-   .keyval_dwords = 2,
-   .init = { .workgroup_size_log2 = 8, },
-   .fill = { .workgroup_size_log2 = 8, .block_rows = 8 },
-   .histogram = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 6,
-      .block_rows = 14, /* TODO tune this */
-   },
-   .prefix = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 6,
-   },
-   .scatter = {
-      .workgroup_size_log2 = 8,
-      .subgroup_size_log2 = 6,
-      .block_rows = 14, /* TODO tune this */
-   },
-   .nonsequential_dispatch = false,
-};
-
-static VkResult
-init_radix_sort(struct tu_device *device)
-{
-   if (!device->radix_sort) {
-      mtx_lock(&device->radix_sort_mutex);
-      if (!device->radix_sort) {
-         const struct radix_sort_vk_target_config *cfg =
-            device->physical_device->info->props.supports_double_threadsize ?
-            &tu_radix_sort_config_128 :
-            &tu_radix_sort_config_64;
-         device->radix_sort =
-            vk_create_radix_sort_u64(tu_device_to_handle(device),
-                                     &device->vk.alloc,
-                                     VK_NULL_HANDLE, *cfg);
-         if (!device->radix_sort) {
-            /* TODO plumb through the error here */
-            mtx_unlock(&device->radix_sort_mutex);
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
-         }
-
-      }
-      mtx_unlock(&device->radix_sort_mutex);
-   }
-
-   return VK_SUCCESS;
-}
 
 struct tu_saved_compute_state {
    uint32_t push_constants[MAX_PUSH_CONSTANTS_SIZE / 4];
@@ -399,20 +330,15 @@ tu_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t inf
    struct tu_device *device = cmd->device;
    struct tu_saved_compute_state state;
 
-   VkResult result = init_radix_sort(device);
-   if (result != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmd->vk, result);
-      return;
-   }
-
    tu_save_compute_state(cmd, &state);
 
    struct vk_acceleration_structure_build_args args = {
       .subgroup_size = device->physical_device->info->threadsize_base *
-                       (device->physical_device->info->props.supports_double_threadsize ? 2 : 1),
+                       (device->physical_device->expose_double_threadsize ? 2 : 1),
       .bvh_bounds_offset = offsetof(tu_accel_struct_header, aabb),
+      .morton_sort_workgroup_size = 512,
+      .morton_sort_kvs_per_thread = 2,
       .emit_markers = false,
-      .radix_sort_64 = device->radix_sort,
    };
 
    vk_cmd_build_acceleration_structures(commandBuffer,
@@ -560,12 +486,11 @@ tu_GetAccelerationStructureBuildSizesKHR(VkDevice _device, VkAccelerationStructu
 {
    VK_FROM_HANDLE(tu_device, device, _device);
 
-   init_radix_sort(device);
-
    struct vk_acceleration_structure_build_args args = {
       .subgroup_size = device->physical_device->info->threadsize_base *
-                       (device->physical_device->info->props.supports_double_threadsize ? 2 : 1),
-      .radix_sort_64 = device->radix_sort,
+                       (device->physical_device->expose_double_threadsize ? 2 : 1),
+      .morton_sort_workgroup_size = 512,
+      .morton_sort_kvs_per_thread = 2,
    };
 
    vk_get_as_build_sizes(_device, buildType, pBuildInfo, pMaxPrimitiveCounts,
@@ -620,9 +545,9 @@ tu_init_null_accel_struct(struct tu_device *device)
       node.mantissas[i][0][2] = 0xff;
    }
 
-   memcpy(device->null_accel_struct_bo->map, (void *)&header, sizeof(header));
-   memcpy((char *)device->null_accel_struct_bo->map + sizeof(header),
-          (void *)&node, sizeof(node));
+   memcpy(device->null_accel_struct_bo->map, &header, sizeof(header));
+   memcpy(static_cast<char *>(device->null_accel_struct_bo->map) + sizeof(header),
+          &node, sizeof(node));
    return VK_SUCCESS;
 }
 
@@ -666,7 +591,7 @@ dump_internal(struct tu_internal_node *node, uint32_t *max_child)
             unsigned mantissa = node->mantissas[i][vert][coord];
             if (coord != 0)
                fprintf(stderr, ", ");
-            fprintf(stderr, "%f", base[coord] + ldexp((float)mantissa,
+            fprintf(stderr, "%f", base[coord] + ldexp(static_cast<float>(mantissa),
                                                       exponents[coord]));
          }
          fprintf(stderr, ")\n");
@@ -680,28 +605,28 @@ dump_as(struct vk_acceleration_structure *as)
    VK_FROM_HANDLE(tu_buffer, buf, vk_buffer_to_handle(as->buffer));
 
    struct tu_accel_struct_header *hdr =
-      (struct tu_accel_struct_header *)((char *)buf->bo->map + as->offset);
+      reinterpret_cast<struct tu_accel_struct_header *>(static_cast<char *>(buf->bo->map) + as->offset);
 
    fprintf(stderr, "dumping AS at %" PRIx64 "\n",
            vk_buffer_address(&buf->vk, as->offset));
-   u_hexdump(stderr, (uint8_t *)hdr, sizeof(*hdr), false);
+   u_hexdump(stderr, reinterpret_cast<uint8_t *>(hdr), sizeof(*hdr), false);
 
-   char *base = ((char *)buf->bo->map + (hdr->bvh_ptr - buf->vk.device_address));
-   struct tu_node *node = (struct tu_node *)base;
+   char *base = (static_cast<char *>(buf->bo->map) + (hdr->bvh_ptr - buf->vk.device_address));
+   struct tu_node *node = reinterpret_cast<struct tu_node *>(base);
 
    fprintf(stderr, "dumping nodes at %" PRIx64 "\n", hdr->bvh_ptr);
 
    uint32_t max_child = 1;
    for (unsigned i = 0; i < max_child; i++) {
-      uint32_t *parent_ptr = (uint32_t*)(base - (4 + 4 * i));
+      uint32_t *parent_ptr = reinterpret_cast<uint32_t*>(base - (4 + 4 * i));
       uint32_t parent = *parent_ptr;
       fprintf(stderr, "node %d parent %d\n", i, parent);
-      u_hexdump(stderr, (uint8_t *)node, sizeof(*node), false);
+      u_hexdump(stderr, reinterpret_cast<uint8_t *>(node), sizeof(*node), false);
       if (node->data[15] & TU_NODE_TYPE_LEAF) {
          /* TODO compressed leaves */
-         dump_leaf((struct tu_leaf_node *)node);
+         dump_leaf(reinterpret_cast<struct tu_leaf_node *>(node));
       } else {
-         dump_internal((struct tu_internal_node *)node, &max_child);
+         dump_internal(reinterpret_cast<struct tu_internal_node *>(node), &max_child);
       }
 
       node++;
@@ -715,7 +640,7 @@ as_finished(struct tu_device *dev, struct vk_acceleration_structure *as)
    tu_bo_map(dev, buf->bo, NULL);
 
    struct tu_accel_struct_header *hdr =
-      (struct tu_accel_struct_header *)((char *)buf->bo->map + as->offset);
+      reinterpret_cast<struct tu_accel_struct_header *>(static_cast<char *>(buf->bo->map) + as->offset);
    return hdr->self_ptr == vk_buffer_address(&buf->vk, as->offset);
 }
 

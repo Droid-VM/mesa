@@ -171,6 +171,9 @@ v3d_ioctl_get_param(int fd, unsigned long request, void *arg)
         case DRM_V3D_PARAM_CONTEXT_RESET_COUNTER:
                 gp->value = 0;
                 return 0;
+        case DRM_V3D_PARAM_SUPPORTS_TFU_CCOL:
+                gp->value = !strcmp(shim_gpu->name, "71");
+                return 0;
         default:
                 break;
         }

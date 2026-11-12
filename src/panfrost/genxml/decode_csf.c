@@ -516,9 +516,18 @@ print_cs_instr(FILE *fp, const uint64_t *instr)
 
    case MALI_CS_OPCODE_REQ_RESOURCE: {
       cs_unpack(instr, CS_REQ_RESOURCE, I);
-      fprintf(fp, "REQ_RESOURCE%s%s%s%s", I.compute ? ".compute" : "",
+      fprintf(fp, "REQ_RESOURCE%s%s%s%s%s%s", I.compute ? ".compute" : "",
               I.fragment ? ".fragment" : "", I.tiler ? ".tiler" : "",
-              I.idvs ? ".idvs" : "");
+              I.idvs ? ".idvs" : "",
+#if PAN_ARCH >= 11
+              I.rt ? ".ray_tracing" :
+#endif
+                "",
+#if PAN_ARCH >= 14
+              I.neural ? ".neural" :
+#endif
+                ""
+	      );
       break;
    }
 
@@ -707,8 +716,11 @@ pandecode_run_compute(struct pandecode_context *ctx, FILE *fp,
    if (fau)
       GENX(pandecode_fau)(ctx, fau & BITFIELD64_MASK(48), fau >> 56, "FAU");
 
-   GENX(pandecode_shader)
-   (ctx, cs_get_u64(qctx, reg_spd), "Shader", qctx->gpu_id);
+   uint64_t spd = cs_get_u64(qctx, reg_spd);
+#if PAN_ARCH >= 14
+   spd &= ~0x3;
+#endif
+   GENX(pandecode_shader)(ctx, spd, "Shader", qctx->gpu_id);
 
    DUMP_ADDR(ctx, LOCAL_STORAGE, cs_get_u64(qctx, reg_tsd),
              "Local Storage @%" PRIx64 ":\n", cs_get_u64(qctx, reg_tsd));
@@ -749,8 +761,11 @@ pandecode_run_compute_indirect(struct pandecode_context *ctx, FILE *fp,
    if (fau)
       GENX(pandecode_fau)(ctx, fau & BITFIELD64_MASK(48), fau >> 56, "FAU");
 
-   GENX(pandecode_shader)
-   (ctx, cs_get_u64(qctx, reg_spd), "Shader", qctx->gpu_id);
+   uint64_t spd = cs_get_u64(qctx, reg_spd);
+#if PAN_ARCH >= 14
+   spd &= ~0x3;
+#endif
+   GENX(pandecode_shader)(ctx, spd, "Shader", qctx->gpu_id);
 
    DUMP_ADDR(ctx, LOCAL_STORAGE, cs_get_u64(qctx, reg_tsd),
              "Local Storage @%" PRIx64 ":\n", cs_get_u64(qctx, reg_tsd));

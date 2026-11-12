@@ -121,6 +121,13 @@ Lib::Lib(const Client* pClient) :
     m_pElemLib(NULL)
 {
     m_configFlags.value = 0;
+
+    // Historial maximum image dimensions prior to GFX11 parts.
+    m_maxDims.extent.width  = 16384;
+    m_maxDims.extent.height = 16384;
+    m_maxDims.extent.depth  = 8192;
+    m_maxDims.mipLevels  = 14;
+    m_maxDims.samples    = 8;
 }
 
 /**
@@ -258,6 +265,7 @@ ADDR_E_RETURNCODE Lib::Create(
         pLib->m_configFlags.forceDccAndTcCompat = pCreateIn->createFlags.forceDccAndTcCompat;
         pLib->m_configFlags.nonPower2MemConfig  = pCreateIn->createFlags.nonPower2MemConfig;
         pLib->m_configFlags.enableAltTiling     = pCreateIn->createFlags.enableAltTiling;
+        pLib->m_configFlags.padValidEqBits      = pCreateIn->createFlags.padValidEqBits;
         pLib->m_configFlags.disableLinearOpt    = FALSE;
 
         pLib->SetChipFamily(pCreateIn->chipFamily, pCreateIn->chipRevision);
@@ -501,6 +509,20 @@ ADDR_E_RETURNCODE Lib::GetMaxMetaAlignments(
     }
 
     return returnCode;
+}
+
+/**
+****************************************************************************************************
+*   Lib::GetMaxDims
+*
+*   @return
+*       Returns the maximum supported image dimensions.
+*
+****************************************************************************************************
+*/
+const ADDR_MAX_IMAGE_DIMS* Lib::GetMaxDims() const
+{
+    return &m_maxDims;
 }
 
 /**

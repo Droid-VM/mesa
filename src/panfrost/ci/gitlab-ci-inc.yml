@@ -18,6 +18,11 @@
     - if: '$INPUT_HW_JOBS !~ /"(all|panvk|panthor.ko)"/i'
       when: never
 
+.enforce-hw-jobs-panfrost-panvk-panthor-rules:
+  rules:
+    - if: '$INPUT_HW_JOBS !~ /"(all|panfrost|panvk|panthor.ko)"/i'
+      when: never
+
 .panfrost-midgard-rules:
   stage: arm
   rules:
@@ -200,6 +205,49 @@
         *panfrost_bifrost_file_list
       when: manual
 
+.panfrost-panthor-gl-vk-rules:
+  stage: arm
+  rules:
+    - !reference [.enforce-hw-jobs-panfrost-panvk-panthor-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.collabora-farm-rules, rules]
+    - !reference [.gl-rules, rules]
+    - !reference [.vulkan-rules, rules]
+    - changes:
+        *panfrost_common_file_list
+      when: on_success
+    - changes:
+        *panfrost_gallium_file_list
+      when: on_success
+    - changes:
+        *panfrost_bifrost_file_list
+      when: on_success
+    - changes:
+        *panfrost_vulkan_file_list
+      when: on_success
+
+.panfrost-panthor-gl-vk-manual-rules:
+  stage: arm-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.enforce-hw-jobs-panfrost-panvk-panthor-rules, rules]
+    - !reference [.test, rules]
+    - !reference [.collabora-farm-manual-rules, rules]
+    - !reference [.gl-manual-rules, rules]
+    - !reference [.vulkan-manual-rules, rules]
+    - changes:
+        *panfrost_common_file_list
+      when: manual
+    - changes:
+        *panfrost_gallium_file_list
+      when: manual
+    - changes:
+        *panfrost_bifrost_file_list
+      when: manual
+    - changes:
+        *panfrost_vulkan_file_list
+      when: manual
+
 .panfrost-test:
   variables:
     FLAKES_CHANNEL: "#panfrost-ci"
@@ -252,20 +300,6 @@
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-mt8186-corsola-steelix-sku131072
     VK_DRIVER: panfrost
-
-# Status: https://lava.collabora.dev/scheduler/device_type/mt8192-asurada-spherion-r0
-.lava-mt8192-asurada-spherion-r0:arm64:
-  variables:
-    BOOT_METHOD: depthcharge
-    DEVICE_TYPE: mt8192-asurada-spherion-r0
-    DTB: $DEVICE_TYPE
-#   FDO_CI_CONCURRENT: ?
-    FARM: collabora
-    GPU_VERSION: panfrost-g57
-    KERNEL_IMAGE_TYPE: ""
-    RUNNER_TAG: mesa-ci-x86-64-lava-mt8192-asurada-spherion-r0
-    # Force fixed 6.6 kernel, we're not reliably getting a GPU on 6.13
-    KERNEL_TAG: "v6.6.21-mesa-1978"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/mt8195-cherry-tomato-r2
 .lava-mt8195-cherry-tomato-r2:arm64:
@@ -333,7 +367,7 @@
     VK_DRIVER: panfrost
     LAVA_FIRMWARE: arm
     # Mainline kernel support for MT8196 is still incomplete
-    KERNEL_TAG: "v6.18-pan-mesa-952e"
+    KERNEL_TAG: "v6.18-pan-mesa-ce6c"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/sun50i-h6-pine-h64
 .lava-sun50i-h6-pine-h64:arm64:

@@ -63,6 +63,7 @@ driwindows_destroy_context(struct glx_context *context)
 {
    struct driwindows_context *pcp = (struct driwindows_context *) context;
 
+   glx_display_remove_context(context);
    driReleaseDrawables(&pcp->base);
 
    free((char *) context->extensions);

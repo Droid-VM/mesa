@@ -23,6 +23,23 @@ vcn_dec_only(struct radeon_info *info)
 }
 
 static bool
+needs_preenc_pitch_wa(struct radeon_info *info)
+{
+   if (info->vcn_ip_version >= VCN_5_0_0)
+      return !check_vcn_fw_version(info, 9, 13, 1);
+   else if (info->vcn_ip_version >= VCN_4_0_0)
+      return !check_vcn_fw_version(info, 9, 24, 40);
+   else if (info->vcn_ip_version >= VCN_3_0_0)
+      return !check_vcn_fw_version(info, 4, 33, 26);
+   else if (info->vcn_ip_version >= VCN_2_0_0)
+      return !check_vcn_fw_version(info, 8, 24, 22);
+   else if (info->vcn_ip_version >= VCN_1_0_0)
+      return !check_vcn_fw_version(info, 3, 15, 12);
+   else
+      UNREACHABLE("VCN only workaround");
+}
+
+static bool
 qvbr_supported(struct radeon_info *info)
 {
    if (info->vcn_ip_version >= VCN_5_0_0)
@@ -116,6 +133,12 @@ write_memory_supported(struct radeon_info *info)
          return AC_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
    }
    return AC_VIDEO_WRITE_MEMORY_SUPPORT_NONE;
+}
+
+static bool
+have_efc_range_bug(struct radeon_info *info)
+{
+   return info->vcn_ip_version >= VCN_5_0_0 && !check_vcn_fw_version(info, 9, 13, 38);
 }
 
 static void
@@ -212,7 +235,7 @@ vce_caps(struct radeon_info *info)
    /* AVC Encode */
    struct ac_video_enc_codec_caps *cap = &info->video_caps.enc[AC_VIDEO_CODEC_AVC];
    cap->ip_type = AMD_IP_VCE;
-   cap->supported = ((info->vce_fw_version & (0xff << 24)) >> 24) >= 40;
+   cap->supported = ((info->vce_fw_version & (0xffu << 24)) >> 24) >= 40;
    cap->min_width = 128;
    cap->min_height = 128;
    cap->max_width = info->family < CHIP_TONGA ? 2048 : 4096;
@@ -228,6 +251,7 @@ vce_caps(struct radeon_info *info)
    cap->max_slices = 128;
    cap->max_temporal_layers = 1;
    cap->quality_levels = 3;
+   cap->preenc_pitch_wa = true; /* FW has the issue but we don't use preenc */
    cap->rc.cbr = true;
    cap->rc.vbr = true;
    cap->avc.p_l0_refs = 1;
@@ -256,6 +280,7 @@ uvd_enc_caps(struct radeon_info *info)
    cap->max_slices = 128;
    cap->max_temporal_layers = 1;
    cap->quality_levels = 3;
+   cap->preenc_pitch_wa = false;
    cap->rc.cbr = true;
    cap->rc.vbr = true;
    cap->hevc.p_l0_refs = 1;
@@ -410,6 +435,8 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
+   cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;
    cap->rc.qvbr = qvbr_supported(info);
@@ -452,6 +479,8 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
+   cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;
    cap->rc.qvbr = qvbr_supported(info);
@@ -473,7 +502,9 @@ vcn_enc_caps(struct radeon_info *info)
    cap->hevc.log2_diff_max_min_luma_transform_block_size = 3;
    cap->formats.nv12 = 1;
    cap->formats.p010 = cap->hevc.main10 ? 1 : 0;
-   cap->min_qp = 0;
+   /* There is a FW bug causing QP to be clamped to 1, only when QP map is
+    * enabled in CQP mode. */
+   cap->min_qp = info->vcn_ip_version < VCN_3_0_0 ? 1 : 0;
    cap->max_qp = 51;
    cap->feedback.avg_qp = true;
    cap->feedback.minmax_qp = true;
@@ -503,6 +534,8 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
+   cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;
    cap->rc.qvbr = qvbr_supported(info);
@@ -607,6 +640,8 @@ vpe_caps(struct radeon_info *info)
    cap->out_formats.a8r8g8b8 = 1;
    cap->out_formats.r10g10b10a2 = 1;
    cap->out_formats.b10g10r10a2 = 1;
+   cap->blend_luma_key = info->vpe_ip_version >= VPE_2_0;
+   cap->sharpening = info->vpe_ip_version >= VPE_2_0;
 }
 
 void

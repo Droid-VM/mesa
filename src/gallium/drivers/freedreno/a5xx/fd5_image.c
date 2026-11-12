@@ -33,6 +33,7 @@ struct fd5_image {
    uint32_t height;
    uint32_t depth;
    uint32_t pitch;
+   uint32_t pitchalign;
    uint32_t array_pitch;
    struct fd_bo *bo;
    uint32_t offset;
@@ -66,14 +67,16 @@ translate_image(struct fd5_image *img, struct pipe_image_view *pimg)
       img->buffer = true;
       img->offset = pimg->u.buf.offset;
       img->pitch = 0;
+      img->pitchalign = 0;
       img->array_pitch = 0;
 
-      /* size is encoded with low 15b in WIDTH and high bits in
-       * HEIGHT, in units of elements:
+      /* The size in elements, which the descriptors split between WIDTH and
+       * HEIGHT:
        */
-      unsigned sz = pimg->u.buf.size / util_format_get_blocksize(format);
-      img->width = sz & MASK(15);
-      img->height = sz >> 15;
+      img->width = fd_clamp_buffer_size(format, pimg->u.buf.size,
+                                        A4XX_MAX_TEXEL_BUFFER_ELEMENTS_UINT) /
+                   util_format_get_blocksize(format);
+      img->height = 0;
       img->depth = 0;
    } else {
       img->buffer = false;
@@ -81,6 +84,7 @@ translate_image(struct fd5_image *img, struct pipe_image_view *pimg)
       unsigned lvl = pimg->u.tex.level;
       img->offset = fd_resource_offset(rsc, lvl, pimg->u.tex.first_layer);
       img->pitch = fd_resource_pitch(rsc, lvl);
+      img->pitchalign = rsc->layout.pitchalign - 6;
 
       img->width = u_minify(prsc->width0, lvl);
       img->height = u_minify(prsc->height0, lvl);
@@ -120,6 +124,16 @@ static void
 emit_image_tex(struct fd_ringbuffer *ring, unsigned slot, struct fd5_image *img,
                mesa_shader_stage shader)
 {
+   uint32_t width = img->width, height = img->height;
+
+   /* A buffer's element count has its low 15 bits in WIDTH and the rest in
+    * HEIGHT.
+    */
+   if (img->buffer) {
+      width = img->width & MASK(15);
+      height = img->width >> 15;
+   }
+
    OUT_PKT7(ring, CP_LOAD_STATE4, 3 + 12);
    OUT_RING(ring, CP_LOAD_STATE4_0_DST_OFF(slot) |
                      CP_LOAD_STATE4_0_STATE_SRC(SS4_DIRECT) |
@@ -133,11 +147,12 @@ emit_image_tex(struct fd_ringbuffer *ring, unsigned slot, struct fd5_image *img,
                      fd5_tex_swiz(img->pfmt, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
                                   PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W) |
                      COND(img->srgb, A5XX_TEX_CONST_0_SRGB));
-   OUT_RING(ring, A5XX_TEX_CONST_1_WIDTH(img->width) |
-                     A5XX_TEX_CONST_1_HEIGHT(img->height));
+   OUT_RING(ring, A5XX_TEX_CONST_1_WIDTH(width) |
+                     A5XX_TEX_CONST_1_HEIGHT(height));
    OUT_RING(ring,
             COND(img->buffer, A5XX_TEX_CONST_2_BUFFER) |
                A5XX_TEX_CONST_2_TYPE(img->type) |
+               A5XX_TEX_CONST_2_PITCHALIGN(img->pitchalign) |
                A5XX_TEX_CONST_2_PITCH(img->pitch));
    OUT_RING(ring, A5XX_TEX_CONST_3_ARRAY_PITCH(img->array_pitch));
    if (img->bo) {
@@ -159,6 +174,23 @@ static void
 emit_image_ssbo(struct fd_ringbuffer *ring, unsigned slot,
                 struct fd5_image *img, mesa_shader_stage shader)
 {
+   uint32_t width = img->width, height = img->height;
+
+   /* VK blob treats 1D_ARRAY images as a 2d image with the layer count as the
+    * height. Note that 1D textures do still use TEX_1D.
+    */
+   if (img->type == A5XX_TEX_1D && img->depth > 1)
+      height = img->depth;
+
+   /* Unlike the texture descriptor's, the SSBO descriptor's WIDTH is 16 bits,
+    * and the blob splits a buffer's element count at bit 16 there, which is
+    * what resinfo.4d (imageSize()) recombines.
+    */
+   if (img->buffer) {
+      width = img->width & MASK(16);
+      height = img->width >> 16;
+   }
+
    OUT_PKT7(ring, CP_LOAD_STATE4, 3 + 2);
    OUT_RING(ring, CP_LOAD_STATE4_0_DST_OFF(slot) |
                      CP_LOAD_STATE4_0_STATE_SRC(SS4_DIRECT) |
@@ -167,9 +199,10 @@ emit_image_ssbo(struct fd_ringbuffer *ring, unsigned slot,
    OUT_RING(ring, CP_LOAD_STATE4_1_STATE_TYPE(ST4_CONSTANTS) |
                      CP_LOAD_STATE4_1_EXT_SRC_ADDR(0));
    OUT_RING(ring, CP_LOAD_STATE4_2_EXT_SRC_ADDR_HI(0));
-   OUT_RING(ring,
-            A5XX_SSBO_1_0_FMT(img->fmt) | A5XX_SSBO_1_0_WIDTH(img->width));
-   OUT_RING(ring, A5XX_SSBO_1_1_HEIGHT(img->height) |
+   OUT_RING(ring, A5XX_SSBO_1_0_FMT(img->fmt) |
+                     A5XX_SSBO_1_0_SWAP(fd5_pipe2swap(img->pfmt)) |
+                     A5XX_SSBO_1_0_WIDTH(width));
+   OUT_RING(ring, A5XX_SSBO_1_1_HEIGHT(height) |
                      A5XX_SSBO_1_1_DEPTH(img->depth));
 
    OUT_PKT7(ring, CP_LOAD_STATE4, 3 + 2);

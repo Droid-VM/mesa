@@ -46,29 +46,16 @@ push_node(uint32_t children[2], vk_aabb bounds[2])
    uint32_t internal_node_index = atomicAdd(DEREF(args.header).ir_internal_node_count, 1);
    uint32_t dst_offset = args.internal_node_offset + internal_node_index * SIZEOF(vk_ir_box_node);
    uint32_t dst_id = pack_ir_node_id(dst_offset, vk_ir_node_internal);
-   REF(vk_ir_box_node) dst_node = REF(vk_ir_box_node)(OFFSET(args.bvh, dst_offset));
 
-   vk_aabb total_bounds;
-   total_bounds.min = vec3(INFINITY);
-   total_bounds.max = vec3(-INFINITY);
-
-   uint32_t dst_flags = VK_BVH_BOX_FLAG_ONLY_OPAQUE | VK_BVH_BOX_FLAG_NO_OPAQUE;
-
-   for (uint i = 0; i < 2; ++i) {
-      total_bounds.min = min(total_bounds.min, bounds[i].min);
-      total_bounds.max = max(total_bounds.max, bounds[i].max);
-
-      DEREF(dst_node).children[i] = children[i];
-
-      if (VK_TEST_BUILD_FLAG_PROPAGATE_CULL_FLAGS)
-         dst_flags &= fetch_child_flags(args.bvh, children[i]);
-   }
-
-   DEREF(dst_node).base.aabb = total_bounds;
-   DEREF(dst_node).bvh_offset = VK_UNKNOWN_BVH_OFFSET;
-
+   vk_ir_box_node dst_node;
+   dst_node.base.aabb.min = min(bounds[0].min, bounds[1].min);
+   dst_node.base.aabb.max = max(bounds[0].max, bounds[1].max);
+   dst_node.children = children;
+   dst_node.bvh_offset = VK_UNKNOWN_BVH_OFFSET;
    if (VK_TEST_BUILD_FLAG_PROPAGATE_CULL_FLAGS)
-      DEREF(dst_node).flags = dst_flags;
+      dst_node.flags = fetch_child_flags(args.bvh, children[0]) & fetch_child_flags(args.bvh, children[1]);
+
+   DEREF(REF(vk_ir_box_node)(OFFSET(args.bvh, dst_offset))) = dst_node;
 
    return dst_id;
 }
@@ -132,7 +119,7 @@ combined_node_cost(uint32_t lds_base, uint32_t i, uint32_t j)
    vk_aabb combined_bounds;
    combined_bounds.min = min(shared_bounds[i - lds_base].min, shared_bounds[j - lds_base].min);
    combined_bounds.max = max(shared_bounds[i - lds_base].max, shared_bounds[j - lds_base].max);
-   return aabb_surface_area(combined_bounds);
+   return aabb_half_surface_area(combined_bounds);
 }
 
 shared uint32_t shared_aggregate_sum;

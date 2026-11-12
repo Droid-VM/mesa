@@ -227,6 +227,25 @@ void vbo_exec_do_EvalCoord2f( struct vbo_exec_context *exec,
 
 
          CROSS3(&normal[0].f, du, dv);
+
+          /* Scale by map->du * map->dv to account for the parameter range.
+           * The de Casteljau function returns derivatives with respect to the
+           * normalized parameters (uu, vv) in [0,1], but the OpenGL spec says
+           * the normal is (dP/du) x (dP/dv) where u and v are the original
+           * map parameters:
+           *   dP/du = dP/duu * map->du
+           *   dP/dv = dP/dvv * map->dv
+           * So n = map->du * map->dv * (dP/duu x dP/dvv)
+           * Without this scaling, the normal is wrong when the parameter
+           * range is reversed (e.g., v1 > v2 makes map->dv negative).
+           */
+         {
+            const float scale = map->du * map->dv;
+            normal[0].f *= scale;
+            normal[1].f *= scale;
+            normal[2].f *= scale;
+         }
+
          NORMALIZE_3FV(&normal[0].f);
 	 normal[3] = FLOAT_AS_UNION(1.0);
 

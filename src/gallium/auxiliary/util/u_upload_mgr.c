@@ -47,6 +47,7 @@ struct u_upload_mgr {
    unsigned flags;
    unsigned map_flags;     /* Bitmask of PIPE_MAP_* flags. */
    bool map_persistent; /* If persistent mappings are supported. */
+   struct pipe_clientptr_heap *clientptr_heap;
 
    struct pipe_resource *buffer;   /* Upload buffer. */
    struct pipe_transfer *transfer; /* Transfer object for the upload buffer. */
@@ -57,9 +58,10 @@ struct u_upload_mgr {
 };
 
 
-struct u_upload_mgr *
-u_upload_create(struct pipe_context *pipe, unsigned default_size,
-                unsigned bind, enum pipe_resource_usage usage, unsigned flags)
+static struct u_upload_mgr *
+u_upload_create_clientptr(struct pipe_context *pipe, unsigned default_size,
+                           unsigned bind, enum pipe_resource_usage usage, unsigned flags,
+                           struct pipe_clientptr_heap *clientptr_heap)
 {
    struct u_upload_mgr *upload = CALLOC_STRUCT(u_upload_mgr);
    if (!upload)
@@ -86,7 +88,19 @@ u_upload_create(struct pipe_context *pipe, unsigned default_size,
                           PIPE_MAP_FLUSH_EXPLICIT;
    }
 
+   if (upload->flags & PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER) {
+      pipe_clientptr_heap_reference(pipe->screen, &upload->clientptr_heap, clientptr_heap);
+      upload->map_flags |= PIPE_MAP_CLIENT_POINTER;
+   }
+
    return upload;
+}
+
+struct u_upload_mgr *
+u_upload_create(struct pipe_context *pipe, unsigned default_size,
+                unsigned bind, enum pipe_resource_usage usage, unsigned flags)
+{
+   return u_upload_create_clientptr(pipe, default_size, bind, usage, flags, NULL);
 }
 
 struct u_upload_mgr *
@@ -107,6 +121,19 @@ u_upload_clone(struct pipe_context *pipe, struct u_upload_mgr *upload)
                                                  upload->flags);
    if (!upload->map_persistent && result->map_persistent)
       u_upload_disable_persistent(result);
+
+   return result;
+
+}
+
+struct u_upload_mgr *
+u_upload_clone_clientptr(struct pipe_context *pipe, struct u_upload_mgr *upload,
+                              struct pipe_clientptr_heap *clientptr_heap)
+{
+   struct u_upload_mgr *result = u_upload_create_clientptr(pipe, upload->default_size,
+                                                 upload->bind, upload->usage,
+                                                 upload->flags | PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER,
+                                                 clientptr_heap);
 
    return result;
 }
@@ -159,6 +186,7 @@ u_upload_destroy(struct u_upload_mgr *upload)
 {
    u_upload_release_buffer(upload);
    pipe_resource_release(upload->pipe, upload->buffer);
+   pipe_clientptr_heap_reference(upload->pipe->screen, &upload->clientptr_heap, NULL);
    FREE(upload);
 }
 
@@ -190,6 +218,7 @@ u_upload_alloc_buffer(struct u_upload_mgr *upload, unsigned min_size, struct pip
    buffer.height0 = 1;
    buffer.depth0 = 1;
    buffer.array_size = 1;
+   buffer.clientptr_heap = upload->clientptr_heap;
 
    if (upload->map_persistent) {
       buffer.flags |= PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
@@ -276,7 +305,11 @@ u_upload_alloc(struct u_upload_mgr *upload,
          return;
       }
 
-      upload->map -= offset;
+      if (upload->map != PIPE_TRANSFER_CLIENT_POINTER) {
+         upload->map -= offset;
+      } else {
+         assert(!offset);
+      }
    }
 
    assert(offset < buffer_size);
@@ -284,7 +317,11 @@ u_upload_alloc(struct u_upload_mgr *upload,
    assert(size);
 
    /* Emit the return values: */
-   *ptr = upload->map + offset;
+   if (upload->map == PIPE_TRANSFER_CLIENT_POINTER) {
+      *ptr = PIPE_TRANSFER_CLIENT_POINTER;
+   } else {
+      *ptr = upload->map + offset;
+   }
    *out_offset = offset;
    *outbuf = upload->buffer;
 
@@ -323,6 +360,7 @@ u_upload_data(struct u_upload_mgr *upload,
    u_upload_alloc(upload, min_out_offset, size, alignment,
                   out_offset, outbuf, releasebuf,
                   (void**)&ptr);
+   assert(ptr != PIPE_TRANSFER_CLIENT_POINTER);
    if (ptr)
       memcpy(ptr, data, size);
 }
@@ -340,6 +378,41 @@ u_upload_data_ref(struct u_upload_mgr *upload,
    struct pipe_resource *releasebuf = NULL;
 
    u_upload_data(upload, min_out_offset, size, alignment, data, out_offset, &pres, &releasebuf);
+   pipe_resource_release(upload->pipe, releasebuf);
+   pipe_resource_reference(outbuf, pres);
+}
+
+void
+u_upload_alloc_clientptr(struct u_upload_mgr *upload,
+                  unsigned size,
+                  unsigned alignment,
+                  unsigned *out_offset,
+                  struct pipe_resource **outbuf,
+                  struct pipe_resource **releasebuf,
+                  struct pipe_transfer **transfer_clientptr)
+{
+   uint8_t *ptr = NULL;
+
+   u_upload_alloc(upload, 0, size, alignment,
+                  out_offset, outbuf, releasebuf,
+                  (void**)&ptr);
+   assert(ptr == PIPE_TRANSFER_CLIENT_POINTER);
+
+   *transfer_clientptr = upload->transfer;
+}
+
+void
+u_upload_alloc_clientptr_ref(struct u_upload_mgr *upload,
+                  unsigned size,
+                  unsigned alignment,
+                  unsigned *out_offset,
+                  struct pipe_resource **outbuf,
+                  struct pipe_transfer **transfer_clientptr)
+{
+   struct pipe_resource *pres = NULL;
+   struct pipe_resource *releasebuf = NULL;
+
+   u_upload_alloc_clientptr(upload, size, alignment, out_offset, &pres, &releasebuf, transfer_clientptr);
    pipe_resource_release(upload->pipe, releasebuf);
    pipe_resource_reference(outbuf, pres);
 }

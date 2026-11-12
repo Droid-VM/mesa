@@ -207,6 +207,9 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       case nir_tex_src_min_lod:        min_lod =   tex->src[i].src.ssa; break;
       case nir_tex_src_ddx:            ddx =       tex->src[i].src.ssa; break;
       case nir_tex_src_ddy:            ddy =       tex->src[i].src.ssa; break;
+      case nir_tex_src_texture_offset:
+         assert(tex->input_attachment_index);
+         break;
       default:
          UNREACHABLE("Unsupported texture source");
       }

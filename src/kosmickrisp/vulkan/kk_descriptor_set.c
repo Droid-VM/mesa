@@ -68,7 +68,7 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
       plane_count = view->plane_count;
       for (uint8_t plane = 0; plane < plane_count; plane++) {
          if (is_input_attachment) {
-            assert(view->planes[plane].sampled_gpu_resource_id);
+            assert(view->planes[plane].input_gpu_resource_id);
             desc[plane].image_gpu_resource_id =
                view->planes[plane].input_gpu_resource_id;
          } else {
@@ -425,6 +425,13 @@ kk_push_descriptor_set_update(struct kk_push_descriptor_set *push_set,
 
 static void kk_descriptor_pool_free(struct kk_descriptor_pool *pool,
                                     uint64_t addr, uint64_t size);
+
+void
+kk_descriptor_pool_set_label(struct kk_descriptor_pool *pool, const char *label)
+{
+   if (pool->bo)
+      kk_bo_set_label(pool->bo, label);
+}
 
 static void
 kk_descriptor_set_destroy(struct kk_device *dev,

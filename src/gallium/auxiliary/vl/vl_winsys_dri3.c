@@ -170,7 +170,11 @@ dri3_handle_present_event(struct vl_dri3_screen *scrn,
       int b;
       for (b = 0; b < BACK_BUFFER_NUM; b++) {
          struct vl_dri3_buffer *buf = scrn->back_buffers[b];
-         if (buf && buf->pixmap == ie->pixmap) {
+         /* Match both client pixmap and our fence so we handle disconnects
+          * correctly
+          */
+         if (buf && buf->pixmap == ie->pixmap &&
+             buf->sync_fence == ie->idle_fence) {
             buf->busy = false;
             break;
          }

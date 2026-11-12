@@ -186,7 +186,7 @@ make_image_handle_resident(struct gl_context *ctx,
       _mesa_hash_table_u64_insert(ctx->ResidentImageHandles, handle,
                                   imgHandleObj);
 
-      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, access, GL_TRUE);
+      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, st_image_access(access), GL_TRUE);
 
       /* Reference the texture object to be sure it won't be deleted until it
        * is not bound anywhere and there are no handles using the object that
@@ -198,7 +198,7 @@ make_image_handle_resident(struct gl_context *ctx,
 
       _mesa_hash_table_u64_remove(ctx->ResidentImageHandles, handle);
 
-      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, access, GL_FALSE);
+      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, st_image_access(access), GL_FALSE);
 
       /* Unreference the texture object but keep the pointer intact, if
        * refcount hits zero, the texture and all handles will be deleted.
@@ -577,8 +577,7 @@ _mesa_GetTextureHandleARB_no_error(GLuint texture)
    GET_CURRENT_CONTEXT(ctx);
 
    texObj = _mesa_lookup_texture(ctx, texture);
-   if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                  ctx->Const.ForceIntegerTexNearest))
+   if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler))
       _mesa_test_texobj_completeness(ctx, texObj);
 
    return get_texture_handle(ctx, texObj, &texObj->Sampler);
@@ -617,11 +616,9 @@ _mesa_GetTextureHandleARB(GLuint texture)
     *  GetTextureSamplerHandleARB if the texture object specified by <texture>
     *  is not complete."
     */
-   if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                  ctx->Const.ForceIntegerTexNearest)) {
+   if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler)) {
       _mesa_test_texobj_completeness(ctx, texObj);
-      if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                     ctx->Const.ForceIntegerTexNearest)) {
+      if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler)) {
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glGetTextureHandleARB(incomplete texture)");
          return 0;
@@ -648,8 +645,7 @@ _mesa_GetTextureSamplerHandleARB_no_error(GLuint texture, GLuint sampler)
    texObj = _mesa_lookup_texture(ctx, texture);
    sampObj = _mesa_lookup_samplerobj(ctx, sampler);
 
-   if (!_mesa_is_texture_complete(texObj, sampObj,
-                                  ctx->Const.ForceIntegerTexNearest))
+   if (!_mesa_is_texture_complete(ctx, texObj, sampObj))
       _mesa_test_texobj_completeness(ctx, texObj);
 
    return get_texture_handle(ctx, texObj, sampObj);
@@ -702,11 +698,9 @@ _mesa_GetTextureSamplerHandleARB(GLuint texture, GLuint sampler)
     *  GetTextureSamplerHandleARB if the texture object specified by <texture>
     *  is not complete."
     */
-   if (!_mesa_is_texture_complete(texObj, sampObj,
-                                  ctx->Const.ForceIntegerTexNearest)) {
+   if (!_mesa_is_texture_complete(ctx, texObj, sampObj)) {
       _mesa_test_texobj_completeness(ctx, texObj);
-      if (!_mesa_is_texture_complete(texObj, sampObj,
-                                     ctx->Const.ForceIntegerTexNearest)) {
+      if (!_mesa_is_texture_complete(ctx, texObj, sampObj)) {
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glGetTextureSamplerHandleARB(incomplete texture)");
          return 0;
@@ -823,8 +817,7 @@ _mesa_GetImageHandleARB_no_error(GLuint texture, GLint level, GLboolean layered,
    GET_CURRENT_CONTEXT(ctx);
 
    texObj = _mesa_lookup_texture(ctx, texture);
-   if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                  ctx->Const.ForceIntegerTexNearest))
+   if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler))
       _mesa_test_texobj_completeness(ctx, texObj);
 
    return get_image_handle(ctx, texObj, level, layered, layer, format);
@@ -883,11 +876,9 @@ _mesa_GetImageHandleARB(GLuint texture, GLint level, GLboolean layered,
     *  <texture> is not a three-dimensional, one-dimensional array, two
     *  dimensional array, cube map, or cube map array texture."
     */
-   if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                  ctx->Const.ForceIntegerTexNearest)) {
+   if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler)) {
       _mesa_test_texobj_completeness(ctx, texObj);
-      if (!_mesa_is_texture_complete(texObj, &texObj->Sampler,
-                                     ctx->Const.ForceIntegerTexNearest)) {
+      if (!_mesa_is_texture_complete(ctx, texObj, &texObj->Sampler)) {
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glGetImageHandleARB(incomplete texture)");
          return 0;

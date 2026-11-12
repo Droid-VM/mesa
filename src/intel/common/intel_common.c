@@ -77,7 +77,7 @@ intel_compute_engine_async_threads_limit(const struct intel_device_info *devinfo
    uint8_t pixel_async_compute_thread_limit = uses_fence ? 0 : 2;
    uint8_t z_pass_async_compute_thread_limit = 0;
    uint8_t np_z_async_throttle_settings = 0;
-   bool has_vrt = devinfo->verx10 >= 300 && !INTEL_DEBUG(DEBUG_NO_VRT);
+   bool has_vrt = intel_has_vrt(devinfo);
 
    /* When VRT is enabled async threads limits don't have effect */
    if (!slm_or_barrier_enabled || has_vrt || uses_fence) {
@@ -256,11 +256,28 @@ intel_compute_threads_group_dispatch_size(uint32_t hw_threads_in_wg)
     */
    switch (hw_threads_in_wg) {
    case 0 ... 16:
-      return 0;
+      return 0;/* TG size 8 */
    case 17 ... 32:
-      return 1;
+      return 1;/* TG size 4 */
    default:
-      return 2;
+      return 2;/* TG size 2 */
+   }
+}
+
+/* Compute Walker 2 has a new enconde values */
+int
+intel_compute_threads_group_dispatch_size_walker_2(uint32_t hw_threads_in_wg)
+{
+   /* Following value calculated based on overdispatch is disabled. In case if
+    * compute overdispatch disabled set to 1, then we need to use TG Size 1.
+    */
+   switch (hw_threads_in_wg) {
+   case 0 ... 16:
+      return 0;/* TG size 8 */
+   case 17 ... 32:
+      return 2;/* TG size 4 */
+   default:
+      return 4;/* TG size 2 */
    }
 }
 
@@ -307,4 +324,10 @@ intel_register_blocks_supported(const struct intel_device_info *devinfo,
 
    const unsigned n = (num_regs / 32) - 1;
    return intel_register_blocks_bits(devinfo) & (1u << n);
+}
+
+uint8_t
+intel_sampler_state_size(bool uses_efficient_64bit)
+{
+   return uses_efficient_64bit ? 32 : 16;
 }

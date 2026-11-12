@@ -342,7 +342,10 @@ vn_tls_get_ring(struct vn_instance *instance)
    mtx_init(&tls_ring->mutex, mtx_plain);
    tls_ring->instance = instance;
    list_add(&tls_ring->tls_head, &tls->tls_rings);
+
+   simple_mtx_lock(&instance->ring.tls_rings_mutex);
    list_add(&tls_ring->vk_head, &instance->ring.tls_rings);
+   simple_mtx_unlock(&instance->ring.tls_rings_mutex);
 
    return tls_ring->ring;
 }
@@ -378,11 +381,30 @@ static tss_t vn_tls_key;
 static bool vn_tls_key_valid;
 
 static void
+vn_tls_key_fini(void)
+{
+   vn_tls_key_valid = false;
+   vn_tls_free(tss_get(vn_tls_key));
+   tss_delete(vn_tls_key);
+}
+
+static void
 vn_tls_key_create_once(void)
 {
    vn_tls_key_valid = tss_create(&vn_tls_key, vn_tls_free) == thrd_success;
-   if (!vn_tls_key_valid && VN_DEBUG(INIT))
-      vn_log(NULL, "WARNING: failed to create vn_tls_key");
+   if (!vn_tls_key_valid) {
+      if (VN_DEBUG(INIT))
+         vn_log(NULL, "WARNING: failed to create vn_tls_key");
+      return;
+   }
+
+   /* Nothing ensures all threads that called vn_tls_get() have completed when
+    * the last vulkan instance is destroyed, which unmaps the driver.
+    *
+    * Delete the TLS key so that threads still holding venus TLS leak it
+    * instead of calling into unmapped code.
+    */
+   atexit(vn_tls_key_fini);
 }
 
 struct vn_tls *

@@ -104,10 +104,8 @@ setup_reduce_temp(Program* program)
                std::vector<aco_ptr<Instruction>>& instructions =
                   program->blocks[last_top_level_block_idx].instructions;
                auto insert_point =
-                  std::find_if(instructions.rbegin(), instructions.rend(),
-                               [](const auto& iter) {
-                                  return iter->opcode == aco_opcode::p_logical_end;
-                               })
+                  std::find_if(instructions.rbegin(), instructions.rend(), [](const auto& iter)
+                               { return iter->opcode == aco_opcode::p_logical_end; })
                      .base();
                instructions.insert(insert_point, std::move(create));
                inserted_at = last_top_level_block_idx;
@@ -149,10 +147,8 @@ setup_reduce_temp(Program* program)
                std::vector<aco_ptr<Instruction>>& instructions =
                   program->blocks[last_top_level_block_idx].instructions;
                auto insert_point =
-                  std::find_if(instructions.rbegin(), instructions.rend(),
-                               [](const auto& iter) {
-                                  return iter->opcode == aco_opcode::p_logical_end;
-                               })
+                  std::find_if(instructions.rbegin(), instructions.rend(), [](const auto& iter)
+                               { return iter->opcode == aco_opcode::p_logical_end; })
                      .base();
                instructions.insert(insert_point, std::move(create));
                vtmp_inserted_at = last_top_level_block_idx;

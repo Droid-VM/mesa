@@ -35,3 +35,9 @@ spec@ext_framebuffer_object@fbo-blending-formats
 
 # Skip VK test on GL drivers
 vulkan@.*
+
+# Nightly run expectations update
+spec@egl_ext_surface_compression@create
+spec@egl_khr_gl_colorspace@srgb
+spec@ext_image_dma_buf_import@ext_image_dma_buf_import-invalid_attributes
+

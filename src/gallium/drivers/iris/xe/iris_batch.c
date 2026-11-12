@@ -40,6 +40,8 @@ static enum drm_sched_priority
 iris_context_priority_to_drm_sched_priority(enum iris_context_priority priority)
 {
    switch (priority) {
+   case IRIS_CONTEXT_REALTIME_PRIORITY:
+      return DRM_SCHED_PRIORITY_KERNEL;
    case IRIS_CONTEXT_HIGH_PRIORITY:
       return DRM_SCHED_PRIORITY_HIGH;
    case IRIS_CONTEXT_LOW_PRIORITY:

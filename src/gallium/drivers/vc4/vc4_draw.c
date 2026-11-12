@@ -338,6 +338,21 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
         vc4_predraw_check_textures(pctx, &vc4->verttex);
         vc4_predraw_check_textures(pctx, &vc4->fragtex);
 
+        /* The fixup blits above are draws of their own (e.g. the YUV
+         * blit of an imported NV12 dmabuf) that overwrite the cached
+         * clip window, so compute it after them.
+         */
+        if (vc4->dirty & VC4_DIRTY_CLIP_WINDOW) {
+                vc4->clip_window_empty =
+                        !vc4_get_clip_window(vc4, &vc4->clip_window);
+        }
+        /* A draw with an empty clip window covers no pixels, and emitting
+         * a zero-sized CLIP_WINDOW hangs the binner, so drop it before
+         * anything reaches the CL.
+         */
+        if (vc4->clip_window_empty)
+                return;
+
         vc4_hw_2116_workaround(pctx, draws[0].count);
 
         struct vc4_job *job = vc4_get_job_for_fbo(vc4);
@@ -690,6 +705,7 @@ void
 vc4_draw_init(struct pipe_context *pctx)
 {
         pctx->draw_vbo = vc4_draw_vbo;
+        pctx->draw_vbo_buffers = util_draw_vbo_buffers;
         pctx->clear = vc4_clear;
         pctx->clear_render_target = vc4_clear_render_target;
         pctx->clear_depth_stencil = vc4_clear_depth_stencil;

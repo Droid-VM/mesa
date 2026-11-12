@@ -333,6 +333,8 @@ public:
 
     ADDR_E_RETURNCODE GetMaxAlignments(ADDR_GET_MAX_ALIGNMENTS_OUTPUT* pOut) const;
 
+    const ADDR_MAX_IMAGE_DIMS* GetMaxDims() const;
+
     ADDR_E_RETURNCODE GetMaxMetaAlignments(ADDR_GET_MAX_ALIGNMENTS_OUTPUT* pOut) const;
 
     UINT_32 GetBpe(AddrFormat format) const;
@@ -476,6 +478,8 @@ protected:
 
     UINT_32     m_maxBaseAlign;         ///< Max base alignment for data surface
     UINT_32     m_maxMetaBaseAlign;     ///< Max base alignment for metadata
+
+    ADDR_MAX_IMAGE_DIMS  m_maxDims;
 
 private:
     ElemLib*    m_pElemLib;             ///< Element Lib pointer

@@ -81,6 +81,10 @@ _mesa_update_array_format(struct gl_context *ctx,
                           GLuint relativeOffset);
 
 extern void
+_mesa_update_vao_format_fallbacks(struct gl_context *ctx,
+                                  struct gl_vertex_array_object *vao);
+
+extern void
 _mesa_enable_vertex_array_attribs(struct gl_context *ctx,
                                  struct gl_vertex_array_object *vao,
                                  GLbitfield attrib_bits);

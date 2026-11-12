@@ -41,8 +41,7 @@ struct panfrost_blend_state {
 };
 
 struct pan_blend_shader_cache {
-   uint64_t gpu_id;
-   uint32_t gpu_variant;
+   const struct pan_model *model;
    struct pan_pool *bin_pool;
    struct hash_table *shaders;
    pthread_mutex_t lock;
@@ -58,7 +57,7 @@ struct pan_blend_shader {
 uint64_t panfrost_get_blend(struct panfrost_batch *batch, unsigned rt);
 
 void pan_blend_shader_cache_init(struct pan_blend_shader_cache *cache,
-                                 uint64_t gpu_id, uint32_t gpu_variant,
+                                 const struct pan_model *model,
                                  struct pan_pool *bin_pool);
 
 void pan_blend_shader_cache_cleanup(struct pan_blend_shader_cache *cache);

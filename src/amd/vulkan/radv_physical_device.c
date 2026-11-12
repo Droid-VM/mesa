@@ -44,7 +44,7 @@ typedef void *drmDevicePtr;
 #include "git_sha1.h"
 
 #if AMD_LLVM_AVAILABLE
-#include <llvm-c/TargetMachine.h>
+#include <llvm-c/Target.h>
 #endif
 
 #ifdef _WIN32
@@ -59,8 +59,7 @@ radv_perf_query_supported(const struct radv_physical_device *pdev)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    /* SQTT / SPM interfere with the register states for perf counters. */
-   return (pdev->info.gfx_level == GFX10_3 ||
-           (pdev->info.gfx_level >= GFX11 && pdev->info.gfx_level < GFX12)) &&
+   return pdev->info.gfx_level >= GFX10_3 && pdev->info.gfx_level <= GFX12 &&
           !(instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
 }
 
@@ -69,10 +68,11 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   if (instance->debug_flags & RADV_DEBUG_NO_MESH_SHADER)
+   if (RADV_DEBUG(instance, NO_MESH_SHADER))
       return false;
 
-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev) &&
+          !pdev->info.has_taskmesh_indirect0_bug;
 }
 
 bool
@@ -92,7 +92,7 @@ radv_tmz_enabled(const struct radv_physical_device *pdev)
    /* TODO: Fix GFX/SDMA rings hang on GFX9 APUs. */
    const bool radv_supports_tmz = pdev->info.gfx_level >= GFX10 || pdev->info.family == CHIP_VEGA10;
 
-   return pdev->info.has_tmz_support && radv_supports_tmz && !(instance->debug_flags & RADV_DEBUG_NO_TMZ);
+   return pdev->info.has_tmz_support && radv_supports_tmz && !(RADV_DEBUG(instance, NO_TMZ));
 }
 
 bool
@@ -111,15 +111,18 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   /* Check if the GPU has SDMA support and transfer queues are allowed. */
+   /* Check if the GPU has SDMA support and transfer queues are allowed. The queue
+    * is exposed when the experimental flag is set or when a per-application drirc
+    * profile opts in (radv_enable_transfer_queue). */
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
-       !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE))
+       (!(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
+        !pdev->drirc.performance.enable_transfer_queue))
       return false;
 
    if (!radv_compute_queue_enabled(pdev))
       return false;
 
-   return pdev->info.gfx_level >= GFX9 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
+   return pdev->info.gfx_level >= GFX7 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
 }
 
 static bool
@@ -223,12 +226,9 @@ bool
 radv_host_image_copy_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   /* TODO: HIC is supported on GFX10 but the recent addrlib bump introduced few regressions that
-    * should be fixed soon, it's also still missing AVX for some formats. Let's not enable it by
-    * default for now.
-    */
-   return pdev->info.gfx_level >= GFX10_3 ||
-          (pdev->info.gfx_level == GFX10 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
+   /* TODO: HIC is supported on GFX9 but it's still experimental there. */
+   return pdev->info.gfx_level >= GFX10 ||
+          (pdev->info.gfx_level == GFX9 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
 }
 
 static bool
@@ -242,6 +242,14 @@ radv_compression_control_enabled(const struct radv_physical_device *pdev)
 {
    /* Not useful on GFX12. */
    return pdev->info.gfx_level < GFX12;
+}
+
+static bool
+radv_shader_abort_enabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return !pdev->use_llvm && !(instance->experimental_flags & RADV_EXPERIMENTAL_ELF);
 }
 
 bool
@@ -279,7 +287,7 @@ bool
 radv_use_bvh8(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   return pdev->info.gfx_level >= GFX12 && !radv_emulate_rt(pdev) && !(instance->debug_flags & RADV_DEBUG_BVH4);
+   return pdev->info.gfx_level >= GFX12 && !radv_emulate_rt(pdev) && !(RADV_DEBUG(instance, BVH4));
 }
 
 bool
@@ -287,7 +295,7 @@ radv_is_dcc_disabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   return instance->debug_flags & RADV_DEBUG_NO_DCC || pdev->drirc.debug.disable_dcc;
+   return RADV_DEBUG(instance, NO_DCC) || pdev->drirc.debug.disable_dcc;
 }
 
 static bool
@@ -330,7 +338,7 @@ radv_device_get_cache_uuid(struct radv_physical_device *pdev, void *uuid)
       return -1;
 #endif
 
-#if AMD_LLVM_AVAILABLE
+#if RADV_LLVM_BACKEND
    if (pdev->use_llvm && !disk_cache_get_function_identifier(LLVMInitializeAMDGPUTargetInfo, &ctx))
       return -1;
 #endif
@@ -651,6 +659,8 @@ radv_physical_device_init_mem_types(struct radv_physical_device *pdev)
          pdev->memory_types_host_visible |= BITFIELD_BIT(i);
       if (pdev->memory_flags[i] & RADEON_FLAG_ENCRYPTED)
          pdev->memory_types_protected |= BITFIELD_BIT(i);
+      if (pdev->memory_flags[i] & RADEON_FLAG_GL2_BYPASS)
+         pdev->memory_types_device_coherent |= BITFIELD_BIT(i);
    }
 }
 
@@ -672,9 +682,13 @@ radv_get_binning_settings(const struct radv_physical_device *pdev, struct radv_b
 static bool
 radv_msrtss_enabled(const struct radv_physical_device *pdev)
 {
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+   return true;
+#else
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   return DETECT_OS_ANDROID || (instance->experimental_flags & RADV_EXPERIMENTAL_MSRTSS);
+   return instance->experimental_flags & RADV_EXPERIMENTAL_MSRTSS;
+#endif
 }
 
 static void
@@ -738,6 +752,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
       .KHR_maintenance11 = true,
+      .KHR_maintenance12 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = radv_perf_query_supported(pdev),
@@ -760,7 +775,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
-      .KHR_shader_abort = true,
+      .KHR_shader_abort = radv_shader_abort_enabled(pdev),
       .KHR_shader_atomic_int64 = true,
       .KHR_shader_bfloat16 = radv_bfloat16_enabled(pdev),
       .KHR_shader_clock = true,
@@ -832,6 +847,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_color_write_enable = true,
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = pdev->info.gfx_level >= GFX9,
+      .EXT_cooperative_matrix_maintenance1 = radv_cooperative_matrix_enabled(pdev),
       .EXT_custom_border_color = true,
       .EXT_custom_resolve = true,
       .EXT_debug_marker = instance->vk.trace_mode & RADV_TRACE_MODE_RGP,
@@ -842,7 +858,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = true,
       .EXT_descriptor_buffer = true,
-      .EXT_descriptor_heap = !(instance->debug_flags & RADV_DEBUG_NO_HEAP),
+      .EXT_descriptor_heap = !(RADV_DEBUG(instance, NO_HEAP)),
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_fault = true,
@@ -862,7 +878,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_fragment_shader_interlock = radv_has_pops(pdev),
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
-      .EXT_graphics_pipeline_library = !pdev->use_llvm && !(instance->debug_flags & RADV_DEBUG_NO_GPL),
+      .EXT_graphics_pipeline_library = !pdev->use_llvm && !(RADV_DEBUG(instance, NO_GPL)),
       .EXT_hdr_metadata = true,
       .EXT_host_image_copy = radv_host_image_copy_enabled(pdev),
       .EXT_host_query_reset = true,
@@ -871,7 +887,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
 #ifdef RADV_USE_WSI_PLATFORM
       .EXT_image_compression_control_swapchain = radv_compression_control_enabled(pdev),
 #endif
-      .EXT_image_drm_format_modifier = pdev->info.gfx_level >= GFX9,
+      .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = pdev->info.gfx_level >= GFX10,
       .EXT_image_view_min_lod = true,
@@ -920,7 +936,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_shader_float8 = pdev->info.gfx_level >= GFX11_7 && !pdev->use_llvm,
       .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_module_identifier = true,
-      .EXT_shader_object = !pdev->use_llvm && !(instance->debug_flags & RADV_DEBUG_NO_ESO),
+      .EXT_shader_object = !pdev->use_llvm && !(RADV_DEBUG(instance, NO_ESO)),
       .EXT_shader_replicated_composites = true,
       .EXT_shader_split_barrier = radv_split_barrier_enabled(pdev),
       .EXT_shader_stencil_export = true,
@@ -935,11 +951,13 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
       .EXT_transform_feedback = true,
+      .EXT_vertex_address_binding_unrestricted = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_vertex_input_dynamic_state = !pdev->use_llvm,
       .EXT_ycbcr_2plane_444_formats = true,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
+      .AMD_anti_lag = true,
       .AMD_buffer_marker = true,
       .AMD_device_coherent_memory = radv_device_coherent_memory_enabled(pdev),
       .AMD_draw_indirect_count = true,
@@ -958,7 +976,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .AMD_shader_image_load_store_lod = true,
       .AMD_shader_trinary_minmax = true,
       .AMD_texture_gather_bias_lod = pdev->info.gfx_level < GFX11,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .ANDROID_external_memory_android_hardware_buffer = RADV_SUPPORT_ANDROID_HARDWARE_BUFFER,
       .ANDROID_native_buffer = true,
 #endif
@@ -972,6 +990,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .MESA_image_alignment_control = pdev->info.gfx_level >= GFX9,
       .NV_compute_shader_derivatives = true,
       .NV_cooperative_matrix2 = radv_cooperative_matrix2_nv_enabled(pdev),
+      .NV_cooperative_matrix_decode_vector = radv_cooperative_matrix2_nv_enabled(pdev),
       .VALVE_mutable_descriptor_type = true,
       .VALVE_shader_mixed_float_dot_product = pdev->info.compiler_info.has_accelerated_dot_product,
       .VALVE_video_encode_rgb_conversion =
@@ -1461,6 +1480,13 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .cooperativeMatrix = radv_cooperative_matrix_enabled(pdev),
       .cooperativeMatrixRobustBufferAccess = false,
 
+      /* VK_EXT_cooperative_matrix_maintenance1 */
+      .cooperativeMatrixProperties2 = true,
+      .cooperativeMatrixReductions = true,
+      .cooperativeMatrixConversions = true,
+      .cooperativeMatrixPerElementOperations = true,
+      .cooperativeMatrixGetCoordinate = true,
+
       /* VK_EXT_image_compression_control */
       .imageCompressionControl = radv_compression_control_enabled(pdev),
 
@@ -1471,7 +1497,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_device_fault */
       .deviceFaultEXT = true,
-      .deviceFaultVendorBinaryEXT = instance->debug_flags & RADV_DEBUG_HANG,
+      .deviceFaultVendorBinaryEXT = RADV_DEBUG(instance, HANG),
 
       /* VK_KHR_depth_clamp_zero_one */
       .depthClampZeroOne = true,
@@ -1569,12 +1595,15 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderFloat8CooperativeMatrix = radv_cooperative_matrix_enabled(pdev),
 
       /* VK_NV_cooperative_matrix2 */
-      .cooperativeMatrixConversions = true,
+      .cooperativeMatrixConversionsNV = true,
       .cooperativeMatrixFlexibleDimensions = true,
-      .cooperativeMatrixReductions = true,
-      .cooperativeMatrixPerElementOperations = true,
+      .cooperativeMatrixReductionsNV = true,
+      .cooperativeMatrixPerElementOperationsNV = true,
       .cooperativeMatrixTensorAddressing = true,
       .cooperativeMatrixBlockLoads = true,
+
+      /* VK_NV_cooperative_matrix_decode_vector */
+      .cooperativeMatrixDecodeVector = true,
 
       /* VK_KHR_video_encode_av1 */
       .videoEncodeAV1 = true,
@@ -1661,18 +1690,27 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_device_fault */
       .deviceFault = true,
-      .deviceFaultVendorBinary = instance->debug_flags & RADV_DEBUG_HANG,
+      .deviceFaultVendorBinary = RADV_DEBUG(instance, HANG),
       .deviceFaultReportMasked = true,
       .deviceFaultDeviceLostOnMasked = false,
 
       /* VK_KHR_shader_abort */
-      .shaderAbort = true,
+      .shaderAbort = radv_shader_abort_enabled(pdev),
 
       /* VK_EXT_shader_split_barrier */
       .shaderSplitBarrier = radv_split_barrier_enabled(pdev),
 
       /* VK_KHR_extended_flags */
       .extendedFlags = true,
+
+      /* VK_AMD_anti_lag */
+      .antiLag = true,
+
+      /* VK_KHR_maintenance12 */
+      .maintenance12 = true,
+
+      /* VK_EXT_vertex_address_binding_unrestricted */
+      .vertexAddressBindingUnrestricted = true,
    };
 }
 
@@ -2166,9 +2204,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .fragmentShadingRateNonTrivialCombinerOps = true,
       .maxFragmentSize = (VkExtent2D){2, 2},
       .maxFragmentSizeAspectRatio = 2,
-      .maxFragmentShadingRateCoverageSamples = pdev->info.gfx_level >= GFX12 ? 16 : 32,
-      .maxFragmentShadingRateRasterizationSamples =
-         pdev->info.gfx_level >= GFX12 ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_8_BIT,
+      .maxFragmentShadingRateCoverageSamples = 16,
+      .maxFragmentShadingRateRasterizationSamples = VK_SAMPLE_COUNT_4_BIT,
       .fragmentShadingRateWithShaderDepthStencilWrites = !pdev->info.has_vrs_ds_export_bug,
       .fragmentShadingRateWithSampleMask = true,
       .fragmentShadingRateWithShaderSampleMask = false,
@@ -2393,6 +2430,9 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_EXT_shader_split_barrier */
       .splitBarrierReservedSharedMemory = 0,
+
+      /* VK_KHR_maintenance12 */
+      .maxInputAttachmentIndex = ~0,
    };
 
    struct vk_properties *p = &pdev->vk.properties;
@@ -2530,14 +2570,41 @@ radv_physical_device_destroy(struct vk_physical_device *vk_device)
    vk_free(&instance->vk.alloc, pdev);
 }
 
+// clang-format off
+static const uint32_t driconf_device_versions[] = {
+   [GFX6] = 60,
+   [GFX7] = 70,
+   [GFX8] = 80,
+   [GFX9] = 90,
+   [GFX10] = 100,
+   [GFX10_3] = 103,
+   [GFX11] = 110,
+   [GFX11_5] = 115,
+   [GFX11_7] = 117,
+   [GFX12] = 120,
+   [GFX12_1] = 121,
+};
+// clang-format on
+
+static uint32_t
+radv_get_driconf_device_version(const struct radv_physical_device *pdev)
+{
+   assert(pdev->info.gfx_level < ARRAY_SIZE(driconf_device_versions));
+   uint32_t device_version = driconf_device_versions[pdev->info.gfx_level];
+   assert(device_version != 0 && "Unknown gfx_level for the driconf device version");
+   return device_version;
+}
+
 static void
 radv_init_dri_options(struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   const uint32_t device_version = radv_get_driconf_device_version(pdev);
    struct radv_drirc *drirc = &pdev->drirc;
 
    radv_parse_dri_options(drirc, &(driConfigFileParseParams){
                                     .driverName = "radv",
+                                    .deviceVersion = device_version,
                                     .applicationName = instance->vk.app_info.app_name,
                                     .applicationVersion = instance->vk.app_info.app_version,
                                     .engineName = instance->vk.app_info.engine_name,
@@ -2549,13 +2616,6 @@ radv_init_dri_options(struct radv_physical_device *pdev)
       const bool is_d3d9 = instance->vk.app_info.app_version & 0x1;
 
       drirc->debug.disable_trunc_coord &= !is_d3d9;
-   }
-
-   if (pdev->info.gfx_level >= GFX12) {
-      /* GFX12 isn't affected by any DCC issues from drirc. */
-      pdev->drirc.debug.disable_dcc = false;
-      pdev->drirc.debug.disable_dcc_stores = false;
-      pdev->drirc.debug.disable_dcc_mips = false;
    }
 }
 
@@ -2610,7 +2670,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
    drmFreeVersion(version);
 
-   if (instance->debug_flags & RADV_DEBUG_STARTUP)
+   if (RADV_DEBUG(instance, STARTUP))
       fprintf(stderr, "radv: info: Found device '%s'.\n", path);
 
    struct radv_physical_device *pdev =
@@ -2641,7 +2701,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    struct radeon_winsys_info winsys_info;
 
-   result = radv_amdgpu_winsys_query_info(fd, instance->debug_flags, is_virtio, &winsys_info);
+   result =
+      radv_amdgpu_winsys_query_info(fd, is_virtio, !RADV_DEBUG(instance, NO_CACHE_COMPAT), &winsys_info);
    if (result != VK_SUCCESS) {
       result = vk_errorf(instance, result, "failed to query GPU info");
       goto fail;
@@ -2693,8 +2754,19 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
    if (!radv_is_gpu_supported(&pdev->info)) {
-      if (instance->debug_flags & RADV_DEBUG_STARTUP)
+      if (RADV_DEBUG(instance, STARTUP))
          fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n", ac_get_family_name(pdev->info.family));
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
+      goto fail;
+   }
+
+   /* Vulkan requires either gfx or compute queues to be available.
+    * Fail initialization if neither are present (e.g., decode-only configurations).
+    */
+   if (!pdev->info.ip[AMD_IP_GFX].num_queues && !pdev->info.ip[AMD_IP_COMPUTE].num_queues) {
+      if (RADV_DEBUG(instance, STARTUP))
+         fprintf(stderr, "radv: info: device '%s' has no gfx or compute queues available.\n",
+                 ac_get_family_name(pdev->info.family));
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail;
    }
@@ -2705,14 +2777,14 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    }
 
-   pdev->use_llvm = instance->debug_flags & RADV_DEBUG_LLVM;
+   pdev->use_llvm = RADV_DEBUG(instance, LLVM);
 #if !AMD_LLVM_AVAILABLE
    if (pdev->use_llvm) {
       fprintf(stderr, "ERROR: LLVM compiler backend selected for radv, but LLVM support was not "
                       "enabled at build time.\n");
       abort();
    }
-#elif NDEBUG
+#elif !RADV_LLVM_BACKEND
    if (pdev->use_llvm) {
       fprintf(stderr, "ERROR: The LLVM compiler backend is only for debugging and not supported "
                       "in release builds of RADV!\n");
@@ -2720,7 +2792,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    pdev->emulate_etc2 = !pdev->info.has_etc_support;
    pdev->emulate_astc = true;
 #else
@@ -2742,11 +2814,11 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    pdev->dcc_msaa_allowed = (instance->perftest_flags & RADV_PERFTEST_DCC_MSAA);
 
-   pdev->use_fmask = pdev->info.compiler_info.has_fmask && !(instance->debug_flags & RADV_DEBUG_NO_FMASK);
+   pdev->use_fmask = pdev->info.compiler_info.has_fmask && !(RADV_DEBUG(instance, NO_FMASK));
 
    pdev->force_64_byte_sampled_image = !pdev->use_fmask && pdev->drirc.debug.force_64_byte_sampled_image;
 
-   pdev->use_hiz = !(instance->debug_flags & RADV_DEBUG_NO_HIZ);
+   pdev->use_hiz = !(RADV_DEBUG(instance, NO_HIZ));
 
    if (pdev->info.gfx_level == GFX12) {
       const char *gfx12_hiz_wa_str = pdev->drirc.performance.gfx12_hiz_wa;
@@ -2760,22 +2832,25 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
             pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_PARTIAL;
          } else if (!strcmp(gfx12_hiz_wa_str, "full")) {
             pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL;
+         } else if (!strcmp(gfx12_hiz_wa_str, "full_rez")) {
+            pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL_REZ;
          } else {
             fprintf(stderr, "radv: Invalid value found for radv_gfx12_hiz_wa. "
-                            "Accepted values are: disabled, partial or full.\n");
+                            "Accepted values are: disabled, partial, full or full_rez.\n");
          }
       }
    }
 
-   pdev->use_ngg = (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 &&
-                    !(instance->debug_flags & RADV_DEBUG_NO_NGG)) ||
-                   pdev->info.gfx_level >= GFX11;
+   pdev->use_ngg =
+      (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 && !(RADV_DEBUG(instance, NO_NGG))) ||
+      pdev->info.gfx_level >= GFX11;
 
    /* TODO: Investigate if NGG culling helps on GFX11. */
-   pdev->use_ngg_culling = pdev->use_ngg && pdev->info.max_render_backends > 1 &&
-                           (pdev->info.gfx_level == GFX10_3 || pdev->info.gfx_level == GFX10 ||
-                            (instance->perftest_flags & RADV_PERFTEST_NGGC)) &&
-                           !(instance->debug_flags & RADV_DEBUG_NO_NGGC);
+   pdev->use_ngg_culling = pdev->use_ngg &&
+                           (pdev->info.gfx_level == GFX10 ||
+                            (pdev->info.gfx_level == GFX10_3 && pdev->info.family != CHIP_RAPHAEL_MENDOCINO) ||
+                            instance->perftest_flags & RADV_PERFTEST_NGGC) &&
+                           !(RADV_DEBUG(instance, NO_NGGC));
 
    pdev->emulate_ngg_gs_query_pipeline_stat = pdev->use_ngg && pdev->info.gfx_level < GFX11;
 
@@ -2856,7 +2931,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    radv_get_physical_device_properties(pdev);
 
-   if ((instance->debug_flags & RADV_DEBUG_INFO))
+   if ((RADV_DEBUG(instance, INFO)))
       ac_print_gpu_info(stdout, &pdev->info, fd);
 
    radv_init_physical_device_decoder(pdev);
@@ -3097,8 +3172,8 @@ radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, ui
    assert(*pCount <= 6);
 
    for (uint32_t i = 0; i < *pCount; i++) {
-      vk_foreach_struct (ext, pQueueFamilyProperties[i].pNext) {
-         switch (ext->sType) {
+      vk_foreach_struct (sType, ext, pQueueFamilyProperties[i].pNext) {
+         switch (sType) {
          case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
             VkQueueFamilyGlobalPriorityProperties *prop = (VkQueueFamilyGlobalPriorityProperties *)ext;
 
@@ -3564,7 +3639,7 @@ struct matrix_prop {
 };
 
 static void
-fill_matrix_prop_khr(struct __vk_outarray *base, struct matrix_prop *prop)
+fill_matrix_prop_khr(struct __vk_outarray *base, struct matrix_prop *prop, void *fill_data)
 {
    vk_outarray(VkCooperativeMatrixPropertiesKHR) *out = (void *)base;
 
@@ -3584,7 +3659,31 @@ fill_matrix_prop_khr(struct __vk_outarray *base, struct matrix_prop *prop)
 }
 
 static void
-fill_flexible_matrix_prop_nv(struct __vk_outarray *base, struct matrix_prop *prop)
+fill_matrix_prop2_ext(struct __vk_outarray *base, struct matrix_prop *prop, void *fill_data)
+{
+   vk_outarray(VkCooperativeMatrixProperties2EXT) *out = (void *)base;
+   bool saturate_flag = *(bool *)fill_data;
+
+   if (prop->saturate && !saturate_flag)
+      return;
+   if (!prop->saturate && saturate_flag)
+      return;
+
+   vk_outarray_append_typed(VkCooperativeMatrixProperties2EXT, out, p)
+   {
+      *p = (struct VkCooperativeMatrixProperties2EXT){.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_2_EXT,
+                                                      .MGranularity = 16,
+                                                      .NGranularity = 16,
+                                                      .KGranularity = 16,
+                                                      .AType = prop->a_type,
+                                                      .BType = prop->b_type,
+                                                      .CType = prop->c_type,
+                                                      .ResultType = prop->r_type};
+   }
+}
+
+static void
+fill_flexible_matrix_prop_nv(struct __vk_outarray *base, struct matrix_prop *prop, void *fill_data)
 {
    vk_outarray(VkCooperativeMatrixFlexibleDimensionsPropertiesNV) *out = (void *)base;
 
@@ -3606,7 +3705,8 @@ fill_flexible_matrix_prop_nv(struct __vk_outarray *base, struct matrix_prop *pro
 
 static void
 fill_array_sizes_structs(const struct radv_physical_device *pdev, struct __vk_outarray *base,
-                         void (*array_size_cb)(struct __vk_outarray *base, struct matrix_prop *prop))
+                         void (*array_size_cb)(struct __vk_outarray *base, struct matrix_prop *prop, void *fill_data),
+                         void *fill_data)
 {
    /* The Vulkan spec says:
     * If some types are preferred over other types (e.g. for performance),
@@ -3622,7 +3722,7 @@ fill_array_sizes_structs(const struct radv_physical_device *pdev, struct __vk_ou
             prop.a_type = e5m2_a ? VK_COMPONENT_TYPE_FLOAT8_E5M2_EXT : VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT;
             prop.b_type = e5m2_b ? VK_COMPONENT_TYPE_FLOAT8_E5M2_EXT : VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT;
             prop.c_type = prop.r_type = VK_COMPONENT_TYPE_FLOAT32_KHR;
-            (*array_size_cb)(base, &prop);
+            (*array_size_cb)(base, &prop, fill_data);
          }
       }
    }
@@ -3639,7 +3739,7 @@ fill_array_sizes_structs(const struct radv_physical_device *pdev, struct __vk_ou
                prop.b_type = bsigned ? VK_COMPONENT_TYPE_SINT8_KHR : VK_COMPONENT_TYPE_UINT8_KHR;
                prop.c_type = prop.r_type = csigned ? VK_COMPONENT_TYPE_SINT32_KHR : VK_COMPONENT_TYPE_UINT32_KHR;
 
-               (*array_size_cb)(base, &prop);
+               (*array_size_cb)(base, &prop, fill_data);
             }
          }
       }
@@ -3654,7 +3754,7 @@ fill_array_sizes_structs(const struct radv_physical_device *pdev, struct __vk_ou
          if (!radv_bfloat16_enabled(pdev) && bfloat)
             continue;
 
-         (*array_size_cb)(base, &prop);
+         (*array_size_cb)(base, &prop, fill_data);
       }
    }
 }
@@ -3665,7 +3765,21 @@ radv_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(VkPhysicalDevice physicalDe
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties, pPropertyCount);
-   fill_array_sizes_structs(pdev, &out.base, fill_matrix_prop_khr);
+   fill_array_sizes_structs(pdev, &out.base, fill_matrix_prop_khr, NULL);
+   return vk_outarray_status(&out);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetPhysicalDeviceCooperativeMatrixProperties2EXT(VkPhysicalDevice physicalDevice,
+                                                      const VkPhysicalDeviceCooperativeMatrixInfo2EXT *info,
+                                                      uint32_t *pPropertyCount,
+                                                      VkCooperativeMatrixProperties2EXT *pProperties)
+{
+   VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
+   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixProperties2EXT, out, pProperties, pPropertyCount);
+   bool saturate_flag = !!(info->flags & VK_COOPERATIVE_MATRIX_SATURATING_ACCUMULATION_BIT_EXT);
+   if (info->scope == VK_SCOPE_SUBGROUP_KHR)
+      fill_array_sizes_structs(pdev, &out.base, fill_matrix_prop2_ext, (void *)&saturate_flag);
    return vk_outarray_status(&out);
 }
 
@@ -3676,7 +3790,7 @@ radv_GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV(
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixFlexibleDimensionsPropertiesNV, out, pProperties, pPropertyCount);
-   fill_array_sizes_structs(pdev, &out.base, fill_flexible_matrix_prop_nv);
+   fill_array_sizes_structs(pdev, &out.base, fill_flexible_matrix_prop_nv, NULL);
    return vk_outarray_status(&out);
 }
 

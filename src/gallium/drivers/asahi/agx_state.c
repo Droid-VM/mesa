@@ -1554,8 +1554,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS(_, nir, poly_nir_lower_tcs, true);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
-      NIR_PASS(_, nir, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs,
-               &gs_info);
+      poly_nir_lower_gs(nir, &gs_count, &gs_copy, &pre_gs, &gs_info);
 
       agx_preprocess_nir(gs_count);
       agx_preprocess_nir(gs_copy);
@@ -5554,6 +5553,7 @@ agx_init_state_functions(struct pipe_context *ctx)
    ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->resource_release = u_default_resource_release;
    ctx->draw_vbo = agx_draw_vbo;
+   ctx->draw_vbo_buffers = util_draw_vbo_buffers;
    ctx->launch_grid = agx_launch_grid;
    ctx->set_global_binding = agx_set_global_binding;
    ctx->texture_barrier = agx_texture_barrier;

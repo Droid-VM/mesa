@@ -70,22 +70,6 @@ anv_i915_gem_set_tiling(struct anv_device *device, uint32_t gem_handle,
    return intel_ioctl(device->fd, DRM_IOCTL_I915_GEM_SET_TILING, &set_tiling);
 }
 
-int
-anv_i915_gem_wait(struct anv_device *device, uint32_t gem_handle,
-                  int64_t *timeout_ns)
-{
-   struct drm_i915_gem_wait wait = {
-      .bo_handle = gem_handle,
-      .timeout_ns = *timeout_ns,
-      .flags = 0,
-   };
-
-   int ret = intel_ioctl(device->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
-   *timeout_ns = wait.timeout_ns;
-
-   return ret;
-}
-
 VkResult
 anv_i915_gem_import_bo_alloc_flags_to_bo_flags(struct anv_device *device,
                                                struct anv_bo *bo,

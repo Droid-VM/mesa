@@ -162,6 +162,8 @@ gather_ubo_ranges(nir_shader *nir, nir_intrinsic_instr *instr,
 
       plan_r->start = r.start;
       plan_r->end = r.end;
+      plan_r->can_speculate &=
+         !!(nir_intrinsic_access(instr) & ACCESS_CAN_SPECULATE);
       *upload_remaining -= added;
 
       merge_neighbors(state, i);
@@ -179,6 +181,7 @@ gather_ubo_ranges(nir_shader *nir, nir_intrinsic_instr *instr,
    plan_r->ubo = ubo;
    plan_r->start = r.start;
    plan_r->end = r.end;
+   plan_r->can_speculate = nir_intrinsic_access(instr) & ACCESS_CAN_SPECULATE;
    *upload_remaining -= added;
 }
 
@@ -415,7 +418,8 @@ copy_global_to_uniform(nir_shader *nir, struct ir3_ubo_analysis_state *state)
       for (unsigned offset = 0; offset < size; offset += 256 * 16) {
          unsigned const_offset = range->offset / 4 + offset / 4;
          nir_copy_global_to_uniform_ir3(
-            b, base, .base = start + offset, .range_base = const_offset,
+            b, base, .access = range->can_speculate ? ACCESS_CAN_SPECULATE : 0,
+            .base = start + offset, .range_base = const_offset,
             .range = MIN2(256, (size - offset) / 16));
       }
    }
@@ -439,8 +443,11 @@ copy_ubo_to_uniform(nir_shader *nir, const struct ir3_const_state *const_state)
       const struct ir3_ubo_range *range = &state->range[i];
 
       nir_def *ubo = nir_imm_int(b, range->ubo.block);
+      enum gl_access_qualifier access =
+         range->can_speculate ? ACCESS_CAN_SPECULATE : 0;
       if (range->ubo.bindless) {
          ubo = nir_bindless_resource_ir3(b, 32, ubo,
+                                         .access = access,
                                          .desc_set = range->ubo.bindless_base);
       }
 
@@ -451,6 +458,7 @@ copy_ubo_to_uniform(nir_shader *nir, const struct ir3_const_state *const_state)
       for (unsigned offset = 0; offset < size; offset += 256) {
          nir_copy_ubo_to_uniform_ir3(b, ubo, nir_imm_int(b, range->start / 16 +
                                                          offset),
+                                     .access = access,
                                      .base = range->offset / 4 + offset * 4,
                                      .range = MIN2(size - offset, 256));
       }
@@ -470,7 +478,10 @@ instr_is_load_ubo(nir_instr *instr)
    /* nir_lower_ubo_vec4 happens after this pass. */
    assert(op != nir_intrinsic_load_ubo_vec4);
 
-   return op == nir_intrinsic_load_ubo;
+   if (op != nir_intrinsic_load_ubo)
+      return false;
+
+   return ir3_nir_is_prefetchable(nir_instr_as_intrinsic(instr));
 }
 
 bool
@@ -756,8 +767,9 @@ fixup_load_const_ir3_instr(struct nir_builder *b, nir_instr *instr, void *arg)
    const unsigned base_offset_limit = (1 << 9); /* 9 bits */
    unsigned base_offset = nir_intrinsic_base(intr);
 
-   /* Or cases were base offset is lower than the hw limit: */
-   if (base_offset < base_offset_limit)
+   /* Or cases where base offset for each component (because we scalarize the
+    * intrinsic when emitting ir3) fits in the hw limit: */
+   if (base_offset <= base_offset_limit - intr->num_components)
       return NULL;
 
    b->cursor = nir_before_instr(instr);
@@ -784,6 +796,28 @@ fixup_load_const_ir3_instr(struct nir_builder *b, nir_instr *instr, void *arg)
     */
    unsigned new_base_offset = base_offset % base_offset_limit;
 
+   /* If the vector components straddle the hardware limit, we scalarize the
+    * intrinsic so that nir_opt_offsets is able to see which offset additions
+    * for individual components are safe to fold back into the base offset.
+    */
+   if (new_base_offset > base_offset_limit - intr->num_components) {
+      nir_def *results[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < intr->def.num_components; i++) {
+         unsigned component_base_offset = base_offset + i;
+         new_base_offset = component_base_offset % base_offset_limit;
+
+         results[i] = nir_load_const_ir3(
+            b, 1, intr->def.bit_size,
+            nir_iadd_imm(b, offset, component_base_offset - new_base_offset),
+            .base = new_base_offset);
+      }
+
+      nir_def *result = nir_vec(b, results, intr->def.num_components);
+
+      return result;
+   }
+
+   /* All components fit, just update the existing intrinsic: */
    nir_intrinsic_set_base(intr, new_base_offset);
    offset = nir_iadd_imm(b, offset, base_offset - new_base_offset);
 
@@ -831,6 +865,7 @@ ir3_nir_lower_load_const_instr(nir_builder *b, nir_instr *in_instr, void *data)
 
    nir_def *result =
       nir_load_ubo(b, num_components, bit_size, index, offset,
+                   .access = ACCESS_CAN_SPECULATE,
                    .align_mul = nir_intrinsic_align_mul(instr),
                    .align_offset = nir_intrinsic_align_offset(instr),
                    .range_base = base, .range = nir_intrinsic_range(instr));

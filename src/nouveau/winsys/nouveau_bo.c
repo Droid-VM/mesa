@@ -235,24 +235,10 @@ nouveau_ws_bo_from_dma_buf(struct nouveau_ws_device *dev, int fd)
    return bo;
 }
 
-static bool
-atomic_dec_not_one(atomic_uint_fast32_t *counter)
-{
-   uint_fast32_t old = *counter;
-   while (1) {
-      assert(old != 0);
-      if (old == 1)
-         return false;
-
-      if (atomic_compare_exchange_weak(counter, &old, old - 1))
-         return true;
-   }
-}
-
 void
 nouveau_ws_bo_destroy(struct nouveau_ws_bo *bo)
 {
-   if (atomic_dec_not_one(&bo->refcnt))
+   if (p_atomic_dec_not_one(&bo->refcnt))
       return;
 
    struct nouveau_ws_device *dev = bo->dev;

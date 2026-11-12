@@ -1,8 +1,6 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
-use std::f32::consts::PI;
-
 use crate::data_type::*;
 use crate::ir::*;
 use crate::ops::*;
@@ -49,13 +47,20 @@ pub trait Builder {
         });
     }
 
-    fn fadd_32_to(&mut self, dst: Dst, a: Src, b: Src) {
+    fn f32_to_f16_to(&mut self, mut dst: Dst, src: Src, round: FRound) {
+        debug_assert_eq!(dst.dst_ref.bytes_written(), 2);
+        dst.lanes = DstLanes::AnyHF;
+        let neutral_src = if round != FRound::Down {
+            Src::fneg_zero(32)
+        } else {
+            Src::zero(32)
+        };
         self.push_op(OpFAdd {
             dst,
             dst_type: DataType::F32,
-            round: FRound::NearestEven,
+            round,
             clamp: FClamp::None,
-            srcs: [a, b],
+            srcs: [src, neutral_src],
         });
     }
 
@@ -111,21 +116,21 @@ pub trait SSABuilder: Builder + AllocSSA {
         def
     }
 
+    fn copy_i64(&mut self, src: Src) -> SSARef {
+        let def = self.alloc_ref(64);
+        self.copy_i64_to(def.clone().into(), src);
+        def
+    }
+
     fn copy_ssa(&mut self, src: SSAValue) -> SSAValue {
         let def = self.alloc_ssa(src.bits());
         self.copy_to(def.into(), DataType::i(src.bits()), src.into());
         def
     }
 
-    fn fma_32(&mut self, src: Src, mul: Src, add: Src) -> SSAValue {
-        let def = self.alloc_ssa(32);
-        self.fma_32_to(def.into(), src, mul, add);
-        def
-    }
-
-    fn fadd_32(&mut self, a: Src, b: Src) -> SSAValue {
-        let def = self.alloc_ssa(32);
-        self.fadd_32_to(def.into(), a, b);
+    fn f32_to_f16(&mut self, a: Src, round: FRound) -> SSAValue {
+        let def = self.alloc_ssa(16);
+        self.f32_to_f16_to(def.into(), a, round);
         def
     }
 
@@ -245,15 +250,15 @@ pub trait SSABuilder: Builder + AllocSSA {
         let bits = dst_type.bits();
         let comps = dst_type.comps();
         debug_assert!(bits == 16 || bits == 32);
-        debug_assert!(bits * comps <= 32);
+        debug_assert!(comps == 1);
 
         let lane = match axis {
             DerivativeAxis::X => 1_u8,
             DerivativeAxis::Y => 2_u8,
         };
 
-        let left = self.alloc_ssa(dst_type.total_bits());
-        let right = self.alloc_ssa(dst_type.total_bits());
+        let left = self.alloc_ssa(32);
+        let right = self.alloc_ssa(32);
         if coarse {
             self.push_op(OpClper {
                 dst: left.into(),
@@ -283,13 +288,23 @@ pub trait SSABuilder: Builder + AllocSSA {
             });
         }
 
-        let diff = self.alloc_ssa(32);
+        // CLPER works in 32-bits, but we actually only need 16 bits
+        let swiz = if bits == 16 {
+            Swizzle::replicate_half(0)
+        } else {
+            Swizzle::NONE
+        };
+
+        let diff = self.alloc_ssa(dst_type.total_bits());
         self.push_op(OpFAdd {
             dst: diff.into(),
             dst_type,
             round: FRound::NearestEven,
             clamp: FClamp::None,
-            srcs: [Src::from(right), Src::from(left).fneg()],
+            srcs: [
+                Src::from(right).swizzle(swiz),
+                Src::from(left).swizzle(swiz).fneg(),
+            ],
         });
 
         if coarse || sign_is_ignored {
@@ -302,7 +317,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         //
         //  sign_bit = XOR(sign_bit, axis_bit(lane_id)).
         let lane = self.model().fau().special(SpecialFAU::LaneId).unwrap();
-        let mut lane = Src::from(lane);
+        let mut lane = Src::from(lane).word(0);
         if bits == 16 {
             lane = lane.half(0);
         }
@@ -316,10 +331,11 @@ pub trait SSABuilder: Builder + AllocSSA {
         // We skip it on the X-axis, because the lshift-by-31 will get us a
         // clean mask.
         if matches!(axis, DerivativeAxis::Y) {
-            lane = self.and(DataType::u(bits), 2_u8.into(), lane).into();
+            let mask = Src::from(2_u32).swizzle(swiz);
+            lane = self.and(DataType::u(bits), mask, lane).into();
         }
 
-        let dst = self.alloc_ssa(32);
+        let dst = self.alloc_ssa(dst_type.total_bits());
         self.push_op(OpShiftLop {
             dst: dst.into(),
             dst_type: DataType::get(comps, NumericType::UnsignedInteger, bits),
@@ -372,6 +388,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         let frexp = self.alloc_ssa(32);
         self.push_op(OpFrexpE {
             dst: frexp.into(),
+            src_type: DataType::F32,
             src: arg.clone(),
             mode: FrexpMode::Log,
             neg_result: false,
@@ -404,74 +421,6 @@ pub trait SSABuilder: Builder + AllocSSA {
         let def = self.alloc_ssa(32);
         self.flog2_32_to(def.into(), src);
         def
-    }
-
-    fn fsincos_32_to(&mut self, dst: Dst, src: Src, is_cos: bool) {
-        // The hardware has extremely coarse tables for approximating sin/cos,
-        // accessible as FSIN/COS_TABLE.u6, which multiplies the bottom 6-bits by
-        // pi/32 and calculates the results. We use them to calculate sin/cos via
-        // a Taylor approximation:
-        //
-        // f(x + e) = f(x) + e f'(x) + (e^2)/2 f''(x)
-        // sin(x + e) = sin(x) + e cos(x) - (e^2)/2 sin(x)
-        // cos(x + e) = cos(x) - e sin(x) - (e^2)/2 cos(x)
-        let two_over_pi: f32 = 2.0 / PI;
-        let mpi_over_two: f32 = -PI / 2.0;
-        let sincos_bias: f32 = 786432.0;
-
-        // Compute x (the lower b)
-        let x_u6 =
-            self.fma_32(src.clone(), two_over_pi.into(), sincos_bias.into());
-        let e_part = self.fadd_32(x_u6.into(), Src::from(sincos_bias).fneg());
-        let e = self.fma_32(e_part.into(), mpi_over_two.into(), src);
-
-        let sinx = self.alloc_ssa(32);
-        let cosx = self.alloc_ssa(32);
-        self.push_op(OpFSinTable {
-            dst: sinx.into(),
-            src: x_u6.into(),
-            offset: false,
-        });
-        self.push_op(OpFCosTable {
-            dst: cosx.into(),
-            src: x_u6.into(),
-            offset: false,
-        });
-
-        let sinx = Src::from(sinx);
-        let cosx = Src::from(cosx);
-
-        let f = if is_cos { cosx.clone() } else { sinx.clone() };
-        let fd = if is_cos { sinx.fneg() } else { cosx };
-        // f''(x) = -f(x)
-        let mfdd = f.clone();
-
-        // e^2 / 2
-        let e2_over2 = self.alloc_ssa(32);
-        self.push_op(OpFmaRScale {
-            dst: e2_over2.into(),
-            round: FRound::NearestEven,
-            clamp: FClamp::None,
-            srcs: [e.into(), e.into(), Src::from(-0.0)],
-            scale: Src::from(-1i32 as u32),
-        });
-
-        // (e^2)/2 f''(x)
-        let quadratic =
-            self.fma_32(Src::from(e2_over2).fneg(), mfdd, Src::from(-0.0));
-
-        // e f'(x) + (e^2/2) f''(x)
-        let partial = self.alloc_ssa(32);
-        self.push_op(OpFma {
-            dst: partial.into(),
-            dst_type: DataType::F32,
-            round: FRound::NearestEven,
-            clamp: FClamp::NegOneToOne,
-            srcs: [e.into(), fd, quadratic.into()],
-        });
-
-        // f(x) + e f'(x) + (e^2/2) f''(x)
-        self.fadd_32_to(dst, partial.into(), f);
     }
 }
 

@@ -45,7 +45,7 @@ panvk_create_bind_queue(struct panvk_device *dev,
    if (result != VK_SUCCESS)
       goto err_free_queue;
 
-   int ret = drmSyncobjCreate(dev->drm_fd, 0, &queue->syncobj_handle);
+   int ret = pan_kmod_sync_create(dev->kmod.dev, 0, &queue->syncobj_handle);
    if (ret) {
       result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                             "Failed to create our internal sync object");
@@ -71,7 +71,7 @@ panvk_destroy_bind_queue(struct vk_queue *vk_queue)
       container_of(vk_queue, struct panvk_bind_queue, vk);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
-   drmSyncobjDestroy(dev->drm_fd, queue->syncobj_handle);
+   pan_kmod_sync_destroy(dev->kmod.dev, queue->syncobj_handle);
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);
 }

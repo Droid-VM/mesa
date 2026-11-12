@@ -7,6 +7,8 @@
 
 #include "slice.h"
 #include "tar.h"
+#include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/ralloc.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
@@ -40,7 +42,7 @@ ensure_output_dir(const char *dir)
    if (stat(dir, &st) == 0)
       return S_ISDIR(st.st_mode);
 
-   return mkdir(dir, 0755) == 0;
+   return os_mkdir(dir, 0755) == 0;
 }
 
 static bool
@@ -97,8 +99,9 @@ debug_archiver_open(void *mem_ctx, const char *name, const char *info)
 
    if (prefix) {
       if (!strcmp(prefix, "timestamp")) {
+         struct tm tm_buf;
          time_t now = time(NULL);
-         struct tm *tm_info = localtime(&now);
+         struct tm *tm_info = os_localtime(&now, &tm_buf);
 
          if (tm_info) {
             prefix = ralloc_asprintf(da, "%04d%02d%02d-%02d%02d%02d",

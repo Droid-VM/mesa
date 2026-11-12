@@ -29,6 +29,7 @@ struct pipe_blit_info;
 struct si_texture;
 struct pipe_box;
 struct pipe_context;
+enum ac_rgp_flush_bits;
 
 enum si_blitter_op /* bitmask */
 {
@@ -73,8 +74,7 @@ MESAPROC bool si_init_gfx_screen(struct si_screen *sscreen) TAILBT;
 MESAPROC void si_fini_gfx_screen(struct si_screen *sscreen) TAILV;
 
 /* si_shader_cache.c */
-void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                         unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
+void si_get_ir_cache_key(struct si_shader *shader, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
 
 bool si_init_shader_cache(struct si_screen *sscreen);
 
@@ -89,6 +89,7 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_b
                                    struct si_shader *shader, bool insert_into_disk_cache);
 
 /* si_sqtt.c */
+MESAPROC bool si_is_sqtt_active(const struct si_context *sctx) TAILB;
 void si_sqtt_write_event_marker(struct si_context* sctx, struct radeon_cmdbuf *rcs,
                                 enum rgp_sqtt_marker_event_type api_type,
                                 uint32_t vertex_offset_user_data,
@@ -110,10 +111,11 @@ si_write_user_event(struct si_context* sctx, struct radeon_cmdbuf *rcs,
 MESAPROC void
 si_sqtt_describe_barrier_start(struct si_context* sctx, struct radeon_cmdbuf *rcs) TAILV;
 MESAPROC void
-si_sqtt_describe_barrier_end(struct si_context* sctx, struct radeon_cmdbuf *rcs, unsigned flags) TAILV;
+si_sqtt_describe_barrier_end(struct si_context* sctx, struct radeon_cmdbuf *rcs, enum ac_rgp_flush_bits flush_bits) TAILV;
 bool si_init_sqtt(struct si_context *sctx);
 void si_destroy_sqtt(struct si_context *sctx);
-MESAPROC void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs) TAILV;
+MESAPROC void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs, bool end_of_frame) TAILV;
+MESAPROC void si_sqtt_finish_capture(struct si_context *sctx) TAILV;
 MESAPROC void si_sqtt_describe_begin(struct si_context *sctx, struct radeon_cmdbuf *rcs) TAILV;
 MESAPROC void si_sqtt_describe_flush(struct si_context *sctx) TAILV;
 

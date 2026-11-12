@@ -13,6 +13,8 @@
 
 #include "ac_gpu_info.h"
 
+struct ac_cmdbuf;
+
 /* Max counters per HW block */
 #define AC_QUERY_MAX_COUNTERS 16
 
@@ -225,5 +227,17 @@ ac_gfx103_get_perfcounters(uint32_t *num_blocks);
 
 const struct ac_pc_block_gfxdescr *
 ac_gfx10_get_perfcounters(uint32_t *num_blocks);
+
+void
+ac_pc_emit_shaders(enum amd_gfx_level gfx_level, struct ac_cmdbuf *cs, unsigned shaders);
+
+void ac_pc_emit_instance(struct ac_cmdbuf *cs, int se, int instance);
+
+void
+ac_pc_emit_select(enum amd_gfx_level gfx_level, enum amd_ip_type hw_ip,
+                  struct ac_cmdbuf *cs,
+                  struct ac_pc_block *block, unsigned count, unsigned *selectors);
+
+void ac_pc_emit_sample(struct ac_cmdbuf *cs);
 
 #endif

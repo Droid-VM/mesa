@@ -124,8 +124,11 @@ anv_copy_image_memory(struct anv_device *device,
    const uint32_t bs = fmt_layout->bpb / 8;
    void *img_ptr = binding->host_map + binding->map_delta + binding_offset;
 
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(surf, &tile_info);
+
    uint64_t start_tile_B, end_tile_B;
-   isl_surf_get_image_range_B_tile(surf, level,
+   isl_surf_get_image_range_B_tile(surf, &tile_info, level,
                                    base_img_array_layer + array_layer,
                                    base_img_z_offset_px + z_offset_px,
                                    &start_tile_B, &end_tile_B);

@@ -49,7 +49,7 @@ run_bs(brw_shader &s, bool allow_spilling)
 
 static std::unique_ptr<brw_shader>
 compile_single_bs(const struct brw_compiler *compiler,
-                  struct brw_compile_bs_params *params,
+                  struct brw_compile_params *params,
                   const struct brw_bs_prog_key *key,
                   struct brw_bs_prog_data *prog_data,
                   nir_shader *shader,
@@ -71,7 +71,7 @@ compile_single_bs(const struct brw_compiler *compiler,
       .dispatch_width = required_width,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
@@ -81,22 +81,18 @@ compile_single_bs(const struct brw_compiler *compiler,
 
    const brw_shader_params shader_params = {
       .compiler                = compiler,
-      .mem_ctx                 = params->base.mem_ctx,
+      .compile_params          = params,
       .nir                     = shader,
-      .key                     = &key->base,
-      .prog_data               = &prog_data->base,
       .dispatch_width          = required_width,
       .needs_register_pressure = needs_register_pressure,
-      .log_data                = params->base.log_data,
       .debug_enabled           = debug_enabled,
-      .archiver                = params->base.archiver,
    };
    auto s = std::make_unique<brw_shader>(&shader_params);
 
    const bool allow_spilling = true;
    if (!run_bs(*s, allow_spilling)) {
-      params->base.error_str =
-         ralloc_asprintf(params->base.mem_ctx,
+      params->error_str =
+         ralloc_asprintf(params->mem_ctx,
                          "Can't compile shader: '%s'.\n",
                          s->fail_msg);
       return nullptr;
@@ -107,23 +103,23 @@ compile_single_bs(const struct brw_compiler *compiler,
 
 const unsigned *
 brw_compile_bs(const struct brw_compiler *compiler,
-               struct brw_compile_bs_params *params)
+               struct brw_compile_params *params)
 {
-   nir_shader *shader = params->base.nir;
+   nir_shader *shader = params->nir;
    const struct brw_bs_prog_key *key =
-      (const struct brw_bs_prog_key *)params->base.key;
+      (const struct brw_bs_prog_key *)params->key;
    struct brw_bs_prog_data *prog_data =
-      (struct brw_bs_prog_data *)params->base.prog_data;
-   unsigned num_resume_shaders = params->num_resume_shaders;
-   nir_shader **resume_shaders = params->resume_shaders;
+      (struct brw_bs_prog_data *)params->prog_data;
+   unsigned num_resume_shaders = params->bs.num_resume_shaders;
+   nir_shader **resume_shaders = params->bs.resume_shaders;
 
-   brw_prog_data_init(&prog_data->base, &params->base);
+   brw_prog_data_init(&prog_data->base, params);
 
    prog_data->max_stack_size = 0;
 
    std::unique_ptr<brw_shader> main_shader =
       compile_single_bs(compiler, params, key, prog_data,
-                        shader, params->base.stats != NULL);
+                        shader, params->stats != NULL);
    if (!main_shader)
       return NULL;
 
@@ -157,7 +153,7 @@ brw_compile_bs(const struct brw_compiler *compiler,
 
    const brw_to_binary_params to_binary_params = {
       .compiler = compiler,
-      .params = &params->base,
+      .params = params,
       .prog_data = &prog_data->base,
       .shaders = { main_shader.get() },
       .resume_shaders = resume_ptrs.data(),

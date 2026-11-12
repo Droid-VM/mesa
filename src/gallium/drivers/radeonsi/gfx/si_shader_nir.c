@@ -106,6 +106,8 @@ void si_nir_late_opts(nir_shader *nir)
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    }
+
+   NIR_PASS(_, nir, nir_opt_uadd_carry, 32 | 64);
 }
 
 void si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir,

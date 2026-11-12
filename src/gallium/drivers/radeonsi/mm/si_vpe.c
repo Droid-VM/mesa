@@ -556,7 +556,8 @@ si_vpe_mpes_vpe_to_gm_primary(enum vpe_color_primaries vpe_pri)
 }
 
 static void
-si_vpe_load_default_primaries(struct vpe_hdr_metadata* vpe_hdr, enum vpe_color_primaries primaries)
+si_vpe_load_primaries(struct vpe_hdr_metadata* vpe_hdr, enum vpe_color_primaries primaries,
+                      const struct pipe_video_vpp_hdr10metadata* metadata)
 {
    enum vpe_color_primaries pri_idx = (primaries < VPE_PRIMARIES_COUNT)?
                                       primaries : VPE_PRIMARIES_BT709;
@@ -573,6 +574,35 @@ si_vpe_load_default_primaries(struct vpe_hdr_metadata* vpe_hdr, enum vpe_color_p
    vpe_hdr->max_mastering = Color_Parimaries[pri_idx].max_mastering;
    vpe_hdr->max_content   = Color_Parimaries[pri_idx].max_content;
    vpe_hdr->avg_content   = Color_Parimaries[pri_idx].avg_content;
+
+   if (metadata && metadata->valid) {
+      if (metadata->display_primaries_x[0] || metadata->display_primaries_y[0] ||
+          metadata->display_primaries_x[1] || metadata->display_primaries_y[1] ||
+          metadata->display_primaries_x[2] || metadata->display_primaries_y[2] ||
+          metadata->white_point_x || metadata->white_point_y)
+      {
+         vpe_hdr->greenX = metadata->display_primaries_x[0];
+         vpe_hdr->greenY = metadata->display_primaries_y[0];
+         vpe_hdr->blueX  = metadata->display_primaries_x[1];
+         vpe_hdr->blueY  = metadata->display_primaries_y[1];
+         vpe_hdr->redX   = metadata->display_primaries_x[2];
+         vpe_hdr->redY   = metadata->display_primaries_y[2];
+         vpe_hdr->whiteX = metadata->white_point_x;
+         vpe_hdr->whiteY = metadata->white_point_y;
+      }
+
+      vpe_hdr->min_mastering = (metadata->min_display_mastering_luminance)?
+                  metadata->min_display_mastering_luminance : vpe_hdr->min_mastering;
+
+      vpe_hdr->max_mastering = (metadata->max_display_mastering_luminance)?
+                  metadata->max_display_mastering_luminance : vpe_hdr->max_mastering;
+
+      vpe_hdr->max_content = (metadata->max_content_light_level)?
+                  metadata->max_content_light_level : vpe_hdr->max_content;
+
+      vpe_hdr->avg_content = (metadata->max_pic_average_light_level)?
+                  metadata->max_pic_average_light_level : vpe_hdr->avg_content;
+   }
 }
 
 static void
@@ -821,8 +851,8 @@ si_vpe_init_polyphase_filter(struct vpe_video_processor *vpeproc,
    stream->use_external_scaling_coeffs = true;
    stream->polyphase_scaling_coeffs.taps.h_taps = hw_num_taps[0];
    stream->polyphase_scaling_coeffs.taps.v_taps = hw_num_taps[1];
-   stream->polyphase_scaling_coeffs.taps.h_taps_c = 2;
-   stream->polyphase_scaling_coeffs.taps.v_taps_c = 2;
+   stream->polyphase_scaling_coeffs.taps.h_taps_c = 4;
+   stream->polyphase_scaling_coeffs.taps.v_taps_c = 4;
    stream->polyphase_scaling_coeffs.nb_phases = hw_num_phases;
 
    if (scaling_ratios[0] > 0)
@@ -878,8 +908,8 @@ si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
    scaling_info->dst_rect.height       = process_properties->dst_region.y1 - process_properties->dst_region.y0;
    scaling_info->taps.v_taps           = 0;
    scaling_info->taps.h_taps           = 0;
-   scaling_info->taps.v_taps_c         = 2;
-   scaling_info->taps.h_taps_c         = 2;
+   scaling_info->taps.v_taps_c         = 4;
+   scaling_info->taps.h_taps_c         = 4;
 
    /* Get current scaling ratio */
    if (stream->scaling_info.dst_rect.width > 1)
@@ -895,12 +925,19 @@ si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
       si_vpe_init_polyphase_filter(vpeproc, stream, scaling_ratios);
    }
 
-   scaling_info->enable_easf                         = false;
-   scaling_info->prefer_easf                         = false;
-   scaling_info->adaptive_sharpeness.enable          = false;
-   scaling_info->adaptive_sharpeness.sharpness_level = 0;
+   if(vpe_handle->level >= VPE_IP_LEVEL_2_0 && process_properties->sharpening.valid) {
+      scaling_info->enable_easf                         = true;
+      scaling_info->prefer_easf                         = true;
+      scaling_info->adaptive_sharpeness.enable          = true;
+      scaling_info->adaptive_sharpeness.sharpness_level = process_properties->sharpening.strength;
+   } else {
+      scaling_info->enable_easf                         = false;
+      scaling_info->prefer_easf                         = false;
+      scaling_info->adaptive_sharpeness.enable          = false;
+      scaling_info->adaptive_sharpeness.sharpness_level = 0;
+   }
 
-   if (process_properties->blend.global_alpha) {
+   if (process_properties->blend.mode & PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA) {
       blend_info->global_alpha_value   = process_properties->blend.global_alpha;
       blend_info->blending             = true;
       blend_info->pre_multiplied_alpha = false;
@@ -912,11 +949,10 @@ si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
       blend_info->global_alpha         = false;
    }
 
-   /* TO-DO: do ProcAmp in next stage */
-   color_adj->brightness               = 0.0;
-   color_adj->contrast                 = 1.0;
-   color_adj->hue                      = 0.0;
-   color_adj->saturation               = 1.0;
+   color_adj->brightness = process_properties->color_balance_brightness.valid ? process_properties->color_balance_brightness.strength : 0.0;
+   color_adj->contrast   = process_properties->color_balance_contrast.valid ? process_properties->color_balance_contrast.strength : 1.0;
+   color_adj->hue        = process_properties->color_balance_hue.valid ? process_properties->color_balance_hue.strength : 0.0;
+   color_adj->saturation = process_properties->color_balance_saturation.valid ? process_properties->color_balance_saturation.strength : 1.0;
 
    switch (process_properties->orientation & 0x7) {
    case PIPE_VIDEO_VPP_ROTATION_90:
@@ -936,16 +972,21 @@ si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
    stream->horizontal_mirror  = (process_properties->orientation & PIPE_VIDEO_VPP_FLIP_HORIZONTAL) ? true : false;
    stream->vertical_mirror    = (process_properties->orientation & PIPE_VIDEO_VPP_FLIP_VERTICAL)   ? true : false;
 
-   stream->enable_luma_key         = false;
-   stream->lower_luma_bound        = 0.5;
-   stream->upper_luma_bound        = 0.5;
+   if (vpe_handle->level >= VPE_IP_LEVEL_2_0 && (process_properties->blend.mode & PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY)) {
+      stream->enable_luma_key  = true;
+      stream->lower_luma_bound = process_properties->blend.min_luma;
+      stream->upper_luma_bound = process_properties->blend.max_luma;
+   } else {
+      stream->enable_luma_key         = false;
+      stream->lower_luma_bound        = 0.0;
+      stream->upper_luma_bound        = 0.0;
+   }
 
    stream->flags.reserved          = 0;
    stream->flags.geometric_scaling = is_geometric_scaling_round;
    stream->flags.hdr_metadata      = 0;
 
-   /* TO-DO: support HDR10 Metadata */
-   si_vpe_load_default_primaries(&stream->hdr_metadata, stream->surface_info.cs.primaries);
+   si_vpe_load_primaries(&stream->hdr_metadata, stream->surface_info.cs.primaries, &process_properties->in_hdr10metadata);
 }
 
 static void
@@ -971,8 +1012,8 @@ si_vpe_set_bg_stream_in_param(struct vpe_video_processor *vpeproc,
    scaling_info->dst_rect.height       = scaling_info->src_rect.height;
    scaling_info->taps.v_taps           = 0;
    scaling_info->taps.h_taps           = 0;
-   scaling_info->taps.v_taps_c         = 2;
-   scaling_info->taps.h_taps_c         = 2;
+   scaling_info->taps.v_taps_c         = 4;
+   scaling_info->taps.h_taps_c         = 4;
 
    if (!si_vpe_reuse_scaling_info(vpeproc, stream, scaling_ratios)) {
       /* Failed to reuse scaling info,
@@ -987,12 +1028,18 @@ si_vpe_set_bg_stream_in_param(struct vpe_video_processor *vpeproc,
    scaling_info->adaptive_sharpeness.enable          = false;
    scaling_info->adaptive_sharpeness.sharpness_level = 0;
 
-   blend_info->global_alpha_value                    = 1.0 - process_properties->blend.global_alpha;
-   blend_info->blending                              = true;
-   blend_info->pre_multiplied_alpha                  = false;
-   blend_info->global_alpha                          = true;
+   if (process_properties->blend.mode & PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA) {
+      blend_info->global_alpha_value                    = 1.0;
+      blend_info->blending                              = true;
+      blend_info->pre_multiplied_alpha                  = false;
+      blend_info->global_alpha                          = true;
+   } else {
+      blend_info->global_alpha_value                    = 0.0;
+      blend_info->blending                              = false;
+      blend_info->pre_multiplied_alpha                  = false;
+      blend_info->global_alpha                          = false;
+   }
 
-   /* TO-DO: do ProcAmp in next stage */
    color_adj->brightness                             = 0.0;
    color_adj->contrast                               = 1.0;
    color_adj->hue                                    = 0.0;
@@ -1004,15 +1051,14 @@ si_vpe_set_bg_stream_in_param(struct vpe_video_processor *vpeproc,
    stream->vertical_mirror                           = false;
 
    stream->enable_luma_key                           = false;
-   stream->lower_luma_bound                          = 0.5;
-   stream->upper_luma_bound                          = 0.5;
+   stream->lower_luma_bound                          = 0.0;
+   stream->upper_luma_bound                          = 0.0;
 
    stream->flags.reserved                            = 0;
    stream->flags.geometric_scaling                   = 0;
    stream->flags.hdr_metadata                        = 0;
 
-   /* TO-DO: support HDR10 Metadata */
-   si_vpe_load_default_primaries(&stream->hdr_metadata, stream->surface_info.cs.primaries);
+   si_vpe_load_primaries(&stream->hdr_metadata, stream->surface_info.cs.primaries, &process_properties->out_hdr10metadata);
 }
 
 static void
@@ -1028,8 +1074,8 @@ si_vpe_set_stream_out_param(struct vpe_video_processor *vpeproc,
    if (process_properties->background_color) {
       build_param->target_rect.x      = 0;
       build_param->target_rect.y      = 0;
-      build_param->target_rect.width  = pipe_surface_width(&vpeproc->dst_surfaces[0]);
-      build_param->target_rect.height = pipe_surface_height(&vpeproc->dst_surfaces[0]);
+      build_param->target_rect.width  = vpeproc->dst_surfaces[0].texture->width0;
+      build_param->target_rect.height = vpeproc->dst_surfaces[0].texture->height0;
    } else {
       build_param->target_rect.x      = process_properties->dst_region.x0;
       build_param->target_rect.y      = process_properties->dst_region.y0;
@@ -1053,8 +1099,7 @@ si_vpe_set_stream_out_param(struct vpe_video_processor *vpeproc,
    build_param->alpha_mode         = VPE_ALPHA_OPAQUE;
    build_param->flags.hdr_metadata = 1;
 
-   /* TODO: Should support HDR10 Metadata */
-   si_vpe_load_default_primaries(&build_param->hdr_metadata, build_param->dst_surface.cs.primaries);
+   si_vpe_load_primaries(&build_param->hdr_metadata, build_param->dst_surface.cs.primaries, &process_properties->out_hdr10metadata);
 }
 
 static inline int
@@ -1191,7 +1236,7 @@ si_vpe_set_tonemap(struct vpe_video_processor *vpeproc,
       SIVPE_DBG(vpeproc->log_level, "Enable Tone mapping 3DLut with FastLoading\n");
       build_param->streams[stream_idx].tm_params.lut_type          = VPE_LUT_TYPE_GPU_3D_SWIZZLE;
       build_param->streams[stream_idx].dma_info.lut3d.data         = vpeproc->ws->buffer_get_virtual_address(fl_buf->buf);
-      build_param->streams[stream_idx].dma_info.lut3d.format       = VPE_SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616;
+      build_param->streams[stream_idx].dma_info.lut3d.format       = VPE_SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616;
       build_param->streams[stream_idx].dma_info.lut3d.mem_align    = VPE_3DLUT_ALIGNMENT_256;
       build_param->streams[stream_idx].dma_info.lut3d.bias         = 0.0f;
       build_param->streams[stream_idx].dma_info.lut3d.scale        = 1.0f;
@@ -1207,6 +1252,12 @@ si_vpe_set_tonemap(struct vpe_video_processor *vpeproc,
    build_param->streams[stream_idx].tm_params.lut_dim              = VPE_LUT_DIM;
    build_param->streams[stream_idx].tm_params.input_pq_norm_factor = 0;
    build_param->streams[stream_idx].tm_params.shaper_tf            = build_param->streams[stream_idx].surface_info.cs.tf;
+   if (build_param->streams[stream_idx].surface_info.cs.tf == VPE_TF_PQ) {
+      uint32_t pq_norm = build_param->streams[stream_idx].hdr_metadata.max_mastering;
+
+      build_param->streams[stream_idx].tm_params.shaper_tf            = VPE_TF_PQ_NORMALIZED;
+      build_param->streams[stream_idx].tm_params.input_pq_norm_factor = (uint16_t)CLAMP(pq_norm, 4000, 10000);
+   }
    build_param->streams[stream_idx].tm_params.lut_in_gamut         = build_param->streams[stream_idx].surface_info.cs.primaries;
    build_param->streams[stream_idx].tm_params.lut_out_tf           = build_param->dst_surface.cs.tf;
    build_param->streams[stream_idx].tm_params.lut_out_gamut        = build_param->dst_surface.cs.primaries;
@@ -1417,7 +1468,7 @@ si_vpe_processor_check_and_build_settins(struct vpe_video_processor *vpeproc,
     * In this case, some special processing is needed for blending mode with global alpha,
     * which requires using dst surface as background input stream for blending.
     */
-   if (final_blit && process_properties->blend.mode == PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA) {
+   if (final_blit && process_properties->blend.mode) {
       SIVPE_INFO(vpeproc->log_level, "Going to handle blending blit\n");
       build_param->num_streams = 2;
    } else {
@@ -1785,7 +1836,6 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
     * Allocate working frame buffer of geometric scaling.
     */
    if (!vpeproc->geometric_buf[0] || !vpeproc->geometric_buf[1]) {
-      struct si_texture *dst_tex = (struct si_texture *)vpeproc->dst_surfaces[0].texture;
       struct pipe_video_buffer templat;
 
       if (vpeproc->geometric_buf[0])
@@ -1794,7 +1844,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
          vpeproc->geometric_buf[1]->destroy(vpeproc->geometric_buf[1]);
 
       memset(&templat, 0, sizeof(templat));
-      templat.buffer_format = dst_tex->buffer.b.b.format;
+      templat.buffer_format = vpeproc->dst_buffer->buffer_format;
       templat.width  = (int)(src_rect_width  / pHrSr[0]);
       templat.height = (int)(src_rect_height / pVtSr[0]);
       vpeproc->geometric_buf[0] = vpeproc->base.context->create_video_buffer(vpeproc->base.context, &templat);
@@ -1825,30 +1875,23 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
       struct pipe_surface *dst_surfaces;
       struct pipe_surface *tmp_surfaces;
 
+      /* Copy the original VPP descriptor to the processing descriptor */
+      memcpy(&process_geoscl, process_properties, sizeof(struct pipe_vpp_desc));
+
       src_region = &process_geoscl.src_region;
       dst_region = &process_geoscl.dst_region;
 
       /* First Round:
-       * Should copy the source setting and destination setting from original command.
-       * Complete the CSC at the first round.
+       * Rewrite the source and destination regions for the first round of geometric scaling.
+       * Should keep the source setting and destination setting from original command to complete
+       * the rotation, color space conversion, HDR TM, color adjustment and sharpness at the first round.
        */
-      process_geoscl.orientation                  = process_properties->orientation;
-      process_geoscl.blend.mode                   = PIPE_VIDEO_VPP_BLEND_MODE_NONE;
-      process_geoscl.blend.global_alpha           = process_properties->blend.global_alpha;
-      process_geoscl.background_color             = 0;
+      /* Blending will be done at the final round */
+      process_geoscl.blend.mode       = PIPE_VIDEO_VPP_BLEND_MODE_NONE;
+      process_geoscl.background_color = 0;
+      /* Use full color range during mulit-pass scaling */
+      process_geoscl.out_color_range  = PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_FULL;
 
-      process_geoscl.in_color_range               = process_properties->in_color_range;
-      process_geoscl.in_chroma_siting             = process_properties->in_chroma_siting;
-      process_geoscl.out_color_range              = PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_FULL;
-      process_geoscl.out_chroma_siting            = process_properties->out_chroma_siting;
-
-      process_geoscl.in_color_primaries           = process_properties->in_color_primaries;
-      process_geoscl.in_transfer_characteristics  = process_properties->in_transfer_characteristics;
-      process_geoscl.in_matrix_coefficients       = process_properties->in_matrix_coefficients;
-
-      process_geoscl.out_color_primaries          = process_properties->out_color_primaries;
-      process_geoscl.out_transfer_characteristics = process_properties->out_transfer_characteristics;
-      process_geoscl.out_matrix_coefficients      = process_properties->out_matrix_coefficients;
 
       /* Setup the scaling size of first round */
       src_region->x0 = process_properties->src_region.x0;
@@ -1875,16 +1918,24 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
 
       /* Second to Final Round:
        * The source format should be reset to the format of DstFormat.
-       * And other option should be cleaned.
+       * And other options which are completed at the first round should be cleaned.
        * Set is_geometric_scaling_round = true to force the format of source format to the format of DstFormat.
        */
       process_geoscl.orientation                  = PIPE_VIDEO_VPP_ORIENTATION_DEFAULT;
-      process_geoscl.blend.global_alpha           = 1.0f;
       process_geoscl.in_color_range               = PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_FULL;
       process_geoscl.in_chroma_siting             = process_properties->out_chroma_siting;
       process_geoscl.in_color_primaries           = process_properties->out_color_primaries;
       process_geoscl.in_transfer_characteristics  = process_properties->out_transfer_characteristics;
       process_geoscl.in_matrix_coefficients       = process_properties->out_matrix_coefficients;
+
+      memcpy(&process_geoscl.in_hdr10metadata, &process_properties->out_hdr10metadata, sizeof(struct pipe_video_vpp_hdr10metadata));
+
+      /* disable filter */
+      process_geoscl.color_balance_brightness.valid = false;
+      process_geoscl.color_balance_contrast.valid = false;
+      process_geoscl.color_balance_hue.valid = false;
+      process_geoscl.color_balance_saturation.valid = false;
+      process_geoscl.sharpening.valid = false;
 
       src_surfaces = tmp_geo_scaling_surf_2;
       for (idx = 1; idx < vpeproc->geometric_passes - 1; idx++) {
@@ -2067,7 +2118,7 @@ si_vpe_create_processor(struct pipe_context *context, const struct pipe_video_co
        * 3DLut GPU buffer is used for fast loading 3Dlut
        * It finally calls into si_buffer_create(screen, templ, 256) to create 256-alignment buffer
        */
-      if (vpeproc->vpe_handle->level == VPE_IP_LEVEL_2_0) {
+      if (vpeproc->vpe_handle->level >= VPE_IP_LEVEL_2_0) {
          vpeproc->fl3dlut_buf = si_vid_create_buffer(vpeproc->screen, PIPE_USAGE_DEFAULT, 0, VPE_FASTLOAD_SIZE);
          if (!vpeproc->fl3dlut_buf) {
             vpeproc->fl3dlut_buf = NULL;

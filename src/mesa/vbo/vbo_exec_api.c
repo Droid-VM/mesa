@@ -635,10 +635,10 @@ _mesa_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
          MAT_ATTR(VBO_ATTRIB_MAT_BACK_SPECULAR, 4, params);
       break;
    case GL_SHININESS:
-      if (*params < 0 || *params > ctx->Const.MaxShininess) {
+      if (*params < 0 || *params > MAX_SHININESS) {
          _mesa_error(ctx, GL_INVALID_VALUE,
                      "glMaterial(invalid shininess: %f out range [0, %f])",
-                     *params, ctx->Const.MaxShininess);
+                     *params, MAX_SHININESS);
          return;
       }
       if (updateMats & MAT_BIT_FRONT_SHININESS)
@@ -962,8 +962,11 @@ _mesa_End(void)
 
          if (exec->vtx.markers[last].begin == 0)
             last_draw->start++; /* skip vertex0 */
+         else {
+            assert(!driver_supports_lineloop);
+            last_draw->count++;
+         }
 
-         /* note that the count stays unchanged */
          exec->vtx.mode[last] = GL_LINE_STRIP;
 
          /* Increment the vertex count so the next primitive doesn't
@@ -971,9 +974,6 @@ _mesa_End(void)
           */
          exec->vtx.vert_count++;
          exec->vtx.buffer_ptr += exec->vtx.vertex_size;
-
-         if (!driver_supports_lineloop)
-            last_draw->count++;
       }
 
       try_vbo_merge(exec);

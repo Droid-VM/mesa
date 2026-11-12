@@ -258,6 +258,9 @@ def pipe_formats_to_formats(pipe_formats, mapping):
 
 if __name__ == '__main__':
     pipe_formats = parse(sys.argv[1])
+    # Fixed little-endian formats are aliases of the host-endian ones on
+    # little-endian hosts.
+    pipe_formats = [f for f in pipe_formats if not f.le_byte_order]
 
     # gfx10
     with open(sys.argv[2], 'r') as filp:

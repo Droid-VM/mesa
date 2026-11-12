@@ -193,20 +193,6 @@ hgl_st_framebuffer_validate(struct st_context *st,
 }
 
 
-static int
-hgl_st_manager_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
-{
-	CALLED();
-
-	switch (param) {
-		case ST_MANAGER_BROKEN_INVALIDATE:
-			return 1;
-	}
-
-	return 0;
-}
-
-
 static uint32_t hgl_fb_ID = 0;
 
 /**
@@ -362,7 +348,7 @@ hgl_create_display(struct pipe_screen* screen)
 	display->fscreen = CALLOC_STRUCT(pipe_frontend_screen);
 	assert(display->fscreen);
 	display->fscreen->screen = screen;
-	display->fscreen->get_param = hgl_st_manager_get_param;
+	display->fscreen->broken_invalidate = true;
 	// display->fscreen->st_screen is used by llvmpipe
 
 	return display;

@@ -80,9 +80,6 @@ _mesa_max_tex_unit(struct gl_context *ctx)
 
 
 extern void
-_mesa_copy_texture_state( const struct gl_context *src, struct gl_context *dst );
-
-extern void
 _mesa_print_texunit_state( struct gl_context *ctx, GLuint unit );
 
 

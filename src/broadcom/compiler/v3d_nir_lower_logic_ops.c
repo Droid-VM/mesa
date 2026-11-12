@@ -260,7 +260,7 @@ static nir_def *
 v3d_nir_emit_logic_op(struct v3d_compile *c, nir_builder *b,
                       nir_def *src, int rt, int sample)
 {
-        nir_def *dst = v3d_nir_get_tlb_color(b, c, rt, sample);
+        nir_def *dst = v3d_nir_get_tlb_color(b, rt, sample, 0, 4);
 
         nir_def *src_chans[4], *dst_chans[4];
         for (unsigned i = 0; i < 4; i++) {

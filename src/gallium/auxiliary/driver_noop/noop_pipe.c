@@ -394,7 +394,7 @@ static void noop_replace_buffer_storage(struct pipe_context *ctx,
                                         struct pipe_resource *dst,
                                         struct pipe_resource *src,
                                         unsigned num_rebinds,
-                                        uint32_t rebind_mask,
+                                        uint64_t rebind_mask,
                                         uint32_t delete_buffer_id)
 {
 }

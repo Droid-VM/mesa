@@ -89,8 +89,4 @@ struct dri3_screen {
 struct dri3_drawable {
    __GLXDRIdrawable base;
    struct loader_dri3_drawable loader_drawable;
-
-   /* LIBGL_SHOW_FPS support */
-   uint64_t previous_ust;
-   unsigned frames;
 };

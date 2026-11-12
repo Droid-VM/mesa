@@ -26,6 +26,7 @@
 
 #include "util/os_mman.h"
 #include "util/hash_table.h"
+#include "util/perf/cpu_trace.h"
 
 #include "etnaviv_priv.h"
 #include "etnaviv_drmif.h"
@@ -186,6 +187,8 @@ static struct etna_bo *bo_from_handle(struct etna_device *dev,
 struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
 		uint32_t flags)
 {
+	MESA_TRACE_FUNC();
+	MESA_TRACE_SET_COUNTER("etna_bo_new size", size);
 	struct etna_bo *bo;
 	int ret;
 	struct drm_etnaviv_gem_new req = {
@@ -414,12 +417,13 @@ void *etna_bo_map(struct etna_bo *bo)
 
 int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
 {
+	MESA_TRACE_FUNC();
 	struct drm_etnaviv_gem_cpu_prep req = {
 		.handle = bo->handle,
 		.op = op,
 	};
 
-	get_abs_timeout(&req.timeout, 5000000000);
+	get_abs_timeout(&req.timeout, OS_TIMEOUT_INFINITE);
 
 	return drmCommandWrite(bo->dev->fd, DRM_ETNAVIV_GEM_CPU_PREP,
 			&req, sizeof(req));

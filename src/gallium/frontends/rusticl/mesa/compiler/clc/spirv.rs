@@ -336,7 +336,6 @@ impl SPIRVBin {
         nir_options: *const nir_shader_compiler_options,
         spirv_to_nir_options: SPIRVToNirOptions,
         libclc: &NirShader,
-        spec_constants: &mut nir_spirv_specialization,
         log: Option<&mut Vec<CString>>,
     ) -> Option<NirShader> {
         let spirv_options =
@@ -346,7 +345,7 @@ impl SPIRVBin {
             spirv_to_nir(
                 self.spirv.data.cast(),
                 self.spirv.size / 4,
-                spec_constants,
+                ptr::null_mut(),
                 mesa_shader_stage::MESA_SHADER_KERNEL,
                 entry_point.as_ptr(),
                 &spirv_options,
@@ -416,6 +415,29 @@ impl SPIRVBin {
             .iter()
             .find(|sc| sc.id == spec_id)
             .map(|sc| sc.type_)
+    }
+
+    pub fn specialize(&self, consts: &[clc_spirv_specialization]) -> Option<Self> {
+        let mut out = clc_binary::default();
+        let consts = clc_spirv_specialization_consts {
+            specializations: consts.as_ptr(),
+            num_specializations: consts.len().try_into().unwrap(),
+        };
+
+        let res = unsafe { clc_specialize_spirv(&self.spirv, &self.info?, &consts, &mut out) };
+        if !res {
+            return None;
+        }
+
+        let mut pspirv = clc_parsed_spirv::default();
+        Some(Self {
+            info: if unsafe { clc_parse_spirv(&out, ptr::null(), &mut pspirv) } {
+                Some(pspirv)
+            } else {
+                None
+            },
+            spirv: out,
+        })
     }
 
     pub fn print(&self) {

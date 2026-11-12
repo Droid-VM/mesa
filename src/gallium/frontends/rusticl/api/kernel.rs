@@ -5,7 +5,6 @@ use crate::api::event::create_and_queue;
 use crate::api::icd::*;
 use crate::api::util::*;
 use crate::core::device::*;
-use crate::core::event::*;
 use crate::core::kernel::*;
 use crate::core::memory::*;
 use crate::core::program::*;
@@ -455,7 +454,7 @@ fn set_kernel_arg(
                     // We are required to prevent mutable access to immutable memory objects,
                     // however no explicit error code has been specified yet.
                     if arg.kind == KernelArgType::MemGlobal
-                        && bit_check(buffer.flags, CL_MEM_IMMUTABLE_EXT)
+                        && buffer.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT)
                     {
                         return Err(CL_INVALID_ARG_VALUE);
                     }
@@ -479,11 +478,14 @@ fn set_kernel_arg(
                 // of CL_MEM_READ_ONLY.
                 // We are required to prevent mutable access to immutable memory objects, however no
                 // explicit error code has been specified yet.
-                if arg.kind == KernelArgType::Texture && bit_check(img.flags, CL_MEM_WRITE_ONLY)
+                if arg.kind == KernelArgType::Texture
+                    && img.flags.are_any_bits_set(CL_MEM_WRITE_ONLY)
                     || arg.kind == KernelArgType::Image
-                        && bit_check(img.flags, CL_MEM_READ_ONLY | CL_MEM_IMMUTABLE_EXT)
+                        && img
+                            .flags
+                            .are_any_bits_set(CL_MEM_READ_ONLY | CL_MEM_IMMUTABLE_EXT)
                     || arg.kind == KernelArgType::RWImage
-                        && bit_check(img.flags, CL_MEM_IMMUTABLE_EXT)
+                        && img.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT)
                 {
                     return Err(CL_INVALID_ARG_VALUE);
                 }
@@ -803,16 +805,16 @@ fn enqueue_ndrange_kernel(
     // If global_work_size is NULL, or the value in any passed dimension is 0 then the kernel
     // command will trivially succeed after its event dependencies are satisfied and subsequently
     // update its completion event.
-    let cb: EventSig = if global_work_size.contains(&0) {
-        Box::new(|_, _| Ok(()))
+    let cb = if global_work_size.contains(&0) {
+        None
     } else {
-        k.launch(
+        Some(k.launch(
             q.device,
             work_dim,
             local_work_size,
             global_work_size,
             global_work_offset,
-        )?
+        )?)
     };
 
     create_and_queue(q, CL_COMMAND_NDRANGE_KERNEL, evs, event, false, cb)

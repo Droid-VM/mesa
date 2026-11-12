@@ -18,20 +18,17 @@ struct nvk_device;
 struct nvkmd_mem;
 struct nvkmd_ctx;
 
-struct nvk_queue_state {
-   struct {
-      uint32_t alloc_count;
-   } images;
+struct nvk_queue_heap_state {
+   uint64_t image_heap_addr;
+   uint64_t sampler_heap_addr;
+   uint32_t image_count;
+   uint32_t sampler_count;
+};
 
-   struct {
-      uint32_t alloc_count;
-   } samplers;
-
-   struct {
-      struct nvkmd_mem *mem;
-      uint32_t bytes_per_warp;
-      uint32_t bytes_per_tpc;
-   } slm;
+struct nvk_queue_slm_state {
+   struct nvkmd_mem *mem;
+   uint32_t bytes_per_warp;
+   uint32_t bytes_per_tpc;
 };
 
 struct nvk_queue {
@@ -47,7 +44,8 @@ struct nvk_queue {
     */
    struct nvk_mem_stream push_stream;
 
-   struct nvk_queue_state state;
+   struct nvk_queue_heap_state heap_state;
+   struct nvk_queue_slm_state slm_state;
 
    /* CB0 for all draw commands on this queue */
    struct nvkmd_mem *draw_cb0;
@@ -75,6 +73,8 @@ nvk_queue_engines_from_queue_flags(VkQueueFlags queue_flags)
    }
    if (queue_flags & VK_QUEUE_TRANSFER_BIT)
       engines |= NVKMD_ENGINE_COPY;
+   if (queue_flags & VK_QUEUE_VIDEO_DECODE_BIT_KHR)
+      engines |= NVKMD_ENGINE_VDEC;
 
    return engines;
 }
@@ -99,6 +99,9 @@ nvk_queue_subchannels_from_engines(enum nvkmd_engines engines)
 
    if (engines & NVKMD_ENGINE_COMPUTE)
       subc_mask |= BITFIELD_BIT(SUBC_NV90C0);
+
+   if (engines & NVKMD_ENGINE_VDEC)
+      subc_mask |= BITFIELD_BIT(SUBC_NVC5B0);
 
    return subc_mask;
 }

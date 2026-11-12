@@ -4,7 +4,7 @@ prog_cbindgen = find_program(
   'cbindgen',
   required : true,
   native : true,
-  version : '>= 0.25'
+  version : '>= 0.28'
 )
 
 dep_paste = dependency('paste',
@@ -34,7 +34,7 @@ _libnil_format_table = static_library(
 
 _libnil_deps = [
   dep_paste,
-  idep_bitview_rs,
+  idep_mesa_util_rs,
   idep_nvidia_headers_rs,
 ]
 
@@ -47,18 +47,12 @@ _nil_bindings_rs = rust.bindgen(
   include_directories : [inc_include, inc_src, include_directories('.')],
   args: [
     bindgen_output_args,
-    '--allowlist-function', 'util_format_description',
-    '--allowlist-function', 'util_format_get_blocksize',
-    '--allowlist-function', 'util_format_is_compressed',
-    '--allowlist-function', 'util_format_is_pure_integer',
-    '--allowlist-function', 'util_format_is_srgb',
     '--allowlist-function', 'drm_format_mod_block_linear_2D',
     '--allowlist-function', 'drm_mod_is_nvidia',
     '--allowlist-type', 'nil_format_support_flags',
     '--allowlist-type', 'nv_device_info',
     '--allowlist-type', 'nv_device_type',
     '--allowlist-type', 'nv_zcull_device_info',
-    '--allowlist-type', 'pipe_format',
     '--allowlist-type', 'pipe_swizzle',
     '--allowlist-var', 'nil_format_table',
     '--allowlist-var', 'drm_format_mod_invalid',
@@ -87,7 +81,7 @@ _libnil = static_library(
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely
 # with the sanitizers because meson doesn't know to pass -fsanitize to the
-# Rust linker.  See also https://github.com/mesonbuild/meson/issues/11741
+# Rust linker.  See also https://github.com/mesonbuild/meson/issues/15222
 if with_tests and get_option('b_sanitize') == 'none'
   rust.test(
     'nil',

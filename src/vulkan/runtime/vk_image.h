@@ -74,6 +74,9 @@ struct vk_image {
    /* VK_EXT_image_compression_control */
    VkImageCompressionFlagsEXT compr_flags;
 
+   /* VK_MESA_image_alignment_control */
+   uint32_t maximum_requested_alignment;
+
    /* wsi_image_create_info::scanout */
    bool wsi_legacy_scanout;
 

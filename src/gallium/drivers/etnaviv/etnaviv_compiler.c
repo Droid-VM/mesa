@@ -27,11 +27,10 @@
 #include "etnaviv_compiler.h"
 #include "etnaviv_compiler_nir.h"
 #include "etnaviv_debug.h"
-#include "etnaviv_disk_cache.h"
 #include "util/ralloc.h"
 
 struct etna_compiler *
-etna_compiler_create(const char *renderer, const struct etna_core_info *info)
+etna_compiler_create(const struct etna_core_info *info)
 {
    struct etna_compiler *compiler = rzalloc(NULL, struct etna_compiler);
    bool has_sign_floor_ceil = etna_core_has_feature(info, ETNA_FEATURE_HAS_SIGN_FLOOR_CEIL);
@@ -45,8 +44,6 @@ etna_compiler_create(const char *renderer, const struct etna_core_info *info)
       .float_mul_add16 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
       .float_mul_add32 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
       .float_mul_add64 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
-      .lower_uadd_carry = true,
-      .lower_usub_borrow = true,
       .lower_mul_high = true,
       .lower_bitops = true,
       .lower_bitfield_insert = info->halti < 5,
@@ -66,6 +63,7 @@ etna_compiler_create(const char *renderer, const struct etna_core_info *info)
       .lower_uniforms_to_ubo = info->halti >= 2,
       .force_indirect_unrolling = nir_var_all,
       .max_unroll_iterations = 32,
+      .max_samples = ETNA_MAX_SAMPLES,
       .lower_pack_32_2x16_split = true,
       .lower_pack_64_2x32_split = true,
       .lower_pack_half_2x16 = true,
@@ -90,15 +88,12 @@ etna_compiler_create(const char *renderer, const struct etna_core_info *info)
       compiler = NULL;
    }
 
-   etna_disk_cache_init(compiler, renderer);
-
    return compiler;
 }
 
 void
 etna_compiler_destroy(const struct etna_compiler *compiler)
 {
-   disk_cache_destroy(compiler->disk_cache);
    ralloc_free((void *)compiler);
 }
 

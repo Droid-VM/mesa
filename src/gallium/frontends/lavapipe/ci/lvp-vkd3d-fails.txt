@@ -1,9 +1,6 @@
 # The tests assumes a dubgroup size >= 16
 test_shader_waveop_maximal_convergence,Fail
 
-# The test uses multiplanar formats for render targets which is unsupported
-test_planar_video_formats,Fail
-
 # The test expect lod=0.5 to load level 1 with nearest sampling
 test_sample_instructions,Fail
 
@@ -23,3 +20,9 @@ test_uav_clear_exhaustive_descriptors,Crash
 test_misc_agility_sdk_feature_checks,Fail
 test_query_heap_cpu_resolve_timestamp,Fail
 test_structured_buffer_addressing_wrap,Fail
+test_clear_unordered_access_view_buffer,Fail
+test_conservative_ssbo_vectorization_dxbc_heap_desc,Fail
+test_conservative_ssbo_vectorization_dxil_heap_desc,Fail
+test_fp16_rounding_behavior_legacy,Fail
+test_r16_texel_buffer_atomic,Fail
+test_suballocate_va_alignment,Fail

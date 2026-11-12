@@ -49,6 +49,12 @@ struct pan_model {
    /* GPU variant. */
    uint32_t gpu_variant;
 
+   /* minimum core count */
+   unsigned min_core_count;
+
+   /* required GPU features. */
+   uint32_t required_gpu_features;
+
    /* Marketing name for the GPU, used as the GL_RENDERER */
    const char *name;
 
@@ -91,7 +97,8 @@ struct pan_model {
    } quirks;
 };
 
-const struct pan_model *pan_get_model(uint64_t gpu_id, uint32_t gpu_variant);
+const struct pan_model *pan_get_model(uint64_t gpu_id, uint32_t gpu_variant,
+                                      unsigned core_count, uint64_t gpu_features);
 
 /* Returns the architecture version given a GPU ID, either from a table for
  * old-style Midgard versions or directly for new-style Bifrost/Valhall
@@ -130,6 +137,13 @@ static inline uint32_t
 pan_rev(uint64_t gpu_id)
 {
    return PAN_REV(PAN_VERSION_MAJOR(gpu_id), PAN_VERSION_MINOR(gpu_id));
+}
+
+static inline int
+pan_model_device_name(char *buf, size_t size, const struct pan_model *model,
+                      unsigned core_count, const char *suffix)
+{
+   return snprintf(buf, size, "%s MC%u%s", model->name, core_count, suffix);
 }
 
 #endif

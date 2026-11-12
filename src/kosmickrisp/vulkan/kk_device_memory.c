@@ -15,6 +15,7 @@
 
 #include "vulkan/vulkan_metal.h"
 
+#include "util/os_misc.h"
 #include "util/u_atomic.h"
 #include "util/u_memory.h"
 
@@ -97,8 +98,8 @@ kk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    const VkImportMemoryHostPointerInfoEXT *host_info = vk_find_struct_const(
       pAllocateInfo->pNext, IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
 
-   // TODO_KOSMICKRISP Do the actual memory allocation with alignment requirements
-   uint32_t alignment = (1ULL << 12);
+   uint64_t alignment = 4096;
+   os_get_page_size(&alignment);
 
    const uint64_t aligned_size =
       align64(pAllocateInfo->allocationSize, alignment);
@@ -316,4 +317,11 @@ kk_GetDeviceMemoryOpaqueCaptureAddress(
    VK_FROM_HANDLE(kk_device_memory, mem, pInfo->memory);
 
    return mem->bo->gpu;
+}
+
+void
+kk_device_memory_set_label(struct kk_device_memory *dev_mem, const char *label)
+{
+   if (dev_mem->bo)
+      kk_bo_set_label(dev_mem->bo, label);
 }

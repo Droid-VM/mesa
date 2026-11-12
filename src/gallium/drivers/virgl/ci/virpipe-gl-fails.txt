@@ -210,8 +210,6 @@ spec@arb_occlusion_query@occlusion_query_conform,Fail
 spec@arb_occlusion_query@occlusion_query_meta_no_fragments,Fail
 spec@arb_occlusion_query@occlusion_query_meta_save,Fail
 spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
 
 spec@arb_sample_shading@builtin-gl-sample-position 2,Fail
 
@@ -311,17 +309,11 @@ spec@arb_texture_float@texwrap formats bordercolor-swizzled@GL_LUMINANCE_ALPHA16
 spec@arb_texture_float@texwrap formats bordercolor-swizzled@GL_RGB16F- swizzled- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor-swizzled@GL_RGBA16F- swizzled- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_ALPHA16F_ARB- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_ALPHA32F_ARB- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_INTENSITY16F_ARB- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_INTENSITY32F_ARB- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_LUMINANCE16F_ARB- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_LUMINANCE32F_ARB- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_LUMINANCE_ALPHA16F_ARB- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_LUMINANCE_ALPHA32F_ARB- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_RGB16F- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_RGB32F- border color only,Fail
 spec@arb_texture_float@texwrap formats bordercolor@GL_RGBA16F- border color only,Fail
-spec@arb_texture_float@texwrap formats bordercolor@GL_RGBA32F- border color only,Fail
 spec@arb_texture_rectangle@copyteximage rect,Fail
 spec@arb_texture_rectangle@copyteximage rect samples=2,Fail
 spec@arb_texture_rectangle@copyteximage rect samples=4,Fail
@@ -503,7 +495,6 @@ spec@arb_framebuffer_object@execution@msaa-alpha-to-coverage_alpha-to-one_write-
 spec@arb_shader_image_load_store@max-size@image2DMS max size test/8x16384x8x1,Fail
 spec@arb_shader_image_load_store@max-size@image2DMS max size test/8x8x16384x1,Fail
 spec@arb_shader_image_load_store@max-size@image2DMSArray max size test/8x8x8x2048,Fail
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-equal-vec2-vec2,Crash
 spec@arb_tessellation_shader@execution@tcs-output-unmatched,Fail
 spec@arb_texture_compression_bptc@texwrap formats bordercolor-swizzled,Fail
 spec@arb_texture_compression_bptc@texwrap formats bordercolor-swizzled@GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT- swizzled- border color only,Fail
@@ -561,10 +552,7 @@ spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_ALPHA_
 spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_S3TC_DXT1_EXT- border color only,Fail
 spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=6,Fail
 spec@ext_framebuffer_multisample@interpolation 8 centroid-edges,Fail
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
-spec@!opengl 1.1@large-tex,Crash
 spec@arb_texture_rectangle@copyteximage rect samples=8,Fail
-vulkan@shaders@cmat-uniform-ctor,Fail
 
 # New failures with GL CTS 4.6.6.0 & ES CTS 3.2.12.0
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
@@ -599,3 +587,6 @@ dEQP-GLES3.functional.transform_feedback.random_full_array_capture.interleaved.p
 dEQP-GLES3.functional.transform_feedback.random_full_array_capture.interleaved.triangles.1,Crash
 dEQP-GLES3.functional.transform_feedback.random_full_array_capture.separate.lines.6,Crash
 dEQP-GLES3.functional.transform_feedback.random_full_array_capture.separate.triangles.4,Crash
+
+spec@arb_texture_rectangle@copyteximage rect samples=6,Fail
+spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail

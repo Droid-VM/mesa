@@ -629,6 +629,32 @@ UINT_32 ADDR_API AddrGetInterfaceVersion(ADDR_HANDLE hLib)
 
 /**
 ****************************************************************************************************
+*   AddrGetMaxDims
+*
+*   @return
+*       Returns the maximum supported image dimensions.
+****************************************************************************************************
+*/
+const ADDR_MAX_IMAGE_DIMS* ADDR_API AddrGetMaxDims(
+    ADDR_HANDLE  hLib)
+{
+    const Addr::Lib*            pLib     = Lib::GetLib(hLib);
+    const ADDR_MAX_IMAGE_DIMS*  pMaxDims = nullptr;
+
+    ADDR_ASSERT(pLib != NULL);
+
+    if (pLib)
+    {
+        pMaxDims = pLib->GetMaxDims();
+    }
+
+    ADDR_RESET_DEBUG_PRINTERS();
+
+    return pMaxDims;
+}
+
+/**
+****************************************************************************************************
 *   AddrUseTileIndex
 *
 *   @brief
@@ -2410,3 +2436,4 @@ ADDR_E_RETURNCODE ADDR_API Addr3ComputeSlicePipeBankXor(
     ADDR_RESET_DEBUG_PRINTERS();
     return returnCode;
 }
+

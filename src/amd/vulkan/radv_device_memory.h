@@ -11,14 +11,14 @@
 #ifndef RADV_DEVICE_MEMORY_H
 #define RADV_DEVICE_MEMORY_H
 
-#include "vk_object.h"
+#include "vk_device_memory.h"
 
 #include "radv_android.h"
 
 struct radv_device;
 
 struct radv_device_memory {
-   struct vk_object_base base;
+   struct vk_device_memory vk;
    struct radeon_winsys_bo *bo;
    /* for dedicated allocations */
    struct radv_image *image;
@@ -26,19 +26,9 @@ struct radv_device_memory {
    uint32_t heap_index;
    uint64_t alloc_size;
    void *map;
-   void *user_ptr;
-
-   /* Import handle type (if any) */
-   VkExternalMemoryHandleTypeFlags import_handle_type;
-
-   VkExternalMemoryHandleTypeFlags export_handle_type;
-
-#if RADV_SUPPORT_ANDROID_HARDWARE_BUFFER
-   struct AHardwareBuffer *android_hardware_buffer;
-#endif
 };
 
-VK_DEFINE_NONDISP_HANDLE_CASTS(radv_device_memory, base, VkDeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_device_memory, vk.base, VkDeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY)
 
 void radv_free_memory(struct radv_device *device, const VkAllocationCallbacks *pAllocator,
                       struct radv_device_memory *mem);

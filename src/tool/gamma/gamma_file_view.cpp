@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <stdint.h>
@@ -100,21 +101,68 @@ gamma_acceleration_structure::load(FILE *file, uint32_t chunk_size)
 {
    fread(&header, sizeof(header), 1, file);
 
-   primitive_counts = (uint32_t *)malloc(header.geometry_count * sizeof(uint32_t));
+   geometry_infos = (gamma_acceleration_structure_geometry_info *)malloc(
+      header.geometry_count * sizeof(gamma_acceleration_structure_geometry_info));
    primitive_counts_exclusive_sum = (uint32_t *)malloc(header.geometry_count * sizeof(uint32_t));
-   fread(primitive_counts, header.geometry_count * sizeof(uint32_t), 1, file);
+   fread(geometry_infos, header.geometry_count * sizeof(gamma_acceleration_structure_geometry_info), 1, file);
    for (uint32_t i = 0; i < header.geometry_count; i++) {
       primitive_counts_exclusive_sum[i] = primitive_count;
-      primitive_count += primitive_counts[i];
+      primitive_count += geometry_infos[i].primitive_count;
    }
 
    name = (char *)malloc(header.name_size + 1);
    name[header.name_size] = 0;
    fread(name, header.name_size, 1, file);
 
-   uint64_t data_size = chunk_size - header.name_size - sizeof(gamma_acceleration_structure_header);
+   uint64_t data_size = chunk_size - header.name_size -
+                        header.geometry_count * sizeof(gamma_acceleration_structure_geometry_info) -
+                        sizeof(gamma_acceleration_structure_header);
    data = malloc(data_size);
    fread(data, data_size, 1, file);
+}
+
+std::vector<char *>
+gamma_acceleration_structure::write_common_build_info(char **p_dst)
+{
+   char *dst = *p_dst;
+
+   gamma_chunk_header *chunk_header = (gamma_chunk_header *)dst;
+   dst += sizeof(gamma_chunk_header);
+   gamma_acceleration_structure_build_info_header *info_header = (gamma_acceleration_structure_build_info_header *)dst;
+
+   info_header->dst_acceleration_structure_id = view->addr_to_id(header.address);
+   info_header->geometry_type = header.geometry_type;
+   info_header->geometry_count = header.geometry_count;
+   info_header->build_flags = header.build_flags;
+
+   dst += sizeof(gamma_acceleration_structure_build_info_header);
+   std::vector<char *> geometry_data_ptrs;
+   geometry_data_ptrs.reserve(header.geometry_count);
+   for (uint32_t i = 0; i < header.geometry_count; ++i) {
+      gamma_acceleration_structure_geometry_info *geom = (gamma_acceleration_structure_geometry_info *)dst;
+      *geom = geometry_infos[i];
+      dst += sizeof(gamma_acceleration_structure_geometry_info);
+      geometry_data_ptrs.push_back(dst);
+      switch (header.geometry_type) {
+      case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
+         dst += geom->primitive_count * sizeof(gamma_acceleration_structure_triangle_primitive);
+         break;
+      case VK_GEOMETRY_TYPE_AABBS_KHR:
+         dst += geom->primitive_count * sizeof(gamma_acceleration_structure_aabb_primitive);
+         break;
+      case VK_GEOMETRY_TYPE_INSTANCES_KHR:
+         dst += geom->primitive_count * sizeof(VkAccelerationStructureInstanceKHR);
+         break;
+      default:
+         assert(!"gamma/radv: Unhandled primitive type!\n");
+      }
+   }
+
+   chunk_header->type = gamma_chunk_type_build_info;
+   chunk_header->size = dst - (char *)info_header;
+
+   *p_dst = dst;
+   return geometry_data_ptrs;
 }
 
 void
@@ -153,6 +201,9 @@ gamma_file_view::load(FILE *file, const gamma_header *header)
          acceleration_structure->load(file, chunk_header.size);
          address_map[acceleration_structure->header.address] = acceleration_structures.size();
          acceleration_structures.push_back(std::move(acceleration_structure));
+      } else if (chunk_header.type == gamma_chunk_type_build_info) {
+         fseek(file, chunk_header.size, SEEK_CUR);
+         continue;
       } else if (chunk_header.type >= gamma_chunk_type_driver_start) {
          load_driver_specific(file, &chunk_header, header);
       } else {
@@ -179,6 +230,25 @@ gamma_file_view::addr_to_acceleration_structure(uint64_t address)
       return acceleration_structure;
 
    return nullptr;
+}
+
+uint32_t
+gamma_file_view::addr_to_id(uint64_t address)
+{
+   if (address_map.empty())
+      return ~0u;
+
+   auto lower_bound = address_map.lower_bound(address);
+
+   if (lower_bound == address_map.end() || lower_bound->first > address)
+      lower_bound--;
+
+   gamma_acceleration_structure *acceleration_structure = acceleration_structures[lower_bound->second].get();
+   if (address >= acceleration_structure->header.address &&
+       address < acceleration_structure->header.address + acceleration_structure->header.allocated_size)
+      return std::distance(address_map.begin(), lower_bound);
+
+   return ~0u;
 }
 
 std::unique_ptr<gamma_file_view>
@@ -298,6 +368,8 @@ gamma_file_view::begin()
       ImGui::SetWindowFocus();
       ui.request_focus = false;
    }
+   if (ImGui::IsWindowFocused())
+      app->selected_file = this;
 
    ImGui::DockSpace(ui.dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_NoWindowMenuButton, &ui.dockspace_class);
 

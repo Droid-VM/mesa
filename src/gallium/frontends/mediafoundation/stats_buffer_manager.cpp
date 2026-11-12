@@ -74,6 +74,8 @@ PipeFormatToD3D12Format( enum pipe_format pipeFormat )
          return DXGI_FORMAT_R32_UINT;
       case PIPE_FORMAT_R8_SINT:
          return DXGI_FORMAT_R8_SINT;
+      case PIPE_FORMAT_R16_SINT:
+         return DXGI_FORMAT_R16_SINT;
       case PIPE_FORMAT_Y8_U8V8_420_UNORM:
          return DXGI_FORMAT_NV12;
       default:

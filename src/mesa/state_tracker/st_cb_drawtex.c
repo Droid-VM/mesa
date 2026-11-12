@@ -3,6 +3,8 @@
  * Copyright 2008 VMware, Inc.
  * All Rights Reserved.
  *
+ * SPDX-License-Identifier: MIT
+ *
  **************************************************************************/
 
 
@@ -30,7 +32,6 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "util/u_inlines.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_draw_quad.h"
 #include "util/u_upload_mgr.h"
 

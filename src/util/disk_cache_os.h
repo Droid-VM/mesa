@@ -76,7 +76,8 @@ struct disk_cache {
 
    /* A pointer to the mmapped index file within the cache directory. */
    uint8_t *index_mmap;
-   size_t index_mmap_size;
+   uint8_t *index_reserve;
+   size_t index_reserve_size;
 
    /* Pointer to total size of all objects in cache (within index_mmap) */
    p_atomic_uint64_t *size;
@@ -135,8 +136,14 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                               enum disk_cache_type cache_type,
                               bool mkdir);
 
-void
+bool
 disk_cache_evict_lru_item(struct disk_cache *cache);
+
+bool
+disk_cache_size_is_valid(struct disk_cache *cache);
+
+void
+disk_cache_recompute_size(struct disk_cache *cache);
 
 void
 disk_cache_evict_item(struct disk_cache *cache, char *filename);

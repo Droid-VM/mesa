@@ -14,8 +14,10 @@
 /* TODO_KOSMICKRISP Move this to bridge. */
 struct kk_view_layout;
 
-/* Utils*/
+/* Utils */
 uint64_t mtl_texture_get_gpu_resource_id(mtl_texture *texture);
+
+uint32_t mtl_texture_first_mipmap_in_tail(mtl_texture *texture);
 
 /* Texture view creation */
 mtl_texture *mtl_new_texture_view_with(mtl_texture *texture,

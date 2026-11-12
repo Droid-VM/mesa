@@ -317,8 +317,11 @@ static int file_override_open(const char *path)
             return file_override_open(file_overrides[i].contents);
          }
          int fd = os_create_anonymous_file(0, "shim file");
-         write(fd, file_overrides[i].contents,
-               strlen(file_overrides[i].contents));
+         if (write(fd, file_overrides[i].contents,
+                   strlen(file_overrides[i].contents)) == -1) {
+            close(fd);
+            return -1;
+         }
          lseek(fd, 0, SEEK_SET);
          return fd;
       }

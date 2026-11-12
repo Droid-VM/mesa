@@ -177,7 +177,6 @@ static const struct dri2_egl_display_vtbl dri2_surfaceless_display_vtbl = {
    .create_pbuffer_surface = dri2_surfaceless_create_pbuffer_surface,
    .destroy_surface = surfaceless_destroy_surface,
    .create_image = dri2_create_image_khr,
-   .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
 static void
@@ -200,24 +199,25 @@ surfaceless_get_capability(void *loaderPrivate, enum dri_loader_cap cap)
 }
 
 static const __DRIimageLoaderExtension image_loader_extension = {
-   .base = {__DRI_IMAGE_LOADER, 2},
    .getBuffers = surfaceless_image_get_buffers,
    .flushFrontBuffer = surfaceless_flush_front_buffer,
    .getCapability = surfaceless_get_capability,
 };
 
-static const __DRIextension *image_loader_extensions[] = {
-   &image_loader_extension.base,  &image_lookup_extension.base, NULL,
+static const struct dri_loader_funcs image_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &image_loader_extension,
 };
 
-static const __DRIextension *swrast_loader_extensions[] = {
-   &swrast_pbuffer_loader_extension.base, &image_loader_extension.base,
-   &image_lookup_extension.base, NULL,
+static const struct dri_loader_funcs swrast_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &image_loader_extension,
+   .swrast = &swrast_pbuffer_loader_extension,
 };
 
-static const __DRIextension *kopper_loader_extensions[] = {
-   &kopper_pbuffer_loader_extension.base, &image_lookup_extension.base,
-   &image_lookup_extension.base, NULL,
+static const struct dri_loader_funcs kopper_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .kopper = &kopper_pbuffer_loader_extension,
 };
 
 static bool
@@ -289,11 +289,11 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast, bool zink)
       if (dri2_dpy->driver_name) {
          dri2_detect_swrast_kopper(disp);
          if (dri2_dpy->kopper)
-            dri2_dpy->loader_extensions = kopper_loader_extensions;
+            dri2_dpy->loader_funcs = &kopper_loader_funcs;
          else if (swrast)
-            dri2_dpy->loader_extensions = swrast_loader_extensions;
+            dri2_dpy->loader_funcs = &swrast_loader_funcs;
          else
-            dri2_dpy->loader_extensions = image_loader_extensions;
+            dri2_dpy->loader_funcs = &image_loader_funcs;
 
          if (!dri2_create_screen(disp)) {
             _eglLog(_EGL_WARNING, "DRI2: failed to create screen");
@@ -361,9 +361,9 @@ surfaceless_probe_device_sw(_EGLDisplay *disp)
    dri2_detect_swrast_kopper(disp);
 
    if (dri2_dpy->kopper)
-      dri2_dpy->loader_extensions = kopper_loader_extensions;
+      dri2_dpy->loader_funcs = &kopper_loader_funcs;
    else
-      dri2_dpy->loader_extensions = swrast_loader_extensions;
+      dri2_dpy->loader_funcs = &swrast_loader_funcs;
 
    dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
 
@@ -401,8 +401,10 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
 
    dri2_setup_screen(disp);
 #ifdef HAVE_WAYLAND_PLATFORM
-   dri2_dpy->device_name =
-      loader_get_device_name_for_fd(dri2_dpy->fd_render_gpu);
+   if (dri2_dpy->fd_render_gpu >= 0) {
+      dri2_dpy->device_name =
+         loader_get_device_name_for_fd(dri2_dpy->fd_render_gpu);
+   }
 #endif
    dri2_set_WL_bind_wayland_display(disp);
 

@@ -2298,6 +2298,36 @@ d3d12_has_video_encode_support(struct pipe_screen *pscreen,
                roi_support.bits.roi_rc_qp_delta_support = ((capEncoderSupportData.SupportFlags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_DELTA_QP_AVAILABLE) != 0) ? 1 : 0;
                roi_support.bits.num_roi_regions = roi_support.bits.roi_rc_qp_delta_support ? PIPE_ENC_ROI_REGION_NUM_MAX : 0;
                roi_support.bits.log2_roi_min_block_pixel_size = static_cast<uint32_t>(std::log2(capEncoderSupportData.pResolutionDependentSupport[0].QPMapRegionPixelsSize));
+
+               D3D12_VIDEO_ENCODER_INPUT_MAP_SESSION_INFO sessionInfo = {
+                  // D3D12_VIDEO_ENCODER_CODEC Codec;
+                  capEncoderSupportData.Codec,
+                  // D3D12_VIDEO_ENCODER_PROFILE_DESC Profile;
+                  profDesc,
+                  // D3D12_VIDEO_ENCODER_LEVEL_SETTING Level;
+                  maxLvl,
+                  // DXGI_FORMAT InputFormat;
+                  capEncoderSupportData.InputFormat,
+                  // D3D12_VIDEO_ENCODER_PICTURE_RESOLUTION_DESC InputResolution;
+                  maxRes,
+                  // D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION CodecConfiguration;
+                  capEncoderSupportData.CodecConfiguration,
+                  // D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE SubregionFrameEncoding;
+                  capEncoderSupportData.SubregionFrameEncoding,
+                  // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_SUBREGIONS_LAYOUT_DATA SubregionFrameEncodingData;
+                  capEncoderSupportData.SubregionFrameEncodingData,
+               };
+
+               dirty_rects_support = get_dirty_rects_support(sessionInfo, spD3D12VideoDevice.Get(), D3D12_VIDEO_ENCODER_INPUT_MAP_SOURCE_CPU_BUFFER);
+               dirty_rects_support_gpu = get_dirty_rects_support(sessionInfo, spD3D12VideoDevice.Get(), D3D12_VIDEO_ENCODER_INPUT_MAP_SOURCE_GPU_TEXTURE);
+               move_rects_support = get_move_rects_support(sessionInfo, spD3D12VideoDevice.Get());
+               get_gpu_output_stats_support(sessionInfo, capEncoderSupportData.SupportFlags, spD3D12VideoDevice.Get(), gpu_stats_qp, gpu_stats_satd, gpu_stats_rcbits, psnr_support);
+               sliced_encode_support = get_sliced_encode_support(capEncoderSupportData.SupportFlags);
+               gpu_motion_input_support = get_motion_gpuinput_support(sessionInfo, spD3D12VideoDevice.Get());
+               two_pass_support = query_two_pass_support(pscreen, sessionInfo, spD3D12VideoDevice.Get(),
+                                                         ((capEncoderSupportData.SupportFlags &
+                                                            D3D12_VIDEO_ENCODER_SUPPORT_FLAG_READABLE_RECONSTRUCTED_PICTURE_LAYOUT_AVAILABLE) != 0));
+
             }
          }
       } break;

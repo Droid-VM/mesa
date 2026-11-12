@@ -11,10 +11,10 @@
 #include "encode.h"
 
 void
-radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t global_id,
-                    bool gfx12)
+radv_get_triangle(inout vk_aabb bounds, inout vk_ir_triangle_node node, vk_bvh_geometry_data geom_data,
+                  uint32_t primitive_index)
 {
-   triangle_indices indices = load_indices(geom_data.indices, geom_data.index_format, global_id);
+   triangle_indices indices = load_indices(geom_data.indices, geom_data.index_format, primitive_index);
 
    triangle_vertices vertices = load_vertices(geom_data.data, indices, geom_data.vertex_format, geom_data.stride);
 
@@ -29,11 +29,6 @@ radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data
          vertices.vertex[i] = transform * vertices.vertex[i];
    }
 
-   vk_ir_triangle_node node;
-
-   bounds.min = vec3(INFINITY);
-   bounds.max = vec3(-INFINITY);
-
    for (uint32_t coord = 0; coord < 3; coord++) {
       for (uint32_t comp = 0; comp < 3; comp++) {
          node.coords[coord][comp] = vertices.vertex[coord][comp];
@@ -42,13 +37,40 @@ radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data
       }
    }
 
-   node.triangle_id = global_id;
+   node.triangle_id = primitive_index;
    node.geometry_id_and_flags = geom_data.geometry_id;
+}
+
+void
+radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t global_id,
+                    bool gfx12)
+{
+   bounds.min = vec3(INFINITY);
+   bounds.max = vec3(-INFINITY);
+
+   vk_ir_triangle_node node;
+   radv_get_triangle(bounds, node, geom_data, global_id);
 
    if (gfx12)
       radv_encode_triangle_gfx12(dst_ptr, node);
    else
       radv_encode_triangle_gfx10_3(dst_ptr, node);
+}
+
+void
+radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t primitive_index,
+                    vk_bvh_geometry_data second_geom_data, uint32_t second_primitive_index)
+{
+   bounds.min = vec3(INFINITY);
+   bounds.max = vec3(-INFINITY);
+
+   vk_ir_triangle_node node;
+   radv_get_triangle(bounds, node, geom_data, primitive_index);
+
+   vk_ir_triangle_node second_node;
+   radv_get_triangle(bounds, second_node, second_geom_data, second_primitive_index);
+
+   radv_encode_triangle_gfx12(dst_ptr, node, second_node);
 }
 
 void

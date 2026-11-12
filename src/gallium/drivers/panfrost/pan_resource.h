@@ -12,7 +12,6 @@
 #include "pan_screen.h"
 
 #define LAYOUT_CONVERT_THRESHOLD 8
-#define PAN_MAX_BATCHES          32
 
 #define PAN_BIND_SHARED_MASK                                                   \
    (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)
@@ -209,12 +208,16 @@ void pan_resource_modifier_convert(struct panfrost_context *ctx,
                                    struct panfrost_resource *rsrc,
                                    uint64_t modifier, bool copy_resource,
                                    const char *reason);
+void pan_resource_modifier_legalize(struct panfrost_context *ctx,
+                                    struct panfrost_resource *rsrc,
+                                    enum pipe_format format, bool write,
+                                    bool discard);
 
-void pan_legalize_format(struct panfrost_context *ctx,
-                         struct panfrost_resource *rsrc,
-                         enum pipe_format format, bool write,
-                         bool discard);
 void pan_dump_resource(struct panfrost_context *ctx,
                        struct panfrost_resource *rsc);
+
+bool panfrost_resource_wait(struct panfrost_resource *rsrc,
+                            struct panfrost_context *ctx, int64_t timeout_ns,
+                            bool wait_readers);
 
 #endif /* PAN_RESOURCE_H */

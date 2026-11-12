@@ -62,4 +62,12 @@ prefix = "asan-"
 [deqp.env]
   ZINK_DEBUG = "validation"
 
-# TODO: add piglit when it's fixed
+# TODO: add piglit gl when it's fixed
+
+[[piglit]]
+piglit_folder = "/piglit"
+profile = "cl"
+process_isolation = true
+prefix = "asan-"
+[piglit.env]
+  RUSTICL_ENABLE = "zink:0"  # limit testing to the first device

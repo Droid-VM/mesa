@@ -26,7 +26,7 @@
 #include "drm-uapi/v3d_drm.h"
 #include "util/detect_os.h"
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #define V3DV_MAX_QUEUES 4
 #else
 #define V3DV_MAX_QUEUES 1
@@ -118,5 +118,11 @@
 #define V3DV_VCM_CACHE_SIZE_LENGTH 2
 #define V3DV_GL_SHADER_STATE_ATTRIBUTE_RECORD_LENGTH 16
 #define V3DV_STENCIL_CFG_LENGTH 6
+
+/* Size of the zeroed BO used as backing for null index buffers
+ * (VK_KHR_maintenance6). Bigger is safer, see the FIXME in
+ * cmd_buffer_emit_index_buffer.
+ */
+#define V3DV_NULL_BO_SIZE_MAINTENANCE6 (128 * 1024)
 
 #endif /* V3DV_LIMITS_H */

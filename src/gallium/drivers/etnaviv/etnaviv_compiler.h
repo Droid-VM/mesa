@@ -32,9 +32,7 @@
 #include "etnaviv_internal.h"
 #include "etnaviv_shader.h"
 #include "util/compiler.h"
-#include "pipe/p_shader_tokens.h"
 #include "compiler/shader_enums.h"
-#include "util/disk_cache.h"
 #include "util/u_shader_variant_cache.h"
 
 /* XXX some of these are pretty arbitrary limits, may be better to switch
@@ -56,7 +54,6 @@ struct etna_compiler {
    struct ra_regs *regs;
 
    nir_shader_compiler_options options;
-   struct disk_cache *disk_cache;
 };
 
 /* compiler output per input/output */
@@ -83,12 +80,14 @@ struct etna_shader_variant {
    struct etna_shader_key key;
 
    struct etna_bo *bo; /* cached code memory bo handle (for icache) */
+   struct etna_bo *constant_bo; /* uploaded copy of constant_data */
 
    /*
     * Below here is serialized when written to disk cache:
     */
    uint32_t *code;
    struct etna_shader_uniform_info uniforms;
+   void *constant_data;
 
    /*
     * The following macros are used by the shader disk cache save/
@@ -102,11 +101,15 @@ struct etna_shader_variant {
 
    mesa_shader_stage stage;
    uint32_t code_size; /* code size in uint32 words */
+   uint32_t constant_data_size; /* in bytes */
    unsigned num_temps;
 
    /* ETNA_DIRTY_* flags that, when set in context dirty, mean that the
     * uniforms have to get (partial) reloaded. */
    uint32_t uniforms_dirty_bits;
+
+   /* Constant buffers the shader reads from memory. */
+   uint32_t ubo_mask;
 
    /* inputs (for linking) for fs, the inputs must be in register 1..N */
    struct etna_shader_io_file infile;
@@ -150,7 +153,7 @@ struct etna_shader_link_info {
 };
 
 struct etna_compiler *
-etna_compiler_create(const char *renderer, const struct etna_core_info *info);
+etna_compiler_create(const struct etna_core_info *info);
 
 void
 etna_compiler_destroy(const struct etna_compiler *compiler);

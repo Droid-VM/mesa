@@ -253,7 +253,6 @@ void initialize_context_to_defaults(struct gl_context *ctx, gl_api api)
    ctx->Const.GLSLVersion = 120;
 
    /* 1.20 minimums. */
-   ctx->Const.MaxLights = 8;
    ctx->Const.MaxClipPlanes = 6;
    ctx->Const.MaxTextureUnits = 2;
    ctx->Const.MaxTextureCoordUnits = 2;

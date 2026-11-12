@@ -500,7 +500,12 @@ VkResult pvr_arch_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
       /* Assert if no memory is bound to destination buffer. */
       assert(buffer->dev_addr.addr);
 
-      uint64_t offset =
+      const uint32_t report_count = pool->query_report_count;
+      const uint32_t result_stride = pool->result_elem_stride;
+
+      uint64_t result_offset =
+         (uint64_t)query_info->copy_query_results.first_query * result_stride;
+      uint64_t avail_offset =
          query_info->copy_query_results.first_query * sizeof(uint32_t);
 
       dev_addr = PVR_DEV_ADDR_OFFSET(buffer->dev_addr,
@@ -508,10 +513,11 @@ VkResult pvr_arch_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
       uint64_t dest_addr = dev_addr.addr;
 
       dev_addr =
-         PVR_DEV_ADDR_OFFSET(pool->availability_buffer->dev_addr, offset);
+         PVR_DEV_ADDR_OFFSET(pool->availability_buffer->dev_addr, avail_offset);
       uint64_t avail_addr = dev_addr.addr;
 
-      dev_addr = PVR_DEV_ADDR_OFFSET(pool->result_buffer->dev_addr, offset);
+      dev_addr =
+         PVR_DEV_ADDR_OFFSET(pool->result_buffer->dev_addr, result_offset);
       uint64_t result_addr = dev_addr.addr;
 
       const_buffer[PVR_QUERY_COPY_DATA_INDEX_COUNT] = num_query_indices;
@@ -532,6 +538,9 @@ VkResult pvr_arch_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
       const_buffer[PVR_QUERY_COPY_DATA_FLAGS] =
          query_info->copy_query_results.flags;
 
+      const_buffer[PVR_QUERY_COPY_DATA_RESULT_STRIDE] = result_stride;
+      const_buffer[PVR_QUERY_COPY_DATA_REPORT_COUNT] = report_count;
+
       break;
    }
 
@@ -540,15 +549,20 @@ VkResult pvr_arch_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
                      pool,
                      query_info->reset_query_pool.query_pool);
 
-      uint64_t offset =
+      const uint32_t report_count = pool->query_report_count;
+      const uint32_t result_stride = pool->result_elem_stride;
+
+      uint64_t result_offset =
+         (uint64_t)query_info->reset_query_pool.first_query * result_stride;
+      uint64_t avail_offset =
          query_info->reset_query_pool.first_query * sizeof(uint32_t);
 
       pvr_dev_addr_t dev_addr =
-         PVR_DEV_ADDR_OFFSET(pool->result_buffer->dev_addr, offset);
+         PVR_DEV_ADDR_OFFSET(pool->result_buffer->dev_addr, result_offset);
       uint64_t result_addr = dev_addr.addr;
 
       dev_addr =
-         PVR_DEV_ADDR_OFFSET(pool->availability_buffer->dev_addr, offset);
+         PVR_DEV_ADDR_OFFSET(pool->availability_buffer->dev_addr, avail_offset);
       uint64_t avail_addr = dev_addr.addr;
 
       const_buffer[PVR_QUERY_RESET_DATA_INDEX_COUNT] = num_query_indices;
@@ -558,6 +572,8 @@ VkResult pvr_arch_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
       const_buffer[PVR_QUERY_RESET_DATA_AVAILABILITY_BO_LO] = avail_addr &
                                                               0xffffffff;
       const_buffer[PVR_QUERY_RESET_DATA_AVAILABILITY_BO_HI] = avail_addr >> 32;
+      const_buffer[PVR_QUERY_RESET_DATA_RESULT_STRIDE] = result_stride;
+      const_buffer[PVR_QUERY_RESET_DATA_REPORT_COUNT] = report_count;
 
       break;
    }

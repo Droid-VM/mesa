@@ -27,17 +27,8 @@
 #include "util/u_printf.h"
 #include "util/vma.h"
 
-/* On JM hardware, we need to allocate a buffer depending on vertex count.
- *
- * As a result, for indirect and indexed draw we allocate a large buffer with
- * alloc on fault set.
- *
- * The size of that buffer is calculated assuming a max of 2 millions vertices
- * and 18 attributes per vertex (16 user attributes, 2 specials)
- */
-
-#define PANVK_JM_MAX_VERTICES_INDIRECT                (2000000)
-#define PANVK_JM_MAX_PER_VTX_ATTRIBUTES_INDIRECT_SIZE (18 * 4)
+/* 128 MiB */
+#define PANVK_POLY_HEAP_SIZE (1 << 27)
 
 struct panvk_precomp_cache;
 struct panvk_device_draw_context;
@@ -48,16 +39,26 @@ enum panvk_queue_family {
    PANVK_QUEUE_FAMILY_COUNT,
 };
 
+enum panvk_va_heap_id {
+   PANVK_INVALID_VA_HEAP = -1,
+   PANVK_EXEC_VA_HEAP = 0,
+   PANVK_NO_EXEC_VA_HEAP,
+   PANVK_FIXED_VA_HEAP,
+   PANVK_VA_HEAP_COUNT,
+};
+
+struct panvk_va_heap {
+   struct util_vma_heap heap;
+   uint64_t start;
+   uint64_t end;
+};
+
 struct panvk_device {
    struct vk_device vk;
 
    struct {
       simple_mtx_t lock;
-      struct util_vma_heap heap;
-      struct util_vma_heap fixed_heap;
-      struct util_vma_heap *priv_heap;
-      bool split_heap;
-      bool extended_range;
+      struct panvk_va_heap heaps[PANVK_VA_HEAP_COUNT];
    } as;
 
    struct {
@@ -67,7 +68,6 @@ struct panvk_device {
    } kmod;
 
    struct panvk_priv_bo *tiler_heap;
-   struct panvk_priv_bo *indirect_varying_buffer;
    struct panvk_priv_bo *sample_positions;
 
    struct {
@@ -108,6 +108,23 @@ struct panvk_device {
    } utrace;
 
    struct panvk_device_draw_context* draw_ctx;
+
+   struct {
+      bool initialized;
+      /* Only used on CSF, to synchronize initialization between multiple
+       * threads */
+      simple_mtx_t init_lock;
+
+      /* Used to propagate errors from poly_heap initialization back to the
+       * caller, since the call_once interface does not allow for a fallible
+       * initialization function */
+      VkResult init_result;
+
+      struct panvk_priv_bo *buffer;
+
+      /* 'struct poly_heap' allocation */
+      struct panvk_priv_mem state;
+   } poly_heap;
 
    struct {
       struct pandecode_context *decode_ctx;
@@ -186,33 +203,66 @@ panvk_get_gpu_page_size(const struct panvk_device *device)
    return (uint64_t)1 << (ffsll(device->kmod.vm->pgsize_bitmap) - 1);
 }
 
+static inline enum panvk_va_heap_id
+panvk_va_heap_fallback(enum panvk_va_heap_id heap)
+{
+   switch (heap) {
+   /* Non-executable objects can live in the executable heap if there's no space
+    * left in the non-executable one. */
+   case PANVK_NO_EXEC_VA_HEAP:
+      return PANVK_EXEC_VA_HEAP;
+
+   case PANVK_FIXED_VA_HEAP:
+   case PANVK_EXEC_VA_HEAP:
+   default:
+      return PANVK_INVALID_VA_HEAP;
+   }
+}
+
 static inline uint64_t
-panvk_as_alloc(struct panvk_device *device, struct util_vma_heap *heap,
+panvk_as_alloc(struct panvk_device *device, enum panvk_va_heap_id heap,
                uint64_t size, uint64_t alignment)
 {
+   uint64_t address = 0;
+
    simple_mtx_lock(&device->as.lock);
-   uint64_t address = util_vma_heap_alloc(heap, size, alignment);
+   while (address == 0 && heap != PANVK_INVALID_VA_HEAP) {
+      address =
+         util_vma_heap_alloc(&device->as.heaps[heap].heap, size, alignment);
+      heap = panvk_va_heap_fallback(heap);
+   }
    simple_mtx_unlock(&device->as.lock);
+
    return address;
 }
 
 static inline uint64_t
-panvk_as_alloc_fixed_address(struct panvk_device *device,
-                             struct util_vma_heap *heap, uint64_t address,
+panvk_as_alloc_fixed_address(struct panvk_device *device, uint64_t address,
                              uint64_t size)
 {
    simple_mtx_lock(&device->as.lock);
-   bool alloc_result = util_vma_heap_alloc_addr(heap, address, size);
+   bool alloc_result = util_vma_heap_alloc_addr(
+      &device->as.heaps[PANVK_FIXED_VA_HEAP].heap, address, size);
    simple_mtx_unlock(&device->as.lock);
    return alloc_result ? address : 0;
 }
 
 static inline void
-panvk_as_free(struct panvk_device *device, struct util_vma_heap *heap,
-              uint64_t address, uint64_t size)
+panvk_as_free(struct panvk_device *device, uint64_t address, uint64_t size)
 {
+   struct panvk_va_heap *heap = NULL;
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(device->as.heaps); i++) {
+      if (address >= device->as.heaps[i].start && address < device->as.heaps[i].end) {
+         heap = &device->as.heaps[i];
+         break;
+      }
+   }
+
+   assert(heap);
+
    simple_mtx_lock(&device->as.lock);
-   util_vma_heap_free(heap, address, size);
+   util_vma_heap_free(&heap->heap, address, size);
    simple_mtx_unlock(&device->as.lock);
 }
 
@@ -252,6 +302,8 @@ VkResult panvk_per_arch(device_check_status)(struct vk_device *vk_dev);
 #if PAN_ARCH >= 10
 VkResult panvk_per_arch(init_tiler_oom)(struct panvk_device *device);
 #endif
+
+VkResult panvk_per_arch(device_init_poly_heap)(struct panvk_device *dev);
 #endif
 
 #endif

@@ -21,6 +21,7 @@
  */
 
 #include "pipe/p_defines.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_upload_mgr.h"
 
@@ -347,6 +348,7 @@ nv50_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->destroy = nv50_destroy;
 
    pipe->draw_vbo = nv50_draw_vbo;
+   pipe->draw_vbo_buffers = util_draw_vbo_buffers;
    pipe->clear = nv50_clear;
    pipe->launch_grid = nv50_launch_grid;
 

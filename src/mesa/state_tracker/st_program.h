@@ -65,7 +65,174 @@ struct st_external_sampler_key
    GLuint bt709;
    GLuint bt2020;
    GLuint yuv_full_range;
+   GLuint external_y2y;
 };
+
+/**
+ * Add the lowering that sampling stObj through the external sampler unit
+ * needs to key.
+ */
+static inline void
+st_add_external_sampler_key(struct st_external_sampler_key *key,
+                            unsigned unit, struct gl_texture_object *stObj)
+{
+   enum pipe_format format = st_get_view_format(stObj);
+
+   /* if no extra YUV plane views are needed, there's nothing to lower */
+   if (!stObj->needs_yuv_plane_views)
+      return;
+
+   switch (format) {
+   case PIPE_FORMAT_Y8U8V8_420_UNORM_PACKED:
+      /* This format is HW-defined, so we can't lower it to anything but its
+       * YUV-as-RGB variant. */
+      assert(stObj->pt->format == PIPE_FORMAT_R8G8B8_420_UNORM_PACKED);
+      key->lower_yuv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y10U10V10_420_UNORM_PACKED:
+      /* This format is HW-defined, so we can't lower it to anything but its
+       * YUV-as-RGB variant. */
+      assert(stObj->pt->format == PIPE_FORMAT_R10G10B10_420_UNORM_PACKED);
+      key->lower_yuv |= (1 << unit);
+      break;
+
+   case PIPE_FORMAT_NV16:
+      if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_422_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      FALLTHROUGH;
+   case PIPE_FORMAT_NV12:
+      if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_420_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      FALLTHROUGH;
+   case PIPE_FORMAT_NV15:
+      if (stObj->pt->format == PIPE_FORMAT_R10_G10B10_420_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      FALLTHROUGH;
+   case PIPE_FORMAT_NV24:
+   case PIPE_FORMAT_P010:
+   case PIPE_FORMAT_P012:
+   case PIPE_FORMAT_P016:
+   case PIPE_FORMAT_P030:
+      key->lower_nv12 |= (1 << unit);
+      break;
+   case PIPE_FORMAT_NV21:
+      if (stObj->pt->format == PIPE_FORMAT_R8_B8G8_420_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      FALLTHROUGH;
+   case PIPE_FORMAT_NV61:
+   case PIPE_FORMAT_NV42:
+      key->lower_nv21 |= (1 << unit);
+      break;
+   case PIPE_FORMAT_NV20:
+      if (stObj->pt->format == PIPE_FORMAT_R10_G10B10_422_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      FALLTHROUGH;
+   case PIPE_FORMAT_IYUV:
+      if (stObj->pt->format == PIPE_FORMAT_R8_G8_B8_420_UNORM ||
+          stObj->pt->format == PIPE_FORMAT_R8_B8_G8_420_UNORM) {
+         key->lower_yuv |= (1 << unit);
+         break;
+      }
+      key->lower_iyuv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y10X6_U10X6_V10X6_420_UNORM:
+   case PIPE_FORMAT_Y10X6_U10X6_V10X6_422_UNORM:
+   case PIPE_FORMAT_Y10X6_U10X6_V10X6_444_UNORM:
+      key->lower_iyuv |= (1 << unit);
+      key->lower_sx10 |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y12X4_U12X4_V12X4_420_UNORM:
+   case PIPE_FORMAT_Y12X4_U12X4_V12X4_422_UNORM:
+   case PIPE_FORMAT_Y12X4_U12X4_V12X4_444_UNORM:
+      key->lower_iyuv |= (1 << unit);
+      key->lower_sx12 |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
+   case PIPE_FORMAT_Y16_U16_V16_422_UNORM:
+   case PIPE_FORMAT_Y16_U16_V16_444_UNORM:
+      key->lower_iyuv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_YUYV:
+      if (stObj->pt->format == PIPE_FORMAT_R8G8_R8B8_UNORM)
+         key->lower_yu_yv |= (1 << unit);
+      else
+         key->lower_yx_xuxv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y210:
+      if (stObj->pt->format == PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM)
+         key->lower_yu_yv |= (1 << unit);
+      else
+         key->lower_yx_xuxv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y212:
+   case PIPE_FORMAT_Y216:
+      if (stObj->pt->format == PIPE_FORMAT_R16G16_R16B16_422_UNORM)
+         key->lower_yu_yv |= (1 << unit);
+      else
+         key->lower_yx_xuxv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_UYVY:
+      if (stObj->pt->format == PIPE_FORMAT_G8R8_B8R8_UNORM) {
+         key->lower_yu_yv |= (1 << unit);
+         break;
+      }
+      key->lower_xy_uxvx |= (1 << unit);
+      break;
+   case PIPE_FORMAT_VYUY:
+      if (stObj->pt->format == PIPE_FORMAT_B8R8_G8R8_UNORM) {
+         key->lower_yv_yu |= (1 << unit);
+         break;
+      }
+      key->lower_xy_vxux |= (1 << unit);
+      break;
+   case PIPE_FORMAT_YVYU:
+      if (stObj->pt->format == PIPE_FORMAT_R8B8_R8G8_UNORM) {
+         key->lower_yv_yu |= (1 << unit);
+         break;
+      }
+      key->lower_yx_xvxu |= (1 << unit);
+      break;
+   case PIPE_FORMAT_AYUV:
+      key->lower_ayuv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_XYUV:
+      key->lower_xyuv |= (1 << unit);
+      break;
+   case PIPE_FORMAT_Y410:
+   case PIPE_FORMAT_Y412:
+   case PIPE_FORMAT_Y416:
+      key->lower_y41x |= (1 << unit);
+      break;
+   default:
+      printf("mesa: st_get_external_sampler_key: unhandled pipe format %u\n",
+             format);
+      break;
+   }
+
+   switch (stObj->yuv_color_space) {
+   case GL_TEXTURE_YUV_COLOR_SPACE_REC601:
+      break;
+   case GL_TEXTURE_YUV_COLOR_SPACE_REC709:
+      key->bt709 |= (1 << unit);
+      break;
+   case GL_TEXTURE_YUV_COLOR_SPACE_REC2020:
+      key->bt2020 |= (1 << unit);
+      break;
+   }
+
+   if (stObj->yuv_full_range)
+      key->yuv_full_range |= (1 << unit);
+}
 
 static inline struct st_external_sampler_key
 st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
@@ -75,170 +242,30 @@ st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
 
    memset(&key, 0, sizeof(key));
 
+   /* Set Y2Y samplers from the stored bitfield */
+   key.external_y2y = prog->Y2YSamplersUsed;
+
    while (unlikely(mask)) {
       unsigned unit = u_bit_scan(&mask);
       struct gl_texture_object *stObj =
             st_get_texture_object(st->ctx, prog, unit);
-      enum pipe_format format = st_get_view_format(stObj);
 
-      /* if resource format matches then YUV wasn't lowered */
-      if (format == stObj->pt->format)
-         continue;
-
-      switch (format) {
-      case PIPE_FORMAT_Y8U8V8_420_UNORM_PACKED:
-         /* This format is HW-defined, so we can't lower it to anything but its
-          * YUV-as-RGB variant. */
-         assert(stObj->pt->format == PIPE_FORMAT_R8G8B8_420_UNORM_PACKED);
-         key.lower_yuv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y10U10V10_420_UNORM_PACKED:
-         /* This format is HW-defined, so we can't lower it to anything but its
-          * YUV-as-RGB variant. */
-         assert(stObj->pt->format == PIPE_FORMAT_R10G10B10_420_UNORM_PACKED);
-         key.lower_yuv |= (1 << unit);
-         break;
-
-      case PIPE_FORMAT_NV16:
-         if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_422_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         FALLTHROUGH;
-      case PIPE_FORMAT_NV12:
-         if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_420_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         FALLTHROUGH;
-      case PIPE_FORMAT_NV15:
-         if (stObj->pt->format == PIPE_FORMAT_R10_G10B10_420_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         FALLTHROUGH;
-      case PIPE_FORMAT_NV24:
-      case PIPE_FORMAT_P010:
-      case PIPE_FORMAT_P012:
-      case PIPE_FORMAT_P016:
-      case PIPE_FORMAT_P030:
-         key.lower_nv12 |= (1 << unit);
-         break;
-      case PIPE_FORMAT_NV21:
-         if (stObj->pt->format == PIPE_FORMAT_R8_B8G8_420_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         FALLTHROUGH;
-      case PIPE_FORMAT_NV61:
-      case PIPE_FORMAT_NV42:
-         key.lower_nv21 |= (1 << unit);
-         break;
-      case PIPE_FORMAT_NV20:
-         if (stObj->pt->format == PIPE_FORMAT_R10_G10B10_422_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         FALLTHROUGH;
-      case PIPE_FORMAT_IYUV:
-         if (stObj->pt->format == PIPE_FORMAT_R8_G8_B8_420_UNORM ||
-             stObj->pt->format == PIPE_FORMAT_R8_B8_G8_420_UNORM) {
-            key.lower_yuv |= (1 << unit);
-            break;
-         }
-         key.lower_iyuv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y10X6_U10X6_V10X6_420_UNORM:
-      case PIPE_FORMAT_Y10X6_U10X6_V10X6_422_UNORM:
-      case PIPE_FORMAT_Y10X6_U10X6_V10X6_444_UNORM:
-         key.lower_iyuv |= (1 << unit);
-         key.lower_sx10 |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y12X4_U12X4_V12X4_420_UNORM:
-      case PIPE_FORMAT_Y12X4_U12X4_V12X4_422_UNORM:
-      case PIPE_FORMAT_Y12X4_U12X4_V12X4_444_UNORM:
-         key.lower_iyuv |= (1 << unit);
-         key.lower_sx12 |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
-      case PIPE_FORMAT_Y16_U16_V16_422_UNORM:
-      case PIPE_FORMAT_Y16_U16_V16_444_UNORM:
-         key.lower_iyuv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_YUYV:
-         if (stObj->pt->format == PIPE_FORMAT_R8G8_R8B8_UNORM)
-            key.lower_yu_yv |= (1 << unit);
-         else
-            key.lower_yx_xuxv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y210:
-         if (stObj->pt->format == PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM)
-            key.lower_yu_yv |= (1 << unit);
-         else
-            key.lower_yx_xuxv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y212:
-      case PIPE_FORMAT_Y216:
-         if (stObj->pt->format == PIPE_FORMAT_R16G16_R16B16_422_UNORM)
-            key.lower_yu_yv |= (1 << unit);
-         else
-            key.lower_yx_xuxv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_UYVY:
-         if (stObj->pt->format == PIPE_FORMAT_G8R8_B8R8_UNORM) {
-            key.lower_yu_yv |= (1 << unit);
-            break;
-         }
-         key.lower_xy_uxvx |= (1 << unit);
-         break;
-      case PIPE_FORMAT_VYUY:
-         if (stObj->pt->format == PIPE_FORMAT_B8R8_G8R8_UNORM) {
-            key.lower_yv_yu |= (1 << unit);
-            break;
-         }
-         key.lower_xy_vxux |= (1 << unit);
-         break;
-      case PIPE_FORMAT_YVYU:
-         if (stObj->pt->format == PIPE_FORMAT_R8B8_R8G8_UNORM) {
-            key.lower_yv_yu |= (1 << unit);
-            break;
-         }
-         key.lower_yx_xvxu |= (1 << unit);
-         break;
-      case PIPE_FORMAT_AYUV:
-         key.lower_ayuv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_XYUV:
-         key.lower_xyuv |= (1 << unit);
-         break;
-      case PIPE_FORMAT_Y410:
-      case PIPE_FORMAT_Y412:
-      case PIPE_FORMAT_Y416:
-         key.lower_y41x |= (1 << unit);
-         break;
-      default:
-         printf("mesa: st_get_external_sampler_key: unhandled pipe format %u\n",
-                format);
-         break;
-      }
-
-      switch (stObj->yuv_color_space) {
-      case GL_TEXTURE_YUV_COLOR_SPACE_REC601:
-         break;
-      case GL_TEXTURE_YUV_COLOR_SPACE_REC709:
-         key.bt709 |= (1 << unit);
-         break;
-      case GL_TEXTURE_YUV_COLOR_SPACE_REC2020:
-         key.bt2020 |= (1 << unit);
-         break;
-      }
-
-      if (stObj->yuv_full_range)
-         key.yuv_full_range |= (1 << unit);
+      st_add_external_sampler_key(&key, unit, stObj);
    }
 
    return key;
 }
+
+struct nir_shader;
+
+void
+st_nir_lower_external_samplers(struct nir_shader *nir,
+                               const struct st_external_sampler_key *key);
+
+void
+st_nir_lower_external_sampler_planes(struct nir_shader *nir,
+                                     const struct st_external_sampler_key *key,
+                                     unsigned free_slots);
 
 /** Fragment program variant key
  *
@@ -279,13 +306,15 @@ struct st_fp_variant_key
    GLuint lower_flatshade:1;
    unsigned lower_alpha_func:3;
 
+   GLuint lower_polygon_stipple:1;
+
    /** needed for ATI_fragment_shader */
    uint8_t texture_index[MAX_NUM_FRAGMENT_REGISTERS_ATI];
 
    struct st_external_sampler_key external;
 
    /* bitmask of sampler units; pipe_caps.gl_clamp */
-   uint32_t gl_clamp[3];
+   uint32_t gl_clamp[4];
 
    /* bitmask of shadow samplers with depth textures in them for ARB programs; */
    GLbitfield depth_textures;
@@ -321,6 +350,12 @@ struct st_fp_variant
    /** For glDrawPixels variants */
    unsigned drawpix_sampler;
    unsigned pixelmap_sampler;
+
+   /**
+    * For emulated polygon stipple variants: the sampler/texture unit used by
+    * the stipple texture, or -1 if this variant doesn't emulate stipple.
+    */
+   int stipple_sampler;
 };
 
 
@@ -342,13 +377,16 @@ struct st_common_variant_key
    /* for user-defined clip-planes */
    uint8_t lower_ucp;
 
+   /* remove clip distance outputs when no clip plane is enabled */
+   bool drop_clip_dist;
+
    /* Whether st_variant::driver_shader is for the draw module,
     * not for the driver.
     */
    bool is_draw_shader;
 
    /* bitmask of sampler units; pipe_caps.gl_clamp */
-   uint32_t gl_clamp[3];
+   uint32_t gl_clamp[4];
 };
 
 
@@ -389,7 +427,7 @@ st_get_generic_varying_index(struct st_context *st, GLuint attr)
 }
 
 extern void
-st_set_prog_affected_state_flags(struct gl_program *prog);
+st_set_prog_affected_state_flags(struct st_context *st, struct gl_program *prog);
 
 
 extern struct st_fp_variant *

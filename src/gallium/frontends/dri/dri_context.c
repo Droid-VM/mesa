@@ -38,14 +38,14 @@
 #include "pipe-loader/pipe_loader.h"
 #include "state_tracker/st_context.h"
 
-#include "util/u_cpu_detect.h"
+#include "util/u_driconf.h"
 #include "util/u_memory.h"
 #include "util/u_debug.h"
 
 struct dri_context *
 dri_create_context(struct dri_screen *screen,
-                   gl_api api, const struct gl_config *visual,
-                   const struct __DriverContextConfig *ctx_config,
+                   struct st_context_attribs *attribs,
+                   const struct gl_config *visual,
                    unsigned *error,
                    struct dri_context *sharedContextPrivate,
                    void *loaderPrivate,
@@ -53,102 +53,7 @@ dri_create_context(struct dri_screen *screen,
 {
    struct dri_context *ctx = NULL;
    struct st_context *st_share = NULL;
-   struct st_context_attribs attribs;
    enum st_context_error ctx_err = 0;
-   unsigned allowed_flags = __DRI_CTX_FLAG_DEBUG |
-                            __DRI_CTX_FLAG_FORWARD_COMPATIBLE;
-   unsigned allowed_attribs =
-      __DRIVER_CONTEXT_ATTRIB_PRIORITY |
-      __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR |
-      __DRIVER_CONTEXT_ATTRIB_NO_ERROR;
-   const struct driOptionCache *optionCache = &screen->dev->option_cache;
-
-   /* This is effectively doing error checking for GLX context creation (by both
-    * Mesa and the X server) when the driver doesn't support the robustness ext.
-    * EGL already checks, so it won't send us the flags if the ext isn't
-    * available.
-    */
-   if (screen->has_reset_status_query) {
-      allowed_flags |= __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS;
-      allowed_attribs |= __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY;
-   }
-
-   if (screen->has_protected_context)
-      allowed_attribs |= __DRIVER_CONTEXT_ATTRIB_PROTECTED;
-
-   if (ctx_config->flags & ~allowed_flags) {
-      *error = __DRI_CTX_ERROR_UNKNOWN_FLAG;
-      goto fail;
-   }
-
-   if (ctx_config->attribute_mask & ~allowed_attribs) {
-      *error = __DRI_CTX_ERROR_UNKNOWN_ATTRIBUTE;
-      goto fail;
-   }
-
-   memset(&attribs, 0, sizeof(attribs));
-   switch (api) {
-   case API_OPENGLES:
-      attribs.profile = API_OPENGLES;
-      break;
-   case API_OPENGLES2:
-      attribs.profile = API_OPENGLES2;
-      break;
-   case API_OPENGL_COMPAT:
-   case API_OPENGL_CORE:
-      if (driQueryOptionb(optionCache, "force_compat_profile")) {
-         attribs.profile = API_OPENGL_COMPAT;
-      } else {
-         attribs.profile = api == API_OPENGL_COMPAT ? API_OPENGL_COMPAT
-                                                    : API_OPENGL_CORE;
-      }
-
-      attribs.major = ctx_config->major_version;
-      attribs.minor = ctx_config->minor_version;
-
-      if ((ctx_config->flags & __DRI_CTX_FLAG_FORWARD_COMPATIBLE) != 0)
-	 attribs.flags |= ST_CONTEXT_FLAG_FORWARD_COMPATIBLE;
-      break;
-   default:
-      *error = __DRI_CTX_ERROR_BAD_API;
-      goto fail;
-   }
-
-   if ((ctx_config->flags & __DRI_CTX_FLAG_DEBUG) != 0)
-      attribs.flags |= ST_CONTEXT_FLAG_DEBUG;
-
-   if (ctx_config->flags & __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS)
-      attribs.context_flags |= PIPE_CONTEXT_ROBUST_BUFFER_ACCESS;
-
-   if (ctx_config->attribute_mask & __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY)
-      if (ctx_config->reset_strategy != __DRI_CTX_RESET_NO_NOTIFICATION)
-         attribs.context_flags |= PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET;
-
-   if (ctx_config->attribute_mask & __DRIVER_CONTEXT_ATTRIB_NO_ERROR)
-      attribs.flags |= ctx_config->no_error ? ST_CONTEXT_FLAG_NO_ERROR : 0;
-
-   if (ctx_config->attribute_mask & __DRIVER_CONTEXT_ATTRIB_PRIORITY) {
-      switch (ctx_config->priority) {
-      case __DRI_CTX_PRIORITY_LOW:
-         attribs.context_flags |= PIPE_CONTEXT_LOW_PRIORITY;
-         break;
-      case __DRI_CTX_PRIORITY_HIGH:
-         attribs.context_flags |= PIPE_CONTEXT_HIGH_PRIORITY;
-         break;
-      case __DRI_CTX_PRIORITY_REALTIME:
-         attribs.context_flags |= PIPE_CONTEXT_REALTIME_PRIORITY;
-         break;
-      default:
-         break;
-      }
-   }
-
-   if ((ctx_config->attribute_mask & __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR)
-       && (ctx_config->release_behavior == __DRI_CTX_RELEASE_BEHAVIOR_NONE))
-      attribs.flags |= ST_CONTEXT_FLAG_RELEASE_NONE;
-
-   if (ctx_config->attribute_mask & __DRIVER_CONTEXT_ATTRIB_PROTECTED)
-      attribs.context_flags |= PIPE_CONTEXT_PROTECTED;
 
    struct dri_context *share_ctx = NULL;
    if (sharedContextPrivate) {
@@ -173,11 +78,11 @@ dri_create_context(struct dri_screen *screen,
 #if !defined(_WIN32)
       if (__normal_user())
 #endif
-         attribs.flags |= ST_CONTEXT_FLAG_NO_ERROR;
+         attribs->flags |= ST_CONTEXT_FLAG_NO_ERROR;
 
-   attribs.options = screen->options;
-   dri_fill_st_visual(&attribs.visual, screen, visual);
-   ctx->st = st_api_create_context(&screen->base, &attribs, &ctx_err,
+   attribs->options = screen->options;
+   dri_fill_st_visual(&attribs->visual, screen, visual);
+   ctx->st = st_api_create_context(&screen->base, attribs, &ctx_err,
 				   st_share);
    if (ctx->st == NULL) {
       switch (ctx_err) {
@@ -201,32 +106,7 @@ dri_create_context(struct dri_screen *screen,
                             ctx->st, st_context_invalidate_state);
    }
 
-   /* order of precedence (least to most):
-    * - driver setting
-    * - app setting
-    * - user setting
-    */
-   bool enable_glthread = driQueryOptionb(&screen->dev->option_cache, "mesa_glthread_driver");
-
-   /* always disable glthread by default if fewer than 5 "big" CPUs are active */
-   unsigned nr_big_cpus = util_get_cpu_caps()->nr_big_cpus;
-   if (util_get_cpu_caps()->nr_cpus < 4 || (nr_big_cpus && nr_big_cpus < 5))
-      enable_glthread = false;
-
-   int app_enable_glthread = driQueryOptioni(&screen->dev->option_cache, "mesa_glthread_app_profile");
-   if (app_enable_glthread != -1) {
-      /* if set (not -1), apply the app setting */
-      enable_glthread = app_enable_glthread == 1;
-   }
-   if (os_get_option("mesa_glthread")) {
-      /* only apply the env var if set */
-      bool user_enable_glthread = debug_get_bool_option("mesa_glthread", false);
-      if (user_enable_glthread != enable_glthread) {
-         /* print warning to mimic old behavior */
-         fprintf(stderr, "ATTENTION: default value of option mesa_glthread overridden by environment.\n");
-      }
-      enable_glthread = user_enable_glthread;
-   }
+   bool enable_glthread = u_driconf_glthread_enabled(&screen->dev->option_cache);
 
    if (!thread_safe)
       enable_glthread = false;

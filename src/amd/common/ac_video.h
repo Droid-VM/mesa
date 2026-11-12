@@ -95,7 +95,6 @@ struct ac_video_dec_codec_caps {
 
       struct {
          bool profile2;
-         bool profile2_tier3;
       } av1;
 
       struct {
@@ -130,6 +129,8 @@ struct ac_video_enc_codec_caps {
    uint32_t max_temporal_layers;
    uint32_t quality_levels;
    bool efc;
+   bool efc_range_bug; /* only bt709/limited and bt2020/full works */
+   bool preenc_pitch_wa; /* preenc input pitch uses input pitch */
 
    bool qp_map;
    uint32_t qp_map_texel_size;
@@ -210,6 +211,8 @@ struct ac_video_proc_caps {
    bool flip_horizontal;
    bool flip_vertical;
    bool blend_global_alpha;
+   bool blend_luma_key;
+   bool sharpening;
 };
 
 enum ac_video_write_memory_support {

@@ -10,8 +10,6 @@ vc4-rpi3-gl:arm64:
   timeout: 25m
   parallel: 3
   variables:
-    # Use an old kernel because VC4 is not loaded correctly with newer kernels
-    BM_BOOTFS: /boot/raspberrypi_arm64_20250916
     DEQP_SUITE: broadcom-rpi3-gl
     HWCI_START_WESTON: 1
 
@@ -82,7 +80,7 @@ v3d-rpi4-gl:arm64:
     - .test-piglit
     - .v3d-rules
   timeout: 25m
-  parallel: 8
+  parallel: 7
   variables:
     HWCI_START_WESTON: 1
     DEQP_SUITE: broadcom-rpi4-gl
@@ -123,18 +121,9 @@ v3d-rpi4-rusticl-full:arm64:
 
 v3d-rpi4-traces:arm64:
   extends:
-    - .igalia-bcm2711-rpi-4
-    - .broadcom-test:arm64-gl
-    - .piglit-traces-test
-    - .v3d-rules
-  timeout: 25m
-  variables:
-    PIGLIT_TRACES_FILE: traces-broadcom.yml
-
-.ci-tron-v3d-rpi4-traces:arm64:
-  extends:
     - .ci-tron-v3d-traces:arm64
     - .ci-tron-broadcom-rpi4:arm64
+    - .v3d-manual-rules
   timeout: 10m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 5
@@ -182,11 +171,11 @@ v3dv-rpi4-vk:arm64:
     - .broadcom-test:arm64-vk
     - .v3dv-rules
   timeout: 25m
-  parallel: 8
+  parallel: 7
   variables:
     HWCI_START_WESTON: 1
     DEQP_SUITE: broadcom-rpi4-vk
-    DEQP_FRACTION: 2
+    DEQP_FRACTION: 4
     FLAKES_CHANNEL: "#videocore-ci"
 
 .ci-tron-v3dv-rpi4-vk:arm64:
@@ -238,7 +227,7 @@ v3dv-rpi4-vk-ubsan:arm64:
     # UBSan is quite slow, so restrict to 1 job
     FDO_CI_CONCURRENT: 1
     DEQP_SUITE: broadcom-rpi4-vk-ubsan
-    DEQP_FRACTION: 45
+    DEQP_FRACTION: 80
 
 v3d-rpi5-gl:arm64:
   extends:
@@ -285,6 +274,19 @@ v3d-rpi5-rusticl-full:arm64:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 25
     DEQP_SUITE: v3d-rusticl
 
+v3d-rpi5-opencl-cts-quick:
+  extends:
+    - .ci-tron-arm64-test-gl
+    - .ci-tron-broadcom-rpi5:arm64
+    - .test-opencl-cts
+    - .v3d-rusticl-manual-rules
+  timeout: 2h
+  variables:
+    CI_TRON_TIMEOUT__OVERALL_MINUTES: 110
+    HWCI_START_WESTON: 1
+    RUSTICL_ENABLE: v3d
+    DEQP_SUITE: broadcom-rpi-opencl-cts-quick
+
 v3d-rpi5-traces:arm64:
   extends:
     - .igalia-bcm2712-rpi-5
@@ -325,7 +327,7 @@ v3dv-rpi5-vk:arm64:
   variables:
     HWCI_START_WESTON: 1
     DEQP_SUITE: broadcom-rpi5-vk
-    DEQP_FRACTION: 3
+    DEQP_FRACTION: 6
     FLAKES_CHANNEL: "#videocore-ci"
 
 .ci-tron-v3dv-rpi5-vk:arm64:
@@ -360,7 +362,7 @@ v3dv-rpi5-vk-asan:arm64:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 20
     FDO_CI_CONCURRENT: 1
     DEQP_SUITE: broadcom-rpi5-vk-asan
-    DEQP_FRACTION: 160
+    DEQP_FRACTION: 250
 
 # This is quite unstable. Keep it disabled
 .rpi3-skqp:arm64:

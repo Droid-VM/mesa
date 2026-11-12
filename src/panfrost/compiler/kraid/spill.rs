@@ -5,7 +5,7 @@ use crate::ir::*;
 use crate::liveness::*;
 use crate::ops::{OpCopy, OpPhiDst, OpPhiSrc};
 use crate::phi::{PhiMap, PhiWordSet};
-use crate::ssa_value::AllocSSA;
+use crate::ssa_value::{AllocSSA, SSAValueIndexedVec};
 
 use compiler::bitset::BitSet;
 use compiler::dataflow::BackwardDataflow;
@@ -13,24 +13,21 @@ use rustc_hash::FxHashMap;
 use std::cmp::{Ord, Ordering, PartialOrd, Reverse};
 use std::collections::BinaryHeap;
 
-/// A map from SSA value indices to distances
-struct SSADistMap(Vec<usize>);
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct Dist(usize);
 
-impl SSADistMap {
-    fn new(ssa_count: u32) -> SSADistMap {
-        let mut vec = Vec::new();
-        vec.resize(ssa_count.try_into().unwrap(), usize::MAX);
-        SSADistMap(vec)
-    }
+impl Dist {
+    const MAX: Dist = Dist(usize::MAX);
+}
 
-    fn get(&self, ssa_idx: u32) -> usize {
-        self.0[usize::try_from(ssa_idx).unwrap()]
-    }
-
-    fn set(&mut self, ssa_idx: u32, dist: usize) {
-        self.0[usize::try_from(ssa_idx).unwrap()] = dist
+impl Default for Dist {
+    fn default() -> Dist {
+        Dist::MAX
     }
 }
+
+/// A map from SSA value indices to distances
+type SSADistMap = SSAValueIndexedVec<Dist>;
 
 /// An SSA valud index and it's next use IP
 ///
@@ -62,7 +59,7 @@ impl NextUseSet {
                 }
             }
             if self.0[si].idx == o.idx {
-                let o_next_use = o.next_use + delta;
+                let o_next_use = o.next_use.saturating_add(delta);
                 if self.0[si].next_use > o_next_use {
                     self.0[si].next_use = o_next_use;
                     changed = true;
@@ -89,25 +86,25 @@ struct GlobalNextUse {
 }
 
 impl GlobalNextUse {
-    fn for_shader(s: &Shader, live: &impl Liveness) -> GlobalNextUse {
-        let mut last_use = SSADistMap::new(s.ssa_alloc.count());
+    fn for_shader(s: &Shader, live: &Liveness) -> GlobalNextUse {
+        let mut last_use = SSADistMap::with_count(s.ssa_alloc.count());
 
         let mut block_next_use_in = Vec::new();
         let mut block_next_use_out = Vec::new();
         for (bi, block) in s.blocks.iter().enumerate() {
             let bl = live.block(bi);
 
-            // Default anything that's live-in to u32::MAX.  If it's used in
+            // Default anything that's live-in to Dist::MAX.  If it's used in
             // this block, it'll get a lower ip.
             for idx in live.block(bi).live_in_set().iter() {
                 debug_assert!(!s.ssa_alloc.lookup_by_idx(idx).is_mem());
-                last_use.set(idx, usize::MAX);
+                last_use[idx] = Dist::MAX;
             }
 
             for (ip, instr) in block.instrs.iter().enumerate().rev() {
                 for &ssa in instr.iter_ssa_uses().rev() {
                     debug_assert!(!ssa.is_mem());
-                    last_use.set(ssa.idx(), ip);
+                    last_use[ssa] = Dist(ip);
                 }
             }
 
@@ -116,7 +113,7 @@ impl GlobalNextUse {
             //  2. The NextUseSet contains exactly the live-in
             let map = bl.live_in_set().iter().map(|idx| NextUse {
                 idx,
-                next_use: last_use.get(idx),
+                next_use: last_use[idx].0,
             });
             let next_use_in = NextUseSet(map.collect());
 
@@ -194,7 +191,7 @@ impl LocalNextUseIter {
         // Populate the initial distance map
         let delta = block.instrs.len().try_into().unwrap();
         for nu in &next_use_out.0 {
-            dist_map.set(nu.idx, nu.next_use.saturating_add(delta));
+            dist_map[nu.idx] = Dist(nu.next_use.saturating_add(delta));
         }
 
         let mut vec = Vec::new();
@@ -214,13 +211,13 @@ impl LocalNextUseIter {
                     use_idx: u8::MAX,
                     #[cfg(debug_assertions)]
                     ssa: *ssa,
-                    next_use_ip: dist_map.get(ssa.idx()),
+                    next_use_ip: dist_map[ssa].0,
                 });
                 use_i += 1;
             }
 
             for ssa in instr.iter_ssa_uses().rev() {
-                dist_map.set(ssa.idx(), ip.try_into().unwrap());
+                dist_map[ssa] = Dist(ip.try_into().unwrap());
 
                 // In debug builds, we also set use_idx
                 use_i -= 1;
@@ -297,10 +294,6 @@ struct SpillMap {
 }
 
 impl SpillMap {
-    fn contains(&self, ssa: &SSAValue) -> bool {
-        self.map.contains_key(ssa)
-    }
-
     fn get(&self, ssa: &SSAValue) -> Option<&SpillValue> {
         self.map.get(ssa)
     }
@@ -479,7 +472,7 @@ impl<'a> SpillChooser<'a> {
     }
 
     pub fn add_candidate(&mut self, ssa: SSAValue) {
-        let next_use = self.next_use_map.get(ssa.idx());
+        let next_use = self.next_use_map[ssa].0;
         if next_use == self.ip {
             // Don't spill anything we're going to use
             return;
@@ -531,7 +524,7 @@ impl Iterator for SpillChoiceIter {
     }
 }
 
-fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
+fn spill(s: &mut Shader, live: Liveness, limit: u32) {
     let global_next_use = GlobalNextUse::for_shader(s, &live);
     let phi_map = PhiMap::for_shader(s);
     let blocks = &mut s.blocks;
@@ -541,11 +534,16 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
         .into_iter()
         .map(|_| Default::default())
         .collect();
+    let mut loop_max_pressure = vec![0u32; blocks.len()];
+
     if blocks.has_loop() {
         for b_idx in 0..blocks.len() {
             let Some(lh_idx) = blocks.loop_header_index(b_idx) else {
                 continue;
             };
+
+            loop_max_pressure[lh_idx] = loop_max_pressure[lh_idx]
+                .max(live.block(b_idx).max_live_bytes().reg);
 
             let uses = &mut loop_uses[lh_idx];
             for instr in &blocks[b_idx].instrs {
@@ -576,6 +574,9 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
             let b_uses = &after_b[0];
 
             *p_uses |= b_uses.s(..);
+
+            loop_max_pressure[p_idx] =
+                loop_max_pressure[p_idx].max(loop_max_pressure[b_idx]);
         }
     }
 
@@ -584,7 +585,7 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
     let mut live_in: Vec<LiveSet> = Vec::new();
     let mut live_out: Vec<LiveSet> = Vec::new();
     let mut split_phis: FxHashMap<Phi, [Phi; 2]> = Default::default();
-    let mut next_use_map = SSADistMap::new(s.ssa_alloc.count());
+    let mut next_use_map = SSADistMap::with_count(s.ssa_alloc.count());
 
     for b_idx in 0..blocks.len() {
         let bl = live.block(b_idx);
@@ -627,7 +628,7 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                 if lu.contains(idx) {
                     rev_nu.push(Reverse(NextUse {
                         idx,
-                        next_use: next_use_map.get(idx),
+                        next_use: next_use_map[idx].0,
                     }));
                     false
                 } else {
@@ -648,19 +649,28 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                 debug_assert!(live.bytes().reg <= limit);
             }
 
-            // If we still have room, consider values which aren't used
-            // inside the loop.
+            // If we still have room, consider values which aren't used inside
+            // the loop.  We need to be careful, variables defined in the loop
+            // should still have space.
             if !full {
+                let mut live_in_bytes = live.bytes().reg;
                 for idx in live_in.iter() {
                     rev_nu.push(Reverse(NextUse {
                         idx,
-                        next_use: next_use_map.get(idx),
+                        next_use: next_use_map[idx].0,
                     }));
+                    let ssa = s.ssa_alloc.lookup_by_idx(idx);
+                    debug_assert!(!s.ssa_alloc.lookup_by_idx(idx).is_mem());
+                    live_in_bytes += u32::from(ssa.bytes());
                 }
 
+                debug_assert!(loop_max_pressure[b_idx] >= live_in_bytes);
+                let loop_pressure = loop_max_pressure[b_idx] - live_in_bytes;
+                let entry_limit = limit.saturating_sub(loop_pressure);
                 while let Some(nu) = rev_nu.pop() {
                     let ssa = s.ssa_alloc.lookup_by_idx(nu.0.idx);
-                    if live.bytes().reg + u32::from(ssa.bytes()) > limit {
+                    let ssa_bytes = u32::from(ssa.bytes());
+                    if live.bytes().reg + ssa_bytes > entry_limit {
                         break;
                     }
                     live.insert(ssa);
@@ -678,7 +688,7 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                     live_min = p_live.clone();
                     live_max = p_live.clone();
                 } else {
-                    live_max &= p_live.s(..);
+                    live_min &= p_live.s(..);
                     live_max |= p_live.s(..);
                 }
 
@@ -698,6 +708,17 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                 }
             }
 
+            // Remove phi-src ssa which are live in the predecessors but dead now
+            // (every value still live must be in either live_in or a phi_dst)
+            let mut entry_values = bl.live_in_set().clone();
+            for op in blocks[b_idx].iter_phi_dsts() {
+                for ssa in op.iter_ssa_defs() {
+                    entry_values.insert(ssa.idx());
+                }
+            }
+            live_min &= entry_values.s(..);
+            live_max &= entry_values.s(..);
+
             // Now get an initial W
             let mut live = live_out[preds[0]].clone();
             let extra = BitSet::from(live.as_bit_set().s(..) - live_min.s(..));
@@ -706,16 +727,20 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
             }
             debug_assert!(live.bytes().reg <= limit);
 
+            // W now contains the minimal set of live values that are already in
+            // registers (from every predecessors).  Add back everything we can
+            // afford from the "missing" set (live_max - live_min).  Items used
+            // first take precedence
             let mut heap = BinaryHeap::new();
 
             let mut missing = live_max;
             missing -= live_min.s(..);
             for idx in missing.iter() {
-                let next_use = next_use_map.get(idx);
-                heap.push(NextUse { idx, next_use });
+                let next_use = next_use_map[idx].0;
+                heap.push(Reverse(NextUse { idx, next_use }));
             }
 
-            while let Some(nu) = heap.pop() {
+            while let Some(Reverse(nu)) = heap.pop() {
                 let ssa = s.ssa_alloc.lookup_by_idx(nu.idx);
                 if live.bytes().reg + u32::from(ssa.bytes()) > limit {
                     break;
@@ -775,7 +800,7 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                     let mut fills = MappedInstrs::new();
                     for ssa in instr.iter_ssa_uses() {
                         // We should be the next use
-                        debug_assert_eq!(next_use_map.get(ssa.idx()), ip);
+                        debug_assert_eq!(next_use_map[ssa].0, ip);
 
                         if !live.contains(ssa) {
                             spill.add_spill(&mut s.ssa_alloc, *ssa);
@@ -784,8 +809,9 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                         }
                     }
 
-                    let rel_pressure =
-                        u32::from(bl.get_instr_pressure(ip, &instr));
+                    let rel_pressure = u32::from(
+                        bl.get_instr_pressure_top_down(s.model, ip, &instr),
+                    );
                     let abs_pressure = live.bytes().reg + rel_pressure;
 
                     if abs_pressure > limit {
@@ -816,10 +842,11 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
                         // should always have the lowest IPs and therefore
                         // never be spilled.
                         let dist = next_use.get_next_use_ip(ip, use_idx, ssa);
-                        next_use_map.set(ssa.idx(), dist);
+                        next_use_map[ssa] = Dist(dist);
                     }
 
-                    let max = live.insert_instr_top_down(ip, &instr, bl);
+                    let max =
+                        live.insert_instr_top_down(s.model, ip, &instr, bl);
                     debug_assert!(max.reg <= limit);
 
                     // We add the actual spill instructions later
@@ -990,7 +1017,7 @@ fn spill(s: &mut Shader, live: impl Liveness, limit: u32) {
 }
 
 impl Shader<'_> {
-    pub fn spill_values(&mut self, live: impl Liveness, limit: u32) {
+    pub fn spill_values(&mut self, live: Liveness, limit: u32) {
         spill(self, live, limit);
     }
 }

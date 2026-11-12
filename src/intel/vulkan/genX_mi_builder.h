@@ -5,12 +5,13 @@
 #pragma once
 
 /* We reserve :
+ *    - GPR 11 for performance query trigger IDs
  *    - GPR 12 for 3DSTATE_BINDING_TABLE_POOL_ALLOC  address
  *    - GPR 13 for STATE_BASE_ADDRESS bindless surface base address
  *    - GPR 14 for perf queries
  *    - GPR 15 for conditional rendering
  */
-#define MI_BUILDER_NUM_ALLOC_GPRS 12
+#define MI_BUILDER_NUM_ALLOC_GPRS 11
 #ifndef MI_BUILDER_CAN_WRITE_BATCH
 #define MI_BUILDER_CAN_WRITE_BATCH true
 #endif
@@ -33,6 +34,11 @@
  * Other code which uses the MI ALU should leave it alone.
  */
 #define ANV_PERF_QUERY_OFFSET_REG 0x2670 /* MI_ALU_REG14 */
+
+/* Pass-specific OAG trigger ID offset selected by
+ * VkPerformanceQuerySubmitInfoKHR::counterPassIndex.
+ */
+#define ANV_PERF_QUERY_ID_OFFSET_REG 0x2658 /* MI_ALU_REG11 */
 
 /* We reserve this MI ALU register to hold the last programmed bindless
  * surface state base address so that we can predicate STATE_BASE_ADDRESS

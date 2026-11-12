@@ -98,7 +98,7 @@ void anv_slab_bo_alloc_with_alignment(void) {
    test_device_info_init(&physical_device.info);
    anv_device_set_physical(&device, &physical_device);
    device.kmd_backend = anv_kmd_backend_get(INTEL_KMD_TYPE_STUB);
-   pthread_mutex_init(&device.mutex, NULL);
+   simple_mtx_init(&device.mutex, mtx_plain);
    anv_bo_cache_init(&device.bo_cache, &device);
 
    ASSERT(anv_slab_bo_init(&device));
@@ -163,5 +163,5 @@ void anv_slab_bo_alloc_with_alignment(void) {
    anv_slab_bo_deinit(&device);
    free(bo_list);
    anv_bo_cache_finish(&device.bo_cache);
-   pthread_mutex_destroy(&device.mutex);
+   simple_mtx_destroy(&device.mutex);
 }

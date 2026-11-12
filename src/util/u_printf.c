@@ -22,6 +22,8 @@
 // Extract from Serge's printf clover code by airlied.
 
 #include <assert.h>
+#include <ctype.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -144,6 +146,35 @@ u_printf_plain(FILE *out, const char* format)
    u_printf_plain_sized(out, format, strlen(format));
 }
 
+/*
+ * Map an OpenCL vector element size + conversion char to the matching
+ * C99 fixed-width format macro (PRId8, PRIx32, …).  Returns NULL for
+ * float conversions or anything we don't recognise.
+ */
+static const char *
+get_pri_conversion(size_t size, char conv)
+{
+#define PRI_CASE(bits)                \
+   case 'd': return PRId##bits;       \
+   case 'i': return PRIi##bits;       \
+   case 'u': return PRIu##bits;       \
+   case 'o': return PRIo##bits;       \
+   case 'x': return PRIx##bits;       \
+   case 'X': return PRIX##bits;       \
+   default: return NULL;
+
+   switch (size) {
+   case 1: switch (conv) { PRI_CASE(8)  } break;
+   case 2: switch (conv) { PRI_CASE(16) } break;
+   case 4: switch (conv) { PRI_CASE(32) } break;
+   case 8: switch (conv) { PRI_CASE(64) } break;
+   default: return NULL;
+   }
+   return NULL;
+
+#undef PRI_CASE
+}
+
 static void
 u_printf_impl(FILE *out, const char *buffer, size_t buffer_size,
               const u_printf_info *info,
@@ -198,7 +229,12 @@ u_printf_impl(FILE *out, const char *buffer, size_t buffer_size,
          if (token != format)
             u_printf_plain_sized(out, format, token - format);
 
-         char *print_str = strndup(token, next_format - token);
+         /* Extra room so we can replace the conversion specifier with a
+          * PRI macro (e.g. PRIi64 → "li") without a second allocation. */
+         const size_t pri_headroom = 3;
+         size_t fmt_len = next_format - token;
+         char *print_str = (char *)calloc(fmt_len + pri_headroom, sizeof(char*));
+         memcpy(print_str, token, fmt_len);
          /* rebase spec_pos so we can use it with print_str */
          spec_pos += format - token;
 
@@ -222,8 +258,19 @@ u_printf_impl(FILE *out, const char *buffer, size_t buffer_size,
                component_count = atoi(vec);
                free(vec);
 
-               /* remove the vector and precision stuff */
-               memmove(&print_str[vec_pos - print_str], &print_str[spec_pos], 2);
+               /* Strip 'v', the width digits, and the OpenCL length modifier.
+                * We can't just forward those to the host printf because
+                * OpenCL types are fixed-size while C types aren't.  We
+                * re-add the right modifier below via PRI macros. */
+               char *len_pos = vec_pos + 1;
+               for (int i = 0; i < 2 && isdigit(*len_pos); i++)
+                  len_pos++;
+               if (len_pos[0] == 'h' && (len_pos[1] == 'h' || len_pos[1] == 'l'))
+                  len_pos += 2;
+               else if (len_pos[0] == 'h' || len_pos[0] == 'l')
+                  len_pos += 1;
+               size_t tail = strlen(len_pos) + 1;
+               memmove(vec_pos, len_pos, tail);
             }
 
             /* in fact vec3 are vec4 */
@@ -231,21 +278,55 @@ u_printf_impl(FILE *out, const char *buffer, size_t buffer_size,
             size_t elmt_size = arg_size / men_components;
             bool is_float = strpbrk(print_str, "fFeEgGaA") != NULL;
 
+            /* For vector integers, replace the conversion specifier with
+             * the platform-correct PRI macro (e.g. PRIi8 for char). OpenCL
+             * long is 64 bits, but a host long can be 32 bits, so a 64-bit
+             * scalar gets the PRI macro in place of its l modifier too. */
+            if (!is_float && (vec_pos != NULL || elmt_size == 8)) {
+               size_t slen = strlen(print_str);
+               char conv = print_str[slen - 1];
+               const char *pri = get_pri_conversion(elmt_size, conv);
+               if (pri) {
+                  if (vec_pos == NULL && print_str[slen - 2] == 'l')
+                     slen--;
+                  memcpy(&print_str[slen - 1], pri, strlen(pri) + 1);
+               }
+            }
+
+            bool is_signed = false;
+            if (!is_float) {
+               size_t slen = strlen(print_str);
+               char last = print_str[slen - 1];
+               is_signed = (last == 'd' || last == 'i');
+            }
+
             for (int i = 0; i < component_count; i++) {
                size_t elmt_buf_pos = buf_pos + i * elmt_size;
                switch (elmt_size) {
                case 1: {
-                  uint8_t v;
-                  memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
-                  fprintf(out, print_str, v);
+                  if (is_signed) {
+                     int8_t v;
+                     memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
+                     fprintf(out, print_str, v);
+                  } else {
+                     uint8_t v;
+                     memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
+                     fprintf(out, print_str, v);
+                  }
                   break;
                }
                case 2: {
-                  uint16_t v;
-                  memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
                   if (is_float) {
+                     uint16_t v;
+                     memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
                      fprintf(out, print_str, _mesa_half_to_float(v));
+                  } else if (is_signed) {
+                     int16_t v;
+                     memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
+                     fprintf(out, print_str, v);
                   } else {
+                     uint16_t v;
+                     memcpy(&v, &buffer[elmt_buf_pos], elmt_size);
                      fprintf(out, print_str, v);
                   }
                   break;

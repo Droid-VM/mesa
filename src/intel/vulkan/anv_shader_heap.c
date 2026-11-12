@@ -110,6 +110,8 @@ anv_shader_heap_alloc(struct anv_shader_heap *heap,
    assert(align <= heap->base_chunk_size);
    assert(size <= heap->base_chunk_size);
 
+   size = align64(size, align);
+
    simple_mtx_lock(&heap->mutex);
 
    heap->vma.nospan_shift = MAX2(21, util_last_bit64(size) - 1);
@@ -210,21 +212,24 @@ anv_shader_heap_upload(struct anv_shader_heap *heap,
                        struct anv_shader_alloc alloc,
                        const void *data, uint64_t size)
 {
+   const uint64_t shader_base_addr =
+      heap->va_range.addr + alloc.offset;
    const uint32_t bo_begin_idx = shader_bo_index(
-      heap, heap->va_range.addr + alloc.offset);
+      heap, shader_base_addr);
    const uint32_t bo_end_idx = shader_bo_index(
-      heap, heap->va_range.addr + alloc.offset + size - 1);
+      heap, shader_base_addr + size - 1);
 
-   const uint64_t upload_addr = heap->va_range.addr + alloc.offset;
+   const uint64_t upload_addr = shader_base_addr;
    for (uint32_t i = MIN2(bo_begin_idx, bo_end_idx);
         i <= MAX2(bo_begin_idx, bo_end_idx); i++) {
       const uint64_t bo_offset =
          MAX2(upload_addr, heap->bos[i].addr) - heap->bos[i].addr;
-      const uint32_t data_offset =
-         upload_addr - (heap->bos[i].addr + bo_offset);
+      const uint64_t data_offset =
+         (heap->bos[i].addr + bo_offset) - upload_addr;
       const uint64_t copy_size =
          MIN2(heap->bos[i].size - bo_offset, size - data_offset);
 
-      memcpy(heap->bos[i].bo->map + bo_offset, data, copy_size);
+      memcpy(heap->bos[i].bo->map + bo_offset,
+             (const char *)data + data_offset, copy_size);
    }
 }

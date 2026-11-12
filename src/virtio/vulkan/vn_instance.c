@@ -119,6 +119,7 @@ vn_instance_fini_ring(struct vn_instance *instance)
    list_for_each_entry_safe(struct vn_tls_ring, tls_ring,
                             &instance->ring.tls_rings, vk_head)
       vn_tls_destroy_ring(tls_ring);
+   simple_mtx_destroy(&instance->ring.tls_rings_mutex);
 
    vn_ring_destroy(instance->ring.ring);
 }
@@ -143,6 +144,7 @@ vn_instance_init_ring(struct vn_instance *instance)
    if (!instance->ring.ring)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+   simple_mtx_init(&instance->ring.tls_rings_mutex, mtx_plain);
    list_inithead(&instance->ring.tls_rings);
 
    vn_watchdog_init(&instance->ring.watchdog);

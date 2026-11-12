@@ -643,6 +643,7 @@ unlower_io_to_vars(nir_builder *b, nir_intrinsic_instr *intr, void *opaque)
          load = nir_load_deref_with_access(b, deref, var->data.access);
          load = nir_extract_bits(b, &load, 1, desc.sem.high_dvec2 ? 128 : 0,
                                  4, 32);
+         load = nir_64_2x32_memory_order(b, load);
       } else {
          nir_intrinsic_op baryc = desc.baryc ? desc.baryc->intrinsic :
                                                nir_num_intrinsics;

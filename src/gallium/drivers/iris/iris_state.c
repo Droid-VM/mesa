@@ -67,6 +67,7 @@
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
 #include "util/u_dual_blend.h"
+#include "util/u_draw.h"
 #include "util/u_inlines.h"
 #include "util/format/u_format.h"
 #include "util/u_framebuffer.h"
@@ -320,7 +321,7 @@ upload_state(struct u_upload_mgr *uploader,
              unsigned alignment)
 {
    void *p = NULL;
-   u_upload_alloc_ref(uploader, 0, size, alignment, &ref->offset, &ref->res, &p);
+   iris_u_upload_alloc_ref_to_iris_state_ref(uploader, 0, size, alignment, ref, &p);
    return p;
 }
 
@@ -337,19 +338,22 @@ stream_state(struct iris_batch *batch,
              struct pipe_resource **out_res,
              unsigned size,
              unsigned alignment,
-             uint32_t *out_offset)
+             uint64_t *out_offset)
 {
    void *ptr = NULL;
+   unsigned res_offset;
 
-   u_upload_alloc_ref(uploader, 0, size, alignment, out_offset, out_res, &ptr);
+   u_upload_alloc_ref(uploader, 0, size, alignment, &res_offset, out_res, &ptr);
+   *out_offset = res_offset;
 
    struct iris_bo *bo = iris_resource_bo(*out_res);
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
-   iris_record_state_size(batch->state_sizes,
+   iris_record_state_size(bo->bufmgr, batch->state_sizes,
                           bo->address + *out_offset, size);
-
-   *out_offset += iris_bo_offset_from_base_address(bo);
+   *out_offset += iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                     bo->address : iris_bo_offset_from_base_address(bo);
+   assert(iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) || (*out_offset < UINT32_MAX));
 
    return ptr;
 }
@@ -357,7 +361,7 @@ stream_state(struct iris_batch *batch,
 /**
  * stream_state() + memcpy.
  */
-static uint32_t
+static uint64_t
 emit_state(struct iris_batch *batch,
            struct u_upload_mgr *uploader,
            struct pipe_resource **out_res,
@@ -365,7 +369,7 @@ emit_state(struct iris_batch *batch,
            unsigned size,
            unsigned alignment)
 {
-   unsigned offset = 0;
+   uint64_t offset = 0;
    uint32_t *map =
       stream_state(batch, uploader, out_res, size, alignment, &offset);
 
@@ -643,12 +647,36 @@ iris_copy_mem_mem(struct iris_batch *batch,
 }
 
 static void
-iris_rewrite_compute_walker_pc(struct iris_batch *batch,
-                               uint32_t *walker,
-                               struct iris_bo *bo,
-                               uint32_t offset)
+iris_rewrite_compute_walker_2_pc(struct iris_batch *batch,
+                                 uint32_t *walker,
+                                 struct iris_bo *bo,
+                                 uint32_t offset)
 {
+#if GFX_VERx10 >= 350
+   struct iris_screen *screen = batch->screen;
+   struct iris_address addr = rw_bo(bo, offset, IRIS_DOMAIN_OTHER_WRITE);
+
+   uint32_t dwords[GENX(COMPUTE_WALKER_2_length)];
+
+   _iris_pack_command(batch, GENX(COMPUTE_WALKER_2), dwords, cw) {
+      cw.body.Post_sync_opn0.Operation = WriteTimestamp;
+      cw.body.Post_sync_opn0.DestinationAddress = addr;
+      cw.body.Post_sync_opn0.MOCS = iris_mocs(NULL, &screen->isl_dev, 0);
+   }
+
+   for (uint32_t i = 0; i < GENX(COMPUTE_WALKER_length); i++)
+      walker[i] |= dwords[i];
+#endif
+}
+
+
 #if GFX_VERx10 >= 125
+static void
+iris_rewrite_compute_walker_1_pc(struct iris_batch *batch,
+                                 uint32_t *walker,
+                                 struct iris_bo *bo,
+                                 uint32_t offset)
+{
    struct iris_screen *screen = batch->screen;
    struct iris_address addr = rw_bo(bo, offset, IRIS_DOMAIN_OTHER_WRITE);
 
@@ -662,6 +690,22 @@ iris_rewrite_compute_walker_pc(struct iris_batch *batch,
 
    for (uint32_t i = 0; i < GENX(COMPUTE_WALKER_length); i++)
       walker[i] |= dwords[i];
+}
+#endif
+
+static void
+iris_rewrite_compute_walker_pc(struct iris_batch *batch,
+                               uint32_t *walker,
+                               struct iris_bo *bo,
+                               uint32_t offset)
+{
+#if GFX_VERx10 >= 125
+   struct iris_screen *screen = batch->screen;
+
+   if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr))
+      iris_rewrite_compute_walker_2_pc(batch, walker, bo, offset);
+   else
+      iris_rewrite_compute_walker_1_pc(batch, walker, bo, offset);
 
 #if INTEL_NEEDS_WA_14025112257
    if (batch->name == IRIS_BATCH_COMPUTE) {
@@ -810,31 +854,36 @@ init_state_base_address(struct iris_batch *batch)
 #if GFX_VER >= 9
       sba.BindlessSurfaceStateMOCS    = mocs;
 #endif
-
-      sba.GeneralStateBaseAddressModifyEnable   = true;
-      sba.DynamicStateBaseAddressModifyEnable   = true;
-      sba.IndirectObjectBaseAddressModifyEnable = true;
-      sba.InstructionBaseAddressModifyEnable    = true;
-      sba.GeneralStateBufferSizeModifyEnable    = true;
-      sba.DynamicStateBufferSizeModifyEnable    = true;
-      sba.SurfaceStateBaseAddressModifyEnable   = true;
 #if GFX_VER >= 11
       sba.BindlessSamplerStateMOCS    = mocs;
 #endif
-      sba.IndirectObjectBufferSizeModifyEnable  = true;
-      sba.InstructionBuffersizeModifyEnable     = true;
-
-      sba.InstructionBaseAddress  = ro_bo(NULL, IRIS_MEMZONE_SHADER_START);
-      sba.DynamicStateBaseAddress = ro_bo(NULL, IRIS_MEMZONE_DYNAMIC_START);
-      sba.SurfaceStateBaseAddress = ro_bo(NULL, IRIS_MEMZONE_BINDER_START);
-
-      sba.GeneralStateBufferSize   = 0xfffff;
-      sba.IndirectObjectBufferSize = 0xfffff;
-      sba.InstructionBufferSize    = 0xfffff;
-      sba.DynamicStateBufferSize   = 0xfffff;
 #if GFX_VERx10 >= 125
       sba.L1CacheControl = L1CC_WB;
 #endif
+#if GFX_VERx10 >= 350
+      sba.BaseAddressdisable = iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr);
+#endif
+
+      if (!iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr)) {
+         sba.GeneralStateBaseAddressModifyEnable   = true;
+         sba.DynamicStateBaseAddressModifyEnable   = true;
+         sba.IndirectObjectBaseAddressModifyEnable = true;
+         sba.InstructionBaseAddressModifyEnable    = true;
+         sba.GeneralStateBufferSizeModifyEnable    = true;
+         sba.DynamicStateBufferSizeModifyEnable    = true;
+         sba.SurfaceStateBaseAddressModifyEnable   = true;
+         sba.IndirectObjectBufferSizeModifyEnable  = true;
+         sba.InstructionBuffersizeModifyEnable     = true;
+
+         sba.InstructionBaseAddress  = ro_bo(NULL, IRIS_MEMZONE_SHADER_START);
+         sba.DynamicStateBaseAddress = ro_bo(NULL, IRIS_MEMZONE_DYNAMIC_START);
+         sba.SurfaceStateBaseAddress = ro_bo(NULL, IRIS_MEMZONE_BINDER_START);
+
+         sba.GeneralStateBufferSize   = 0xfffff;
+         sba.IndirectObjectBufferSize = 0xfffff;
+         sba.InstructionBufferSize    = 0xfffff;
+         sba.DynamicStateBufferSize   = 0xfffff;
+      }
    }
 
    flush_after_state_base_change(batch);
@@ -956,7 +1005,7 @@ upload_pixel_hashing_tables(struct iris_batch *batch)
       return;
 
    unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
-   uint32_t hash_address;
+   uint64_t hash_address;
    struct pipe_resource *tmp = NULL;
    uint32_t *map =
       stream_state(batch, ice->state.dynamic_uploader, &tmp,
@@ -969,6 +1018,7 @@ upload_pixel_hashing_tables(struct iris_batch *batch)
 
    GENX(SLICE_HASH_TABLE_pack)(NULL, map, &table);
 
+   assert(!iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr));
    iris_emit_cmd(batch, GENX(3DSTATE_SLICE_TABLE_STATE_POINTERS), ptr) {
       ptr.SliceHashStatePointerValid = true;
       ptr.SliceHashTableStatePointer = hash_address;
@@ -1080,8 +1130,10 @@ upload_pixel_hashing_tables(struct iris_batch *batch)
    pipe_buffer_unmap(&ice->ctx, transfer);
 
    iris_use_pinned_bo(batch, res->bo, false, IRIS_DOMAIN_NONE);
-   iris_record_state_size(batch->state_sizes, res->bo->address + res->offset, size);
+   iris_record_state_size(res->bo->bufmgr, batch->state_sizes,
+                          res->bo->address + res->offset, size);
 
+   assert(!iris_bufmgr_is_eff_64bit_enabled(res->bo->bufmgr));
    iris_emit_cmd(batch, GENX(3DSTATE_SLICE_TABLE_STATE_POINTERS), ptr) {
       ptr.SliceHashStatePointerValid = true;
       ptr.SliceHashTableStatePointer = iris_bo_offset_from_base_address(res->bo) +
@@ -1508,12 +1560,12 @@ iris_init_render_context(struct iris_batch *batch)
 }
 
 #if GFX_VERx10 >= 125
-static void
-iris_compute_emit_engine_async_threads_limits(struct iris_batch *batch,
-                                              const uint32_t hw_threads_in_wg,
-                                              uint32_t total_shared,
-                                              bool uses_barrier,
-                                              bool force_emit)
+static bool
+iris_compute_engine_async_threads_limits(struct iris_batch *batch,
+                                         const uint32_t hw_threads_in_wg,
+                                         uint32_t total_shared,
+                                         bool uses_barrier,
+                                         bool force_emit)
 {
    uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
            np_z_async_throttle_settings;
@@ -1539,8 +1591,15 @@ iris_compute_emit_engine_async_threads_limits(struct iris_batch *batch,
       changed = true;
    }
 
-   if (!changed && !force_emit)
-      return;
+   return changed || force_emit;
+}
+
+static void
+iris_emit_engine_async_threads_limits(struct iris_batch *batch)
+{
+   struct iris_screen *screen = batch->screen;
+   UNUSED const struct intel_device_info *devinfo = screen->devinfo;
+   struct iris_context *ice = batch->ice;
 
    iris_emit_cmd(batch, GENX(STATE_COMPUTE_MODE), cm) {
 #if GFX_VER >= 30
@@ -1548,19 +1607,19 @@ iris_compute_emit_engine_async_threads_limits(struct iris_batch *batch,
       cm.EnableVariableRegisterSizeAllocation = !INTEL_DEBUG(DEBUG_NO_VRT);
 #endif
 #if GFX_VER >= 20
-      cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-      cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
-      cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+      cm.AsyncComputeThreadLimit = ice->state.pixel_async_compute_thread_limit;
+      cm.ZPassAsyncComputeThreadLimit = ice->state.z_pass_async_compute_thread_limit;
+      cm.ZAsyncThrottlesettings = ice->state.np_z_async_throttle_settings;
       cm.AsyncComputeThreadLimitMask = 0x7;
       cm.ZPassAsyncComputeThreadLimitMask = 0x7;
       cm.ZAsyncThrottlesettingsMask = 0x3;
 #else
-      cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-      cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+      cm.PixelAsyncComputeThreadLimit = ice->state.pixel_async_compute_thread_limit;
+      cm.ZPassAsyncComputeThreadLimit = ice->state.z_pass_async_compute_thread_limit;
       cm.PixelAsyncComputeThreadLimitMask = 0x7;
       cm.ZPassAsyncComputeThreadLimitMask = 0x7;
       if (intel_device_info_is_mtl_or_arl(devinfo)) {
-         cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+         cm.ZAsyncThrottlesettings = ice->state.np_z_async_throttle_settings;
          cm.ZAsyncThrottlesettingsMask = 0x3;
       }
 #endif
@@ -1630,13 +1689,16 @@ iris_init_compute_context(struct iris_batch *batch)
                                    PIPE_CONTROL_INSTRUCTION_INVALIDATE |
                                    PIPE_CONTROL_FLUSH_HDC);
 
-   iris_compute_emit_engine_async_threads_limits(batch, 0, 0, false, true);
+   if (iris_compute_engine_async_threads_limits(batch, 0, 0, false, true))
+      iris_emit_engine_async_threads_limits(batch);
 #endif
 
 #if GFX_VERx10 >= 125
-   iris_emit_cmd(batch, GENX(CFE_STATE), cfe) {
-      cfe.MaximumNumberofThreads =
-         devinfo->max_cs_threads * devinfo->subslice_total;
+   if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr)) {
+      iris_emit_cmd(batch, GENX(CFE_STATE), cfe) {
+         cfe.MaximumNumberofThreads =
+            devinfo->max_cs_threads * devinfo->subslice_total;
+      }
    }
 #endif
 
@@ -2523,6 +2585,12 @@ wrap_mode_needs_border_color(unsigned wrap_mode)
    return wrap_mode == TCM_CLAMP_BORDER || wrap_mode == TCM_HALF_BORDER;
 }
 
+#if GFX_VERx10 >= 350
+#define SAMPLER_STATE_DWORDS GENX(SAMPLER_STATE_EXTENDED_length)
+#else
+#define SAMPLER_STATE_DWORDS GENX(SAMPLER_STATE_length)
+#endif
+
 /**
  * Gallium CSO for sampler state.
  */
@@ -2530,18 +2598,19 @@ struct iris_sampler_state {
    union pipe_color_union border_color;
    bool needs_border_color;
 
-   uint32_t sampler_state[GENX(SAMPLER_STATE_length)];
+   uint32_t sampler_state[SAMPLER_STATE_DWORDS];
 
 #if GFX_VERx10 == 125
    /* Sampler state structure to use for 3D textures in order to
     * implement Wa_14014414195.
     */
-   uint32_t sampler_state_3d[GENX(SAMPLER_STATE_length)];
+   uint32_t sampler_state_3d[SAMPLER_STATE_DWORDS];
 #endif
 };
 
 static void
-fill_sampler_state(uint32_t *sampler_state,
+fill_sampler_state(struct iris_screen *screen,
+                   uint32_t *sampler_state,
                    const struct pipe_sampler_state *state,
                    unsigned max_anisotropy)
 {
@@ -2560,6 +2629,68 @@ fill_sampler_state(uint32_t *sampler_state,
       translate_tex_filter_mode(state->reduction_mode);
 #endif
 
+#if GFX_VERx10 >= 350
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)) {
+      iris_pack_state(GENX(SAMPLER_STATE_EXTENDED), sampler_state, samp) {
+         samp.TCXAddressControlMode = translate_wrap(state->wrap_s);
+         samp.TCYAddressControlMode = translate_wrap(state->wrap_t);
+         samp.TCZAddressControlMode = translate_wrap(state->wrap_r);
+         samp.CubeSurfaceControlMode = state->seamless_cube_map;
+         samp.NonnormalizedCoordinateEnable = state->unnormalized_coords;
+         samp.MinModeFilter = state->min_img_filter;
+         samp.MagModeFilter = mag_img_filter;
+         samp.MipModeFilter = translate_mip_filter(state->min_mip_filter);
+         samp.MaximumAnisotropy = RATIO21;
+         samp.ReductionType = reduction_mode;
+         samp.ReductionTypeEnable =
+            reduction_mode != PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE;
+         if (max_anisotropy >= 2) {
+            if (state->min_img_filter == PIPE_TEX_FILTER_LINEAR) {
+               samp.MinModeFilter = MAPFILTER_ANISOTROPIC_FAST;
+               samp.LODAlgorithm = EWAApproximation;
+            }
+
+            if (state->mag_img_filter == PIPE_TEX_FILTER_LINEAR) {
+               samp.MagModeFilter = MAPFILTER_ANISOTROPIC_FAST;
+            }
+
+            samp.MaximumAnisotropy =
+               MIN2((max_anisotropy - 2) / 2, RATIO161);
+         }
+
+         /* Set address rounding bits if not using nearest filtering. */
+         if (state->min_img_filter != PIPE_TEX_FILTER_NEAREST) {
+            samp.UAddressMinFilterRoundingEnable = true;
+            samp.VAddressMinFilterRoundingEnable = true;
+            samp.RAddressMinFilterRoundingEnable = true;
+         }
+
+         if (state->mag_img_filter != PIPE_TEX_FILTER_NEAREST) {
+            samp.UAddressMagFilterRoundingEnable = true;
+            samp.VAddressMagFilterRoundingEnable = true;
+            samp.RAddressMagFilterRoundingEnable = true;
+         }
+
+         if (state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
+            samp.ShadowFunction = translate_shadow_func(state->compare_func);
+
+         const float hw_max_lod = 14;
+
+         samp.LODPreClampMode = CLAMP_MODE_OGL;
+         samp.MinLOD = CLAMP(min_lod, 0, hw_max_lod);
+         samp.MaxLOD = CLAMP(state->max_lod, 0, hw_max_lod);
+         samp.TextureLODBias = CLAMP(state->lod_bias, -16, 15);
+         samp.YCRCBBorderMode = YCRCBBM_PASSTHROUGH;
+         /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+          * values in the dri option.
+          */
+         samp.sample_d_performance = screen->driconf.sample_d_performance;
+      }
+
+      return;
+   }
+#endif
+
    iris_pack_state(GENX(SAMPLER_STATE), sampler_state, samp) {
       samp.TCXAddressControlMode = translate_wrap(state->wrap_s);
       samp.TCYAddressControlMode = translate_wrap(state->wrap_t);
@@ -2570,6 +2701,14 @@ fill_sampler_state(uint32_t *sampler_state,
       samp.MagModeFilter = mag_img_filter;
       samp.MipModeFilter = translate_mip_filter(state->min_mip_filter);
       samp.MaximumAnisotropy = RATIO21;
+
+#if GFX_VER >= 35
+      /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+       * values in the dri option.
+       */
+      samp.sample_d_performance = screen->driconf.sample_d_performance;
+#endif
+
 #if GFX_VER > 8
       samp.ReductionType = reduction_mode;
       samp.ReductionTypeEnable =
@@ -2636,7 +2775,7 @@ static void *
 iris_create_sampler_state(struct pipe_context *ctx,
                           const struct pipe_sampler_state *state)
 {
-   UNUSED struct iris_screen *screen = (void *)ctx->screen;
+   struct iris_screen *screen = (void *)ctx->screen;
    UNUSED const struct intel_device_info *devinfo = screen->devinfo;
    struct iris_sampler_state *cso = CALLOC_STRUCT(iris_sampler_state);
 
@@ -2656,14 +2795,14 @@ iris_create_sampler_state(struct pipe_context *ctx,
                              wrap_mode_needs_border_color(wrap_t) ||
                              wrap_mode_needs_border_color(wrap_r);
 
-   fill_sampler_state(cso->sampler_state, state, state->max_anisotropy);
+   fill_sampler_state(screen, cso->sampler_state, state, state->max_anisotropy);
 
 #if GFX_VERx10 == 125
    /* Fill an extra sampler state structure with anisotropic filtering
     * disabled used to implement Wa_14014414195.
     */
    if (intel_needs_workaround(screen->devinfo, 14014414195))
-      fill_sampler_state(cso->sampler_state_3d, state, 0);
+      fill_sampler_state(screen, cso->sampler_state_3d, state, 0);
 #endif
 
    return cso;
@@ -2697,6 +2836,33 @@ iris_bind_sampler_states(struct pipe_context *ctx,
       ice->state.stage_dirty |= IRIS_STAGE_DIRTY_SAMPLER_STATES_VS << stage;
 }
 
+static void
+iris_upload_sampler_state_set_border_color(struct iris_screen *screen,
+                                           uint32_t *dynamic,
+                                           union pipe_color_union *color)
+{
+#if GFX_VERx10 >= 350
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)) {
+      iris_pack_state(GENX(SAMPLER_STATE_EXTENDED), dynamic, dyns) {
+         dyns.BorderColorRed = color->f[0];
+         dyns.BorderColorGreen = color->f[1];
+         dyns.BorderColorBlue = color->f[2];
+         dyns.BorderColorAlpha = color->f[3];
+      }
+      return;
+   }
+#endif
+
+   struct iris_border_color_pool *border_color_pool =
+      iris_bufmgr_get_border_color_pool(screen->bufmgr);
+   /* Stream out the border color and merge the pointer. */
+   uint32_t offset = iris_upload_border_color(border_color_pool, color);
+
+   iris_pack_state(GENX(SAMPLER_STATE), dynamic, dyns) {
+      dyns.BorderColorPointer = offset;
+   }
+}
+
 /**
  * Upload the sampler states into a contiguous area of GPU memory, for
  * for 3DSTATE_SAMPLER_STATE_POINTERS_*.
@@ -2709,8 +2875,6 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
    struct iris_screen *screen = (struct iris_screen *) ice->ctx.screen;
    struct iris_compiled_shader *shader = ice->shaders.prog[stage];
    struct iris_shader_state *shs = &ice->state.shaders[stage];
-   struct iris_border_color_pool *border_color_pool =
-      iris_bufmgr_get_border_color_pool(screen->bufmgr);
 
    /* We assume gallium frontends will call pipe->bind_sampler_states()
     * if the program's number of textures changes.
@@ -2720,11 +2884,14 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
    if (!count)
       return;
 
+   const bool eff_64bit_enabled = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr);
+   const unsigned sampler_state_len = intel_sampler_state_size(eff_64bit_enabled);
+
    /* Assemble the SAMPLER_STATEs into a contiguous table that lives
     * in the dynamic state memory zone, so we can point to it via the
     * 3DSTATE_SAMPLER_STATE_POINTERS_* commands.
     */
-   unsigned size = count * 4 * GENX(SAMPLER_STATE_length);
+   unsigned size = count * sampler_state_len;
    uint32_t *map =
       upload_state(ice->state.dynamic_uploader, &shs->sampler_table, size, 32);
    if (unlikely(!map))
@@ -2733,10 +2900,11 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
    struct pipe_resource *res = shs->sampler_table.res;
    struct iris_bo *bo = iris_resource_bo(res);
 
-   iris_record_state_size(ice->state.sizes,
+   iris_record_state_size(bo->bufmgr, ice->state.sizes,
                           bo->address + shs->sampler_table.offset, size);
 
-   shs->sampler_table.offset += iris_bo_offset_from_base_address(bo);
+   shs->sampler_table.offset += eff_64bit_enabled ? bo->address :
+                                                    iris_bo_offset_from_base_address(bo);
 
    ice->state.need_border_colors &= ~(1 << stage);
 
@@ -2745,7 +2913,7 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
       struct iris_sampler_view *tex = shs->textures[i];
 
       if (!state) {
-         memset(map, 0, 4 * GENX(SAMPLER_STATE_length));
+         memset(map, 0, sampler_state_len);
       } else {
          const uint32_t *sampler_state = state->sampler_state;
 
@@ -2757,7 +2925,7 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
 #endif
 
          if (!state->needs_border_color) {
-            memcpy(map, sampler_state, 4 * GENX(SAMPLER_STATE_length));
+            memcpy(map, sampler_state, sampler_state_len);
          } else {
             ice->state.need_border_colors |= 1 << stage;
 
@@ -2790,21 +2958,15 @@ iris_upload_sampler_states(struct iris_context *ice, mesa_shader_stage stage)
                }
             }
 
-            /* Stream out the border color and merge the pointer. */
-            uint32_t offset = iris_upload_border_color(border_color_pool,
-                                                       color);
+            uint32_t dynamic[SAMPLER_STATE_DWORDS];
 
-            uint32_t dynamic[GENX(SAMPLER_STATE_length)];
-            iris_pack_state(GENX(SAMPLER_STATE), dynamic, dyns) {
-               dyns.BorderColorPointer = offset;
-            }
-
-            for (uint32_t j = 0; j < GENX(SAMPLER_STATE_length); j++)
+            iris_upload_sampler_state_set_border_color(screen, dynamic, color);
+            for (uint32_t j = 0; j < (sampler_state_len / sizeof(uint32_t)); j++)
                map[j] = sampler_state[j] | dynamic[j];
          }
       }
 
-      map += GENX(SAMPLER_STATE_length);
+      map += (sampler_state_len / 4);
    }
 }
 
@@ -2908,8 +3070,9 @@ upload_surface_states(struct u_upload_mgr *mgr,
    void *map =
       upload_state(mgr, &surf_state->ref, bytes, SURFACE_STATE_ALIGNMENT);
 
-   surf_state->ref.offset +=
-      iris_bo_offset_from_base_address(iris_resource_bo(surf_state->ref.res));
+   struct iris_bo *bo = iris_resource_bo(surf_state->ref.res);
+   surf_state->ref.offset += iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                                bo->address : iris_bo_offset_from_base_address(bo);
 
    if (map)
       memcpy(map, surf_state->cpu, bytes);
@@ -3276,7 +3439,8 @@ iris_create_surface(struct iris_screen *screen,
                               read_view->base_level,
                               0, read_view->base_array_layer,
                               &read_surf, &read_surf_offset_B,
-                              &read_surf_tile_x_sa, &read_surf_tile_y_sa);
+                              &read_surf_tile_x_sa, &read_surf_tile_y_sa,
+                              NULL);
       read_view->base_level = 0;
       read_view->base_array_layer = 0;
       assert(read_view->array_len == 1);
@@ -3975,15 +4139,25 @@ iris_set_framebuffer_state(struct pipe_context *ctx,
    isl_emit_depth_stencil_hiz_s(isl_dev, cso_z->packets, &info);
 
    /* Make a null surface for unbound buffers */
-   void *null_surf_map =
-      upload_state(ice->state.surface_uploader, &ice->state.null_fb,
-                   4 * GENX(RENDER_SURFACE_STATE_length), 64);
-   isl_null_fill_state(&screen->isl_dev, null_surf_map,
-                       .size = isl_extent3d(MAX2(cso->width, 1),
-                                            MAX2(cso->height, 1),
-                                            cso->layers ? cso->layers : 1));
-   ice->state.null_fb.offset +=
-      iris_bo_offset_from_base_address(iris_resource_bo(ice->state.null_fb.res));
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)) {
+      if (!ice->state.null_fb_cpu)
+         ice->state.null_fb_cpu = malloc(GENX(RENDER_SURFACE_STATE_length) * sizeof(uint32_t));
+
+      isl_null_fill_state(&screen->isl_dev, ice->state.null_fb_cpu,
+                          .size = isl_extent3d(MAX2(cso->width, 1),
+                                               MAX2(cso->height, 1),
+                                               cso->layers ? cso->layers : 1));
+   } else {
+      void *null_surf_map =
+         upload_state(ice->state.surface_uploader, &ice->state.null_fb,
+                     4 * GENX(RENDER_SURFACE_STATE_length), 64);
+      isl_null_fill_state(&screen->isl_dev, null_surf_map,
+                        .size = isl_extent3d(MAX2(cso->width, 1),
+                                             MAX2(cso->height, 1),
+                                             cso->layers ? cso->layers : 1));
+      struct iris_bo *bo = iris_resource_bo(ice->state.null_fb.res);
+      ice->state.null_fb.offset += iris_bo_offset_from_base_address(bo);
+   }
 
    /* Render target change */
    ice->state.stage_dirty |= IRIS_STAGE_DIRTY_BINDINGS_FS;
@@ -5031,7 +5205,7 @@ encode_surface_count(const struct iris_screen *screen,
        !screen->driconf.force_compute_surface_prefetch)
       return 0;
 #endif
-   return shader->bt.size_bytes / 4;
+   return shader->bt.total_surf_count;
 }
 
 #define INIT_THREAD_DISPATCH_FIELDS(pkt, prefix, stage)                   \
@@ -5360,6 +5534,10 @@ iris_store_fs_state(const struct iris_screen *screen,
       psx.PixelShaderRequiresSourceDepthandorWPlaneCoefficients =
          fs_data->uses_depth_w_coefficients;
 #endif
+#if INTEL_WA_16030144090_GFX_VER
+      if (intel_needs_workaround(devinfo, 16030144090))
+         psx.EnablePSDependencyOnCPsizeChange = fs_data->is_per_sample;
+#endif
    }
 }
 
@@ -5583,7 +5761,7 @@ update_clear_value(struct iris_context *ice,
 #endif
 }
 
-static uint32_t
+static uint64_t
 use_surface_state(struct iris_batch *batch,
                   struct iris_surface_state *surf_state,
                   enum isl_aux_usage aux_usage)
@@ -5601,7 +5779,7 @@ use_surface_state(struct iris_batch *batch,
  *
  * Returns the binding table entry (offset to SURFACE_STATE).
  */
-static uint32_t
+static uint64_t
 use_surface(struct iris_context *ice,
             struct iris_batch *batch,
             struct iris_surface *surf,
@@ -5648,7 +5826,7 @@ use_surface(struct iris_context *ice,
    }
 }
 
-static uint32_t
+static uint64_t
 use_sampler_view(struct iris_context *ice,
                  struct iris_batch *batch,
                  struct iris_sampler_view *isv)
@@ -5682,7 +5860,7 @@ use_sampler_view(struct iris_context *ice,
    return use_surface_state(batch, &isv->surface_state, aux_usage);
 }
 
-static uint32_t
+static uint64_t
 use_ubo_ssbo(struct iris_batch *batch,
              struct iris_context *ice,
              struct pipe_shader_buffer *buf,
@@ -5699,7 +5877,7 @@ use_ubo_ssbo(struct iris_batch *batch,
    return surf_state->offset;
 }
 
-static uint32_t
+static uint64_t
 use_image(struct iris_batch *batch, struct iris_context *ice,
           struct iris_shader_state *shs, const struct shader_info *info,
           int i)
@@ -5727,9 +5905,271 @@ use_image(struct iris_batch *batch, struct iris_context *ice,
    return use_surface_state(batch, &iv->surface_state, aux_usage);
 }
 
+static void
+iris_populate_64bit_binding_table(struct iris_context *ice,
+                                  struct iris_batch *batch,
+                                  mesa_shader_stage stage,
+                                  bool pin_only)
+{
+   struct iris_screen *screen = batch->screen;
+   struct iris_compiled_shader *shader = ice->shaders.prog[stage];
+   const struct isl_device *isl_dev = &screen->isl_dev;
+   struct iris_shader_state *shs = &ice->state.shaders[stage];
+   struct iris_binding_table *bt = &shader->bt;
+   uint32_t surfaces_i = 0;
+   void *surfaces_state_map;
+
+   if (bt->total_surf_count == 0) {
+      batch->render_target_surfs_state_addr[stage] = 0;
+      return;
+   }
+
+   if (pin_only) {
+      struct pipe_resource *res = ice->state.last_res.render_target_64bit_surfs_res[stage];
+      assert(res);
+      iris_use_pinned_bo(batch, iris_resource_bo(res), false, IRIS_DOMAIN_NONE);
+
+      if (!mesa_shader_stage_is_compute(stage)) {
+         struct pipe_resource *push_res = ice->state.last_res.push_const_64bit_payload_res[stage];
+         assert(push_res);
+         iris_use_pinned_bo(batch, iris_resource_bo(push_res), false, IRIS_DOMAIN_NONE);
+      }
+
+      /* In pin_only mode, we only would need to do the iris_use_pinned_bo()
+       * calls but that would add too much complexity to the code, so here we
+       * are allocating a new surfaces_state_map with malloc, this way the real
+       * surfaces_state_map is not overwritten and all pins are called.
+       */
+      surfaces_state_map = malloc(isl_dev->ss.size * bt->total_surf_count);
+   } else {
+      /* Allocate a state long enough to store all surface_states */
+      surfaces_state_map = stream_state(batch,
+                                        ice->state.dynamic_uploader,
+                                        &ice->state.last_res.render_target_64bit_surfs_res[stage],
+                                        isl_dev->ss.size * bt->total_surf_count,
+                                        isl_dev->ss.align,
+                                        &batch->render_target_surfs_state_addr[stage]);
+   }
+
+   if (stage == MESA_SHADER_FRAGMENT) {
+      struct iris_framebuffer_state *cso_fb = &ice->state.framebuffer;
+
+      if (cso_fb->base.nr_cbufs) {
+         for (unsigned i = 0; i < cso_fb->base.nr_cbufs; i++) {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+
+            if (!cso_fb->base.cbufs[i].texture) {
+               memcpy(surface_state_map, ice->state.null_fb_cpu, isl_dev->ss.size);
+               continue;
+            }
+
+            struct iris_surface *surf = &cso_fb->i_cbufs[i];
+            struct iris_resource *res = (struct iris_resource *)cso_fb->base.cbufs[i].texture;
+            const enum isl_aux_usage aux_usage = ice->state.draw_aux_usage[i];
+            uint8_t *surface_state_cpu = (uint8_t *)surf->surface_state.cpu;
+            const enum iris_domain access = IRIS_DOMAIN_RENDER_WRITE;
+            const bool writeable = true;
+
+            if (memcmp(&res->aux.clear_color, &surf->clear_color, sizeof(surf->clear_color)) != 0)
+               surf->clear_color = res->aux.clear_color;
+
+            if (res->aux.clear_color_bo)
+               iris_use_pinned_bo(batch, res->aux.clear_color_bo, false, access);
+
+            if (res->aux.bo)
+               iris_use_pinned_bo(batch, res->aux.bo, writeable, access);
+
+            iris_use_pinned_bo(batch, res->bo, writeable, access);
+
+            assert(surface_state_cpu);
+            surface_state_cpu += surf_state_offset_for_aux(surf->surface_state.aux_usages, aux_usage);
+            memcpy(surface_state_map, surface_state_cpu, isl_dev->ss.size);
+         }
+      } else if (bt->use_null_rt) {
+         uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+         memcpy(surface_state_map, ice->state.null_fb_cpu, isl_dev->ss.size);
+      }
+   }
+
+   for (enum iris_surface_group group = IRIS_SURFACE_GROUP_RENDER_TARGET_READ; group < IRIS_SURFACE_GROUP_COUNT; group++) {
+      for (int index = 0; index < bt->surf_count[group]; index++) {
+         if (iris_group_index_to_bti(bt, group, index) == IRIS_SURFACE_NOT_USED)
+            continue;
+
+         switch (group) {
+         case IRIS_SURFACE_GROUP_UBO:
+         case IRIS_SURFACE_GROUP_SSBO: {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+            struct pipe_shader_buffer *buf = NULL;
+            isl_surf_usage_flags_t usage;
+            enum iris_domain access;
+            bool writable;
+
+            if (group == IRIS_SURFACE_GROUP_UBO) {
+               buf = &shs->constbuf[index];
+               writable = false;
+               access = IRIS_DOMAIN_PULL_CONSTANT_READ;
+               usage = ISL_SURF_USAGE_CONSTANT_BUFFER_BIT;
+            } else if (group == IRIS_SURFACE_GROUP_SSBO) {
+               buf = &shs->ssbo[index];
+               writable = shs->writable_ssbos & (1u << index);
+               access = IRIS_DOMAIN_NONE;
+               usage = ISL_SURF_USAGE_STORAGE_BIT;
+            }
+
+            if (buf->buffer) {
+               struct iris_resource *res = (void *)buf->buffer;
+               const bool ssbo = usage & ISL_SURF_USAGE_STORAGE_BIT;
+               const bool dataport = ssbo || !intel_indirect_ubos_use_sampler(screen->devinfo);
+
+               iris_use_pinned_bo(batch, iris_resource_bo(buf->buffer), writable, access);
+
+               isl_buffer_fill_state(&screen->isl_dev, surface_state_map,
+                                     .address = res->bo->address + res->offset + buf->buffer_offset,
+                                     .size_B = buf->buffer_size - res->offset,
+                                     .format = dataport ? ISL_FORMAT_RAW : ISL_FORMAT_R32G32B32A32_FLOAT,
+                                     .swizzle = ISL_SWIZZLE_IDENTITY,
+                                     .stride_B = 1,
+                                     .usage = usage,
+                                     .mocs = iris_mocs(res->bo, &screen->isl_dev, usage));
+            } else {
+               isl_null_fill_state(&screen->isl_dev, surface_state_map, .size = isl_extent3d(1, 1, 1));
+            }
+            break;
+         }
+         case IRIS_SURFACE_GROUP_IMAGE: {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+            struct iris_image_view *iv = &shs->image[index];
+            struct iris_resource *res = (void *) iv->base.resource;
+
+            if (!res) {
+               isl_null_fill_state(&screen->isl_dev, surface_state_map, .size = isl_extent3d(1, 1, 1));
+               break;
+            }
+
+            const bool write = iv->base.shader_access & PIPE_IMAGE_ACCESS_WRITE;
+
+            iris_use_pinned_bo(batch, res->bo, write, IRIS_DOMAIN_NONE);
+            if (res->aux.bo)
+               iris_use_pinned_bo(batch, res->aux.bo, write, IRIS_DOMAIN_NONE);
+            if (res->aux.clear_color_bo)
+               iris_use_pinned_bo(batch, res->aux.clear_color_bo, false,
+                                  IRIS_DOMAIN_NONE);
+
+            uint8_t *surface_state_cpu = (uint8_t *)iv->surface_state.cpu;
+            const enum isl_aux_usage aux_usage = shs->image_aux_usage[index];
+
+            assert(surface_state_cpu);
+            surface_state_cpu += surf_state_offset_for_aux(iv->surface_state.aux_usages, aux_usage);
+            memcpy(surface_state_map, surface_state_cpu, isl_dev->ss.size);
+            break;
+         }
+         case IRIS_SURFACE_GROUP_TEXTURE_LOW64:
+         case IRIS_SURFACE_GROUP_TEXTURE_HIGH64: {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+            struct iris_sampler_view *view = NULL;
+
+            if (group == IRIS_SURFACE_GROUP_TEXTURE_LOW64)
+               view = shs->textures[index];
+            else if (group == IRIS_SURFACE_GROUP_TEXTURE_HIGH64)
+               view = shs->textures[64 + index];
+
+            if (view) {
+               uint8_t *surface_state_cpu = (uint8_t *)view->surface_state.cpu;
+               enum isl_aux_usage aux_usage;
+
+               if (memcmp(&view->res->aux.clear_color, &view->clear_color, sizeof(view->clear_color)) != 0) {
+                  update_clear_value(ice, batch, view->res, &view->surface_state, &view->view);
+                  view->clear_color = view->res->aux.clear_color;
+               }
+
+               if (view->res->aux.clear_color_bo)
+                  iris_use_pinned_bo(batch, view->res->aux.clear_color_bo, false, IRIS_DOMAIN_SAMPLER_READ);
+               if (view->res->aux.bo)
+                  iris_use_pinned_bo(batch, view->res->aux.bo, false, IRIS_DOMAIN_SAMPLER_READ);
+               iris_use_pinned_bo(batch, view->res->bo, false, IRIS_DOMAIN_SAMPLER_READ);
+
+               assert(surface_state_cpu);
+               aux_usage = iris_resource_texture_aux_usage(ice,
+                                                           view->res,
+                                                           view->view.format,
+                                                           view->view.base_level,
+                                                           view->view.levels);
+
+               surface_state_cpu += surf_state_offset_for_aux(view->surface_state.aux_usages, aux_usage);
+               memcpy(surface_state_map, surface_state_cpu, isl_dev->ss.size);
+            } else {
+               isl_null_fill_state(&screen->isl_dev, surface_state_map, .size = isl_extent3d(1, 1, 1));
+            }
+            break;
+         }
+         case IRIS_SURFACE_GROUP_CS_WORK_GROUPS: {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+            struct iris_state_ref *grid_ref = &ice->state.grid_size;
+            struct iris_bo *grid_bo = iris_resource_bo(grid_ref->res);
+
+            iris_use_pinned_bo(batch, grid_bo, false,
+                               IRIS_DOMAIN_PULL_CONSTANT_READ);
+
+            isl_buffer_fill_state(&screen->isl_dev,
+                                  surface_state_map,
+                                  .address = grid_ref->offset + grid_bo->address,
+                                  .size_B = 3 * sizeof(uint32_t),
+                                  .format = ISL_FORMAT_RAW,
+                                  .stride_B = 1,
+                                  .usage = ISL_SURF_USAGE_CONSTANT_BUFFER_BIT,
+                                  .mocs = iris_mocs(grid_bo, isl_dev,
+                                                    ISL_SURF_USAGE_CONSTANT_BUFFER_BIT));
+            break;
+         }
+         case IRIS_SURFACE_GROUP_RENDER_TARGET_READ: {
+            uint8_t *surface_state_map = surfaces_state_map + (surfaces_i++ * isl_dev->ss.size);
+            struct iris_framebuffer_state *cso_fb = &ice->state.framebuffer;
+
+            if (!cso_fb->base.cbufs[index].texture) {
+               memcpy(surface_state_map, ice->state.null_fb_cpu, isl_dev->ss.size);
+               continue;
+            }
+
+            struct iris_surface *surf = &cso_fb->i_cbufs[index];
+            struct iris_resource *res = (struct iris_resource *)cso_fb->base.cbufs[index].texture;
+            const enum isl_aux_usage aux_usage = ice->state.draw_aux_usage[index];
+            uint8_t *surface_state_cpu = (uint8_t *)surf->surface_state.cpu;
+            const enum iris_domain access = IRIS_DOMAIN_RENDER_WRITE;
+            const bool writeable = true;
+
+            if (memcmp(&res->aux.clear_color, &surf->clear_color, sizeof(surf->clear_color)) != 0)
+               surf->clear_color = res->aux.clear_color;
+
+            if (res->aux.clear_color_bo)
+               iris_use_pinned_bo(batch, res->aux.clear_color_bo, false, access);
+
+            if (res->aux.bo)
+               iris_use_pinned_bo(batch, res->aux.bo, writeable, access);
+
+            iris_use_pinned_bo(batch, res->bo, writeable, access);
+
+            assert(surface_state_cpu);
+            surface_state_cpu += surf_state_offset_for_aux(surf->surface_state.aux_usages, aux_usage);
+            memcpy(surface_state_map, surface_state_cpu, isl_dev->ss.size);
+
+            break;
+         }
+         default:
+            UNREACHABLE("group not handled\n");
+         }
+      }
+   }
+
+   if (pin_only)
+      free(surfaces_state_map);
+
+   assert(surfaces_i == bt->total_surf_count);
+}
+
 #define push_bt_entry(addr) \
    assert(addr >= surf_base_offset); \
-   assert(s < shader->bt.size_bytes / sizeof(uint32_t)); \
+   assert(s < shader->bt.total_surf_count); \
    if (!pin_only) bt_map[s++] = (addr) - surf_base_offset;
 
 #define bt_assert(section) \
@@ -5751,15 +6191,15 @@ iris_populate_binding_table(struct iris_context *ice,
 {
    const struct iris_binder *binder = &ice->state.binder;
    struct iris_compiled_shader *shader = ice->shaders.prog[stage];
+   struct iris_bufmgr *bufmgr = batch->screen->bufmgr;
+
    if (!shader)
       return;
 
-   struct iris_binding_table *bt = &shader->bt;
-   struct iris_shader_state *shs = &ice->state.shaders[stage];
-   uint32_t surf_base_offset = GFX_VER < 11 ? binder->bo->address : 0;
-
-   uint32_t *bt_map = binder->map + binder->bt_offset[stage];
-   int s = 0;
+   if (iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+      iris_populate_64bit_binding_table(ice, batch, stage, pin_only);
+      return;
+   }
 
    const struct shader_info *info = iris_get_shader_info(ice, stage);
    if (!info) {
@@ -5767,6 +6207,13 @@ iris_populate_binding_table(struct iris_context *ice,
       assert(stage == MESA_SHADER_TESS_CTRL);
       return;
    }
+
+   struct iris_binding_table *bt = &shader->bt;
+   struct iris_shader_state *shs = &ice->state.shaders[stage];
+   uint32_t surf_base_offset = GFX_VER < 11 ? binder->bo->address : 0;
+
+   uint32_t *bt_map = binder->map + binder->bt_offset[stage];
+   int s = 0;
 
    if (stage == MESA_SHADER_COMPUTE &&
        shader->bt.used_mask[IRIS_SURFACE_GROUP_CS_WORK_GROUPS]) {
@@ -5899,36 +6346,6 @@ pin_depth_and_stencil_buffers(struct iris_batch *batch,
    }
 }
 
-static uint32_t
-pin_scratch_space(struct iris_context *ice,
-                  struct iris_batch *batch,
-                  const struct iris_compiled_shader *shader,
-                  mesa_shader_stage stage)
-{
-   uint32_t scratch_addr = 0;
-
-   if (shader->total_scratch > 0) {
-      struct iris_bo *scratch_bo =
-         iris_get_scratch_space(ice, shader->total_scratch, stage);
-      iris_use_pinned_bo(batch, scratch_bo, true, IRIS_DOMAIN_NONE);
-
-#if GFX_VERx10 >= 125
-      const struct iris_state_ref *ref =
-         iris_get_scratch_surf(ice, shader->total_scratch);
-      iris_use_pinned_bo(batch, iris_resource_bo(ref->res),
-                         false, IRIS_DOMAIN_NONE);
-      scratch_addr = ref->offset +
-                     iris_resource_bo(ref->res)->address -
-                     IRIS_MEMZONE_SCRATCH_START;
-      assert(util_is_aligned(scratch_addr, 64) && scratch_addr < (1 << 26));
-#else
-      scratch_addr = scratch_bo->address;
-#endif
-   }
-
-   return scratch_addr;
-}
-
 /* ------------------------------------------------------------------- */
 
 /**
@@ -6002,10 +6419,10 @@ iris_restore_render_saved_bos(struct iris_context *ice,
       if (!shader)
          continue;
 
-      for (int i = 0; i < 4; i++) {
+      for (int i = 0; i < ARRAY_SIZE(shader->ubo_ranges); i++) {
          const struct iris_ubo_range *range = &shader->ubo_ranges[i];
 
-         if (range->length == 0)
+         if (range->length == 0 || range->reserved_64bits_binding_tables)
             continue;
 
          struct iris_bo *bo;
@@ -6053,7 +6470,7 @@ iris_restore_render_saved_bos(struct iris_context *ice,
             struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
             iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
-            pin_scratch_space(ice, batch, shader, stage);
+            iris_pin_scratch_space(ice, batch, shader);
          }
       }
    }
@@ -6119,7 +6536,7 @@ iris_restore_compute_saved_bos(struct iris_context *ice,
             iris_use_pinned_bo(batch, curbe_bo, false, IRIS_DOMAIN_NONE);
          }
 
-         pin_scratch_space(ice, batch, shader, stage);
+         iris_pin_scratch_space(ice, batch, shader);
       }
    }
 }
@@ -6131,7 +6548,10 @@ static void
 iris_update_binder_address(struct iris_batch *batch,
                            struct iris_binder *binder)
 {
-   if (batch->last_binder_address == binder->bo->address)
+   struct iris_bufmgr *bufmgr = batch->screen->bufmgr;
+
+   if (iris_bufmgr_is_eff_64bit_enabled(bufmgr) ||
+       batch->last_binder_address == binder->bo->address)
       return;
 
    struct isl_device *isl_dev = &batch->screen->isl_dev;
@@ -6407,11 +6827,62 @@ init_aux_map_state(struct iris_batch *batch)
 struct push_bos {
    struct {
       struct iris_address addr;
+      /* In 256-bit units */
       uint32_t length;
    } buffers[4];
    int buffer_count;
    uint32_t max_length;
 };
+
+static void
+setup_binding_tables_to_push_bos(struct iris_context *ice,
+                                 struct iris_batch *batch,
+                                 int stage,
+                                 struct push_bos *push_bos,
+                                 int *n,
+                                 uint32_t *push_range_sum)
+{
+   struct iris_bufmgr *bufmgr = batch->screen->bufmgr;
+
+   assert(iris_bufmgr_is_eff_64bit_enabled(bufmgr));
+
+   const uint32_t len_bytes = iris_bufmgr_get_device_info(bufmgr)->grf_size;
+   const uint32_t len_256bit_units = DIV_ROUND_UP(len_bytes, (256 / 8));
+   uint64_t push_const_addr;
+   void *map = stream_state(batch, ice->state.surface_uploader,
+                            &ice->state.last_res.push_const_64bit_payload_res[stage],
+                            len_bytes,
+                            32,
+                            &push_const_addr);
+   uint32_t *push_const_map = map;
+
+   assert(push_const_map);
+   assert(batch->render_target_surfs_state_addr[stage] >> 32 ==
+          IRIS_MEMZONE_DYNAMIC_START >> 32 ||
+          batch->render_target_surfs_state_addr[stage] == 0);
+   push_const_map[0] = batch->render_target_surfs_state_addr[stage];
+
+   if (ice->shaders.prog[stage]) {
+      struct iris_shader_state *shs = &ice->state.shaders[stage];
+
+      iris_upload_sampler_states(ice, stage);
+
+      if (shs->sampler_table.res) {
+         iris_use_pinned_bo(batch, iris_resource_bo(shs->sampler_table.res), false,
+                            IRIS_DOMAIN_NONE);
+
+         assert(shs->sampler_table.offset >> 32 ==
+                IRIS_MEMZONE_DYNAMIC_START >> 32);
+         push_const_map[1] = shs->sampler_table.offset;
+      }
+   }
+
+   *push_range_sum = *push_range_sum + len_256bit_units;
+   push_bos->buffers[*n].length = len_256bit_units;
+   push_bos->buffers[*n].addr = ro_bo(NULL, push_const_addr);
+
+   *n = *n + 1;
+}
 
 static void
 setup_constant_buffers(struct iris_context *ice,
@@ -6423,11 +6894,15 @@ setup_constant_buffers(struct iris_context *ice,
    struct iris_compiled_shader *shader = ice->shaders.prog[stage];
 
    uint32_t push_range_sum = 0;
-
    int n = 0;
+
    for (int i = 0; i < 4; i++) {
       const struct iris_ubo_range *range = &shader->ubo_ranges[i];
 
+      if (range->reserved_64bits_binding_tables) {
+         setup_binding_tables_to_push_bos(ice, batch, stage, push_bos, &n, &push_range_sum);
+         continue;
+      }
       if (range->length == 0)
          continue;
 
@@ -6840,16 +7315,41 @@ setup_autostrip_state(struct iris_context *ice,
 }
 
 static void
+iris_upload_render_sysvals(struct iris_context *ice, uint64_t *stage_dirty)
+{
+   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
+      struct iris_shader_state *shs = &ice->state.shaders[stage];
+
+      if (!ice->shaders.prog[stage] || !shs->sysvals_need_upload)
+         continue;
+
+      upload_sysvals(ice, stage, NULL);
+      *stage_dirty |= IRIS_STAGE_DIRTY_BINDINGS_VS << stage;
+   }
+}
+
+static void
+iris_populate_binding_tables(struct iris_context *ice, struct iris_batch *batch,
+                             uint64_t stage_dirty)
+{
+   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
+      if (stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
+         iris_populate_binding_table(ice, batch, stage, false);
+      }
+   }
+}
+
+static void
 iris_emit_binding_tables(struct iris_context *ice, struct iris_batch *batch,
                          uint64_t stage_dirty)
 {
    struct iris_binder *binder = &ice->state.binder;
 
-   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
-         iris_populate_binding_table(ice, batch, stage, false);
-      }
+   /* binding table will be send to shader using push constants or inline data */
+   if (iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr))
+      return;
 
+   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
       /* Gfx9 requires 3DSTATE_BINDING_TABLE_POINTERS_XS to be re-emitted
        * in order to commit constants.  TODO: Investigate "Disable Gather
        * at Set Shader" to go back to legacy mode...
@@ -6902,18 +7402,25 @@ iris_emit_push_constants(struct iris_context *ice, struct iris_batch *batch,
 #endif
 
    for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (!(stage_dirty & (IRIS_STAGE_DIRTY_CONSTANTS_VS << stage)) &&
+      uint64_t stage_check_flags = IRIS_STAGE_DIRTY_CONSTANTS_VS << stage;
+
+      /* If the efficient 64bit addressing mode is enabled, we also need to
+       * check for dirty sampler states and bindings for this stage, so the
+       * pointers in the constant buffer is correctly updated before use.
+       */
+      if (iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr)) {
+         stage_check_flags |= (IRIS_STAGE_DIRTY_SAMPLER_STATES_VS << stage);
+         stage_check_flags |= (IRIS_STAGE_DIRTY_BINDINGS_VS << stage);
+      }
+
+      if (!(stage_dirty & stage_check_flags) &&
           !emit_const_wa)
          continue;
 
-      struct iris_shader_state *shs = &ice->state.shaders[stage];
       struct iris_compiled_shader *shader = ice->shaders.prog[stage];
 
       if (!shader)
          continue;
-
-      if (shs->sysvals_need_upload)
-         upload_sysvals(ice, stage, NULL);
 
       struct push_bos push_bos = {};
       setup_constant_buffers(ice, batch, stage, &push_bos);
@@ -6962,6 +7469,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    struct iris_screen *screen = batch->screen;
    struct iris_border_color_pool *border_color_pool =
       iris_bufmgr_get_border_color_pool(screen->bufmgr);
+   struct iris_bufmgr *bufmgr = screen->bufmgr;
 
    /* Re-emit 3DSTATE_DS before any 3DPRIMITIVE when tessellation is on */
    if (intel_needs_workaround(batch->screen->devinfo, 22018402687) &&
@@ -7019,7 +7527,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 
    if (dirty & IRIS_DIRTY_CC_VIEWPORT) {
       const struct iris_rasterizer_state *cso_rast = ice->state.cso_rast;
-      uint32_t cc_vp_address;
+      uint64_t cc_vp_address;
       bool wa_18020335297_applied = false;
 
       /* Wa_18020335297 - Apply the WA when viewport ptr is reprogrammed. */
@@ -7053,10 +7561,22 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 
          cc_vp_map += GENX(CC_VIEWPORT_length);
       }
-
+#if GFX_VERx10 >= 350
+      if (iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+         iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), ptr) {
+            ptr.CCViewportPointer = ro_bo(NULL, cc_vp_address);
+         }
+      } else {
+         iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), ptr) {
+            ptr.CCViewportPointer = cc_vp_address;
+         }
+      }
+      batch->dfc_vp_sent = true;
+#else
       iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), ptr) {
          ptr.CCViewportPointer = cc_vp_address;
       }
+#endif
 
       if (wa_18020335297_applied) {
 #if GFX_VER >= 12
@@ -7086,7 +7606,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    if (dirty & IRIS_DIRTY_SF_CL_VIEWPORT) {
       struct pipe_framebuffer_state *cso_fb = &ice->state.framebuffer.base;
       int32_t x_min, y_min, x_max, y_max;
-      uint32_t sf_cl_vp_address;
+      uint64_t sf_cl_vp_address;
       uint32_t *vp_map =
          stream_state(batch, ice->state.dynamic_uploader,
                       &ice->state.last_res.sf_cl_vp,
@@ -7132,8 +7652,16 @@ iris_upload_dirty_render_state(struct iris_context *ice,
          vp_map += GENX(SF_CLIP_VIEWPORT_length);
       }
 
-      iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), ptr) {
-         ptr.SFClipViewportPointer = sf_cl_vp_address;
+      if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+#if GFX_VERx10 >= 350
+         iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP_2), ptr) {
+            ptr.SFClipViewportPointer = ro_bo(NULL, sf_cl_vp_address);
+         }
+#endif
+      } else {
+         iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), ptr) {
+            ptr.SFClipViewportPointer = sf_cl_vp_address;
+         }
       }
    }
 
@@ -7169,7 +7697,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       const int rt_dwords =
          MAX2(cso_fb->nr_cbufs, 1) * GENX(BLEND_STATE_ENTRY_length);
 
-      uint32_t blend_offset;
+      uint64_t blend_offset;
       uint32_t *blend_map =
          stream_state(batch, ice->state.dynamic_uploader,
                       &ice->state.last_res.blend,
@@ -7229,9 +7757,18 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       blend_map[0] = blend_state_header | cso_blend->blend_state[0];
       typed_memcpy(&blend_map[1], blend_entries, rt_dwords);
 
-      iris_emit_cmd(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), ptr) {
-         ptr.BlendStatePointer = blend_offset;
-         ptr.BlendStatePointerValid = true;
+      if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+#if GFX_VERx10 >= 350
+         iris_emit_cmd(batch, GENX(3DSTATE_BLEND_STATE_POINTERS_2), ptr) {
+            ptr.BlendStatePointer = ro_bo(NULL, blend_offset);
+            ptr.BlendStatePointerValid = true;
+         }
+#endif
+      } else {
+         iris_emit_cmd(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), ptr) {
+            ptr.BlendStatePointer = blend_offset;
+            ptr.BlendStatePointerValid = true;
+         }
       }
    }
 
@@ -7240,7 +7777,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 #if GFX_VER == 8
       struct pipe_stencil_ref *p_stencil_refs = &ice->state.stencil_ref;
 #endif
-      uint32_t cc_offset;
+      uint64_t cc_offset;
       void *cc_map =
          stream_state(batch, ice->state.dynamic_uploader,
                       &ice->state.last_res.color_calc,
@@ -7262,9 +7799,18 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 	 cc.BackfaceStencilReferenceValue = p_stencil_refs->ref_value[1];
 #endif
       }
-      iris_emit_cmd(batch, GENX(3DSTATE_CC_STATE_POINTERS), ptr) {
-         ptr.ColorCalcStatePointer = cc_offset;
-         ptr.ColorCalcStatePointerValid = true;
+      if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+#if GFX_VERx10 >= 350
+         iris_emit_cmd(batch, GENX(3DSTATE_CC_STATE_POINTERS_2), ptr) {
+            ptr.ColorCalcStatePointer = ro_bo(NULL, cc_offset);
+            ptr.ColorCalcStatePointerValid = true;
+         }
+#endif
+      } else {
+         iris_emit_cmd(batch, GENX(3DSTATE_CC_STATE_POINTERS), ptr) {
+            ptr.ColorCalcStatePointer = cc_offset;
+            ptr.ColorCalcStatePointerValid = true;
+         }
       }
    }
 
@@ -7295,6 +7841,8 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    }
 #endif
 
+   iris_upload_render_sysvals(ice, &stage_dirty);
+   iris_populate_binding_tables(ice, batch, stage_dirty);
    iris_emit_push_constants(ice, batch, dirty, stage_dirty);
    iris_emit_binding_tables(ice, batch, stage_dirty);
 
@@ -7319,7 +7867,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    if (dirty & IRIS_DIRTY_RENDER_BUFFER)
       trace_framebuffer_state(&batch->trace, NULL, &ice->state.framebuffer.base);
 
-   if (ice->state.need_border_colors)
+   if (ice->state.need_border_colors && border_color_pool->bo)
       iris_use_pinned_bo(batch, border_color_pool->bo, false, IRIS_DOMAIN_NONE);
 
    if (dirty & IRIS_DIRTY_MULTISAMPLE) {
@@ -7381,7 +7929,7 @@ iris_upload_dirty_render_state(struct iris_context *ice,
          iris_use_pinned_bo(batch, cache->bo, false, IRIS_DOMAIN_NONE);
 
          uint32_t scratch_addr =
-            pin_scratch_space(ice, batch, shader, stage);
+            iris_pin_scratch_space(ice, batch, shader);
 
 #if GFX_VERx10 >= 125
          shader_program_uses_primitive_id(ice, batch, shader, stage,
@@ -7920,15 +8468,22 @@ iris_upload_dirty_render_state(struct iris_context *ice,
        *    should be aligned to a 64-byte boundary.
        */
       uint32_t alignment = 64;
-      uint32_t scissor_offset =
+      uint64_t scissor_offset =
          emit_state(batch, ice->state.dynamic_uploader,
                     &ice->state.last_res.scissor,
                     ice->state.scissors,
                     sizeof(struct pipe_scissor_state) *
                     ice->state.num_viewports, alignment);
-
-      iris_emit_cmd(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS), ptr) {
-         ptr.ScissorRectPointer = scissor_offset;
+      if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+#if GFX_VERx10 >= 350
+         iris_emit_cmd(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS_2), ptr) {
+            ptr.ScissorRectPointer = ro_bo(NULL, scissor_offset);
+         }
+#endif
+      } else {
+         iris_emit_cmd(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS), ptr) {
+            ptr.ScissorRectPointer = scissor_offset;
+         }
       }
    }
 
@@ -8322,13 +8877,33 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 
 #if GFX_VERx10 >= 125
    if (dirty & IRIS_DIRTY_VFG) {
-      iris_emit_cmd(batch, GENX(3DSTATE_VFG), vfg) {
-         /* Gfx12.5: If 3DSTATE_TE: TE Enable == 1 then RR_STRICT else RR_FREE */
-         vfg.DistributionMode =
+
+      /* Gfx12.5: If 3DSTATE_TE: TE Enable == 1 then RR_STRICT else RR_FREE */
+      unsigned distribution_mode =
 #if GFX_VER < 20
             ice->shaders.prog[MESA_SHADER_TESS_EVAL] == NULL ? RR_FREE :
 #endif
                                                                RR_STRICT;
+#if INTEL_WA_16029281427_GFX_VER
+   /* Make sure that if we have cutindex enabled and use any strip primitive
+    * then VFG distribution mode must not be RR_FREE, use RR_STRICT instead.
+    */
+   const unsigned primitive_topology =
+      translate_prim_type(draw->mode, ice->state.vertices_per_patch);
+   if (draw->restart_index &&
+       (primitive_topology == _3DPRIM_TRISTRIP ||
+        primitive_topology == _3DPRIM_TRISTRIP_ADJ ||
+        primitive_topology == _3DPRIM_QUADSTRIP ||
+        primitive_topology == _3DPRIM_LINESTRIP ||
+        primitive_topology == _3DPRIM_LINESTRIP_ADJ ||
+        primitive_topology == _3DPRIM_LINESTRIP_CONT ||
+        primitive_topology == _3DPRIM_LINESTRIP_BF ||
+        primitive_topology == _3DPRIM_LINESTRIP_CONT_BF))
+      distribution_mode = RR_STRICT;
+#endif
+
+      iris_emit_cmd(batch, GENX(3DSTATE_VFG), vfg) {
+         vfg.DistributionMode = distribution_mode;
          if (intel_needs_workaround(batch->screen->devinfo, 14019166699) &&
              program_uses_primitive_id)
             vfg.DistributionGranularity = InstanceLevelGranularity;
@@ -8582,8 +9157,7 @@ iris_upload_render_state(struct iris_context *ice,
     * context, and need it anyway.  Since true zero-bindings cases are
     * practically non-existent, just pin it and avoid last_res tracking.
     */
-   iris_use_pinned_bo(batch, ice->state.binder.bo, false,
-                      IRIS_DOMAIN_NONE);
+   iris_binder_pin(batch);
 
    if (!batch->contains_draw) {
       if (GFX_VER == 12) {
@@ -8790,8 +9364,7 @@ iris_upload_indirect_render_state(struct iris_context *ice,
     * context, and need it anyway.  Since true zero-bindings cases are
     * practically non-existent, just pin it and avoid last_res tracking.
     */
-   iris_use_pinned_bo(batch, ice->state.binder.bo, false,
-                      IRIS_DOMAIN_NONE);
+   iris_binder_pin(batch);
 
    if (!batch->contains_draw) {
       /* Re-emit constants when starting a new batch buffer in order to
@@ -8889,8 +9462,7 @@ iris_upload_indirect_shader_render_state(struct iris_context *ice,
     * context, and need it anyway.  Since true zero-bindings cases are
     * practically non-existent, just pin it and avoid last_res tracking.
     */
-   iris_use_pinned_bo(batch, ice->state.binder.bo, false,
-                      IRIS_DOMAIN_NONE);
+   iris_binder_pin(batch);
 
    if (!batch->contains_draw) {
       if (GFX_VER == 12) {
@@ -8957,8 +9529,7 @@ iris_upload_indirect_shader_render_state(struct iris_context *ice,
     * context, and need it anyway.  Since true zero-bindings cases are
     * practically non-existent, just pin it and avoid last_res tracking.
     */
-   iris_use_pinned_bo(batch, ice->state.binder.bo, false,
-                      IRIS_DOMAIN_NONE);
+   iris_binder_pin(batch);
 
    /* Wa_1306463417 - Send HS state for every primitive on gfx11.
     * Wa_16011107343 (same for gfx12)
@@ -9075,12 +9646,114 @@ static bool iris_emit_indirect_dispatch_supported(const struct intel_device_info
    return devinfo->has_indirect_unroll;
 }
 
+static void
+iris_emit_compute_walker2(struct iris_context *ice,
+                          struct iris_batch *batch,
+                          const struct pipe_grid_info *grid)
+{
+#if GFX_VERx10 >= 350
+   struct iris_screen *screen = batch->screen;
+   const struct intel_device_info *devinfo = screen->devinfo;
+   struct iris_shader_state *shs = &ice->state.shaders[MESA_SHADER_COMPUTE];
+   struct iris_compiled_shader *shader =
+      ice->shaders.prog[MESA_SHADER_COMPUTE];
+   const struct iris_cs_data *cs_data = iris_cs_data(shader);
+   const struct intel_cs_dispatch_info dispatch =
+      iris_get_cs_dispatch_info(devinfo, shader, grid->block);
+   uint32_t total_shared = shader->total_shared + grid->variable_shared_mem;
+
+   iris_compute_engine_async_threads_limits(batch, dispatch.threads,
+                                            total_shared, cs_data->uses_barrier,
+                                            false);
+
+   struct GENX(INTERFACE_DESCRIPTOR_DATA_2) idd = {
+      .KernelStartPointer = KSP(shader) + iris_cs_data_prog_offset(cs_data, dispatch.simd_size),
+      .RegistersPerThread = intel_register_blocks(devinfo, shader->brw_prog_data->grf_used),
+      .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+      .ThreadGroupDispatchSize = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
+      .SharedLocalMemorySize = intel_compute_slm_encode_size(GFX_VER, total_shared),
+      .PreferredSLMAllocationSize =
+         intel_compute_preferred_slm_calc_encode_size(devinfo,
+                                                      total_shared,
+                                                      dispatch.group_size,
+                                                      dispatch.simd_size),
+      .NumberOfBarriers = cs_data->uses_barrier,
+      .PSAsyncThreadLimit = ice->state.pixel_async_compute_thread_limit,
+      .ZPassAsyncComputeThreadLimit = ice->state.z_pass_async_compute_thread_limit,
+      .NP_ZAsyncThrottlesettings = ice->state.np_z_async_throttle_settings,
+   };
+
+   struct GENX(COMPUTE_WALKER_BODY_2) body = {
+      .MaximumNumberofThreads = devinfo->max_cs_threads * devinfo->subslice_total,
+      .StackIDControl = SIC_512,
+      .SIMDSize = dispatch.simd_size / 16,
+      .MessageSIMD = dispatch.simd_size / 16,
+      .GenerateLocalID = cs_data->generate_local_id != 0,
+      .EmitLocal = cs_data->generate_local_id,
+      .EmitInlineParameter = true,
+      .WalkOrder = cs_data->walk_order,
+      .TileLayout = cs_data->walk_order == INTEL_WALK_ORDER_YXZ ? TileY32bpe : Linear,
+      .StatCountDisable = false,
+      .DispatchWalkOrder = cs_data->uses_sampler ? MortonWalk : LinearWalk,
+      .ThreadGroupBatchSize = cs_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
+      .ExecutionMask = dispatch.right_mask,
+      .LocalXMaximum = grid->block[0] - 1,
+      .LocalYMaximum = grid->block[1] - 1,
+      .LocalZMaximum = grid->block[2] - 1,
+      .ThreadGroupIDXDimension = grid->grid[0],
+      .ThreadGroupIDYDimension = grid->grid[1],
+      .ThreadGroupIDZDimension = grid->grid[2],
+      .Post_sync_opn0.MOCS = iris_mocs(NULL, &screen->isl_dev, 0),
+      .Post_sync_opn1.MOCS = iris_mocs(NULL, &screen->isl_dev, 0),
+      .Post_sync_opn2.MOCS = iris_mocs(NULL, &screen->isl_dev, 0),
+      .Post_sync_opn3.MOCS = iris_mocs(NULL, &screen->isl_dev, 0),
+      .InterfaceDescriptor = idd,
+      .InlineData = {
+         [0] = batch->render_target_surfs_state_addr[MESA_SHADER_COMPUTE] & 0xffffffff,
+         [1] = shs->sampler_table.offset & 0xffffffff,
+      },
+   };
+
+   if (iris_emit_indirect_dispatch_supported(devinfo) && grid->indirect) {
+      struct iris_bo *indirect = iris_resource_bo(grid->indirect);
+      struct iris_address indirect_bo = ro_bo(indirect, grid->indirect_offset);
+
+      body.ThreadGroupIDXDimension = 0;
+      body.ThreadGroupIDYDimension = 0;
+      body.ThreadGroupIDZDimension = 0;
+
+      iris_emit_cmd(batch, GENX(EXECUTE_INDIRECT_DISPATCH_2), ind) {
+         ind.PredicateEnable            =
+            ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT;
+         ind.MaxCount                   = 1;
+         ind.body                       = body;
+         ind.ArgumentBufferStartAddress = indirect_bo;
+         ind.MOCS                       =
+            MOCS_GET_INDEX(iris_mocs(indirect_bo.bo, &screen->isl_dev, 0));
+      }
+   } else {
+      if (grid->indirect)
+         iris_load_indirect_location(ice, batch, grid);
+
+      ice->utrace.last_compute_walker =
+         iris_emit_dwords(batch, GENX(COMPUTE_WALKER_2_length));
+
+      _iris_pack_command(batch, GENX(COMPUTE_WALKER_2),
+                         ice->utrace.last_compute_walker, cw) {
+         cw.IndirectParameterEnable        = grid->indirect;
+         cw.body                           = body;
+         assert(iris_cs_push_const_total_size(shader, dispatch.threads) == 0);
+      }
+   }
+#endif
+}
+
 #if GFX_VERx10 >= 125
 
 static void
-iris_upload_compute_walker(struct iris_context *ice,
-                           struct iris_batch *batch,
-                           const struct pipe_grid_info *grid)
+iris_emit_compute_walker(struct iris_context *ice,
+                         struct iris_batch *batch,
+                         const struct pipe_grid_info *grid)
 {
    const uint64_t stage_dirty = ice->state.stage_dirty;
    struct iris_screen *screen = batch->screen;
@@ -9094,21 +9767,19 @@ iris_upload_compute_walker(struct iris_context *ice,
       iris_get_cs_dispatch_info(devinfo, shader, grid->block);
    uint32_t total_shared = shader->total_shared + grid->variable_shared_mem;
 
-   trace_intel_begin_compute(&batch->trace);
-
    if (stage_dirty & IRIS_STAGE_DIRTY_CS) {
       iris_emit_cmd(batch, GENX(CFE_STATE), cfe) {
          cfe.MaximumNumberofThreads =
             devinfo->max_cs_threads * devinfo->subslice_total;
-         uint32_t scratch_addr = pin_scratch_space(ice, batch, shader,
-                                                   MESA_SHADER_COMPUTE);
+         uint32_t scratch_addr = iris_pin_scratch_space(ice, batch, shader);
          cfe.ScratchSpaceBuffer = scratch_addr >> SCRATCH_SPACE_BUFFER_SHIFT;
       }
    }
 
-   iris_compute_emit_engine_async_threads_limits(batch, dispatch.threads,
-                                                 total_shared, cs_data->uses_barrier,
-                                                 false);
+   if (iris_compute_engine_async_threads_limits(batch, dispatch.threads,
+                                                total_shared, cs_data->uses_barrier,
+                                                false))
+      iris_emit_engine_async_threads_limits(batch);
 
    struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {};
    idd.KernelStartPointer =
@@ -9160,8 +9831,6 @@ struct GENX(COMPUTE_WALKER_BODY) body = {
 #endif
    };
 
-   iris_measure_snapshot(ice, batch, INTEL_SNAPSHOT_COMPUTE, NULL, NULL, NULL);
-
    if (iris_emit_indirect_dispatch_supported(devinfo) && grid->indirect) {
       struct iris_bo *indirect = iris_resource_bo(grid->indirect);
       struct iris_address indirect_bo = ro_bo(indirect, grid->indirect_offset);
@@ -9193,6 +9862,23 @@ struct GENX(COMPUTE_WALKER_BODY) body = {
          assert(iris_cs_push_const_total_size(shader, dispatch.threads) == 0);
       }
    }
+}
+
+static void
+iris_upload_compute_walker(struct iris_context *ice,
+                           struct iris_batch *batch,
+                           const struct pipe_grid_info *grid)
+{
+   struct iris_screen *screen = batch->screen;
+
+   trace_intel_begin_compute(&batch->trace);
+
+   iris_measure_snapshot(ice, batch, INTEL_SNAPSHOT_COMPUTE, NULL, NULL, NULL);
+
+   if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr))
+      iris_emit_compute_walker2(ice, batch, grid);
+   else
+      iris_emit_compute_walker(ice, batch, grid);
 
 #if INTEL_NEEDS_WA_14025112257
    if (batch->name == IRIS_BATCH_COMPUTE) {
@@ -9242,8 +9928,7 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
 
       iris_emit_cmd(batch, GENX(MEDIA_VFE_STATE), vfe) {
          if (shader->total_scratch) {
-            uint32_t scratch_addr =
-               pin_scratch_space(ice, batch, shader, MESA_SHADER_COMPUTE);
+            uint32_t scratch_addr = iris_pin_scratch_space(ice, batch, shader);
 
             vfe.PerThreadScratchSpace = ffs(shader->total_scratch) - 11;
             vfe.ScratchSpaceBasePointer =
@@ -9272,8 +9957,8 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
    if ((stage_dirty & IRIS_STAGE_DIRTY_CS) ||
        (GFX_VER == 12 && !batch->contains_draw) ||
        cs_data->local_size[0] == 0 /* Variable local group size */) {
-      uint32_t curbe_data_offset, push_const_size;
-      uint32_t *curbe_data_map;
+      uint64_t curbe_data_offset;
+      uint32_t *curbe_data_map, push_const_size;
       if (cs_data->push.cross_thread.dwords == 0 &&
           cs_data->push.per_thread.dwords == 0) {
          push_const_size = 64;
@@ -9403,7 +10088,7 @@ iris_upload_compute_state(struct iris_context *ice,
     * context, and need it anyway.  Since true zero-bindings cases are
     * practically non-existent, just pin it and avoid last_res tracking.
     */
-   iris_use_pinned_bo(batch, ice->state.binder.bo, false, IRIS_DOMAIN_NONE);
+   iris_binder_pin(batch);
 
    if ((stage_dirty & IRIS_STAGE_DIRTY_CONSTANTS_CS) &&
         shs->sysvals_need_upload)
@@ -9420,7 +10105,7 @@ iris_upload_compute_state(struct iris_context *ice,
    iris_use_pinned_bo(batch, iris_resource_bo(shader->assembly.res), false,
                       IRIS_DOMAIN_NONE);
 
-   if (ice->state.need_border_colors)
+   if (ice->state.need_border_colors && border_color_pool->bo)
       iris_use_pinned_bo(batch, border_color_pool->bo, false,
                          IRIS_DOMAIN_NONE);
 
@@ -9450,6 +10135,7 @@ iris_upload_compute_state(struct iris_context *ice,
 static void
 iris_destroy_state(struct iris_context *ice)
 {
+   struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
    struct iris_genx_state *genx = ice->state.genx;
 
    pipe_resource_reference(&ice->state.pixel_hashing_tables, NULL);
@@ -9502,7 +10188,10 @@ iris_destroy_state(struct iris_context *ice)
    pipe_resource_reference(&ice->state.grid_size.res, NULL);
    pipe_resource_reference(&ice->state.grid_surf_state.res, NULL);
 
-   pipe_resource_reference(&ice->state.null_fb.res, NULL);
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr))
+      free(ice->state.null_fb_cpu);
+   else
+      pipe_resource_reference(&ice->state.null_fb.res, NULL);
    pipe_resource_reference(&ice->state.unbound_tex.res, NULL);
 
    pipe_resource_reference(&ice->state.last_res.cc_vp, NULL);
@@ -9513,6 +10202,11 @@ iris_destroy_state(struct iris_context *ice)
    pipe_resource_reference(&ice->state.last_res.index_buffer, NULL);
    pipe_resource_reference(&ice->state.last_res.cs_thread_ids, NULL);
    pipe_resource_reference(&ice->state.last_res.cs_desc, NULL);
+
+   for (mesa_shader_stage stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+      pipe_resource_reference(&ice->state.last_res.push_const_64bit_payload_res[stage], NULL);
+      pipe_resource_reference(&ice->state.last_res.render_target_64bit_surfs_res[stage], NULL);
+   }
 }
 
 /* ------------------------------------------------------------------- */
@@ -10634,6 +11328,7 @@ genX(init_state)(struct iris_context *ice)
    ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->resource_release = u_default_resource_release;
    ctx->draw_vbo = iris_draw_vbo;
+   ctx->draw_vbo_buffers = util_draw_vbo_buffers;
    ctx->launch_grid = iris_launch_grid;
    ctx->create_stream_output_target = iris_create_stream_output_target;
    ctx->stream_output_target_destroy = iris_stream_output_target_destroy;
@@ -10661,8 +11356,9 @@ genX(init_state)(struct iris_context *ice)
                    4 * GENX(RENDER_SURFACE_STATE_length), 64);
    isl_null_fill_state(&screen->isl_dev, null_surf_map,
                        .size = isl_extent3d(1, 1, 1));
-   ice->state.unbound_tex.offset +=
-      iris_bo_offset_from_base_address(iris_resource_bo(ice->state.unbound_tex.res));
+   struct iris_bo *bo = iris_resource_bo(ice->state.unbound_tex.res);
+   ice->state.unbound_tex.offset += iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                                       bo->address : iris_bo_offset_from_base_address(bo);
 
    /* Default all scissor rectangles to be empty regions. */
    for (int i = 0; i < IRIS_MAX_VIEWPORTS; i++) {

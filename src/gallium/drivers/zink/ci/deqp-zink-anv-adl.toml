@@ -126,3 +126,5 @@ piglit_folder = "/piglit"
 profile = "quick_gl"
 process_isolation = true
 timeout = 180.0
+[piglit.env]
+  ZINK_DEBUG = "validation"

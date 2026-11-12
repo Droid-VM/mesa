@@ -442,7 +442,7 @@ ADDR_E_RETURNCODE Lib::CopyLinearSurface(
             const ADDR2_COPY_MEMSURFACE_REGION* pCurRegion = &pRegions[regionIdx];
 
             void* pMipBase = VoidPtrInc(pIn->pMappedSurface,
-                                        (pIn->singleSubres ? 0 : mipInfo[pCurRegion->mipId].offset));
+                                        pIn->singleSubres ? 0 : mipInfo[pCurRegion->mipId].offset);
 
             const size_t lineSizeBytes = (static_cast<size_t>(localIn.bpp) >> 3) * pCurRegion->copyDims.width;
             const size_t lineImgPitchBytes = (static_cast<size_t>(localIn.bpp) >> 3) * mipInfo[pCurRegion->mipId].pitch;
@@ -450,10 +450,10 @@ ADDR_E_RETURNCODE Lib::CopyLinearSurface(
             for (UINT_32 sliceIdx = 0; sliceIdx < pCurRegion->copyDims.depth; sliceIdx++)
             {
                 UINT_32 sliceCoord = sliceIdx + pCurRegion->slice;
-                size_t imgOffsetInMip = (localOut.sliceSize * sliceCoord) +
+                UINT_64 imgOffsetInMip = (localOut.sliceSize * sliceCoord) +
                                         (lineImgPitchBytes * pCurRegion->y) +
                                         (pCurRegion->x * (pIn->bpp >> 3));
-                size_t memOffset = sliceIdx * pCurRegion->memSlicePitch;
+                UINT_64 memOffset = sliceIdx * pCurRegion->memSlicePitch;
 
                 for (UINT_32 yIdx = 0; yIdx < pCurRegion->copyDims.height; yIdx++)
                 {
@@ -1434,7 +1434,7 @@ ADDR_E_RETURNCODE Lib::ComputeSurfaceAddrFromCoordLinear(
         {
             pOut->addr        = (localOut.sliceSize * pIn->slice) +
                                 mipInfo[pIn->mipId].offset +
-                                (static_cast<size_t>(pIn->y) * mipInfo[pIn->mipId].pitch + pIn->x) * (pIn->bpp >> 3);
+                                (static_cast<UINT_64>(pIn->y) * mipInfo[pIn->mipId].pitch + pIn->x) * (pIn->bpp >> 3);
             pOut->bitPosition = 0;
         }
         else

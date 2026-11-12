@@ -276,6 +276,19 @@ poly_nir_lower_tes(nir_shader *tes, bool to_hw_vs)
    nir_lower_tess_coord_z(
       tes, tes->info.tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES);
 
+   /* After tessellation, the GS primitive ID is the patch index, which the TES
+    * writes for the GS to read.
+    */
+   if (!to_hw_vs && tes->info.next_stage == MESA_SHADER_GEOMETRY) {
+      nir_builder b =
+         nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(tes)));
+      nir_store_output(&b, nir_load_primitive_id(&b), nir_imm_int(&b, 0),
+                       .src_type = nir_type_uint32,
+                       .io_semantics.location = VARYING_SLOT_PRIMITIVE_ID,
+                       .io_semantics.num_slots = 1);
+      tes->info.outputs_written |= VARYING_BIT_PRIMITIVE_ID;
+   }
+
    nir_shader_intrinsics_pass(tes, lower_tes, nir_metadata_control_flow, NULL);
 
    /* Points mode renders as points, make sure we write point size for the HW */

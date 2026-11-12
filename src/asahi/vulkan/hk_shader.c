@@ -42,6 +42,7 @@
 #include "vk_shader_module.h"
 #include "vk_ycbcr_conversion.h"
 
+#include "asahi/compiler/agx_compiler.h"
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/compiler/agx_nir_texture.h"
@@ -49,6 +50,7 @@
 #include "asahi/lib/agx_linker.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/lib/agx_uvs.h"
+#include "asahi/isa/disasm.h"
 #include "compiler/spirv/nir_spirv.h"
 
 #include "util/blob.h"
@@ -179,6 +181,7 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_memcpy);
 }
 
 static void
@@ -1218,7 +1221,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
       void *data = malloc(data_size);
       if (data == NULL) {
-         ralloc_free(nir);
          return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
@@ -1231,8 +1233,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       shader->data_ptr = data;
       shader->data_size = data_size;
    }
-
-   ralloc_free(nir);
 
    VkResult result = hk_init_link_ht(shader, sw_stage);
    if (result != VK_SUCCESS)
@@ -1283,8 +1283,15 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
       hk_shader_destroy(dev, shader);
    }
 
+   free(obj->debug_nir_dump);
+   free(obj->debug_agx_dump);
+
    vk_shader_free(&dev->vk, pAllocator, &obj->vk);
 }
+
+static void dump_shader_ir(
+      struct hk_api_shader *obj, struct hk_shader* shader, nir_shader* nir,
+      FILE *debug_nir_stream, FILE *debug_agx_stream);
 
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
@@ -1341,6 +1348,21 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       NIR_PASS(_, nir, poly_nir_lower_tcs, true);
    }
 
+   const bool dump_vk =
+      info->flags & VK_SHADER_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_MESA;
+
+   size_t debug_agx_size = 0;
+   char *debug_agx_buffer = NULL;
+   FILE *debug_agx_stream = NULL;
+   size_t debug_nir_size = 0;
+   char *debug_nir_buffer = NULL;
+   FILE *debug_nir_stream = NULL;
+
+   if (dump_vk) {
+      debug_agx_stream = open_memstream(&debug_agx_buffer, &debug_agx_size);
+      debug_nir_stream = open_memstream(&debug_nir_buffer, &debug_nir_size);
+   }
+
    /* Compile all variants up front */
    if (sw_stage == MESA_SHADER_GEOMETRY) {
       struct hk_shader *main_variant = hk_main_gs_variant(obj);
@@ -1348,8 +1370,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
 
-      NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre_gs,
-               &count_variant->info.gs);
+      poly_nir_lower_gs(nir, &count, &rast, &pre_gs, &count_variant->info.gs);
 
       agx_preprocess_nir(count);
       agx_preprocess_nir(rast);
@@ -1378,6 +1399,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                               sw_stage, true, NULL, info->set_layout_count);
 
             if (result != VK_SUCCESS) {
+               ralloc_free(variants[v].in);
                hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
                ralloc_free(nir);
                ralloc_free(pre_gs);
@@ -1385,6 +1407,12 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                ralloc_free(rast);
                return result;
             }
+
+            if (dump_vk) {
+               dump_shader_ir(obj, variants[v].out, variants[v].in, debug_nir_stream, debug_agx_stream);
+            }
+
+            ralloc_free(variants[v].in);
          }
       }
    } else if (sw_stage == MESA_SHADER_VERTEX ||
@@ -1476,10 +1504,18 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                            info->robustness, key, features, shader, sw_stage,
                            hw, nir->xfb_info, info->set_layout_count);
          if (result != VK_SUCCESS) {
+            ralloc_free(clone);
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
             ralloc_free(nir);
             return result;
          }
+
+
+         if (dump_vk) {
+            dump_shader_ir(obj, shader, clone, debug_nir_stream, debug_agx_stream);
+         }
+
+         ralloc_free(clone);
       }
    } else {
       struct hk_shader *shader = hk_only_variant(obj);
@@ -1489,9 +1525,25 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                               info->robustness, key, features, shader, sw_stage,
                               true, NULL, info->set_layout_count);
       if (result != VK_SUCCESS) {
+         ralloc_free(nir);
          hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
          return result;
       }
+
+      if (dump_vk) {
+         dump_shader_ir(obj, shader, nir, debug_nir_stream, debug_agx_stream);
+      }
+
+      ralloc_free(nir);
+   }
+
+   if (dump_vk) {
+      fflush(debug_agx_stream);
+      fclose(debug_agx_stream);
+      obj->debug_agx_dump = debug_agx_buffer;
+      fflush(debug_nir_stream);
+      fclose(debug_nir_stream);
+      obj->debug_nir_dump = debug_nir_buffer;
    }
 
    *shader_out = obj;
@@ -1744,6 +1796,35 @@ hk_shader_get_executable_statistics(
    return vk_outarray_status(&out);
 }
 
+static void dump_shader_ir(
+   struct hk_api_shader *obj, struct hk_shader* shader, nir_shader* nir,
+   FILE *debug_nir_stream, FILE *debug_agx_stream)
+{
+   const char* shader_name = hk_variant_name(obj, shader);
+   if (!shader_name) shader_name = "";
+
+   fprintf(debug_nir_stream, "nir %s\n", shader_name);
+   nir_print_shader_annotated(nir, debug_nir_stream, NULL);
+   fprintf(debug_nir_stream, "\n");
+
+   fprintf(debug_agx_stream, "agx %s\n", shader_name);
+
+   unsigned preamble_size = 0;
+   if (shader->b.info.has_preamble) {
+      if (shader->b.info.preamble_offset > shader->b.info.main_offset) {
+         preamble_size = shader->b.info.binary_size - shader->b.info.preamble_offset;
+      } else {
+         preamble_size = shader->b.info.main_offset - shader->b.info.preamble_offset;
+      }
+      fprintf(debug_agx_stream, "preamble:\n");
+      agx2_disassemble((uint8_t*)shader->code_ptr + shader->b.info.preamble_offset, preamble_size, debug_agx_stream);
+   }
+
+   fprintf(debug_agx_stream, "entrypoint:\n");
+   agx2_disassemble((uint8_t*)shader->code_ptr + shader->b.info.main_offset, shader->b.info.main_size, debug_agx_stream);
+   fprintf(debug_agx_stream, "\n");
+}
+
 static bool
 write_ir_text(VkPipelineExecutableInternalRepresentationKHR *ir,
               const char *data)
@@ -1771,24 +1852,52 @@ hk_shader_get_executable_internal_representations(
    uint32_t executable_index, uint32_t *internal_representation_count,
    VkPipelineExecutableInternalRepresentationKHR *internal_representations)
 {
-   VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutableInternalRepresentationKHR, out,
-                          internal_representations,
-                          internal_representation_count);
-   bool incomplete_text = false;
-
    assert(executable_index == 0);
 
-   /* TODO */
-#if 0
-   vk_outarray_append_typed(VkPipelineExecutableInternalRepresentationKHR, &out, ir) {
-      VK_COPY_STR(ir->name, "AGX assembly");
-      VK_COPY_STR(ir->description, "AGX assembly");
-      if (!write_ir_text(ir, TODO))
-         incomplete_text = true;
-   }
-#endif
+   struct hk_api_shader *obj =
+      container_of(vk_shader, struct hk_api_shader, vk);
 
-   return incomplete_text ? VK_INCOMPLETE : vk_outarray_status(&out);
+   VkPipelineExecutableInternalRepresentationKHR *p = internal_representations;
+   VkPipelineExecutableInternalRepresentationKHR *end =
+      p + (internal_representations ? *internal_representation_count : 0);
+
+   VkResult result = VK_SUCCESS;
+   if (p < end) {
+      VK_COPY_STR(p->name, "NIR Shader(s)");
+      VK_COPY_STR(p->description, "The optimized NIR shader(s)");
+      if (obj->debug_nir_dump) {
+         if (!write_ir_text(p, obj->debug_nir_dump))
+            result = VK_INCOMPLETE;
+      } else {
+         if (!write_ir_text(p, "Set AGX_MESA_DEBUG=dump_vk to dump NIR shaders\n")) 
+            result = VK_INCOMPLETE;
+      }
+   }
+   p++;
+
+   if (p < end) {
+      VK_COPY_STR(p->name, "AGX Shader(s)");
+      VK_COPY_STR(p->description, "The final optimized AGX shader(s)");
+      if (obj->debug_nir_dump) {
+         if (!write_ir_text(p, obj->debug_agx_dump))
+            result = VK_INCOMPLETE;
+      } else {
+         if (!write_ir_text(p, "Set AGX_MESA_DEBUG=dump_vk to dump AGX shaders\n")) 
+            result = VK_INCOMPLETE;
+      }
+   }
+   p++;
+
+   if (!internal_representations)
+      *internal_representation_count = p - internal_representations;
+   else if (p > end) {
+      result = VK_INCOMPLETE;
+      *internal_representation_count = end - internal_representations;
+   } else {
+      *internal_representation_count = p - internal_representations;
+   }
+
+   return result;
 }
 
 static const struct vk_shader_ops hk_shader_ops = {

@@ -57,7 +57,8 @@ get_temp_registers(Instruction* instr)
    return demand_after;
 }
 
-RegisterDemand get_temp_reg_changes(Instruction* instr)
+RegisterDemand
+get_temp_reg_changes(Instruction* instr)
 {
    RegisterDemand available_def_space;
 
@@ -310,6 +311,12 @@ process_live_temps_per_block(live_ctx& ctx, Block* block)
       } else if (instr_info.classes[(int)insn->opcode] == instr_class::wmma) {
          insn->operands[0].setLateKill(true);
          insn->operands[1].setLateKill(true);
+      } else if (insn->opcode == aco_opcode::p_v_mad_u32_u32_u16 ||
+                 insn->opcode == aco_opcode::p_v_mad_u32) {
+         for (unsigned i = 0; i < 2; i++) {
+            if (insn->operands[i].isOfType(RegType::vgpr))
+               insn->operands[i].setLateKill(true);
+         }
       }
 
       /* Check if a definition clobbers some operand */

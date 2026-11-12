@@ -7,6 +7,12 @@
 
 #include "compiler/libcl/libcl.h"
 
+#define __gen_address_type uint64_t
+#define __gen_user_data void
+#define __gen_combine_address(_, __, addr, delta) (addr + delta)
+
+#include "genX_helpers.h"
+
 #define UNUSED
 
 ALWAYS_INLINE static uint64_t
@@ -115,38 +121,6 @@ util_bitpack_ufixed_nonzero(float v, uint32_t start, uint32_t end,
                             uint32_t fract_bits)
 {
    return util_bitpack_ufixed(v, start, end, fract_bits);
-}
-
-#ifndef __gen_validate_value
-#define __gen_validate_value(x)
-#endif
-
-#ifndef __intel_field_functions
-#define __intel_field_functions
-#endif
-
-static inline __attribute__((always_inline)) uint64_t
-__gen_offset(uint64_t v, UNUSED uint32_t start, UNUSED uint32_t end)
-{
-   return v;
-}
-
-static inline __attribute__((always_inline)) uint64_t
-__gen_offset_nonzero(uint64_t v, uint32_t start, uint32_t end)
-{
-   return __gen_offset(v, start, end);
-}
-
-static inline __attribute__((always_inline)) uint64_t
-__gen_address(uint64_t address,
-              __attribute__((unused)) uint32_t start, uint32_t end)
-{
-   if (end < 63) {
-      uint32_t shift = 63 - end;
-      return (address << shift) >> shift;
-   } else {
-      return address;
-   }
 }
 
 #endif /* __GENX_CL_HELPERS_H__ */

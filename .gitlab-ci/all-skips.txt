@@ -2,19 +2,8 @@
 # non-zero-length and not starting with '#', will regex match to
 # delete lines from the test list.  Be careful.
 
-# This test checks the driver's reported conformance version against the
-# version of the CTS we're running. This check fails every few months
-# and everyone has to go and bump the number in every driver.
-# Running this check only makes sense while preparing a conformance
-# submission, so skip it in the regular CI.
-dEQP-VK.api.driver_properties.conformance_version
-
 # Exclude this test which might fail when a new extension is implemented.
 dEQP-VK.info.device_extensions
-
-# Times out on all supported drivers
-# https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/6728
-dEQP-VK.synchronization2.internally_synchronized_queues.direct_wsi_wsi
 
 # These are tremendously slow (pushing toward a minute), and aren't
 # reliable to be run in parallel with other tests due to CPU-side timing.
@@ -29,10 +18,6 @@ glx@glx_arb_sync_control@timing.*
 
 # This test is not built with waffle, while we do build tests with waffle
 spec@!opengl 1.1@windowoverlap
-
-# These tests are flaking too much recently on almost all drivers, so better skip them until the cause is identified
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT
 
 # gbm does not support reading the front buffer after a swapbuffers, and
 # that's intentional. Don't bother running these tests when PIGLIT_PLATFORM=gbm.
@@ -56,3 +41,15 @@ spec@!opengl 1.1@streaming-texture-leak
 
 # Skip CPU tests (ie. CL_FILTER_LINEAR) that are only required to pass on CPU:
 ^CL_DEVICE_TYPE_CPU,.*$
+
+# On Android, resize is a no-op for both the regular ANativeWindow and the AImageReader fallback we use.
+# https://github.com/KhronosGroup/VK-GL-CTS/blob/bee83722547054754049485ae6ae8344496c02a6/framework/platform/android/tcuAndroidPlatform.cpp#L462
+# These tests don't actually validate anything relevant, but are still resource-intensive,
+# especially when run in parallel, so skip them.
+dEQP-VK.wsi.android.maintenance1.*resize_window*
+
+# Broken tests in 1.4.7.0, see https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16646
+dEQP-VK.spirv_assembly.constant_data.*.*_262128*
+dEQP-VK.spirv_assembly.constant_data.*.*_131064*
+dEQP-VK.spirv_assembly.constant_data.*.*_65532*
+dEQP-VK.spirv_assembly.constant_data.*.*_32766*

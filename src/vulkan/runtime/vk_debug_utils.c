@@ -122,31 +122,6 @@ vk_address_binding_report(struct vk_instance *instance,
                     &cb_data);
 }
 
-void
-vk_emit_device_memory_report(struct vk_device* device,
-                             VkDeviceMemoryReportEventTypeEXT type,
-                             uint64_t mem_obj_id,
-                             VkDeviceSize size,
-                             VkObjectType obj_type,
-                             uint64_t obj_handle,
-                             uint32_t heap_index)
-{
-   assert(device->memory_reports);
-
-   const VkDeviceMemoryReportCallbackDataEXT report = {
-      .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_REPORT_CALLBACK_DATA_EXT,
-      .type = type,
-      .memoryObjectId = mem_obj_id,
-      .size = size,
-      .objectType = obj_type,
-      .objectHandle = obj_handle,
-      .heapIndex = heap_index,
-   };
-
-   for (uint32_t i = 0; i < device->memory_report_count; i++)
-      device->memory_reports[i].callback(&report, device->memory_reports[i].data);
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_CreateDebugUtilsMessengerEXT(
    VkInstance _instance,
@@ -594,7 +569,7 @@ vk_common_QueueInsertDebugUtilsLabelEXT(
 VkResult
 vk_check_printf_status(struct vk_device *dev, struct u_printf_ctx *ctx)
 {
-   if (u_printf_check_abort(stdout, ctx)) {
+   if (u_printf_check_abort(dev->debug_output, ctx)) {
       vk_device_set_lost(dev, "GPU abort.");
       return VK_ERROR_DEVICE_LOST;
    } else {

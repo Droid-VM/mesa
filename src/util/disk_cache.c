@@ -162,6 +162,8 @@ disk_cache_type_create(const char *gpu_name,
 
    if (cache->type == DISK_CACHE_DATABASE)
       mesa_cache_db_multipart_set_size_limit(&cache->cache_db, cache->max_size);
+   else if (cache->type == DISK_CACHE_MULTI_FILE && !disk_cache_size_is_valid(cache))
+      disk_cache_recompute_size(cache);
 
    if (!disk_cache_init_queue(cache))
       goto fail;
@@ -466,7 +468,10 @@ cache_put(void *job, void *gdata, int thread_index)
       /* If the cache is too large, evict something else first. */
       while (p_atomic_read_relaxed(&dc_job->cache->size->value) + dc_job->size > dc_job->cache->max_size &&
              i < 8) {
-         disk_cache_evict_lru_item(dc_job->cache);
+         if (!disk_cache_size_is_valid(dc_job->cache) ||
+             !disk_cache_evict_lru_item(dc_job->cache)) {
+            disk_cache_recompute_size(dc_job->cache);
+         }
          i++;
       }
 

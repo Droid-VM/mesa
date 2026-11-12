@@ -443,13 +443,6 @@ brw_nir_lower_storage_image(nir_shader *shader,
 {
    bool progress = false;
 
-   const nir_lower_image_options image_options = {
-      .lower_cube_size = true,
-      .lower_image_samples_to_one = true,
-   };
-
-   progress |= nir_lower_image(shader, &image_options);
-
    const struct brw_nir_lower_storage_image_state storage_options = {
       .compiler = compiler,
       .opts = *opts,

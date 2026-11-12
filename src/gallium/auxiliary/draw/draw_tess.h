@@ -54,9 +54,18 @@ struct draw_tes_inputs {
 
 #endif
 
+struct draw_tess_info {
+   enum mesa_prim prim_mode;
+   unsigned spacing;
+   unsigned vertex_order_ccw;
+   unsigned point_mode;
+};
+
 struct draw_tess_ctrl_shader {
    struct pipe_shader_state state;
    struct tgsi_shader_info info;
+
+   struct draw_tess_info tess_info;
 
    unsigned vector_length;
    unsigned vertices_out;
@@ -66,10 +75,7 @@ struct draw_tess_eval_shader {
    struct pipe_shader_state state;
    struct tgsi_shader_info info;
 
-   enum mesa_prim prim_mode;
-   unsigned spacing;
-   unsigned vertex_order_cw;
-   unsigned point_mode;
+   struct draw_tess_info tess_info;
 
    unsigned position_output;
    unsigned viewport_index_output;
@@ -78,7 +84,22 @@ struct draw_tess_eval_shader {
    unsigned vector_length;
 };
 
-enum mesa_prim get_tes_output_prim(const struct draw_tess_eval_shader *shader);
+static inline struct draw_tess_info
+draw_tess_info_merge(const struct draw_tess_ctrl_shader *tcs_shader, const struct draw_tess_eval_shader *tes_shader)
+{
+   struct draw_tess_info tess_info = {0};
+   if (tcs_shader)
+      memcpy(&tess_info, &tcs_shader->tess_info, sizeof(struct draw_tess_info));
+   if (tes_shader) {
+      tess_info.prim_mode |= tes_shader->tess_info.prim_mode;
+      tess_info.point_mode |= tes_shader->tess_info.point_mode;
+      tess_info.spacing |= tes_shader->tess_info.spacing;
+      tess_info.vertex_order_ccw |= tes_shader->tess_info.vertex_order_ccw;
+   }
+   return tess_info;
+}
+
+enum mesa_prim get_tes_output_prim(const struct draw_tess_info *tess_info);
 
 int draw_tess_ctrl_shader_run(struct draw_context *draw,
                               const struct draw_tess_ctrl_shader *shader,
@@ -94,6 +115,7 @@ int draw_tess_eval_shader_run(struct draw_context *draw,
                               const struct draw_vertex_info *input_verts,
                               const struct draw_prim_info *input_prim,
                               const struct tgsi_shader_info *input_info,
+                              const struct draw_tess_info *tess_info,
                               struct draw_vertex_info *output_verts,
                               struct draw_prim_info *output_prims,
                               uint32_t **patch_lengths,

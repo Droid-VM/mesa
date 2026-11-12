@@ -163,6 +163,10 @@ bool r600_is_format_supported(struct pipe_screen *screen,
 	if (util_format_get_num_planes(format) > 1)
 		return false;
 
+	/* The byte swap is set up for host-endian formats only. */
+	if (util_format_description(format)->is_byte_swapped)
+		return false;
+
 	if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
 		return false;
 
@@ -313,6 +317,7 @@ static void *r600_create_blend_state_mode(struct pipe_context *ctx,
 {
 	struct r600_context *rctx = (struct r600_context *)ctx;
 	uint32_t color_control = 0, target_mask = 0;
+	uint32_t alpha_to_mask = 0;
 	struct r600_blend_state *blend = CALLOC_STRUCT(r600_blend_state);
 
 	if (!blend) {
@@ -361,12 +366,38 @@ static void *r600_create_blend_state_mode(struct pipe_context *ctx,
 	blend->alpha_to_one = state->alpha_to_one;
 	blend->alpha_to_one_and_coverage = state->alpha_to_one && state->alpha_to_coverage;
 
-	r600_store_context_reg(&blend->buffer, R_028D44_DB_ALPHA_TO_MASK,
-			       S_028D44_ALPHA_TO_MASK_ENABLE(state->alpha_to_coverage) |
-			       S_028D44_ALPHA_TO_MASK_OFFSET0(2) |
-			       S_028D44_ALPHA_TO_MASK_OFFSET1(2) |
-			       S_028D44_ALPHA_TO_MASK_OFFSET2(2) |
-			       S_028D44_ALPHA_TO_MASK_OFFSET3(2));
+	if (state->alpha_to_coverage) {
+		alpha_to_mask = S_028D44_ALPHA_TO_MASK_ENABLE(1);
+		if (state->alpha_to_coverage_dither) {
+			if (rctx->b.gfx_level >= R700) {
+				/* `OFFSET_ROUND` supported by the hardware (tested on RV770). */
+				alpha_to_mask |= S_028D44_ALPHA_TO_MASK_OFFSET0(3) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET1(1) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET2(0) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET3(2) |
+				                 S_028D44_OFFSET_ROUND(1);
+			} else {
+				/* `OFFSET_ROUND` not supported by the hardware (tested on RV630).
+				 * Offsets 0 and 3 correspond to 0% and 75%, not 12.5% and 87.5%.
+				 * They would produce asymmetric coverage, which is inferior to no dithering:
+				 * - Fully transparent for a wide range of alpha values;
+				 * - Fully opaque only when the alpha is exactly 1.
+				 * Use checkerboarded 25% and 75% offsets, which add fewer transparency steps,
+				 * but preserve the symmetry of the coverage function.
+				 */
+				alpha_to_mask |= S_028D44_ALPHA_TO_MASK_OFFSET0(3) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET1(1) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET2(1) |
+				                 S_028D44_ALPHA_TO_MASK_OFFSET3(3);
+			}
+		} else {
+			alpha_to_mask |= S_028D44_ALPHA_TO_MASK_OFFSET0(2) |
+			                 S_028D44_ALPHA_TO_MASK_OFFSET1(2) |
+			                 S_028D44_ALPHA_TO_MASK_OFFSET2(2) |
+			                 S_028D44_ALPHA_TO_MASK_OFFSET3(2);
+		}
+	}
+	r600_store_context_reg(&blend->buffer, R_028D44_DB_ALPHA_TO_MASK, alpha_to_mask);
 
 	/* Copy over the registers set so far into buffer_no_blend. */
 	memcpy(blend->buffer_no_blend.buf, blend->buffer.buf, blend->buffer.num_dw * 4);
@@ -2492,9 +2523,14 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 		if (varying_slot == VARYING_SLOT_COL0)
 			tmp |= S_028644_DEFAULT_VAL(3);
 
+		/* INTERP_MODE_NONE is used for default color interpolation too; only
+		 * treat color inputs as flatshade-dependent to match old TGSI_COLOR.
+		 */
 		if (varying_slot == VARYING_SLOT_POS ||
-			rshader->input[i].interpolate == TGSI_INTERPOLATE_CONSTANT ||
-			(rshader->input[i].interpolate == TGSI_INTERPOLATE_COLOR && flatshade))
+			rshader->input[i].interpolate == INTERP_MODE_FLAT ||
+			(rshader->input[i].interpolate == INTERP_MODE_NONE && flatshade &&
+			 ((varying_slot >= VARYING_SLOT_COL0 && varying_slot <= VARYING_SLOT_COL1) ||
+			  (varying_slot >= VARYING_SLOT_BFC0 && varying_slot <= VARYING_SLOT_BFC1))))
 			tmp |= S_028644_FLAT_SHADE(1);
 
 		if (varying_slot == VARYING_SLOT_PNTC ||
@@ -2503,13 +2539,13 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 			tmp |= S_028644_PT_SPRITE_TEX(1);
 		}
 
-		if (rshader->input[i].interpolate_location == TGSI_INTERPOLATE_LOC_CENTROID)
+		if (rshader->input[i].interpolate_location == R600_INTERP_LOC_CENTROID)
 			tmp |= S_028644_SEL_CENTROID(1);
 
-		if (rshader->input[i].interpolate_location == TGSI_INTERPOLATE_LOC_SAMPLE)
+		if (rshader->input[i].interpolate_location == R600_INTERP_LOC_SAMPLE)
 			tmp |= S_028644_SEL_SAMPLE(1);
 
-		if (rshader->input[i].interpolate == TGSI_INTERPOLATE_LINEAR) {
+		if (rshader->input[i].interpolate == INTERP_MODE_NOPERSPECTIVE) {
 			need_linear = 1;
 			tmp |= S_028644_SEL_LINEAR(1);
 		}
@@ -2564,16 +2600,17 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 	spi_input_z = 0;
 	if (pos_index != -1) {
 		spi_ps_in_control_0 |= (S_0286CC_POSITION_ENA(1) |
-					S_0286CC_POSITION_CENTROID(rshader->input[pos_index].interpolate_location == TGSI_INTERPOLATE_LOC_CENTROID) |
+					S_0286CC_POSITION_CENTROID(rshader->input[pos_index].interpolate_location == R600_INTERP_LOC_CENTROID) |
 					S_0286CC_POSITION_ADDR(rshader->input[pos_index].gpr) |
 					S_0286CC_BARYC_SAMPLE_CNTL(1)) |
-					S_0286CC_POSITION_SAMPLE(rshader->input[pos_index].interpolate_location == TGSI_INTERPOLATE_LOC_SAMPLE);
+					S_0286CC_POSITION_SAMPLE(rshader->input[pos_index].interpolate_location == R600_INTERP_LOC_SAMPLE);
 		spi_input_z |= S_0286D8_PROVIDE_Z_TO_SPI(1);
 	}
 
 	spi_ps_in_control_1 = 0;
 	if (face_index != -1) {
 		spi_ps_in_control_1 |= S_0286D0_FRONT_FACE_ENA(1) |
+			S_0286D0_FRONT_FACE_ALL_BITS(1) |
 			S_0286D0_FRONT_FACE_ADDR(rshader->input[face_index].gpr);
 	}
 	if (fixed_pt_position_index != -1) {

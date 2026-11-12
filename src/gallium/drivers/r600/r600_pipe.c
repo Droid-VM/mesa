@@ -313,10 +313,12 @@ static void r600_init_shader_caps(struct r600_screen *rscreen)
 
 		caps->supported_irs = 1 << PIPE_SHADER_IR_NIR;
 
-		caps->max_shader_buffers =
-		caps->max_shader_images =
-			rscreen->b.family >= CHIP_CEDAR &&
-			(i == MESA_SHADER_FRAGMENT || i == MESA_SHADER_COMPUTE) ? 8 : 0;
+		if (rscreen->b.family >= CHIP_CEDAR) {
+			if (r600_check_image_shader_supported(i))
+				caps->max_shader_images = R600_MAX_IMAGES;
+			if (r600_check_buffer_shader_supported(i))
+				caps->max_shader_buffers = R600_MAX_USABLE_SSBOS;
+		}
 
 		if (rscreen->b.family >= CHIP_CEDAR &&
 		    rscreen->has_atomics) {
@@ -457,6 +459,7 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->can_bind_const_buffer_as_vertex = true;
 	caps->allow_mapped_buffers_during_execution = true;
 	caps->robust_buffer_access_behavior = true;
+	caps->alpha_to_coverage_dither_control = true;
 
 	caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
 
@@ -493,6 +496,7 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->texture_buffer_offset_alignment = 4;
 	caps->glsl_feature_level_compatibility =
 	caps->glsl_feature_level = family >= CHIP_CEDAR ? 460 : 330;
+	caps->fs_sample_variables = family >= CHIP_CEDAR;
 
 	/* Supported except the original R600. */
 	caps->indep_blend_enable =
@@ -511,7 +515,6 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->shader_array_components =
 	caps->query_buffer_object =
 	caps->image_store_formatted =
-	caps->alpha_to_coverage_dither_control =
 	caps->image_atomic_inc_wrap = family >= CHIP_CEDAR;
 	caps->max_texture_gather_components = family >= CHIP_CEDAR ? 4 : 0;
 	/* kernel command checker support is also required */
@@ -524,13 +527,7 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 
 	caps->buffer_sampler_view_rgba_only = family < CHIP_CEDAR;
 
-	caps->max_combined_shader_output_resources = 8;
-
 	caps->max_gs_invocations = 32;
-
-	/* shader buffer objects */
-	caps->max_shader_buffer_size = 1 << 27;
-	caps->max_combined_shader_buffers = 8;
 
 	caps->int64 =
 	caps->doubles =
@@ -542,6 +539,7 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 
 	caps->two_sided_color = false;
 	caps->cull_distance = true;
+	caps->hardware_gl_select = false;
 
 	caps->max_window_rectangles = R600_MAX_WINDOW_RECTANGLES;
 	caps->shader_buffer_offset_alignment = family >= CHIP_CEDAR ?  256 : 0;
@@ -580,6 +578,15 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 
 	caps->framebuffer_msaa_constraints = 2;
 
+	/* shader buffer objects */
+	caps->max_shader_buffer_size = 1 << 27;
+	caps->max_combined_shader_buffers = R600_MAX_USABLE_SSBOS;
+	caps->max_combined_shader_output_resources = R600_MAX_SSBOS;
+	assert(caps->max_combined_shader_output_resources >=
+	       caps->max_combined_shader_buffers &&
+	       R600_MAX_IMAGES <= R600_MAX_SSBOS);
+	caps->max_combined_image_uniforms = R600_MAX_IMAGES;
+
 	/* Timer queries, present when the clock frequency is non zero. */
 	caps->query_time_elapsed =
 	caps->query_timestamp = rscreen->b.info.clock_crystal_freq != 0;
@@ -596,7 +603,6 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->max_varyings = 32;
 
 	caps->texture_border_color_quirk = PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_R600;
-	caps->endianness = PIPE_ENDIAN_LITTLE;
 
 	caps->device_type = rscreen->b.info.has_dedicated_vram
 	   ? PIPE_DEVICE_TYPE_DISCRETE_GPU
@@ -669,7 +675,8 @@ static struct pipe_resource *r600_resource_create(struct pipe_screen *screen,
 }
 
 struct pipe_screen *r600_screen_create(struct radeon_winsys *ws,
-				       const struct pipe_screen_config *config)
+                                       const struct pipe_screen_config *config,
+                                       UNUSED uint64_t debug_flags)
 {
 	struct r600_screen *rscreen = CALLOC_STRUCT(r600_screen);
 

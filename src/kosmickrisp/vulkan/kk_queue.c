@@ -17,7 +17,6 @@
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
 
 #include "vk_cmd_queue.h"
-#include "vk_common_entrypoints.h"
 
 struct kk_commit_data {
    struct kk_queue *queue;
@@ -74,8 +73,8 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
 
    assert(queue->commits_in_flight > 0u);
    if (--queue->commits_in_flight == 0u) {
-      vk_common_ResetCommandPool(kk_device_to_handle(dev),
-                                 kk_cmd_pool_to_handle(queue->cmd_pool), 0u);
+      kk_ResetCommandPool(kk_device_to_handle(dev),
+                          kk_cmd_pool_to_handle(queue->cmd_pool), 0u);
       cnd_broadcast(&queue->cond);
    }
 
@@ -87,8 +86,7 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
 static bool
 kk_cmd_buffer_has_work(struct kk_cmd_buffer *cmd)
 {
-   return util_dynarray_num_elements(&cmd->submit_cmd_bufs,
-                                     mtl_command_buffer *) > 0u;
+   return cmd->metal.cmd_buf;
 }
 
 static void
@@ -100,10 +98,8 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
    mtl_commit_options *options = mtl_new_commit_options();
    mtl_commit_options_add_feedback_handler(options, callback, user_data);
 
-   mtl_command_queue_commit(
-      queue->mtl_handle, util_dynarray_begin(&cmd->submit_cmd_bufs),
-      util_dynarray_num_elements(&cmd->submit_cmd_bufs, mtl_command_buffer *),
-      options);
+   mtl_command_queue_commit(queue->mtl_handle, &cmd->metal.cmd_buf, 1u,
+                            options);
    mtl_release(options);
 }
 

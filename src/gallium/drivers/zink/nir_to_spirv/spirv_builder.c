@@ -1413,16 +1413,41 @@ spirv_builder_type_bool(struct spirv_builder *b)
    return get_type_def(b, SpvOpTypeBool, NULL, 0);
 }
 
+static void
+emit_int_width_caps(struct spirv_builder *b, unsigned width)
+{
+   switch (width) {
+   case 8:
+      spirv_builder_emit_cap(b, SpvCapabilityInt8);
+      break;
+   case 16:
+      spirv_builder_emit_cap(b, SpvCapabilityInt16);
+      break;
+   case 64:
+      spirv_builder_emit_cap(b, SpvCapabilityInt64);
+      break;
+   }
+}
+
+void
+spirv_builder_emit_storage_int_caps(struct spirv_builder *b, unsigned width)
+{
+   emit_int_width_caps(b, width);
+   if (width != 8 && width != 16)
+      return;
+
+   const SpvCapability cap = width == 8 ? SpvCapabilityStorageBuffer8BitAccess : SpvCapabilityStorageBuffer16BitAccess;
+   if (b->caps && _mesa_set_search(b->caps, (void *)(uintptr_t)cap))
+      return;
+   spirv_builder_emit_extension(b, width == 8 ? "SPV_KHR_8bit_storage" : "SPV_KHR_16bit_storage");
+   spirv_builder_emit_cap(b, cap);
+}
+
 SpvId
 spirv_builder_type_int(struct spirv_builder *b, unsigned width)
 {
    uint32_t args[] = { width, 1 };
-   if (width == 8)
-      spirv_builder_emit_cap(b, SpvCapabilityInt8);
-   else if (width == 16)
-      spirv_builder_emit_cap(b, SpvCapabilityInt16);
-   else if (width == 64)
-      spirv_builder_emit_cap(b, SpvCapabilityInt64);
+   emit_int_width_caps(b, width);
    return get_type_def(b, SpvOpTypeInt, args, ARRAY_SIZE(args));
 }
 
@@ -1430,12 +1455,7 @@ SpvId
 spirv_builder_type_uint(struct spirv_builder *b, unsigned width)
 {
    uint32_t args[] = { width, 0 };
-   if (width == 8)
-      spirv_builder_emit_cap(b, SpvCapabilityInt8);
-   else if (width == 16)
-      spirv_builder_emit_cap(b, SpvCapabilityInt16);
-   else if (width == 64)
-      spirv_builder_emit_cap(b, SpvCapabilityInt64);
+   emit_int_width_caps(b, width);
    return get_type_def(b, SpvOpTypeInt, args, ARRAY_SIZE(args));
 }
 
@@ -1679,12 +1699,6 @@ SpvId
 spirv_builder_const_uint(struct spirv_builder *b, int width, uint64_t val)
 {
    assert(width >= 8);
-   if (width == 8)
-      spirv_builder_emit_cap(b, SpvCapabilityInt8);
-   else if (width == 16)
-      spirv_builder_emit_cap(b, SpvCapabilityInt16);
-   else if (width == 64)
-      spirv_builder_emit_cap(b, SpvCapabilityInt64);
    SpvId type = spirv_builder_type_uint(b, width);
    if (width <= 32)
       return emit_constant_32(b, type, val);

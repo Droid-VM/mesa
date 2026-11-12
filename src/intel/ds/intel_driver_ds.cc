@@ -634,7 +634,6 @@ CREATE_DUAL_EVENT_CALLBACK(write_buffer_marker, INTEL_DS_QUEUE_STAGE_CMD_BUFFER)
 CREATE_DUAL_EVENT_CALLBACK(rays, INTEL_DS_QUEUE_STAGE_RT)
 CREATE_DUAL_EVENT_CALLBACK(as_build, INTEL_DS_QUEUE_STAGE_AS)
 CREATE_DUAL_EVENT_CALLBACK(as_build_leaves, INTEL_DS_QUEUE_STAGE_AS)
-CREATE_DUAL_EVENT_CALLBACK(as_morton_generate, INTEL_DS_QUEUE_STAGE_AS)
 CREATE_DUAL_EVENT_CALLBACK(as_morton_sort, INTEL_DS_QUEUE_STAGE_AS)
 CREATE_DUAL_EVENT_CALLBACK(as_lbvh_main, INTEL_DS_QUEUE_STAGE_AS)
 CREATE_DUAL_EVENT_CALLBACK(as_lbvh_generate_ir, INTEL_DS_QUEUE_STAGE_AS)
@@ -759,6 +758,10 @@ intel_ds_end_barrier(struct intel_ds_device *device,
 uint64_t
 intel_ds_begin_submit(struct intel_ds_queue *queue)
 {
+   /* Shared by all queues and devices of the process (e.g. app + HWUI). */
+   static uint64_t next_submission_id = 0;
+
+   queue->submission_id = p_atomic_inc_return(&next_submission_id);
    return perfetto::base::GetBootTimeNs().count();
 }
 
@@ -770,7 +773,7 @@ intel_ds_end_submit(struct intel_ds_queue *queue,
       return;
 
    uint64_t end_ts = perfetto::base::GetBootTimeNs().count();
-   uint32_t submission_id = queue->submission_id++;
+   uint64_t submission_id = queue->submission_id;
 
    IntelRenderpassDataSource::Trace([=](IntelRenderpassDataSource::TraceContext tctx) {
       auto packet = tctx.NewTracePacket();

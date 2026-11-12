@@ -9,7 +9,9 @@
 #include "pipe/p_state.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
+#include "util/log.h"
 #include "util/u_string.h"
+#include "util/u_upload_mgr.h"
 
 #include "freedreno_draw.h"
 #include "freedreno_resource.h"
@@ -227,7 +229,8 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
    /* emit fb as a texture: */
    OUT_PKT3(ring, CP_SET_CONSTANT, 7);
    OUT_RING(ring, 0x00010000);
-   OUT_RING(ring, A2XX_SQ_TEX_0_CLAMP_X(SQ_TEX_WRAP) |
+   OUT_RING(ring, A2XX_SQ_TEX_0_TYPE(SQ_TEX_TYPE_VALID_TEXTURE) |
+                     A2XX_SQ_TEX_0_CLAMP_X(SQ_TEX_WRAP) |
                      A2XX_SQ_TEX_0_CLAMP_Y(SQ_TEX_WRAP) |
                      A2XX_SQ_TEX_0_CLAMP_Z(SQ_TEX_WRAP) |
                      A2XX_SQ_TEX_0_PITCH(
@@ -268,29 +271,34 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
    unsigned bin_w = tile->bin_w;
    unsigned bin_h = tile->bin_h;
-   float x0, y0, x1, y1;
+   struct pipe_resource *texcoord_buf = NULL;
+   unsigned texcoord_offset = 0;
+   float *texcoords = NULL;
+
+   /* Avoid rewriting texture coordinates shared by queued tile restores. */
+   u_upload_alloc_ref(fd2_ctx->restore_uploader, 0, 6 * sizeof(float), 32,
+                      &texcoord_offset, &texcoord_buf, (void **)&texcoords);
+   if (!texcoord_buf) {
+      mesa_loge("fd2: failed to allocate mem2gmem tex coords");
+      return;
+   }
+
+   texcoords[0] = ((float)tile->xoff) / ((float)pfb->width);
+   texcoords[1] = ((float)tile->yoff) / ((float)pfb->height);
+   texcoords[2] = ((float)tile->xoff + bin_w) / ((float)pfb->width);
+   texcoords[3] = texcoords[1];
+   texcoords[4] = texcoords[0];
+   texcoords[5] = ((float)tile->yoff + bin_h) / ((float)pfb->height);
+   u_upload_unmap(fd2_ctx->restore_uploader);
 
    fd2_emit_vertex_bufs(
       ring, 0x9c,
       (struct fd2_vertex_buf[]){
          {.prsc = fd2_ctx->solid_vertexbuf, .size = 36},
-         {.prsc = fd2_ctx->solid_vertexbuf, .size = 24, .offset = 36},
+         {.prsc = texcoord_buf, .size = 24, .offset = texcoord_offset},
       },
       2);
-
-   /* write texture coordinates to vertexbuf: */
-   x0 = ((float)tile->xoff) / ((float)pfb->width);
-   x1 = ((float)tile->xoff + bin_w) / ((float)pfb->width);
-   y0 = ((float)tile->yoff) / ((float)pfb->height);
-   y1 = ((float)tile->yoff + bin_h) / ((float)pfb->height);
-   OUT_PKT3(ring, CP_MEM_WRITE, 7);
-   OUT_RELOC(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo, 36, 0, 0);
-   OUT_RING(ring, fui(x0));
-   OUT_RING(ring, fui(y0));
-   OUT_RING(ring, fui(x1));
-   OUT_RING(ring, fui(y0));
-   OUT_RING(ring, fui(x0));
-   OUT_RING(ring, fui(y1));
+   pipe_resource_reference(&texcoord_buf, NULL);
 
    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));

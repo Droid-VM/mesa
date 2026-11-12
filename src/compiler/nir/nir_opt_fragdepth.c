@@ -45,6 +45,11 @@ nir_def_is_frag_coord_z(nir_def *def)
       return scalar.comp == 2;
    case nir_intrinsic_load_frag_coord_z:
       return true;
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input:
+      /* gl_FragCoord as a varying (fragcoord_is_sysval unset) */
+      return nir_intrinsic_io_semantics(intrin).location == VARYING_SLOT_POS &&
+             nir_intrinsic_component(intrin) + scalar.comp == 2;
    default:
       return false;
    }

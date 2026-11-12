@@ -86,7 +86,6 @@ enum intel_debug_flag {
    DEBUG_DISPATCH_BKP,
    DEBUG_BATCH_STATS,
    DEBUG_REG_PRESSURE,
-   DEBUG_SHADER_PRINT,
    DEBUG_CL_QUIET,
    DEBUG_BVH_BLAS,
    DEBUG_BVH_TLAS,
@@ -99,8 +98,12 @@ enum intel_debug_flag {
    DEBUG_BVH_NO_BUILD,
    DEBUG_NO_SEND_GATHER,
    DEBUG_NO_VRT,
+   DEBUG_NO_JAY,
    DEBUG_RT_NO_TRACE,
+   DEBUG_RT_NO_AHS,
+   DEBUG_RT_NO_CHS,
    DEBUG_SHADERS_LINENO,
+   DEBUG_SHADER_HASH,
    /* Keep the stages grouped */
    DEBUG_VS,
    DEBUG_TCS,
@@ -144,6 +147,9 @@ extern uint32_t intel_debug_bkp_after_dispatch_count;
 extern uint64_t intel_debug_batch_frame_start;
 extern uint64_t intel_debug_batch_frame_stop;
 extern uint64_t intel_shader_dump_filter;
+extern uint32_t intel_threads_per_eu_min;
+extern uint32_t intel_threads_per_eu_set;
+extern uint64_t intel_threads_per_eu_srchash;
 
 #define INTEL_SIMD(type, size)        (!!(intel_simd & (DEBUG_ ## type ## _SIMD ## size)))
 
@@ -186,6 +192,7 @@ intel_simd_debug_allowed_modes(mesa_shader_stage stage)
 {
    switch (stage) {
    case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
       return (intel_simd & DEBUG_CS_SIMD) >> (ffsll(DEBUG_CS_SIMD8) - 1);
    case MESA_SHADER_TASK:
       return (intel_simd & DEBUG_TS_SIMD) >> (ffsll(DEBUG_TS_SIMD8) - 1);
@@ -234,9 +241,10 @@ extern uint64_t intel_debug_flag_for_shader_stage(mesa_shader_stage stage);
 struct intel_device_info;
 struct nir_shader;
 
-extern bool intel_use_jay(const struct intel_device_info *devinfo,
+extern bool intel_use_jay_for_stage(const struct intel_device_info *devinfo,
                           mesa_shader_stage stage);
-extern bool intel_use_jay_any_stage(const struct intel_device_info *devinfo);
+extern bool intel_use_jay(const struct intel_device_info *devinfo,
+                          struct nir_shader *nir);
 extern void process_intel_debug_variable(void);
 
 #ifdef __cplusplus

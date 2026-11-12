@@ -235,7 +235,6 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
 
    /* Intrinsics which are always uniform */
    case nir_intrinsic_load_preamble:
-   case nir_intrinsic_load_push_constant:
    case nir_intrinsic_load_push_constant_zink:
    case nir_intrinsic_load_work_dim:
    case nir_intrinsic_load_num_workgroups:
@@ -249,6 +248,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_raw_vertex_offset:
    case nir_intrinsic_load_first_vertex:
    case nir_intrinsic_load_draw_id:
+   case nir_intrinsic_load_draw_id_offset_ir3:
    case nir_intrinsic_load_is_indexed_draw:
    case nir_intrinsic_load_viewport_scale:
    case nir_intrinsic_load_user_clip_plane:
@@ -309,9 +309,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_prim_xfb_query_enabled_amd:
    case nir_intrinsic_load_merged_wave_info_amd:
    case nir_intrinsic_load_clamp_vertex_color_amd:
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-   case nir_intrinsic_load_cull_ccw_amd:
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
    case nir_intrinsic_load_cull_small_triangles_enabled_amd:
    case nir_intrinsic_load_cull_small_lines_enabled_amd:
    case nir_intrinsic_load_cull_any_enabled_amd:
@@ -349,6 +348,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_debug_log_desc_amd:
    case nir_intrinsic_load_xfb_state_address_gfx12_amd:
    case nir_intrinsic_cmat_length:
+   case nir_intrinsic_cmat_get_coordinate:
    case nir_intrinsic_load_vs_primitive_stride_ir3:
    case nir_intrinsic_load_vs_vertex_stride_ir3:
    case nir_intrinsic_load_hs_patch_stride_ir3:
@@ -402,17 +402,12 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_ttmp_register_amd:
    case nir_intrinsic_load_scalar_arg_amd:
    case nir_intrinsic_load_ro_sink_address_poly:
+   case nir_intrinsic_load_frame_arg_pan:
    case nir_intrinsic_load_noperspective_varyings_pan:
    case nir_intrinsic_load_multisampled_pan:
    case nir_intrinsic_load_rt_conversion_pan:
    case nir_intrinsic_subgroup_barrier_index_intel:
       is_divergent = false;
-      break;
-
-   case nir_intrinsic_load_push_data_intel:
-      is_divergent =
-         (nir_intrinsic_access(instr) & ACCESS_NON_UNIFORM) &&
-         src_divergent(instr->src[0], state);
       break;
 
    case nir_intrinsic_load_ubo_uniform_block_intel:
@@ -438,12 +433,28 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
     */
    case nir_intrinsic_load_global_block_intel:
    case nir_intrinsic_load_urb_input_handle_indexed_intel:
-   case nir_intrinsic_load_urb_output_handle_intel:
       is_divergent = true;
+      break;
+
+   case nir_intrinsic_load_urb_output_handle_intel:
+      is_divergent = stage != MESA_SHADER_TASK && stage != MESA_SHADER_MESH;
       break;
 
    case nir_intrinsic_load_urb_input_handle_intel:
       is_divergent = stage != MESA_SHADER_TESS_EVAL && stage != MESA_SHADER_MESH;
+      break;
+
+   case nir_intrinsic_plane_eqn_bary1_intel:
+   case nir_intrinsic_plane_eqn_bary2_intel:
+   case nir_intrinsic_plane_eqn_rhw_intel:
+   case nir_intrinsic_plane_eqn_origin_intel:
+      /* These would be divergent if Jay supported multipolygon */
+      is_divergent = false;
+      break;
+
+   case nir_intrinsic_load_local_invocation_id_intel:
+      is_divergent = nir_intrinsic_component(instr) != 2 ||
+         !(state->options & nir_divergence_uniform_local_invocation_id_z);
       break;
 
    case nir_intrinsic_decl_reg:
@@ -491,7 +502,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
          is_divergent = true;
       break;
    case nir_intrinsic_load_input_vertex:
-      is_divergent = src_divergent(instr->src[1], state);
+   case nir_intrinsic_load_input_vertex_amd:
+      if (instr->intrinsic == nir_intrinsic_load_input_vertex)
+         is_divergent |= src_divergent(instr->src[1], state);
       assert(stage == MESA_SHADER_FRAGMENT);
       is_divergent |= !(options & nir_divergence_single_prim_per_subgroup);
       break;
@@ -690,6 +703,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_get_ssbo_size:
    case nir_intrinsic_ssbo_descriptor_amd:
    case nir_intrinsic_deref_buffer_array_length:
+   case nir_intrinsic_deref_buffer_address:
       is_divergent = src_divergent(instr->src[0], state) &&
                      (nir_intrinsic_access(instr) & ACCESS_NON_UNIFORM);
       break;
@@ -720,6 +734,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
 
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_input_attachment_load:
    case nir_intrinsic_bindless_image_load:
    case nir_intrinsic_image_heap_load:
    case nir_intrinsic_image_sparse_load:
@@ -812,6 +827,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_attr_pan:
    case nir_intrinsic_lea_attr_pan:
    case nir_intrinsic_lea_buf_pan:
+   case nir_intrinsic_fsin_table_pan:
+   case nir_intrinsic_fcos_table_pan:
    case nir_intrinsic_cubeface_pan:
    case nir_intrinsic_cube_ssel_pan:
    case nir_intrinsic_cube_tsel_pan:
@@ -866,7 +883,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_viewport_z_range_kk:
    case nir_intrinsic_load_texture_scale:
    case nir_intrinsic_load_inline_data_intel:
-   case nir_intrinsic_resource_intel: {
+   case nir_intrinsic_load_push_data_intel:
+   case nir_intrinsic_resource_intel:
+   case nir_intrinsic_load_push_constant: {
       unsigned num_srcs = nir_intrinsic_infos[instr->intrinsic].num_srcs;
       for (unsigned i = 0; i < num_srcs; i++) {
          if (src_divergent(instr->src[i], state)) {
@@ -909,7 +928,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_color1_amd:
    case nir_intrinsic_load_sample_id:
    case nir_intrinsic_load_sample_mask_in:
+   case nir_intrinsic_load_poly_line_smooth_coverage:
    case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_interpolated_input_amd:
    case nir_intrinsic_load_point_coord_maybe_flipped:
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_centroid:
@@ -928,6 +949,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_var_special_pan:
    case nir_intrinsic_load_persp_center_rhw_ir3:
    case nir_intrinsic_load_input_attachment_coord:
+   case nir_intrinsic_load_depth_input_attachment_coord:
+   case nir_intrinsic_load_stencil_input_attachment_coord:
    case nir_intrinsic_interp_deref_at_offset:
    case nir_intrinsic_interp_deref_at_sample:
    case nir_intrinsic_interp_deref_at_centroid:
@@ -942,12 +965,12 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_frag_coord_w:
    case nir_intrinsic_load_frag_coord_w_rcp:
    case nir_intrinsic_load_frag_coord_unscaled_ir3:
-   case nir_intrinsic_load_frag_coord_gmem_ir3:
    case nir_intrinsic_load_pixel_coord:
    case nir_intrinsic_load_pixel_coord_intel:
    case nir_intrinsic_load_fully_covered:
    case nir_intrinsic_load_sample_pos:
    case nir_intrinsic_load_sample_pos_or_center:
+   case nir_intrinsic_load_sample_pos_intel:
    case nir_intrinsic_load_vertex_id_zero_base:
    case nir_intrinsic_load_vertex_id:
    case nir_intrinsic_load_raw_vertex_id:
@@ -1032,6 +1055,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_elect:
    case nir_intrinsic_elect_any_ir3:
    case nir_intrinsic_load_tlb_color_brcm:
+   case nir_intrinsic_load_tlb_depth_stencil_brcm:
    case nir_intrinsic_load_tess_rel_patch_id_amd:
    case nir_intrinsic_load_gs_vertex_offset_amd:
    case nir_intrinsic_is_subgroup_invocation_lt_amd:
@@ -1118,6 +1142,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_cumulative_coverage_pan:
    case nir_intrinsic_load_blend_input_pan:
    case nir_intrinsic_load_idvs_output_buf_index_pan:
+   case nir_intrinsic_load_sample_centroid_pan:
    case nir_intrinsic_atest_pan:
    case nir_intrinsic_zs_emit_pan:
    case nir_intrinsic_load_return_param_amd:
@@ -1125,6 +1150,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_global_transpose_amd:
    case nir_intrinsic_load_deref_transpose_amd:
    case nir_intrinsic_load_global_tr_amd:
+   case nir_intrinsic_trace_ray_intel:
       is_divergent = true;
       break;
 
@@ -1183,10 +1209,6 @@ visit_tex(nir_tex_instr *instr, struct divergence_state *state)
          is_divergent |= src_divergent(instr->src[i].src, state) &&
                          instr->texture_non_uniform;
          break;
-      case nir_tex_src_offset:
-         instr->offset_non_uniform = src_divergent(instr->src[i].src, state);
-         is_divergent |= instr->offset_non_uniform;
-         break;
       default:
          is_divergent |= src_divergent(instr->src[i].src, state);
          break;
@@ -1244,6 +1266,20 @@ nir_variable_is_uniform(nir_shader *shader, nir_variable *var,
       if (var->data.location == SYSTEM_VALUE_INSTANCE_INDEX) {
          assert(fake_instr.intrinsic == nir_num_intrinsics);
          fake_instr.intrinsic = nir_intrinsic_load_instance_id;
+      }
+
+      if (var->data.location == SYSTEM_VALUE_DEVICE_INDEX) {
+         assert(fake_instr.intrinsic == nir_num_intrinsics);
+         return true;
+      }
+
+      /* There are several possible choices for these values, but, from the
+       * perspective of divergence, they're all the same.
+       */
+      if (var->data.location == SYSTEM_VALUE_BARYCENTRIC_LINEAR_COORD ||
+          var->data.location == SYSTEM_VALUE_BARYCENTRIC_PERSP_COORD) {
+         assert(fake_instr.intrinsic == nir_num_intrinsics);
+         fake_instr.intrinsic = nir_intrinsic_load_barycentric_coord_sample;
       }
 
       assert(fake_instr.intrinsic != nir_num_intrinsics);

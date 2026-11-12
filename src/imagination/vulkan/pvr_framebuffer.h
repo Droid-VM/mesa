@@ -79,6 +79,13 @@ VkResult PVR_PER_ARCH(render_state_setup)(
 
 #   define pvr_arch_render_state_setup PVR_PER_ARCH(render_state_setup)
 
+VkResult PVR_PER_ARCH(ppp_state_create)(struct pvr_device *device,
+                                        uint32_t width,
+                                        uint32_t height,
+                                        struct pvr_suballoc_bo **const bo_out,
+                                        size_t *const size_out);
+#define pvr_arch_ppp_state_create PVR_PER_ARCH(ppp_state_create)
+
 #endif
 
 void pvr_render_state_cleanup(struct pvr_device *device,

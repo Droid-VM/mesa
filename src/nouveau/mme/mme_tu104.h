@@ -110,7 +110,7 @@ enum ENUM_PACKED mme_tu104_alu_op {
 
 const char *mme_tu104_alu_op_to_str(enum mme_tu104_alu_op op);
 
-bool mme_tu104_alu_op_has_implicit_imm(enum mme_tu104_alu_op op);
+bool mme_tu104_alu_op_has_implicit_imm(uint32_t cls_eng3d, enum mme_tu104_alu_op op);
 bool mme_tu104_alu_op_has_side_effects(enum mme_tu104_alu_op op);
 bool mme_tu104_alu_op_is_control_flow(enum mme_tu104_alu_op op);
 bool mme_tu104_alu_op_may_depend_on_mthd(enum mme_tu104_alu_op op);
@@ -179,18 +179,20 @@ struct mme_tu104_inst {
    },
 
 void mme_tu104_print_inst(FILE *fp, unsigned indent,
-                          const struct mme_tu104_inst *inst);
+                          const struct mme_tu104_inst *inst,
+                          uint32_t cls_eng3d);
 
 void mme_tu104_print(FILE *fp, const struct mme_tu104_inst *insts,
-                     uint32_t inst_count);
+                     uint32_t inst_count, uint32_t cls_eng3d);
 
 void mme_tu104_encode(uint32_t *out, uint32_t inst_count,
                       const struct mme_tu104_inst *insts);
 
-void mme_tu104_decode(struct mme_tu104_inst *insts,
-                      const uint32_t *in, uint32_t inst_count);
+void mme_tu104_decode(struct mme_tu104_inst *insts, const uint32_t *in,
+                      uint32_t inst_count);
 
-void mme_tu104_dump(FILE *fp, uint32_t *encoded, size_t encoded_size);
+void mme_tu104_dump(FILE *fp, uint32_t *encoded, size_t encoded_size,
+                    uint32_t cls_eng3d);
 
 #ifdef __cplusplus
 }

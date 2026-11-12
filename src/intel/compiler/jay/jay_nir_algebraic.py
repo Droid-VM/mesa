@@ -9,25 +9,56 @@ a = 'a'
 b = 'b'
 c = 'c'
 
-lower_fsign = [
+opt_bool = [
+   # inot is free on xor sources but not dests.
+   (('inot', ('ixor(is_used_once)', ('inot', a), b)), ('ixor', a, b)),
+   (('inot', ('ixor(is_used_once)', a, b)), ('ixor', ('inot', a), b)),
+]
+
+for sz in (16, 32, 64):
+    # For integers, inot is free on iand/ior sources but not destinations, so
+    # apply De Morgan's. For booleans, this is harmful since we want iand/inot
+    # to have no modifiers for our fusing to kick in.
+    opt_bool.extend([
+        (('inot', ('iand(is_used_once)', ('inot', f'a@{sz}'), b)), ('ior', a, ('inot', b))),
+        (('inot', ('ior(is_used_once)', ('inot', f'a@{sz}'), b)), ('iand', a, ('inot', b))),
+        (('inot', ('iand(is_used_once)', f'a@{sz}', b)), ('ior', ('inot', a), ('inot', b))),
+        (('inot', ('ior(is_used_once)', f'a@{sz}', b)), ('iand', ('inot', a), ('inot', b))),
+    ])
+
+lower_algebraic = [
     (('fsign', a), ('bcsel', ('!flt', 0, a), +1.0,
                     ('bcsel', ('!flt', a, 0), -1.0, 0.0))),
     (('fceil', a), ('fneg', ('ffloor', ('fneg', a)))),
 
-    # inot is free on and/or/xor sources but not dests. Apply De Morgan's.
-    (('inot', ('iand(is_used_once)', ('inot', a), b)), ('ior', a, ('inot', b))),
-    (('inot', ('ior(is_used_once)', ('inot', a), b)), ('iand', a, ('inot', b))),
-    (('inot', ('ixor(is_used_once)', ('inot', a), b)), ('ixor', a, b)),
-    (('inot', ('iand(is_used_once)', a, b)), ('ior', ('inot', a), ('inot', b))),
-    (('inot', ('ior(is_used_once)', a, b)), ('iand', ('inot', a), ('inot', b))),
-    (('inot', ('ixor(is_used_once)', a, b)), ('ixor', ('inot', a), b)),
+    (('isub_sat', a, 0), a),
+    (('isub_sat', a, '#b(is_not_int_min)'), ('isub_sat_intel', a, b)),
+
+    # Split b so neither part is INT_MIN and both can be negated at the
+    # source bit size.  The parts have the same sign, so intermediate
+    # saturation does not change the result.
+    (('isub_sat', a, b),
+     ('isub_sat_intel', ('isub_sat_intel', a, ('ishr', b, 1)),
+      ('iadd', b, ('ineg', ('ishr', b, 1))))),
 
     # Remove the zeroing. Down-conversion is free but extracts are not.
     (('u2f32', ('extract_u8', a, 0)), ('u2f32', ('u2u8', a))),
     (('u2f32', ('extract_u16', a, 0)), ('u2f32', ('u2u16', a))),
-    (('i2f32', ('extract_i8', a, 0)), ('i2f32', ('i2i8', a))),
-    (('i2f32', ('extract_i16', a, 0)), ('i2f32', ('i2i16', a))),
+    (('i2f32', ('extract_i8', a, 0)), ('i2f32', ('u2u8', a))),
+    (('i2f32', ('extract_i16', a, 0)), ('i2f32', ('u2u16', a))),
+    (('i2f32', ('extract_u8', 'a@16', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u8', 'a@32', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u16', 'a@32', 0)), ('u2f32', ('u2u16', a))),
+]
 
+for s in range(1, 31):
+    mask = 0xffffffff << s
+    lower_algebraic.extend([
+        (('iadd', ('ishl', 'a@32', s), ('iand', 'b@32', ~mask)),
+         ('bfi', mask, a, b))
+    ])
+
+lower_algebraic.extend([
     # Late multiplication handling
     (('iadd', ('imul_32x16(is_only_used_by_iadd)', a, b), c),
      ('imad_32x16_intel', a, b, c)),
@@ -43,16 +74,27 @@ lower_fsign = [
      ('umad_32x16_intel', a, ('iand', b, 0xffff),
       ('umul_32x16', ('iand', b, 0xffff0000), a))),
 
+    # Xe2 has MACL which is more efficient for multiplication with no constants.
+    # On older platforms without MACL, use the above rule as the lowering.
+    (('imul', 'a@32', b),
+     ('umad_32x16_intel', a, b, ('umul_32x16', ('iand', b, 0xffff0000), a)),
+     'verx10 < 200'),
+
     (('pack_half_2x16_split', a, b),
      ('pack_32_2x16_split', ('f2f16', a), ('f2f16', b))),
-]
+])
 
-for i in range(2, 15):
-    lower_fsign.extend([
+# Fuse iadd+ishl. Prefer imad over umad so we can fold more modifiers.
+for i in range(2, 14):
+    lower_algebraic.extend([
         (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
-         ('umad_32x16_intel', b, 1 << i, c)),
+         ('imad_32x16_intel', b, 1 << i, c)),
     ])
 
+lower_algebraic.extend([
+    (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
+     ('umad_32x16_intel', b, 1 << 15, c)),
+])
 
 lower_bool = [
     # Try to use conditional modifiers more
@@ -109,7 +151,8 @@ def main() -> None:
         f.write('#include "jay_private.h"')
 
         f.write(nir_algebraic.AlgebraicPass(
-            "jay_nir_lower_fsign", lower_fsign).render())
+            "jay_nir_lower_algebraic", opt_bool + lower_algebraic,
+            [("unsigned", "verx10")]).render())
         f.write(nir_algebraic.AlgebraicPass(
             "jay_nir_lower_bool", lower_bool).render())
         f.write(nir_algebraic.AlgebraicPass(

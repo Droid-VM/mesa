@@ -69,6 +69,25 @@ int u_thread_create(thrd_t *thrd, int (*routine)(void *), void *param);
 void u_thread_setname( const char *name );
 
 /**
+ * Get thread affinity.
+ *
+ * \param thread         Thread
+ * \param mask           Affinity mask returned
+ * \param num_mask_bits  Number of bits in the mask
+ * \return  true on success
+ */
+bool
+util_get_thread_affinity(thrd_t thread,
+                         uint32_t *mask,
+                         unsigned num_mask_bits);
+
+static inline bool
+util_get_current_thread_affinity(uint32_t *mask, unsigned num_mask_bits)
+{
+   return util_get_thread_affinity(thrd_current(), mask, num_mask_bits);
+}
+
+/**
  * Set thread affinity.
  *
  * \param thread         Thread
@@ -91,6 +110,9 @@ util_set_current_thread_affinity(const uint32_t *mask,
    return util_set_thread_affinity(thrd_current(), mask, old_mask,
                                    num_mask_bits);
 }
+
+void
+util_set_current_thread_initial_affinity(void);
 
 /*
  * Thread statistics.

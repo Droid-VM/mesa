@@ -41,10 +41,10 @@ static uint64_t
 hk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
 {
    uint64_t addr = 0;
-   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCreateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO: {
-         const VkBufferOpaqueCaptureAddressCreateInfo *bda = (void *)ext;
+         const VkBufferOpaqueCaptureAddressCreateInfo *bda = ext;
          if (bda->opaqueCaptureAddress != 0) {
 #ifdef NDEBUG
             return bda->opaqueCaptureAddress;
@@ -57,7 +57,7 @@ hk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
       }
 
       case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT: {
-         const VkBufferDeviceAddressCreateInfoEXT *bda = (void *)ext;
+         const VkBufferDeviceAddressCreateInfoEXT *bda = ext;
          if (bda->deviceAddress != 0) {
 #ifdef NDEBUG
             return bda->deviceAddress;
@@ -79,7 +79,7 @@ hk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
 
 VkResult
 hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
-                size_t size_B)
+                size_t size_B, bool is_sparse)
 {
    uint64_t addr = va->addr + offset_B;
    uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE;
@@ -89,6 +89,9 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
                          flags | DRM_ASAHI_BIND_WRITE);
    if (ret)
       return VK_ERROR_UNKNOWN;
+
+   if (!is_sparse)
+      return VK_SUCCESS;
 
    /* Map read-only scratch to the secondary (top half) VA range */
    ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
@@ -131,6 +134,8 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       enum agx_va_flags flags = 0;
       uint64_t bda_fixed_addr = 0;
       if (bda_capture_replay) {
+         flags |= AGX_VA_CAPTURE;
+
          bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
          if (bda_fixed_addr != 0)
             flags |= AGX_VA_FIXED;
@@ -147,7 +152,9 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->vk.device_address = buffer->va->addr;
 
       /* Bind scratch pages to make read/write across the VA valid */
-      hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+      hk_bind_scratch(
+         dev, buffer->va, 0, vma_size_B,
+         buffer->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
    }
 
    *pBuffer = hk_buffer_to_handle(buffer);
@@ -190,16 +197,16 @@ hk_GetDeviceBufferMemoryRequirements(
       .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          dedicated->prefersDedicatedAllocation = false;
          dedicated->requiresDedicatedAllocation = false;
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -308,11 +315,12 @@ hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
 
    /* If we are accessing the buffer read-only, we want to return the read-only
     * shadow mapping so non-resident pages return zeroes. That only applies to
-    * sparse resident buffers, which will have buffer->va != NULL. If buffer->va
-    * is NULL, the buffer is not sparse resident, so we don't need the fix up...
-    * and indeed, there may not be a shadow map available.
+    * sparse resident buffers, which will have buffer->va != NULL. If the buffer
+    * is not sparse resident, we don't need the fix up... and indeed, there may
+    * not be a shadow map available.
     */
-   if (read_only && buffer->va) {
+   if (read_only &&
+       buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
       addr = agx_rw_addr_to_ro(&dev->dev, addr);
    }
 

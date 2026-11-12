@@ -56,6 +56,7 @@ pvr_files = files(
   'pvr_spm.c',
   'pvr_usc.c',
   'pvr_wsi.c',
+  'pvr_utrace.c',
 )
 
 pvr_includes = [
@@ -69,6 +70,8 @@ pvr_deps = [
   dep_valgrind,
   idep_mesautil,
   idep_pco_uscgen_programs,
+  idep_pdsc_precomp_programs,
+  idep_pvr_driver_ds,
   idep_vulkan_runtime,
   idep_vulkan_util,
   idep_vulkan_wsi,
@@ -109,6 +112,7 @@ common_per_arch_files += files(
   'pvr_arch_sampler.c',
   'pvr_arch_spm.c',
   'pvr_arch_tex_state.c',
+  'pvr_arch_xfb.c',
 )
 
 if with_imagination_srv
@@ -160,6 +164,8 @@ foreach arch : ['rogue']
       dep_valgrind,
       idep_nir_headers,
       idep_pco_uscgen_programs_headers,
+      idep_pdsc_precomp_programs_headers,
+      idep_pvr_driver_ds_headers,
       idep_vulkan_runtime_headers,
       idep_vulkan_util_headers,
       idep_vulkan_wsi_headers,
@@ -184,6 +190,8 @@ libvulkan_powervr_mesa = shared_library(
     libpowervr_common,
     libpowervr_compiler,
     libpowervr_pds,
+    libpowervr_pdsc,
+    libpowervr_pdsc_precomp,
     libpowervr_uscgen,
     libvulkan_wsi,
   ],

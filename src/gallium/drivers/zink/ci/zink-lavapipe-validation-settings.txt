@@ -1,6 +1,6 @@
 # Please include a comment with the log message and a testcase triggering each
 # VUID at the bottom of the file.
-khronos_validation.message_id_filter = VUID-VkPhysicalDeviceProperties2-pNext-pNext,VUID-VkDeviceCreateInfo-pNext-pNext,VUID-RuntimeSpirv-Location-06272,VUID-vkCmdDrawMultiEXT-None-02699,VUID-RuntimeSpirv-OpEntryPoint-08743,VUID-vkCmdPipelineBarrier2-shaderTileImageColorReadAccess-08718,VUID-VkGraphicsPipelineCreateInfo-flags-06482,VUID-vkCmdPipelineBarrier2-None-08719,VUID-vkCmdDrawMultiEXT-rasterizationSamples-07474,VUID-vkDestroyDevice-device-05137,VUID-VkRectLayerKHR-offset-04864,VUID-vkAcquireNextImageKHR-semaphore-01779,VUID-vkQueueSubmit-pSignalSemaphores-00067,VUID-VkImageMemoryBarrier2-srcAccessMask-07454,VUID-vkCmdDrawMultiIndexedEXT-None-10909,VUID-vkCmdDrawMultiEXT-dynamicRenderingUnusedAttachments-08911,VUID-vkCmdBlitImage-srcImageLayout-00221,VUID-VkRenderingAttachmentInfo-None-12256,VUID-vkCmdBeginRendering-pRenderingInfo-09592,VUID-vkCmdCopyImage-srcImageLayout-00128,VUID-vkDestroySwapchainKHR-swapchain-01282
+khronos_validation.message_id_filter = VUID-VkPhysicalDeviceProperties2-pNext-pNext,VUID-VkDeviceCreateInfo-pNext-pNext,VUID-RuntimeSpirv-Location-06272,02699,VUID-RuntimeSpirv-OpEntryPoint-08743,VUID-vkCmdPipelineBarrier2-shaderTileImageColorReadAccess-08718,VUID-VkGraphicsPipelineCreateInfo-flags-06482,VUID-vkCmdPipelineBarrier2-None-08719,07474,VUID-vkDestroyDevice-device-05137,VUID-VkImageMemoryBarrier2-srcAccessMask-07454,10909,08911,VUID-VkRenderingAttachmentInfo-None-12256,VUID-vkCmdBeginRendering-pRenderingInfo-09592,VUID-vkCmdCopyImage-srcImageLayout-00128,VUID-StandaloneSpirv-OpEntryPoint-08721,VUID-VkImageDrmFormatModifierListCreateInfoEXT-pDrmFormatModifiers-02263,VUID-vkCmdBeginQuery-queryPool-01922,VUID-vkDestroyShaderEXT-shader-08482,VUID-vkGetImageSubresourceLayout-image-07790,VUID-VkPresentInfoKHR-pImageIndices-01430,UNASSIGNED-vkAllocateMemory-maxMemoryAllocationSize,UNASSIGNED-vkAllocateMemory-maxMemoryAllocationSize,VUID-vkGetImageSubresourceLayout-image-07790,VUID-VkShaderModuleCreateInfo-pCode-08737,VUID-VkRenderingAttachmentInfo-imageView-06130,VUID-vkCmdDraw-None-09462
 khronos_validation.report_flags = error
 khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG,VK_DBG_LAYER_ACTION_BREAK
 VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT
@@ -67,37 +67,6 @@ khronos_validation.log_filename = stdout
 # Objects: 1
 #     [0] VkImage 0x25e600000025e6
 
-# dEQP-EGL.functional.swap_buffers_with_damage.resize_before_swap.buffer_age_render_render
-#
-# Validation Error: [ VUID-VkRectLayerKHR-offset-04864 ] | MessageID = 0xa3aae54b
-# vkQueuePresentKHR(): pPresentInfo->pNext<VkPresentRegionsKHR>.pRegions[0].pRectangles[25] sum of offset.y (-20) and extent.height (10) after applying preTransform (VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) is greater than the corresponding swapchain's imageExtent.height (240).
-# The Vulkan spec states: The sum of offset and extent, after being transformed according to the preTransform member of the VkSwapchainCreateInfoKHR structure, must be no greater than the imageExtent member of the VkSwapchainCreateInfoKHR structure passed to vkCreateSwapchainKHR (https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html#VUID-VkRectLayerKHR-offset-04864)
-# Objects: 1
-#     [0] VkSwapchainKHR 0x8b000000008b
-
-# dEQP-EGL.functional.swap_buffers_with_damage.resize_before_swap.clear_render
-#
-# Validation Error: [ VUID-vkAcquireNextImageKHR-semaphore-01779 ] | MessageID = 0x5717e75b
-# vkAcquireNextImageKHR(): Semaphore must not have any pending operations.
-# The Vulkan spec states: If semaphore is not VK_NULL_HANDLE, it must not have any uncompleted signal or wait operations pending (https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html#VUID-vkAcquireNextImageKHR-semaphore-01779)
-# Objects: 1
-#     [0] VkSemaphore 0x310000000031
-
-# dEQP-EGL.functional.buffer_age.no_preserve.resize_before_swap.odd_render_even_none
-#
-# Validation Error: [ VUID-vkQueueSubmit-pSignalSemaphores-00067 ] | MessageID = 0x539277af
-# vkQueueSubmit(): pSubmits[1].pSignalSemaphores[1] (VkSemaphore 0x380000000038) is being signaled by VkQueue 0x55da4072d660, but it may still be in use by VkSwapchainKHR 0x220000000022.
-# Here are the most recently acquired image indices: 1, 2, 0, 1, 2, [0], 1, 2.
-# (brackets mark the last use of VkSemaphore 0x380000000038 in a presentation operation)
-# Swapchain image 0 was presented but was not re-acquired, so VkSemaphore 0x380000000038 may still be in use and cannot be safely reused with image index 2.
-# Vulkan insight: One solution is to assign each image its own semaphore. Here are some common methods to ensure that a semaphore passed to vkQueuePresentKHR is not in use and can be safely reused:
-#     a) Use a separate semaphore per swapchain image. Index these semaphores using the index of the acquired image.
-#     b) Consider the VK_KHR_swapchain_maintenance1 extension. It allows using a VkFence with the presentation operation.
-# The Vulkan spec states: Each binary semaphore element of the pSignalSemaphores member of any element of pSubmits must be unsignaled when the semaphore signal operation it defines is executed on the device (https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html#VUID-vkQueueSubmit-pSignalSemaphores-00067)
-# Objects: 2
-#     [0] VkSemaphore 0x380000000038
-#     [1] VkQueue 0x55da4072d660
-#
 # Validation Error: [ VUID-VkImageMemoryBarrier2-srcAccessMask-07454 ] | MessageID = 0x3fac578b
 # vkCmdPipelineBarrier2(): pDependencyInfo->pImageMemoryBarriers[0].srcAccessMask (VK_ACCESS_SHADER_READ_BIT) is not supported by stage mask (VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT).
 # The Vulkan spec states: If srcAccessMask includes VK_ACCESS_2_SHADER_READ_BIT, srcStageMask must include VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT, or one of the VK_PIPELINE_STAGE_*_SHADER_BIT stages (https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VUID-VkImageMemoryBarrier2-srcAccessMask-07454)
@@ -112,15 +81,6 @@ khronos_validation.log_filename = stdout
 # Objects: 2
 #     [0] VkCommandBuffer 0x55f638578670[zink barrier cmdbuf]
 #     [1] VkPipeline 0x996e000000996e
-
-# KHR-GL46.clear_tex_image.gl_clear_tex_image_clear_red_component_red_image_format_GL_RED_internalFormat_GL_R32F_type_GL_UNSIGNED_SHORT_pixelSize_1_texLevel_0
-#
-# Validation Error: [ VUID-vkCmdBlitImage-srcImageLayout-00221 ] | MessageID = 0x7727610b
-# vkCmdBlitImage(): srcImage Cannot use VkImage 0x18a5e0000018a5e (layer 0, mip 0) with specific layout VK_IMAGE_LAYOUT_GENERAL that doesn't match the previously used layout VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL.
-# The Vulkan spec states: srcImageLayout must specify the layout of the image subresources of srcImage specified in pRegions at the time this command is executed on a VkDevice (https://docs.vulkan.org/spec/latest/chapters/copies.html#VUID-vkCmdBlitImage-srcImageLayout-00221)
-# Objects: 2
-#     [0] VkCommandBuffer 0x56169b800fe0[zink cmdbuf]
-#     [1] VkImage 0x18a5e0000018a5e
 
 # dEQP-GLES3.functional.fbo.multiview.samples_4
 #
@@ -149,8 +109,92 @@ khronos_validation.log_filename = stdout
 #     [0] VkCommandBuffer 0x564a48f23550[zink cmdbuf]
 #     [1] VkImage 0x96dd00000096dd
 
-# dEQP-EGL.functional.swap_buffers_with_damage.resize_before_swap.buffer_age_render
+# spec@arb_pipeline_statistics_query@arb_pipeline_statistics_query-geom
 #
-# Validation Error: [ VUID-vkDestroySwapchainKHR-swapchain-01282 ] | MessageID = 0xc5b0dad2
-# vkDestroySwapchainKHR(): can't be called on VkSwapchainKHR 0x1250000000125 that is currently in use by VkSwapchainKHR 0x1250000000125.
-# The Vulkan spec states: All uses of presentable images acquired from swapchain must have completed execution (https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html#VUID-vkDestroySwapchainKHR-swapchain-01282)
+# Validation Error: [ VUID-vkCmdBeginQuery-queryPool-01922 ] | MessageID = 0xeeb9cdf3
+# vkCmdBeginQuery(): query 0 in VkQueryPool 0x290000000029 has the same queryType (VK_QUERY_TYPE_PIPELINE_STATISTICS) as the active query 0 from VkQueryPool 0x280000000028 (both are using index 0) in VkCommandBuffer 0x557b898db7c0[zink cmdbuf].
+# The Vulkan spec states: queryPool must have been created with a queryType that differs from that of any queries that are active within commandBuffer (https://docs.vulkan.org/spec/latest/chapters/queries.html#VUID-vkCmdBeginQuery-queryPool-01922)
+# Objects: 3
+#    [0] VkCommandBuffer 0x557b898db7c0[zink cmdbuf]
+#    [1] VkQueryPool 0x290000000029
+#    [2] VkQueryPool 0x280000000028
+
+# spec@arb_texture_rg@multisample-formats 8 gl_arb_texture_rg-int
+#
+# Validation Error: [ VUID-VkRenderingAttachmentInfo-imageView-06130 ] | MessageID = 0x3a1ccba9
+# vkCmdBeginRendering(): pRenderingInfo->pColorAttachments[0].resolveMode (VK_RESOLVE_MODE_AVERAGE_BIT) is not valid for integer formats (VK_FORMAT_R8_SINT)
+# Valid resolveMode: NONE, SAMPLE_ZERO, CUSTOM, EXTERNAL_FORMAT_DOWNSAMPLE.
+# The Vulkan spec states: If imageView is not VK_NULL_HANDLE and has an integer color format, resolveMode must be VK_RESOLVE_MODE_NONE or VK_RESOLVE_MODE_CUSTOM_BIT_EXT or VK_RESOLVE_MODE_EXTERNAL_FORMAT_DOWNSAMPLE_BIT_ANDROID or VK_RESOLVE_MODE_SAMPLE_ZERO_BIT (https://docs.vulkan.org/spec/latest/chapters/renderpass.html#VUID-VkRenderingAttachmentInfo-imageView-06130)
+# Objects: 5
+#    [0] VkCommandBuffer 0x55a94806ae00[zink cmdbuf]
+#    [1] VkImageView 0x3a000000003a
+#    [2] VkImage 0x290000000029
+#    [3] VkImageView 0x3b000000003b
+#    [4] VkImage 0x240000000024
+
+# spec@ext_base_instance@arb_base_instance-drawarrays_gles3
+#
+# Validation Error: [ VUID-vkCmdDrawMultiEXT-None-09462 ] | MessageID = 0xfc7e33be
+# vkCmdDrawMultiEXT(): vkCmdSetVertexInputEXT set pVertexBindingDivisors[1] (binding 1) divisor as 2, but firstInstance is 1 and supportsNonZeroFirstInstance is VK_FALSE.
+# The Vulkan spec states: If shader objects are used for drawing or the bound graphics pipeline state was created with the VK_DYNAMIC_STATE_VERTEX_INPUT_EXT dynamic state enabled, any member of the pVertexBindingDescriptions parameter to the vkCmdSetVertexInputEXT call that sets this dynamic state has a value other than 1 in divisor, and VkPhysicalDeviceVertexAttributeDivisorProperties::supportsNonZeroFirstInstance is VK_FALSE, then firstInstance must be 0 (https://docs.vulkan.org/spec/latest/chapters/drawing.html#VUID-vkCmdDrawMultiEXT-None-09462)
+# Objects: 2
+#    [0] VkCommandBuffer 0x55dd81174760[zink cmdbuf]
+#    [1] VkPipeline 0x2a000000002a
+
+# spec@glsl-1.30@execution@interpolation@interpolation-smooth-gl_backcolor-flat-distance
+#
+# Validation Error: [ VUID-StandaloneSpirv-OpEntryPoint-08721 ] | MessageID = 0xed5eb645
+# vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+# Entry-point has conflicting input location assignment at location 0, component 0
+#   OpEntryPoint Fragment %main "main" %14 %18 %19 %gl_FragData_0_ %gl_FragData_1_ %gl_FragData_2_ %gl_FragData_3_ %gl_FragData_4_ %gl_FragData_5_ %gl_FragData_6_ %gl_FragData_7_ %gl_FrontFacing
+#
+# Command to reproduce:
+#	spirv-val <input.spv> --relax-block-layout --uniform-buffer-standard-layout --scalar-block-layout --workgroup-scalar-block-layout --allow-localsizeid --allow-offset-texture-operand --allow-vulkan-32-bit-bitwise --target-env vulkan1.4
+#
+# The Vulkan spec states: Each OpEntryPoint must not have more than one Input variable assigned the same Component word inside a Location slot, either explicitly or implicitly (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-OpEntryPoint-08721)
+
+# spec@!opengl 1.1@max-texture-size
+#
+# Validation Error: [ UNASSIGNED-vkAllocateMemory-maxMemoryAllocationSize ] | MessageID = 0x9db21593
+# vkAllocateMemory(): pAllocateInfo->allocationSize (4294967296) is larger than maxMemoryAllocationSize (2147483648). While this might work locally on your machine, there are many external factors each platform has that is used to determine this limit. You should receive VK_ERROR_OUT_OF_DEVICE_MEMORY from this call, but even if you do not, it is highly advised from all hardware vendors to not ignore this limit.
+
+# spec@ext_image_dma_buf_import@ext_image_dma_buf_import-tex-modifier
+#
+# Validation Error: [ VUID-vkGetImageSubresourceLayout-image-07790 ] | MessageID = 0xb61daa51
+# vkGetImageSubresourceLayout(): image was created with tiling VK_IMAGE_TILING_OPTIMAL.
+# The Vulkan spec states: image must have been created with tiling equal to VK_IMAGE_TILING_LINEAR or VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT (https://docs.vulkan.org/spec/latest/chapters/resources.html#VUID-vkGetImageSubresourceLayout-image-07790)
+# Objects: 1
+#     [0] VkImage 0x210000000021
+
+# spec@nv_shader_atomic_float@execution@ssbo-atomicadd-float
+#
+# Validation Error: [ VUID-VkShaderModuleCreateInfo-pCode-08737 ] | MessageID = 0xa5625282
+# vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+# Instruction may not have a logical pointer operand
+#  %52 = OpBitcast %_ptr_StorageBuffer_float %50
+#
+# Command to reproduce:
+#	spirv-val <input.spv> --relax-block-layout --uniform-buffer-standard-layout --scalar-block-layout --workgroup-scalar-block-layout --allow-localsizeid --allow-offset-texture-operand --allow-vulkan-32-bit-bitwise --target-env vulkan1.4
+#
+# The Vulkan spec states: If pCode is a pointer to SPIR-V code, pCode must adhere to the validation rules described by the Validation Rules within a Module section of the SPIR-V Environment appendix (https://docs.vulkan.org/spec/latest/chapters/shaders.html#VUID-VkShaderModuleCreateInfo-pCode-08737)
+
+# spec@arb_texture_rg@multisample-formats 8 gl_arb_texture_rg-int
+#
+# Validation Error: [ VUID-VkRenderingAttachmentInfo-imageView-06130 ] | MessageID = 0x3a1ccba9
+# vkCmdBeginRendering(): pRenderingInfo->pColorAttachments[0].resolveMode (VK_RESOLVE_MODE_AVERAGE_BIT) is not valid for integer formats (VK_FORMAT_R8_SINT)
+# Valid resolveMode: NONE, SAMPLE_ZERO, CUSTOM, EXTERNAL_FORMAT_DOWNSAMPLE.
+# The Vulkan spec states: If imageView is not VK_NULL_HANDLE and has an integer color format, resolveMode must be VK_RESOLVE_MODE_NONE or VK_RESOLVE_MODE_CUSTOM_BIT_EXT or VK_RESOLVE_MODE_EXTERNAL_FORMAT_DOWNSAMPLE_BIT_ANDROID or VK_RESOLVE_MODE_SAMPLE_ZERO_BIT (https://docs.vulkan.org/spec/latest/chapters/renderpass.html#VUID-VkRenderingAttachmentInfo-imageView-06130)
+# Objects: 5
+#    [0] VkCommandBuffer 0x557ab1a3a080[zink cmdbuf]
+#    [1] VkImageView 0x3a000000003a
+#    [2] VkImage 0x290000000029
+#    [3] VkImageView 0x3b000000003b
+#    [4] VkImage 0x240000000024
+
+# spec@ext_base_instance@arb_base_instance-drawarrays_gles3
+# Validation Error: [ VUID-vkCmdDraw-None-09462 ] | MessageID = 0x25d3a672
+# vkCmdDraw(): vkCmdSetVertexInputEXT set pVertexBindingDivisors[1] (binding 1) divisor as 2, but firstInstance is 1 and supportsNonZeroFirstInstance is VK_FALSE.
+# The Vulkan spec states: If shader objects are used for drawing or the bound graphics pipeline state was created with the VK_DYNAMIC_STATE_VERTEX_INPUT_EXT dynamic state enabled, any member of the pVertexBindingDescriptions parameter to the vkCmdSetVertexInputEXT call that sets this dynamic state has a value other than 1 in divisor, and VkPhysicalDeviceVertexAttributeDivisorProperties::supportsNonZeroFirstInstance is VK_FALSE, then firstInstance must be 0 (https://docs.vulkan.org/spec/latest/chapters/drawing.html#VUID-vkCmdDraw-None-09462)
+# Objects: 2
+#    [0] VkCommandBuffer 0x56411df388a0[zink cmdbuf]
+#    [1] VkPipeline 0x2a000000002a

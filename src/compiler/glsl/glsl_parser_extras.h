@@ -523,7 +523,6 @@ struct _mesa_glsl_parse_state {
     */
    struct {
       /* 1.10 */
-      unsigned MaxLights;
       unsigned MaxClipPlanes;
       unsigned MaxTextureUnits;
       unsigned MaxTextureCoords;
@@ -604,8 +603,6 @@ struct _mesa_glsl_parse_state {
       unsigned MaxViewports;
 
       /* ARB_tessellation_shader */
-      unsigned MaxPatchVertices;
-      unsigned MaxTessGenLevel;
       unsigned MaxTessControlInputComponents;
       unsigned MaxTessControlOutputComponents;
       unsigned MaxTessControlTextureImageUnits;
@@ -613,7 +610,6 @@ struct _mesa_glsl_parse_state {
       unsigned MaxTessEvaluationOutputComponents;
       unsigned MaxTessEvaluationTextureImageUnits;
       unsigned MaxTessPatchComponents;
-      unsigned MaxTessControlTotalOutputComponents;
       unsigned MaxTessControlUniformComponents;
       unsigned MaxTessEvaluationUniformComponents;
 
@@ -937,6 +933,8 @@ struct _mesa_glsl_parse_state {
    bool EXT_texture_query_lod_warn;
    bool EXT_texture_shadow_lod_enable;
    bool EXT_texture_shadow_lod_warn;
+   bool EXT_YUV_target_enable;
+   bool EXT_YUV_target_warn;
    bool INTEL_conservative_rasterization_enable;
    bool INTEL_conservative_rasterization_warn;
    bool INTEL_shader_atomic_float_minmax_enable;

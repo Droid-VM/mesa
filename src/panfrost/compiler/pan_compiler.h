@@ -18,6 +18,7 @@
 #include "util/shader_stats.h"
 
 struct pan_shader_info;
+struct pan_model;
 
 uint32_t pan_get_compiler_flags(unsigned arch);
 
@@ -32,8 +33,8 @@ pan_get_nir_shader_compiler_options(unsigned arch,
 
 /* Inputs to the backend compiler */
 struct pan_compile_inputs {
-   uint64_t gpu_id;
-   uint32_t gpu_variant;
+   unsigned arch;
+   const struct pan_model *model;
    bool is_blend, is_blit;
    bool no_idvs;
    uint32_t view_mask;
@@ -74,7 +75,7 @@ struct pan_compile_inputs {
  * preprocess and postprocess.  Any code except sysval inlining put after
  * postprocess WILL BE NAKed.
  */
-void pan_preprocess_nir(nir_shader *nir, uint64_t gpu_id);
+void pan_preprocess_nir(nir_shader *nir, unsigned arch);
 void pan_postprocess_nir(nir_shader *nir,
                          const struct pan_compile_inputs *inputs,
                          struct pan_shader_info *info);
@@ -352,10 +353,10 @@ enum pipe_format
 pan_varying_format(nir_alu_type type, unsigned ncomps);
 
 void pan_build_varying_layout_compact(struct pan_varying_layout *layout,
-                                      nir_shader *nir, uint64_t gpu_id);
+                                      nir_shader *nir, unsigned arch);
 
 void pan_varying_collect_formats(struct pan_varying_layout *registry,
-                                 nir_shader *nir, uint64_t gpu_id);
+                                 nir_shader *nir, unsigned arch);
 
 struct pan_shader_varying {
    gl_varying_slot location;
@@ -566,7 +567,7 @@ struct pan_shader_info {
 };
 
 void pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
-                            const struct pan_compile_inputs *inputs);
+                            unsigned arch);
 
 uint16_t pan_to_bytemask(unsigned bytes, unsigned mask);
 
@@ -640,6 +641,19 @@ pan_res_handle(unsigned table, unsigned index)
 
 void pan_disassemble(FILE *fp, const void *code, size_t size, uint64_t gpu_id,
                      bool verbose);
+
+void pan_stats_verbose_prologue(FILE *f, const char *prefix, unsigned arch,
+                                const struct pan_model *model);
+
+void pan_valhall_stats_verbose(FILE *f, const struct valhall_stats *stats,
+                               const struct valhall_stats *min_stats,
+                               const struct valhall_stats *max_stats,
+                               unsigned tls_size);
+
+void pan_bifrost_stats_verbose(FILE *f, const struct bifrost_stats *stats,
+                               unsigned tls_size);
+
+void pan_stats_verbose_epilogue(FILE *f, const struct pan_shader_info *info);
 
 float pan_va_compute_alu_bound(uint8_t arch, float fma, float cvt, float sfu);
 

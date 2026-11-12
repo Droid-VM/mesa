@@ -17,9 +17,16 @@
 #include "fd2_texture.h"
 #include "fd2_zsa.h"
 
+#include "util/u_upload_mgr.h"
+
 static void
 fd2_context_destroy(struct pipe_context *pctx) in_dt
 {
+   struct fd2_context *fd2_ctx = fd2_context(fd_context(pctx));
+
+   if (fd2_ctx->restore_uploader)
+      u_upload_destroy(fd2_ctx->restore_uploader);
+
    fd_context_destroy(pctx);
    free(pctx);
 }
@@ -52,6 +59,21 @@ create_solid_vertexbuf(struct pipe_context *pctx)
    return prsc;
 }
 
+static void
+fd2_set_context_param(struct pipe_context *pctx, enum pipe_context_param param,
+                      unsigned value)
+{
+   struct fd2_context *fd2_ctx = fd2_context(fd_context(pctx));
+
+   switch (param) {
+   case PIPE_CONTEXT_PARAM_MAG_SWITCHOVER_HALF:
+      fd2_ctx->mag_switchover_half = value;
+      break;
+   default:
+      break;
+   }
+}
+
 struct pipe_context *
 fd2_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
@@ -73,6 +95,7 @@ fd2_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    pctx->create_blend_state = fd2_blend_state_create;
    pctx->create_rasterizer_state = fd2_rasterizer_state_create;
    pctx->create_depth_stencil_alpha_state = fd2_zsa_state_create;
+   pctx->set_context_param = fd2_set_context_param;
 
    fd2_draw_init(pctx);
    fd2_gmem_init(pctx);
@@ -86,6 +109,13 @@ fd2_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 
    /* construct vertex state used for solid ops (clear, and gmem<->mem) */
    fd2_ctx->solid_vertexbuf = create_solid_vertexbuf(pctx);
+
+   fd2_ctx->restore_uploader = u_upload_create(
+      pctx, 4096, PIPE_BIND_VERTEX_BUFFER, PIPE_USAGE_STREAM, 0);
+   if (!fd2_ctx->restore_uploader) {
+      pctx->destroy(pctx);
+      return NULL;
+   }
 
    fd2_query_context_init(pctx);
 

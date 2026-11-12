@@ -161,7 +161,9 @@ print_ubo_entry(FILE *file,
 void
 iris_nir_analyze_ubo_ranges(const intel_device_info *devinfo,
                             nir_shader *nir,
-                            struct iris_ubo_range out_ranges[4])
+                            struct iris_ubo_range *out_ranges,
+                            const uint8_t out_ranges_len,
+                            const uint8_t used_push_regs)
 {
    void *mem_ctx = ralloc_context(NULL);
 
@@ -227,6 +229,7 @@ iris_nir_analyze_ubo_ranges(const intel_device_info *devinfo,
          entry->range.start = first_bit;
          /* first_hole is one beyond the end, so we don't need to add 1 */
          entry->range.length = first_hole - first_bit;
+         entry->range.reserved_64bits_binding_tables = false;
          entry->benefit = 0;
 
          for (int i = 0; i < entry->range.length; i++)
@@ -258,12 +261,12 @@ iris_nir_analyze_ubo_ranges(const intel_device_info *devinfo,
 
    struct ubo_range_entry *entries = ranges.data;
 
-   /* Return the top 4, limited to the maximum number of push registers. */
-   const int max_ubos = 4;
+   /* Return the top out_ranges_len, limited to the maximum number of push registers. */
+   const int max_ubos = out_ranges_len;
    nr_entries = MIN2(nr_entries, max_ubos);
 
    const unsigned reg_unit = devinfo->grf_size / 32;
-   const unsigned max_push_regs = 64 / reg_unit;
+   const unsigned max_push_regs = 64 / reg_unit - used_push_regs;
    unsigned total_push_regs = 0;
 
    for (unsigned i = 0; i < nr_entries; i++) {
@@ -283,7 +286,7 @@ iris_nir_analyze_ubo_ranges(const intel_device_info *devinfo,
       out_ranges[i].start *= reg_unit;
       out_ranges[i].length *= reg_unit;
    }
-   for (int i = nr_entries; i < 4; i++) {
+   for (int i = nr_entries; i < out_ranges_len; i++) {
       out_ranges[i].block = 0;
       out_ranges[i].start = 0;
       out_ranges[i].length = 0;
@@ -311,9 +314,10 @@ lower_load_ubo_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    unsigned range_offset = 0;
    const struct iris_ubo_range *range = data;
    for (uint32_t i = 0; i < 4; i++) {
-      if (range[i].block != block ||
-          byte_offset < range[i].start * 32 ||
-          (byte_offset + bytes) > (range[i].start + range[i].length) * 32) {
+      if ((range[i].block != block) ||
+          (byte_offset < range[i].start * 32) ||
+          ((byte_offset + bytes) > (range[i].start + range[i].length) * 32) ||
+          range[i].reserved_64bits_binding_tables) {
          range_offset += range[i].length * 32;
          continue;
       }

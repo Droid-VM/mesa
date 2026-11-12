@@ -14,7 +14,8 @@
 #include "radv_device.h"
 #include "radv_physical_device.h"
 
-static nir_def *build_node_to_addr(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *node, bool skip_type_and);
+static nir_def *build_node_to_addr(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *node,
+                                   bool skip_type_and);
 
 bool
 radv_use_bvh_stack_rtn(const struct radv_compiler_info *compiler_info)
@@ -26,8 +27,8 @@ radv_use_bvh_stack_rtn(const struct radv_compiler_info *compiler_info)
 }
 
 nir_def *
-radv_build_bvh_stack_rtn_addr(nir_builder *b, nir_def *stack_idx, const struct radv_compiler_info *compiler_info, uint32_t workgroup_size,
-                              uint32_t stack_base, uint32_t max_stack_entries)
+radv_build_bvh_stack_rtn_addr(nir_builder *b, nir_def *stack_idx, const struct radv_compiler_info *compiler_info,
+                              uint32_t workgroup_size, uint32_t stack_base, uint32_t max_stack_entries)
 {
    assert(stack_base % 4 == 0);
 
@@ -78,8 +79,8 @@ nir_sort_hit_pair(nir_builder *b, nir_variable *var_distances, nir_variable *var
 }
 
 static nir_def *
-intersect_ray_amd_software_box(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *bvh_node, nir_def *ray_tmax,
-                               nir_def *origin, nir_def *dir, nir_def *inv_dir)
+intersect_ray_amd_software_box(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *bvh_node,
+                               nir_def *ray_tmax, nir_def *origin, nir_def *dir, nir_def *inv_dir)
 {
    const struct glsl_type *vec4_type = glsl_vector_type(GLSL_TYPE_FLOAT, 4);
    const struct glsl_type *uvec4_type = glsl_vector_type(GLSL_TYPE_UINT, 4);
@@ -196,8 +197,8 @@ radv_build_intersect_vertex(nir_builder *b, nir_def *v0_x, nir_def *v1_x, nir_de
 }
 
 static nir_def *
-intersect_ray_amd_software_tri(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *bvh_node, nir_def *ray_tmax,
-                               nir_def *origin, nir_def *dir, nir_def *inv_dir)
+intersect_ray_amd_software_tri(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *bvh_node,
+                               nir_def *ray_tmax, nir_def *origin, nir_def *dir, nir_def *inv_dir)
 {
    const struct glsl_type *vec4_type = glsl_vector_type(GLSL_TYPE_FLOAT, 4);
 
@@ -433,7 +434,8 @@ nir_build_vec3_mat_mult(nir_builder *b, nir_def *vec, nir_def *matrix[], bool tr
 }
 
 nir_def *
-radv_load_vertex_position(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *primitive_addr, uint32_t index)
+radv_load_vertex_position(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *primitive_addr,
+                          uint32_t index)
 {
    if (compiler_info->key.bvh8) {
       /* Assume that vertices are uncompressed. */
@@ -461,7 +463,8 @@ radv_load_vertex_position(const struct radv_compiler_info *compiler_info, nir_bu
 }
 
 void
-radv_load_wto_matrix(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *instance_addr, nir_def **out)
+radv_load_wto_matrix(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *instance_addr,
+                     nir_def **out)
 {
    unsigned offset = offsetof(struct radv_bvh_instance_node, wto_matrix);
    if (compiler_info->key.bvh8)
@@ -474,7 +477,8 @@ radv_load_wto_matrix(const struct radv_compiler_info *compiler_info, nir_builder
 }
 
 void
-radv_load_otw_matrix(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *instance_addr, nir_def **out)
+radv_load_otw_matrix(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *instance_addr,
+                     nir_def **out)
 {
    unsigned offset = offsetof(struct radv_bvh_instance_node, otw_matrix);
    if (compiler_info->key.bvh8)
@@ -521,7 +525,8 @@ radv_load_instance_id(const struct radv_compiler_info *compiler_info, nir_builde
 static void
 radv_build_iteration_token(nir_builder *b, const struct radv_compiler_info *compiler_info, nir_def *node_id)
 {
-   nir_def *dst_addr = radv_build_token_begin(b, compiler_info, radv_packed_token_iteration, sizeof(struct radv_packed_iteration_token));
+   nir_def *dst_addr =
+      radv_build_token_begin(b, compiler_info, radv_packed_token_iteration, sizeof(struct radv_packed_iteration_token));
    if (!dst_addr)
       return;
 
@@ -540,7 +545,8 @@ radv_build_iteration_token(nir_builder *b, const struct radv_compiler_info *comp
 static void
 radv_build_accel_struct_token(nir_builder *b, const struct radv_compiler_info *compiler_info, nir_def *bvh_base)
 {
-   nir_def *dst_addr = radv_build_token_begin(b, compiler_info, radv_packed_token_accel_struct, sizeof(struct radv_packed_accel_struct_token));
+   nir_def *dst_addr = radv_build_token_begin(b, compiler_info, radv_packed_token_accel_struct,
+                                              sizeof(struct radv_packed_accel_struct_token));
    if (!dst_addr)
       return;
 
@@ -621,8 +627,9 @@ create_bvh_descriptor(nir_builder *b, const struct radv_compiler_info *compiler_
 }
 
 static void
-insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, nir_builder *b, const struct radv_ray_traversal_args *args,
-                               const struct radv_ray_flags *ray_flags, nir_def *result, nir_def *bvh_node)
+insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, nir_builder *b,
+                               const struct radv_ray_traversal_args *args, const struct radv_ray_flags *ray_flags,
+                               nir_def *result, nir_def *bvh_node)
 {
    if (!args->triangle_cb)
       return;
@@ -655,9 +662,11 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
          not_cull = nir_imm_true(b);
       }
 
-      nir_push_if(b, nir_iand(b,
+      /* The ray triangle emulation doesn't check tmin. */
+      if (compiler_info->key.emulate_rt || !args->tmin_zero)
+         not_cull = nir_iand(b, nir_flt(b, args->tmin, intersection.t), not_cull);
 
-                              nir_flt(b, args->tmin, intersection.t), not_cull));
+      nir_push_if(b, not_cull);
       {
          intersection.base.node_addr = build_node_to_addr(compiler_info, b, bvh_node, false);
          nir_def *triangle_info = nir_load_global(
@@ -747,8 +756,9 @@ insert_traversal_triangle_case_gfx12(const struct radv_compiler_info *compiler_i
 }
 
 static void
-insert_traversal_aabb_case(const struct radv_compiler_info *compiler_info, nir_builder *b, const struct radv_ray_traversal_args *args,
-                           const struct radv_ray_flags *ray_flags, nir_def *bvh_node)
+insert_traversal_aabb_case(const struct radv_compiler_info *compiler_info, nir_builder *b,
+                           const struct radv_ray_traversal_args *args, const struct radv_ray_flags *ray_flags,
+                           nir_def *bvh_node)
 {
    if (!args->aabb_cb)
       return;
@@ -774,8 +784,9 @@ insert_traversal_aabb_case(const struct radv_compiler_info *compiler_info, nir_b
 }
 
 static void
-insert_traversal_aabb_case_gfx12(const struct radv_compiler_info *compiler_info, nir_builder *b, const struct radv_ray_traversal_args *args,
-                                 const struct radv_ray_flags *ray_flags, nir_def *result, nir_def *bvh_node)
+insert_traversal_aabb_case_gfx12(const struct radv_compiler_info *compiler_info, nir_builder *b,
+                                 const struct radv_ray_traversal_args *args, const struct radv_ray_flags *ray_flags,
+                                 nir_def *result, nir_def *bvh_node)
 {
    if (!args->aabb_cb)
       return;
@@ -831,8 +842,8 @@ build_bvh_base(nir_builder *b, const struct radv_compiler_info *compiler_info, n
 }
 
 static void
-build_instance_exit(nir_builder *b, const struct radv_compiler_info *compiler_info, const struct radv_ray_traversal_args *args,
-                    nir_def *stack_instance_exit, nir_def *ptr_flags)
+build_instance_exit(nir_builder *b, const struct radv_compiler_info *compiler_info,
+                    const struct radv_ray_traversal_args *args, nir_def *stack_instance_exit, nir_def *ptr_flags)
 {
    nir_def *root_instance_exit = nir_iand(
       b, nir_ieq_imm(b, nir_load_deref(b, args->vars.current_node), RADV_BVH_INVALID_NODE),
@@ -864,7 +875,8 @@ build_instance_exit(nir_builder *b, const struct radv_compiler_info *compiler_in
 }
 
 nir_def *
-radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_builder *b, const struct radv_ray_traversal_args *args)
+radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_builder *b,
+                         const struct radv_ray_traversal_args *args)
 {
    nir_variable *incomplete = nir_local_variable_create(b->impl, glsl_bool_type(), "incomplete");
    nir_store_var(b, incomplete, nir_imm_true(b), 0x1);
@@ -924,8 +936,8 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
             }
             nir_pop_if(b, NULL);
             build_instance_exit(
-               b, compiler_info, args, nir_ige(b, nir_load_deref(b, args->vars.top_stack), nir_load_deref(b, args->vars.stack)),
-               ptr_flags);
+               b, compiler_info, args,
+               nir_ige(b, nir_load_deref(b, args->vars.top_stack), nir_load_deref(b, args->vars.stack)), ptr_flags);
          }
 
          nir_def *overflow_cond =
@@ -1056,19 +1068,22 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
 
                nir_store_deref(b, args->vars.top_stack, nir_load_deref(b, args->vars.stack), 1);
 
-               /* If ray flags dictate a forced opaqueness/nonopaqueness, instance flags dictating the same are
-                * meaningless.
-                */
-               uint32_t forced_opaqueness_mask = SpvRayFlagsOpaqueKHRMask | SpvRayFlagsNoOpaqueKHRMask;
-               nir_def *instance_flag_mask =
-                  nir_bcsel(b, nir_test_mask(b, ptr_flags, forced_opaqueness_mask),
-                            nir_imm_int64(b, ~((uint64_t)forced_opaqueness_mask << 54ull)), nir_imm_int64(b, ~0ull));
-
-               nir_def *instance_pointer = nir_pack_64_2x32(b, nir_trim_vector(b, instance_data, 2));
-               instance_pointer = nir_iand(b, instance_pointer, instance_flag_mask);
-
-               nir_store_deref(b, args->vars.bvh_base, build_bvh_base(b, compiler_info, instance_pointer, ptr_flags, false),
-                               0x1);
+               nir_def *instance_pointer = nir_trim_vector(b, instance_data, 2);
+               if (compiler_info->ac->gfx_level >= GFX11 && !compiler_info->key.emulate_rt) {
+                  /* If ray flags dictate a forced opaqueness/nonopaqueness, instance flags dictating the same are
+                   * meaningless.
+                   */
+                  uint32_t forced_opaqueness_mask = SpvRayFlagsOpaqueKHRMask | SpvRayFlagsNoOpaqueKHRMask;
+                  nir_def *instance_flag_mask =
+                     nir_bcsel(b, nir_test_mask(b, ptr_flags, forced_opaqueness_mask),
+                               nir_imm_int(b, ~(forced_opaqueness_mask << (54 - 32))), nir_imm_int(b, -1));
+                  nir_def *instance_pointer_lo = nir_channel(b, instance_pointer, 0);
+                  nir_def *instance_pointer_hi = nir_iand(b, nir_channel(b, instance_pointer, 1), instance_flag_mask);
+                  instance_pointer = nir_vec2(b, instance_pointer_lo, instance_pointer_hi);
+               }
+               instance_pointer = nir_pack_64_2x32(b, instance_pointer);
+               nir_store_deref(b, args->vars.bvh_base,
+                               build_bvh_base(b, compiler_info, instance_pointer, ptr_flags, false), 0x1);
 
                if (args->write_ray_history)
                   radv_build_accel_struct_token(b, compiler_info, instance_pointer);
@@ -1104,8 +1119,9 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
                /* If we didn't run the intrinsic cause the hardware didn't support it,
                 * emulate ray/box intersection here */
                result = intersect_ray_amd_software_box(
-                  compiler_info, b, global_bvh_node, nir_load_deref(b, args->vars.tmax), nir_load_deref(b, args->vars.origin),
-                  nir_load_deref(b, args->vars.dir), nir_load_deref(b, args->vars.inv_dir));
+                  compiler_info, b, global_bvh_node, nir_load_deref(b, args->vars.tmax),
+                  nir_load_deref(b, args->vars.origin), nir_load_deref(b, args->vars.dir),
+                  nir_load_deref(b, args->vars.inv_dir));
             }
 
             /* box */
@@ -1160,9 +1176,10 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
          } else {
             /* If we didn't run the intrinsic cause the hardware didn't support it,
              * emulate ray/tri intersection here */
-            result = intersect_ray_amd_software_tri(
-               compiler_info, b, global_bvh_node, nir_load_deref(b, args->vars.tmax), nir_load_deref(b, args->vars.origin),
-               nir_load_deref(b, args->vars.dir), nir_load_deref(b, args->vars.inv_dir));
+            result =
+               intersect_ray_amd_software_tri(compiler_info, b, global_bvh_node, nir_load_deref(b, args->vars.tmax),
+                                              nir_load_deref(b, args->vars.origin), nir_load_deref(b, args->vars.dir),
+                                              nir_load_deref(b, args->vars.inv_dir));
          }
          insert_traversal_triangle_case(compiler_info, b, args, &ray_flags, result, global_bvh_node);
       }
@@ -1195,7 +1212,8 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
 }
 
 nir_def *
-radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, nir_builder *b, const struct radv_ray_traversal_args *args)
+radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, nir_builder *b,
+                               const struct radv_ray_traversal_args *args)
 {
    nir_variable *incomplete = nir_local_variable_create(b->impl, glsl_bool_type(), "incomplete");
    nir_store_var(b, incomplete, nir_imm_true(b), 0x1);
@@ -1250,8 +1268,8 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
             }
             nir_pop_if(b, NULL);
             build_instance_exit(
-               b, compiler_info, args, nir_ige(b, nir_load_deref(b, args->vars.top_stack), nir_load_deref(b, args->vars.stack)),
-               NULL);
+               b, compiler_info, args,
+               nir_ige(b, nir_load_deref(b, args->vars.top_stack), nir_load_deref(b, args->vars.stack)), NULL);
          }
 
          nir_def *overflow_cond =
@@ -1350,8 +1368,7 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
                nir_store_deref(b, args->vars.iteration_instance_count, iteration_instance_count, 0x1);
             }
 
-            nir_def *next_node = nir_iand_imm(b, nir_channel(b, result, 7), 0xff);
-            nir_push_if(b, nir_ieq_imm(b, next_node, 0xff));
+            nir_push_if(b, nir_ieq_imm(b, nir_channel(b, result, 7), 0xffffffff));
             {
                nir_store_deref(b, args->vars.origin, args->origin, 7);
                nir_store_deref(b, args->vars.dir, args->dir, 7);
@@ -1383,12 +1400,12 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
                   for (unsigned i = 0; i < 6; ++i)
                      comps[i] = nir_channel(b, result, i);
                   comps[6] = nir_imm_int(b, RADV_BVH_STACK_SKIP_0_TO_7);
-                  comps[7] = next_node;
+                  comps[7] = nir_imm_int(b, RADV_BVH_ROOT_NODE);
                   nir_store_var(b, intrinsic_result, nir_vec(b, comps, 8), 0xff);
                } else {
-                  nir_store_deref(b, args->vars.current_node, next_node, 0x1);
+                  nir_store_deref(b, args->vars.current_node, nir_imm_int(b, RADV_BVH_ROOT_NODE), 0x1);
                }
-               nir_store_deref(b, args->vars.instance_bottom_node, next_node, 1);
+               nir_store_deref(b, args->vars.instance_bottom_node, nir_imm_int(b, RADV_BVH_ROOT_NODE), 1);
                nir_store_deref(b, args->vars.instance_top_node, bvh_node, 1);
             }
             nir_pop_if(b, NULL);
@@ -1458,8 +1475,8 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
          nir_push_else(b, NULL);
          {
             nir_push_if(b, ray_flags.no_skip_triangles);
-            insert_traversal_triangle_case_gfx12(compiler_info, b, args, &ray_flags, intrinsic_result, result, global_bvh_node,
-                                                 bvh_node);
+            insert_traversal_triangle_case_gfx12(compiler_info, b, args, &ray_flags, intrinsic_result, result,
+                                                 global_bvh_node, bvh_node);
             nir_pop_if(b, NULL);
          }
          nir_pop_if(b, NULL);

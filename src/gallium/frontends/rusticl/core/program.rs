@@ -101,7 +101,7 @@ impl_cl_type_trait!(cl_program, Program, CL_INVALID_PROGRAM);
 pub struct ProgramBuild {
     pub builds_by_device: HashMap<&'static Device, DeviceProgramBuild>,
     pub kernel_info: HashMap<CString, Arc<KernelInfo>>,
-    spec_constants: HashMap<u32, Vec<u8>>,
+    spec_constants: HashMap<u32, clc_spirv_const_value>,
     kernels: Vec<CString>,
 }
 
@@ -138,17 +138,12 @@ impl ProgramBuild {
                     continue;
                 };
 
-                if !build.is_success() {
+                // Skip compiling nirs for failed builds and non executables.
+                if !build.is_success() || build.bin_type != CL_PROGRAM_BINARY_TYPE_EXECUTABLE {
                     continue;
                 }
 
-                let build_result = match convert_spirv_to_nir(
-                    build,
-                    kernel_name,
-                    &args,
-                    &mut self.spec_constants,
-                    dev,
-                ) {
+                let build_result = match convert_spirv_to_nir(build, kernel_name, &args, dev) {
                     Ok(build_result) => build_result,
                     Err(err) => {
                         build.status = CL_BUILD_ERROR;
@@ -224,7 +219,6 @@ impl DeviceProgramBuild {
         &self,
         cache: Option<&DiskCacheBorrowed>,
         name: &CStr,
-        spec_constants: &HashMap<u32, Vec<u8>>,
         libclc: &NirShader,
     ) -> Option<cache_key> {
         if let Some(cache) = cache {
@@ -234,11 +228,6 @@ impl DeviceProgramBuild {
             let mut bin = spirv.to_bin().to_vec();
             bin.extend_from_slice(libclc.source_hash());
             bin.extend_from_slice(name.to_bytes());
-
-            for (k, v) in spec_constants {
-                bin.extend_from_slice(&k.to_ne_bytes());
-                bin.extend_from_slice(v);
-            }
 
             Some(cache.gen_key(&bin))
         } else {
@@ -250,28 +239,8 @@ impl DeviceProgramBuild {
         self.spirv.as_ref()?.kernel_info(kernel_name)
     }
 
-    pub fn to_nir(
-        &self,
-        kernel: &CStr,
-        device: &Device,
-        spec_constants: &mut HashMap<u32, Vec<u8>>,
-    ) -> Result<NirShader, &'static CStr> {
+    pub fn to_nir(&self, kernel: &CStr, device: &Device) -> Result<NirShader, &'static CStr> {
         assert_eq!(self.status, CL_BUILD_SUCCESS as cl_build_status);
-
-        let mut spec_constants: Vec<_> = spec_constants
-            .iter_mut()
-            .map(|(&id, value)| nir_spirv_specialization_entry {
-                id: id,
-                size: value.len() as u32,
-                data: value.as_mut_ptr(),
-                defined_on_module: true,
-            })
-            .collect();
-
-        let mut spec_constants = nir_spirv_specialization {
-            num_entries: spec_constants.len() as u32,
-            entries: spec_constants.as_mut_ptr(),
-        };
 
         let mut log = Platform::dbg().program.then(Vec::new);
         let nir = self
@@ -285,7 +254,6 @@ impl DeviceProgramBuild {
                     .nir_shader_compiler_options(mesa_shader_stage::MESA_SHADER_COMPUTE),
                 device.spirv_to_nir_opts(),
                 &device.lib_clc,
-                &mut spec_constants,
                 log.as_mut(),
             )
             .ok_or(c"spirv_to_nir failed");
@@ -816,15 +784,29 @@ impl Program {
         headers: &[HeaderProgram],
         build_info: &mut MutexGuard<ProgramBuild>,
     ) -> bool {
-        let device_build = build_info.dev_build_mut(device);
-
         let val_options = clc_validator_options(device);
         let (spirv, log) = match &self.src {
             ProgramSourceType::Il(spirv) => {
-                if Platform::dbg().allow_invalid_spirv {
-                    (Some(spirv.clone()), CString::default())
+                let spec_consts = build_info
+                    .spec_constants
+                    .iter()
+                    .map(|(&id, &val)| clc_spirv_specialization {
+                        id: id,
+                        value: val,
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>();
+
+                if let Some(spirv) = spirv.specialize(&spec_consts) {
+                    if Platform::dbg().allow_invalid_spirv {
+                        (Some(spirv), CString::default())
+                    } else {
+                        let (res, log) = spirv.validate(&val_options);
+                        let spirv = if res { Some(spirv) } else { None };
+                        (spirv, log)
+                    }
                 } else {
-                    spirv.clone_on_validate(&val_options)
+                    (None, c"Failed to specialize SPIR-V".to_owned())
                 }
             }
             ProgramSourceType::Src(src) => {
@@ -883,6 +865,7 @@ impl Program {
             }
         };
 
+        let device_build = build_info.dev_build_mut(device);
         device_build.spirv = spirv;
         device_build.log = log;
         device_build.options = options.parsed.clone();
@@ -1101,18 +1084,16 @@ impl Program {
         matches!(self.src, ProgramSourceType::Src(_))
     }
 
-    pub fn get_spec_constant_size(&self, spec_id: u32) -> u8 {
+    pub fn get_spec_constant_size(&self, spec_id: u32) -> Option<clc_spec_constant_type> {
         match &self.src {
-            ProgramSourceType::Il(il) => il
-                .spec_constant(spec_id)
-                .map_or(0, spirv::CLCSpecConstantType::size),
+            ProgramSourceType::Il(il) => il.spec_constant(spec_id),
             _ => unreachable!(),
         }
     }
 
-    pub fn set_spec_constant(&self, spec_id: u32, data: &[u8]) {
+    pub fn set_spec_constant(&self, spec_id: u32, data: clc_spirv_const_value) {
         let mut lock = self.build_info();
-        lock.spec_constants.insert(spec_id, data.to_owned());
+        lock.spec_constants.insert(spec_id, data);
     }
 }
 

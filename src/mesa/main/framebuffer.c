@@ -276,6 +276,7 @@ _mesa_resize_framebuffer(struct gl_context *ctx, struct gl_framebuffer *fb,
    /* XXX I think we could check if the size is not changing
     * and return early.
     */
+   bool changed = fb->Width != width || fb->Height != height;
 
    /* Can only resize win-sys framebuffer objects */
    assert(_mesa_is_winsys_fbo(fb));
@@ -286,7 +287,9 @@ _mesa_resize_framebuffer(struct gl_context *ctx, struct gl_framebuffer *fb,
          struct gl_renderbuffer *rb = att->Renderbuffer;
          /* only resize if size is changing */
          if (rb->Width != width || rb->Height != height) {
-            if (rb->AllocStorage(ctx, rb, rb->InternalFormat, width, height)) {
+            changed = true;
+            if (_mesa_renderbuffer_alloc_storage(ctx, rb, rb->InternalFormat,
+                                                 width, height)) {
                assert(rb->Width == width);
                assert(rb->Height == height);
             }
@@ -307,7 +310,8 @@ _mesa_resize_framebuffer(struct gl_context *ctx, struct gl_framebuffer *fb,
       /* Signal new buffer state so that swrast will update its clipping
        * info (the CLIP_BIT flag).
        */
-      ctx->NewState |= _NEW_BUFFERS;
+      if (changed)
+         ctx->NewState |= _NEW_BUFFERS;
    }
 }
 
@@ -828,18 +832,27 @@ _mesa_dest_buffer_exists(struct gl_context *ctx, GLenum format)
    return renderbuffer_exists(ctx, ctx->DrawBuffer, format, GL_FALSE);
 }
 
+static bool
+has_rtt_samples(const struct gl_renderbuffer_attachment *att)
+{
+   if (att->Type == GL_RENDERBUFFER)
+      return att->Renderbuffer->msrtt;
+   return att->NumSamples > 0;
+}
+
 extern bool
 _mesa_has_rtt_samples(const struct gl_framebuffer *fb)
 {
    /* If there are multiple attachments, all of them are guaranteed
-    * to have the same sample count. */
+    * to have the same sample count, and all or none of them have
+    * implicitly resolved samples. */
    if (fb->_ColorReadBufferIndex) {
       assert(fb->Attachment[fb->_ColorReadBufferIndex].Type != GL_NONE);
-      return fb->Attachment[fb->_ColorReadBufferIndex].NumSamples > 0;
+      return has_rtt_samples(&fb->Attachment[fb->_ColorReadBufferIndex]);
    } else if (fb->Attachment[BUFFER_DEPTH].Type != GL_NONE) {
-      return fb->Attachment[BUFFER_DEPTH].NumSamples > 0;
+      return has_rtt_samples(&fb->Attachment[BUFFER_DEPTH]);
    } else if (fb->Attachment[BUFFER_STENCIL].Type != GL_NONE) {
-      return fb->Attachment[BUFFER_STENCIL].NumSamples > 0;
+      return has_rtt_samples(&fb->Attachment[BUFFER_STENCIL]);
    }
 
    return true;

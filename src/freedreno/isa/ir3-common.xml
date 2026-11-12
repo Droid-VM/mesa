@@ -130,6 +130,12 @@ SOFTWARE.
 		Encoding for instruction source which can be GPR/CONST/IMMED
 		or relative GPR/CONST.
 	</doc>
+	<derived name="NOT" type="bool" display="(not)">
+		<expr>{MOD_IS_BNOT} &amp;&amp; ({ABSNEG} &amp; 1)</expr>
+	</derived>
+	<derived name="MODS" type="#absneg">
+		<expr>{MOD_IS_BNOT} ? {ABSNEG} &amp; 2 : {ABSNEG}</expr>
+	</derived>
 	<encode type="struct ir3_register *" case-prefix="REG_">
 		<map name="ABSNEG">extract_ABSNEG(src)</map>
 		<map name="SRC">src</map>
@@ -139,11 +145,11 @@ SOFTWARE.
 <bitset name="#mulitsrc-immed" extends="#multisrc">
 	<override expr="#multisrc-half">
 		<display>
-			{ABSNEG}{SRC_R}h({IMMED})
+			{MODS}{NOT}{SRC_R}h({IMMED})
 		</display>
 	</override>
 	<display>
-		{ABSNEG}{SRC_R}{IMMED}
+		{MODS}{NOT}{SRC_R}{IMMED}
 	</display>
 	<field name="IMMED" low="0"  high="10" type="int"/>
 	<pattern low="11" high="13">100</pattern>
@@ -181,14 +187,14 @@ SOFTWARE.
 
 <bitset name="#multisrc-immed-flut-full" extends="#mulitsrc-immed-flut">
 	<display>
-		{ABSNEG}{SRC_R}{IMMED}
+		{MODS}{NOT}{SRC_R}{IMMED}
 	</display>
 	<pattern pos="10">0</pattern>
 </bitset>
 
 <bitset name="#multisrc-immed-flut-half" extends="#mulitsrc-immed-flut">
 	<display>
-		{ABSNEG}{SRC_R}h{IMMED}
+		{MODS}{NOT}{SRC_R}h{IMMED}
 	</display>
 	<pattern pos="10">1</pattern>
 </bitset>
@@ -199,7 +205,7 @@ SOFTWARE.
 
 <bitset name="#multisrc-gpr" extends="#multisrc">
 	<display>
-		{LAST}{ABSNEG}{SRC_R}{HALF}{SRC}
+		{LAST}{MODS}{NOT}{SRC_R}{HALF}{SRC}
 	</display>
 	<derived name="HALF" expr="#multisrc-half" type="bool" display="h"/>
 	<field name="SRC" low="0" high="7" type="#reg-gpr"/>
@@ -214,7 +220,7 @@ SOFTWARE.
 
 <bitset name="#multisrc-const" extends="#multisrc">
 	<display>
-		{ABSNEG}{SRC_R}{HALF}{SRC}
+		{MODS}{NOT}{SRC_R}{HALF}{SRC}
 	</display>
 	<derived name="HALF" expr="#multisrc-half" type="bool" display="h"/>
 	<field name="SRC" low="0" high="10" type="#reg-const"/>
@@ -229,7 +235,7 @@ SOFTWARE.
 
 <bitset name="#multisrc-relative-gpr" extends="#multisrc-relative">
 	<display>
-		{ABSNEG}{SRC_R}{HALF}{SRC}
+		{MODS}{NOT}{SRC_R}{HALF}{SRC}
 	</display>
 	<derived name="HALF" expr="#multisrc-half" type="bool" display="h"/>
 	<field name="SRC" low="0" high="9" type="#reg-relative-gpr"/>
@@ -238,7 +244,7 @@ SOFTWARE.
 
 <bitset name="#multisrc-relative-const" extends="#multisrc-relative">
 	<display>
-		{ABSNEG}{SRC_R}{HALF}{SRC}
+		{MODS}{NOT}{SRC_R}{HALF}{SRC}
 	</display>
 	<derived name="HALF" expr="#multisrc-half" type="bool" display="h"/>
 	<field name="SRC" low="0" high="9" type="#reg-relative-const"/>

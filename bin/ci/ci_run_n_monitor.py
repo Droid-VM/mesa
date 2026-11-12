@@ -18,6 +18,7 @@ import sys
 import time
 from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, UTC
 from functools import partial
 from itertools import chain
 from subprocess import check_output, CalledProcessError
@@ -66,8 +67,73 @@ PROFILES: dict[str, dict] = {
     },
     "uprev_vkcts_main": {
         "target": ["radv-.*-vkcts(-asan|-full)?"],
-        "stress": 25
-    }
+        "stress": 25,
+    },
+    "uprev_piglit": {
+        "target": [
+            ".*piglit.*",
+            r"^zink-"
+            r"(anv-adl"
+            r"|anv-tgl"
+            r"|anv-cml-asan"
+            r"|tu-a618"
+            r"|lavapipe"
+            r"|radv-cezanne"
+            r"|radv-gfx1201-valve"
+            r"|radv-navi31-valve"
+            r"|radv-vangogh-valve)"
+            r"(?!-traces.*)"
+            r"( \d+/\d+)*",
+        ],
+        "stress": 2,
+    },
+    "uprev_piglit_nightlies": {
+        "target": [
+            ".*piglit.*",
+            r"(zink-radv-).*",
+        ],
+        "include_stage": [
+            "amd-nightly",
+            "arm-nightly",
+            "freedreno-nightly",
+            "etnaviv-nightly",
+        ],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
+    "uprev_angle": {
+        "target": [
+            ".*angle.*",
+            "a618-android",
+        ],
+        "stress": 2,
+    },
+    "uprev_angle_nightly": {
+        "target": [".*angle.*"],
+        "include_stage": [
+            "amd-nightly",
+            "intel-nightly",
+            "arm",
+            "freedreno-nightly",
+            "software-renderer",
+        ],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
+    "uprev_VVL": {
+        "target": [
+            "^zink-(anv-adl|anv-tgl|anv-cml-asan|tu-a618|lavapipe|radv-cezanne|radv-gfx1201-valve|radv-navi31-valve|radv-vangogh-valve)(?!-traces.*)"
+        ],
+        "stress": 2,
+    },
+    "uprev_VVL_nightly": {
+        "target": [
+            "^zink-(anv-adl|anv-tgl|anv-cml-asan|tu-a618|lavapipe|radv-cezanne|radv-gfx1201-valve|radv-navi31-valve|radv-vangogh-valve)(?!-traces.*)"
+        ],
+        "include_stage": ["layered-backends"],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
 }
 
 if is_gitlab_job():
@@ -163,6 +229,7 @@ def monitor_pipeline(
     stress: int,
     inhibit_single_target_trace: int = False,
     polling_period: int = REFRESH_WAIT_JOBS,
+    no_new_job_after: datetime | None = None,
 ) -> tuple[Optional[int], Optional[int], Dict[str, Dict[int, Tuple[float, str, str]]]]:
     """Monitors pipeline and delegate canceling jobs"""
     statuses: dict[str, str] = defaultdict(str)
@@ -256,6 +323,8 @@ def monitor_pipeline(
                     enough = False
 
             if not enough:
+                if no_new_job_after is not None and datetime.now(UTC) > no_new_job_after:
+                    return None, None, execution_times
                 pretty_wait(polling_period)
                 continue
 
@@ -437,6 +506,26 @@ def print_log(
         pretty_wait(REFRESH_WAIT_LOG)
 
 
+DEADLINE_SUFFIXES = {
+    "m": "minutes",
+    "h": "hours",
+}
+
+
+def parse_deadline(value: str) -> timedelta:
+    if match := re.fullmatch(r"(\d*\.?\d*)([a-z])", value):
+        number, suffix = match.groups()
+        try:
+            number = float(number)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(str(e))
+
+        if key := DEADLINE_SUFFIXES.get(suffix):
+            return datetime.now(UTC) + timedelta(**{key: number})
+
+    raise argparse.ArgumentTypeError(f"Invalid duration: {value}")
+
+
 def parse_args() -> argparse.Namespace:
     """Parse args"""
     parser = argparse.ArgumentParser(
@@ -445,62 +534,24 @@ def parse_args() -> argparse.Namespace:
         epilog="Example: %(prog)s --rev $(git rev-parse HEAD) "
         + '--target ".*traces" ',
     )
-    parser.add_argument(
+
+    access_group = parser.add_argument_group("Access options")
+
+    access_group.add_argument(
         "--server",
         metavar="gitlab-server",
         type=str,
         default=GITLAB_URL,
         help=f"Specify the GitLab server work with (Default: {GITLAB_URL})",
     )
-    parser.add_argument(
-        "--target",
-        metavar="target-job",
-        help="Target job regex. For multiple targets, pass multiple values, "
-             "eg. `--target foo bar`. Only jobs in the target stage(s) "
-             "supplied, and their dependencies, will be considered.",
-        required=False,
-        default=[],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
-        "--profile",
+    access_group.add_argument(
+        "--project",
         metavar="name",
-        choices=PROFILES,
-        help="Use a predefined set of target jobs",
+        type=str,
+        default="mesa",
+        help="GitLab project in the format <user>/<project> or just <project>",
     )
-    parser.add_argument(
-        "--include-stage",
-        metavar="include-stage",
-        help="Job stages to include when searching for target jobs. "
-             "For multiple targets, pass multiple values, eg. "
-             "`--include-stage foo bar`.",
-        default=[".*"],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
-        "--exclude-stage",
-        metavar="exclude-stage",
-        help="Job stages to exclude when searching for target jobs. "
-             "For multiple targets, pass multiple values, eg. "
-             "`--exclude-stage foo bar`. By default, performance and "
-             "nightly jobs are excluded; pass --exclude-stage '' to "
-             "include them for consideration.",
-        default=["performance", ".*-postmerge", ".*-nightly"],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
-        "--job-tags",
-        metavar="job-tags",
-        help="Job tags to require when searching for target jobs. If multiple "
-             "values are passed, eg. `--job-tags 'foo.*' 'bar'`, the job will "
-             "need to have a tag matching `foo.*` *and* a tag matching `bar` "
-             "to qualify. Passing `--job-tags '.*'` makes sure the job has "
-             "a tag defined, while not passing `--job-tags` also allows "
-             "untagged jobs.",
-        default=[],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
+    access_group.add_argument(
         "--token",
         metavar="token",
         type=str,
@@ -508,45 +559,10 @@ def parse_args() -> argparse.Namespace:
         help="Use the provided GitLab token (with `api` scope) or token file, "
              f"otherwise it's read from {TOKEN_DIR / 'gitlab-token'}",
     )
-    parser.add_argument(
-        "--force-manual", action="store_true",
-        help="Deprecated argument; manual jobs are always force-enabled"
-    )
-    parser.add_argument(
-        "--stress",
-        metavar="n",
-        type=int,
-        default=None,
-        help="Stresstest job(s). Specify the number of times to rerun the selected jobs, "
-             "or use -1 for indefinite. Defaults to 0. If jobs have already been executed, "
-             "this will ensure the total run count respects the specified number.",
-    )
-    parser.add_argument(
-        "--project",
-        metavar="name",
-        type=str,
-        default="mesa",
-        help="GitLab project in the format <user>/<project> or just <project>",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Exit after printing target jobs and dependencies",
-    )
-    parser.add_argument(
-        "--no-job-log",
-        action="store_true",
-        help="When there is only one target job, inhibit the job trace output in the console.",
-    )
-    parser.add_argument(
-        "--polling-period",
-        type=int,
-        default=REFRESH_WAIT_JOBS,
-        help=f"Specify the waiting seconds between monitor loops. (Default: {REFRESH_WAIT_JOBS})",
-     )
 
+    pipeline_discovery = parser.add_argument_group("Pipeline discovery options")
 
-    mutex_group1 = parser.add_mutually_exclusive_group()
+    mutex_group1 = pipeline_discovery.add_mutually_exclusive_group()
     mutex_group1.add_argument(
         "--rev",
         metavar="id",
@@ -567,18 +583,131 @@ def parse_args() -> argparse.Namespace:
         help="ID of a merge request; the latest pipeline in that MR will be used.",
     )
 
+    target_group = parser.add_argument_group("Target options")
+
+    target_group.add_argument(
+        "--target",
+        metavar="target-job",
+        help="Target job regex. For multiple targets, pass multiple values, "
+             "eg. `--target foo bar`. Only jobs in the target stage(s) "
+             "supplied, and their dependencies, will be considered.",
+        required=False,
+        default=[],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--profile",
+        metavar="name",
+        choices=PROFILES,
+        help="Use a predefined set of target jobs",
+    )
+    target_group.add_argument(
+        "--include-stage",
+        metavar="include-stage",
+        help="Job stages to include when searching for target jobs. "
+             "For multiple targets, pass multiple values, eg. "
+             "`--include-stage foo bar`.",
+        default=[".*"],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--exclude-stage",
+        metavar="exclude-stage",
+        help="Job stages to exclude when searching for target jobs. "
+             "For multiple targets, pass multiple values, eg. "
+             "`--exclude-stage foo bar`. By default, performance and "
+             "nightly jobs are excluded; pass --exclude-stage '' to "
+             "include them for consideration.",
+        default=["performance", ".*-postmerge", ".*-nightly"],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--job-tags",
+        metavar="job-tags",
+        help="Job tags to require when searching for target jobs. If multiple "
+             "values are passed, eg. `--job-tags 'foo.*' 'bar'`, the job will "
+             "need to have a tag matching `foo.*` *and* a tag matching `bar` "
+             "to qualify. Passing `--job-tags '.*'` makes sure the job has "
+             "a tag defined, while not passing `--job-tags` also allows "
+             "untagged jobs.",
+        default=[],
+        nargs=argparse.ONE_OR_MORE,
+    )
+
+    stress_group = parser.add_argument_group("Stress test options")
+
+    stress_group.add_argument(
+        "--stress",
+        metavar="n",
+        type=int,
+        default=None,
+        help="Stresstest job(s). Specify the number of times to rerun the selected jobs, "
+             "or use -1 for indefinite. Defaults to 0. If jobs have already been executed, "
+             "this will ensure the total run count respects the specified number.",
+    )
+    stress_group.add_argument(
+        "--no-new-job-after",
+        metavar="duration",
+        type=parse_deadline,
+        help="Quit starting new jobs once ci_run_n_monitor has been running for "
+             "that long. Note that existing jobs will continue running until "
+             "they finish. Value must be positive int or float, and valid "
+             "suffixes are: "
+             f"{', '.join(f'`{s}` for {n}' for s, n in DEADLINE_SUFFIXES.items())}"
+    )
+
+    flowctrl_group = parser.add_argument_group("Flow control options")
+
+    flowctrl_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Exit after printing target jobs and dependencies",
+    )
+    flowctrl_group.add_argument(
+        "--force-manual", action="store_true",
+        help="Deprecated argument; manual jobs are always force-enabled"
+    )
+
+    flowctrl_group.add_argument(
+        "--no-job-log",
+        action="store_true",
+        help="When there is only one target job, inhibit the job trace output in the console.",
+    )
+    flowctrl_group.add_argument(
+        "--polling-period",
+        type=int,
+        default=REFRESH_WAIT_JOBS,
+        help=f"Specify the waiting seconds between monitor loops. (Default: {REFRESH_WAIT_JOBS})",
+    )
+
+
+
     args = parser.parse_args()
 
     if args.profile:
+        profile = PROFILES[args.profile]
         if not args.target:
-            args.target = PROFILES[args.profile]["target"]
+            args.target = profile["target"]
+        if args.include_stage == [".*"]:
+            args.include_stage = profile.get(
+                "include_stage",
+                [".*"],
+            )
+        if args.exclude_stage == ["performance", ".*-postmerge", ".*-nightly"]:
+            args.exclude_stage = profile.get(
+                "exclude_stage",
+                ["performance", ".*-postmerge", ".*-nightly"]
+            )
         if args.stress is None:
-            args.stress = PROFILES[args.profile].get("stress", 0)
+            args.stress = profile.get("stress", 0)
     elif not args.target:
         parser.error("one of --target or --profile is required")
 
     if args.stress is None:
         args.stress = 0
+
+    if args.stress == 0 and args.no_new_job_after is not None:
+        parser.error("--no-new-job-after is only applicable with --stress")
 
     # argparse doesn't support groups inside add_mutually_exclusive_group(),
     # which means we can't just put `--project` and `--rev` in a group together,
@@ -840,6 +969,7 @@ def main() -> None:
             args.stress,
             args.no_job_log,
             args.polling_period,
+            args.no_new_job_after,
         )
 
         if target_job_id:

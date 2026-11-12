@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2024 Broadcom. All Rights Reserved.
+ * Copyright (c) 2009-2026 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc.
  * and/or its subsidiaries.
  * SPDX-License-Identifier: MIT
@@ -311,7 +311,7 @@ vmw_drm_surface_get_handle(struct svga_winsys_screen *sws,
 {
    struct vmw_winsys_screen *vws = vmw_winsys_screen(sws);
    struct vmw_svga_winsys_surface *vsrf;
-   int ret;
+   int ret = 0;
 
    if (!surface)
       return false;
@@ -334,11 +334,11 @@ vmw_drm_surface_get_handle(struct svga_winsys_screen *sws,
         ret = drmPrimeHandleToFD(vws->ioctl.drm_fd, region->handle,
                                  DRM_CLOEXEC | DRM_RDWR,
                                  (int *)&whandle->handle);
-      } else if (!vsrf->buf) {
+      } else {
         ret = drmPrimeHandleToFD(vws->ioctl.drm_fd, vsrf->sid,
                                  DRM_CLOEXEC | DRM_RDWR,
                                  (int *)&whandle->handle);
-     }
+      }
       if (ret) {
          vmw_error("Failed to get file descriptor from prime.\n");
          return false;

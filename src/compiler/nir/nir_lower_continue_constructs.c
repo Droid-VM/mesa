@@ -53,6 +53,7 @@ struct loop_simplify_state {
    nir_def *jump_flag;
    struct exec_list *cf_list;
    nir_jump_type type;
+   nir_loop *loop;
 };
 
 static bool
@@ -86,18 +87,46 @@ lower_jump(nir_block *block, struct loop_simplify_state *state)
 }
 
 static bool
+cf_list_ends_in_jump(struct exec_list *cf_list)
+{
+   foreach_list_typed(nir_cf_node, node, node, cf_list) {
+      if (node->type == nir_cf_node_block) {
+         if (nir_block_ends_in_jump(nir_cf_node_as_block(node)))
+            return true;
+      } else if (node->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(node);
+         if (cf_list_ends_in_jump(&nif->then_list) &&
+             cf_list_ends_in_jump(&nif->else_list))
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static bool
 lower_jumps_in_if(nir_if *nif, struct loop_simplify_state *state)
 {
+   /* Lower phis before jump removal makes more predecessors reachable.
+    * Push their writes up the predecessor tree so newly reachable paths
+    * cannot bypass the definitions used by the writes.
+    */
+   nir_block *next_block = nir_cf_node_cf_tree_next(&nif->cf_node);
+   nir_lower_phis_to_regs_block(next_block, false);
+
    nir_block *then_block = nir_if_last_then_block(nif);
    nir_block *else_block = nir_if_last_else_block(nif);
-   bool then_jumps = nir_block_ends_in_jump(then_block);
-   bool else_jumps = nir_block_ends_in_jump(else_block);
+   /* A branch leg can also exit through jumps in both sides of a nested if.
+    * Detect this before lowering so following code is moved into the
+    * surviving branch leg before any of its jumps are removed.
+    */
+   bool then_jumps = cf_list_ends_in_jump(&nif->then_list);
+   bool else_jumps = cf_list_ends_in_jump(&nif->else_list);
 
    bool progress = false;
    progress |= lower_jump(then_block, state);
    progress |= lower_jump(else_block, state);
 
-   nir_block *next_block = nir_cf_node_cf_tree_next(&nif->cf_node);
    bool is_empty_block = nir_cf_node_is_last(&next_block->cf_node) &&
                          exec_list_is_empty(&next_block->instr_list);
 
@@ -118,11 +147,15 @@ lower_jumps_in_if(nir_if *nif, struct loop_simplify_state *state)
        * to lower and increases control-flow depth.
        */
       assert(then_jumps || else_jumps);
-      /* Lower away potential single-src phis, if there was any. */
-      nir_lower_phis_to_regs_block(nir_cf_node_cf_tree_next(&nif->cf_node), true);
       nir_cf_list list;
       nir_cf_extract(&list, nir_after_cf_node(&nif->cf_node),
                      nir_after_cf_list(state->cf_list));
+
+      /* If this is top-level within the loop, phi lowering from the caller
+       * should handle this.
+       */
+      if (nif->cf_node.parent != &state->loop->cf_node)
+         nir_cf_list_detach_ssa(&list);
 
       if (then_jumps && else_jumps) {
          /* Both branches jump, just delete instructions following the IF. */
@@ -149,13 +182,15 @@ lower_jumps_in_if(nir_if *nif, struct loop_simplify_state *state)
    if (!is_empty_block && progress) {
       /* Predicate following blocks. */
       nir_cf_list list;
-      nir_cf_extract(&list, nir_after_cf_node_and_phis(&nif->cf_node),
+      nir_cf_extract(&list, nir_after_cf_node(&nif->cf_node),
                      nir_after_cf_list(state->cf_list));
 
-      state->b->cursor = nir_after_cf_node_and_phis(&nif->cf_node);
+      if (nif->cf_node.parent != &state->loop->cf_node)
+         nir_cf_list_detach_ssa(&list);
+
+      state->b->cursor = nir_after_cf_node(&nif->cf_node);
       nir_if *if_stmt = nir_push_if(state->b, nir_load_reg(state->b, state->jump_flag));
 
-      assert(!exec_list_is_empty(&list.list));
       nir_cf_reinsert(&list, nir_before_cf_list(&if_stmt->else_list));
       nir_pop_if(state->b, NULL);
    }
@@ -206,8 +241,10 @@ lower_jumps_in_cf_list(struct exec_list *cf_list,
  * For breaks, insert a single conditional break just before
  * the back edge.
  *
- * It's assumed that all phis for the jumps in question are
- * lowered to registers before the call to this function.
+ * It's assumed that all headers phis are lowered to registers
+ * before the call to this function. For breaks, exit phis must
+ * also be lowered. Before lowering exit phis, the loop should
+ * be in LCSSA.
  */
 void
 nir_simplify_loop(nir_loop *loop, nir_jump_type type)
@@ -218,6 +255,7 @@ nir_simplify_loop(nir_loop *loop, nir_jump_type type)
    state.type = type;
    nir_builder b = nir_builder_at(nir_before_block_after_phis(nir_loop_first_block(loop)));
    state.b = &b;
+   state.loop = loop;
 
    /* Initialize the variable to False. */
    state.jump_flag = nir_decl_reg(&b, 1, 1, 0);

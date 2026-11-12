@@ -19,8 +19,6 @@ glx@glx-swap-pixmap-bad,Fail
 glx@glx-visuals-depth -pixmap,Crash
 glx@glx-visuals-stencil -pixmap,Crash
 
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
-
 spec@!opengl 1.0@gl-1.0-swapbuffers-behavior,Fail
 
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=2,Fail
@@ -55,11 +53,6 @@ spec@!opengl 1.1@polygon-mode,Fail
 
 spec@!opengl 2.0@vs-point_size-zero,Fail
 
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-
-spec@!opengl 2.1@polygon-stipple-fs,Fail
-
 spec@!opengl 3.0@clearbuffer-depth-cs-probe,Fail
 
 spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
@@ -70,231 +63,6 @@ spec@arb_gpu_shader_fp64@execution@fs-function-inout-array,Crash
 spec@arb_gpu_shader_fp64@execution@glsl-fs-loop-unroll-mul-fp64,Crash
 spec@arb_gpu_shader_fp64@uniform_buffers@fs-ubo-load.indirect.3,Fail
 
-spec@arb_sample_locations@test,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 2- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 4- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: true,Fail
 spec@arb_sample_shading@samplemask 2 all,Fail
 spec@arb_sample_shading@samplemask 2 all@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@1.000000 mask_in_one,Fail
@@ -361,15 +129,10 @@ spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
 
 # "../src/gallium/drivers/zink/zink_compiler.c:2071: assign_producer_var_io: Assertion `*reserved < MAX_VARYING' failed."
 
-spec@egl 1.4@eglterminate then unbind context,Fail
-
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-
-spec@egl_khr_surfaceless_context@viewport,Fail
 
 spec@ext_external_objects@vk-image-overwrite@RGB 10 A2 UINT optimal: Failed to initialize OpenGL FBO/RBO,Fail
 
-spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
 spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
 spec@ext_transform_feedback@tessellation quads wireframe,Fail
 
@@ -388,7 +151,6 @@ glx@glx-multi-window-single-context,Fail
 # uprev Piglit in Mesa
 spec@arb_shader_storage_buffer_object@max-ssbo-size@fs,Crash
 spec@arb_shader_storage_buffer_object@max-ssbo-size@vs,Crash
-spec@egl_mesa_configless_context@basic,Fail
 
 # glcts: ../../src/intel/vulkan/anv_sparse.c:970: vk_bind_to_anv_vm_bind: Assertion `vk_bind->memoryOffset + vk_bind->size <= anv_bind.bo->size' failed.
 # Also related to https://gitlab.freedesktop.org/mesa/mesa/-/issues/11073

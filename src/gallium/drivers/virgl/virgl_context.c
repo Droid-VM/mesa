@@ -1775,6 +1775,7 @@ struct pipe_context *virgl_context_create(struct pipe_screen *pscreen,
    }
    vctx->base.clear_texture = virgl_clear_texture;
    vctx->base.draw_vbo = virgl_draw_vbo;
+   vctx->base.draw_vbo_buffers = util_draw_vbo_buffers;
    vctx->base.flush = virgl_flush_from_st;
    vctx->base.screen = pscreen;
    vctx->base.create_sampler_view = virgl_create_sampler_view;
@@ -1865,7 +1866,7 @@ struct pipe_context *virgl_context_create(struct pipe_screen *pscreen,
     * config procedurally right before context creation, we must check the
     * envvar again.
     */
-#if DETECT_OS_ANDROID
+#ifdef HAVE_ANDROID_PLATFORM
    if (!rs->shader_sync) {
       uint64_t debug_options = debug_get_flags_option("VIRGL_DEBUG",
                                                       virgl_debug_options, 0);

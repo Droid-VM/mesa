@@ -35,6 +35,13 @@ struct radv_sample_locations_state {
    VkExtent2D grid_size;
    uint32_t count;
    VkSampleLocationEXT locations[MAX_SAMPLE_LOCATIONS];
+
+   /* Derived state. */
+   int8_t hw_locations[4][8][2]; /* [pixel in quad][sample][dim] */
+   bool xmax_right_exclusion;
+   bool ymax_bottom_exclusion;
+   bool allow_small_prim_ngg_culling;
+   uint8_t log2_small_prim_ngg_culling_scaling_factor;
 };
 
 struct radv_viewport_xform_state {
@@ -72,7 +79,6 @@ struct radv_vertex_input_state {
    uint8_t format_align_req_minus_1[MAX_VERTEX_ATTRIBS];
    uint8_t component_align_req_minus_1[MAX_VERTEX_ATTRIBS];
    uint8_t format_sizes[MAX_VERTEX_ATTRIBS];
-   uint32_t attrib_index_offset[MAX_VERTEX_ATTRIBS]; /* Only used with static strides. */
    uint32_t non_trivial_format[MAX_VERTEX_ATTRIBS];
 
    uint32_t vbo_misaligned_mask;
@@ -106,11 +112,6 @@ struct radv_dynamic_state {
    struct radv_blend_equation_state blend_eq;
 };
 
-struct radv_multisample_state {
-   bool sample_shading_enable;
-   float min_sample_shading;
-};
-
 struct radv_ia_multi_vgt_param_helpers {
    uint32_t base;
    bool partial_es_wave;
@@ -134,7 +135,6 @@ struct radv_graphics_pipeline {
 
    struct radv_dynamic_state dynamic_state;
 
-   struct radv_multisample_state ms;
    struct radv_ia_multi_vgt_param_helpers ia_multi_vgt_param;
 
    /* Last pre-PS API stage */
@@ -148,6 +148,9 @@ struct radv_graphics_pipeline {
 
    /* Whether the pipeline uses a VRS attachment. */
    bool uses_vrs_attachment;
+
+   /* Whether depth/stencil states must be ignored because the pipeline has no depth/stencil attachments. */
+   bool ignore_ds_state;
 
    /* For relocation of shaders with RGP. */
    struct radv_sqtt_shaders_reloc *sqtt_shaders_reloc;
@@ -197,8 +200,12 @@ radv_pipeline_has_stage(const struct radv_graphics_pipeline *pipeline, mesa_shad
 }
 
 static inline uint32_t
-radv_conv_prim_to_gs_out(uint32_t topology, bool is_ngg)
+radv_conv_prim_to_gs_out(enum amd_gfx_level gfx_level, uint32_t topology, bool is_ngg)
 {
+   static_assert(V_028A6C_POINTLIST == V_030998_POINTLIST && V_028A6C_LINESTRIP == V_030998_LINESTRIP &&
+                    V_028A6C_TRISTRIP == V_030998_TRISTRIP,
+                 "Some VGT_GS_OUTPRIM_TYPE values don't match");
+
    switch (topology) {
    case V_008958_DI_PT_POINTLIST:
    case V_008958_DI_PT_PATCH:
@@ -215,7 +222,7 @@ radv_conv_prim_to_gs_out(uint32_t topology, bool is_ngg)
    case V_008958_DI_PT_TRISTRIP_ADJ:
       return V_028A6C_TRISTRIP;
    case V_008958_DI_PT_RECTLIST:
-      return is_ngg ? V_028A6C_RECTLIST : V_028A6C_TRISTRIP;
+      return is_ngg ? (gfx_level >= GFX11 ? V_030998_RECT_2D : V_028A6C_RECTLIST) : V_028A6C_TRISTRIP;
    default:
       assert(0);
       return 0;
@@ -349,7 +356,7 @@ radv_primitive_topology_is_line_list(unsigned primitive_topology)
 }
 
 static inline unsigned
-radv_get_num_vertices_per_prim(const struct radv_graphics_state_key *gfx_state)
+radv_get_num_vertices_per_prim(enum amd_gfx_level gfx_level, const struct radv_graphics_state_key *gfx_state)
 {
    if (gfx_state->ia.topology == V_008958_DI_PT_NONE) {
       /* When the topology is unknown (with graphics pipeline library), return the maximum number of
@@ -360,7 +367,7 @@ radv_get_num_vertices_per_prim(const struct radv_graphics_state_key *gfx_state)
       return 3;
    } else {
       /* Need to add 1, because: V_028A6C_POINTLIST=0, V_028A6C_LINESTRIP=1, V_028A6C_TRISTRIP=2, etc. */
-      return radv_conv_prim_to_gs_out(gfx_state->ia.topology, false) + 1;
+      return radv_conv_prim_to_gs_out(gfx_level, gfx_state->ia.topology, false) + 1;
    }
 }
 
@@ -618,25 +625,49 @@ void radv_translate_blend_equation(const struct radv_physical_device *pdev, VkBl
                                    VkBlendFactor dstRGB, VkBlendOp eqA, VkBlendFactor srcA, VkBlendFactor dstA,
                                    uint32_t *cb_blend_control_out, uint32_t *sx_mrt_blend_opt_out);
 
-struct radv_shader *radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage);
+static inline struct radv_shader *
+radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_VERTEX) {
+      if (shaders[MESA_SHADER_VERTEX])
+         return shaders[MESA_SHADER_VERTEX];
+      if (shaders[MESA_SHADER_TESS_CTRL])
+         return shaders[MESA_SHADER_TESS_CTRL];
+      if (shaders[MESA_SHADER_GEOMETRY])
+         return shaders[MESA_SHADER_GEOMETRY];
+   } else if (stage == MESA_SHADER_TESS_EVAL) {
+      if (!shaders[MESA_SHADER_TESS_CTRL])
+         return NULL;
+      if (shaders[MESA_SHADER_TESS_EVAL])
+         return shaders[MESA_SHADER_TESS_EVAL];
+      if (shaders[MESA_SHADER_GEOMETRY])
+         return shaders[MESA_SHADER_GEOMETRY];
+   }
+   return shaders[stage];
+}
 
 struct radv_ps_epilog_state {
-   uint8_t color_attachment_count;
    VkFormat color_attachment_formats[MAX_RTS];
-   uint8_t color_attachment_mappings[MAX_RTS];
-
    uint32_t color_write_mask;
-   uint8_t color_blend_enable;
-
    uint32_t colors_written;
+
+   uint8_t color_attachment_count;
+   uint8_t color_attachment_mappings[MAX_RTS];
+   uint8_t color_blend_enable;
+   uint8_t need_src_alpha;
+
    bool mrt0_is_dual_src;
-   bool export_depth;
-   bool export_stencil;
-   bool export_sample_mask;
+   bool has_depth_output;
+   bool has_stencil_output;
+   bool has_sample_mask_output;
+   bool ignore_depth_output;
+   bool ignore_stencil_output;
+   bool lower_1bit_sample_mask_to_discard;
    bool alpha_to_coverage_via_mrtz;
    bool alpha_to_one;
-   uint8_t need_src_alpha;
 };
+
+void radv_init_ps_epilog_format_infos(struct radv_compiler_info *compiler_info);
 
 struct radv_ps_epilog_key radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info,
                                                       const struct radv_ps_epilog_state *state);
@@ -687,6 +718,8 @@ struct radv_graphics_pipeline_state {
    struct radv_graphics_pipeline_key key;
 
    struct radv_pipeline_layout layout;
+
+   blake3_hash libs_blake3;
 };
 
 void radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,

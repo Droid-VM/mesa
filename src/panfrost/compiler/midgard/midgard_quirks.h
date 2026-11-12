@@ -27,49 +27,31 @@
 
 #define MIDGARD_INTERPIPE_REG_ALIASING (1 << 1)
 
-/* Whether we should use old-style blend opcodes */
-
-#define MIDGARD_OLD_BLEND (1 << 2)
-
 /* Errata causing the LOD clamps and bias in the sampler descriptor to be
  * ignored. This errata affects the command stream but uses a compiler
  * workaround (applying the clamps/bias manually in the shader. Corresponds in
  * BASE_HW_ISSUE_10471 in kbase, described as "TEXGRD doesn't honor Sampler
  * Descriptor LOD clamps nor bias". (I'm assuming TEXGRD is what we call
- * textureLod) */
-
-#define MIDGARD_BROKEN_LOD (1 << 3)
+ * textureLod)
+ *
+ * Affects all released V4 GPUs, so we don't need a bit for this.
+ */
 
 /* Don't use upper ALU tags for writeout (if you do, you'll get a
  * INSTR_INVALID_ENC). It's not clear to me what these tags are for. */
 
-#define MIDGARD_NO_UPPER_ALU (1 << 4)
-
-/* Whether (texture) out-of-order execution support is missing on early
- * Midgards. For these just set the OoO bits to 0. */
-
-#define MIDGARD_NO_OOO (1 << 5)
-
-/* Disable auto32 type (apparently broken on T60x). */
-
-#define MIDGARD_NO_AUTO32 (1 << 6)
+#define MIDGARD_NO_UPPER_ALU (1 << 2)
 
 static inline unsigned
-midgard_get_quirks(uint64_t gpu_id)
+midgard_get_quirks(uint32_t gpu_prod_id)
 {
-   switch (pan_prod_id(gpu_id)) {
+   switch (gpu_prod_id) {
    case 0x600:
-      return MIDGARD_OLD_BLEND | MIDGARD_BROKEN_BLEND_LOADS |
-             MIDGARD_BROKEN_LOD | MIDGARD_NO_UPPER_ALU | MIDGARD_NO_OOO |
-             MIDGARD_NO_AUTO32;
-
    case 0x620:
-      return MIDGARD_OLD_BLEND | MIDGARD_BROKEN_BLEND_LOADS |
-             MIDGARD_BROKEN_LOD | MIDGARD_NO_UPPER_ALU | MIDGARD_NO_OOO;
+      return MIDGARD_BROKEN_BLEND_LOADS | MIDGARD_NO_UPPER_ALU;
 
    case 0x720:
-      return MIDGARD_INTERPIPE_REG_ALIASING | MIDGARD_OLD_BLEND |
-             MIDGARD_BROKEN_LOD | MIDGARD_NO_UPPER_ALU | MIDGARD_NO_OOO;
+      return MIDGARD_INTERPIPE_REG_ALIASING | MIDGARD_NO_UPPER_ALU;
 
    case 0x820:
    case 0x830:

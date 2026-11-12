@@ -740,5 +740,7 @@ vl_compositor_gfx_render(struct vl_compositor_state *s,
    c->pipe->bind_rasterizer_state(c->pipe, c->rast);
 
    draw_layers(c, s, dirty_area);
+   c->pipe->bind_vs_state(c->pipe, NULL);
+   c->pipe->bind_fs_state(c->pipe, NULL);
    pipe_resource_release(c->pipe, releasebuf);
 }

@@ -300,7 +300,8 @@ union ConfigFlags
         UINT_32 forceDccAndTcCompat    : 1;    ///< Force enable DCC and TC compatibility
         UINT_32 nonPower2MemConfig     : 1;    ///< Video memory bit width is not power of 2
         UINT_32 enableAltTiling        : 1;    ///< Enable alt tile mode
-        UINT_32 reserved               : 18;   ///< Reserved bits for future use
+        UINT_32 padValidEqBits         : 1;    ///< If set, then all bits in the equation will be marked as valid.
+        UINT_32 reserved               : 17;   ///< Reserved bits for future use
     };
 
     UINT_32 value;
@@ -671,10 +672,13 @@ static inline UINT_32 Log2(
 *       Compute log of base 2 no matter the target is power of 2 or not. Returns 0 if 0.
 ****************************************************************************************************
 */
-static constexpr inline UINT_32 ConstexprLog2(
-    UINT_32 x)      ///< [in] the value should calculate log based 2
+template <typename T>
+static constexpr inline T ConstexprLog2(
+    T x)      ///< [in] the value should calculate log based 2
 {
-    UINT_32 out = 0;
+    ADDR_ASSERT(x >= 0);
+
+    T out = 0;
     while (x >>= 1)
     {
         out++;
@@ -1160,16 +1164,18 @@ static inline UINT_32 ShiftRight(
 *       Subtracts a value to the given pointer directly.
 ****************************************************************************************************
 */
+template <typename T>
 static inline void* VoidPtrDec(
-    void*  pIn,
-    size_t offset)
+    void*   pIn,
+    T       offset)
 {
     return (void*)(((char*)(pIn)) - offset);
 }
 
+template <typename T>
 static inline const void* VoidPtrDec(
     const void* pIn,
-    size_t      offset)
+    T           offset)
 {
     return (const void*)(((const char*)(pIn)) - offset);
 }
@@ -1182,16 +1188,18 @@ static inline const void* VoidPtrDec(
 *       Adds a value to the given pointer directly.
 ****************************************************************************************************
 */
+template <typename T>
 static inline void* VoidPtrInc(
-    void*  pIn,
-    size_t offset)
+    void*   pIn,
+    T       offset)
 {
     return (void*)(((char*)(pIn)) + offset);
 }
 
+template <typename T>
 static inline const void* VoidPtrInc(
     const void* pIn,
-    size_t      offset)
+    T           offset)
 {
     return (const void*)(((const char*)(pIn)) + offset);
 }

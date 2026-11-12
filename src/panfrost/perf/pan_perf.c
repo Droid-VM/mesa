@@ -81,12 +81,13 @@ pan_perf_create(int fd)
 
    struct pan_kmod_dev_props props = perf->dev->props;
 
-   perf->constants.ext_bus_byte_size = pan_query_bus_width(&props);
+   perf->constants.ext_bus_byte_size = pan_query_bus_width(&props) / 8;
    perf->constants.l2_cache_count = pan_query_l2_slices(&props);
    perf->constants.shader_core_count = pan_query_core_count(&props);
 
    const struct pan_model *model =
-      pan_get_model(props.gpu_id, props.gpu_variant);
+      pan_get_model(props.gpu_id, props.gpu_variant,
+                    perf->constants.shader_core_count, props.gpu_features);
    if (model == NULL) {
       mesa_loge("GPU not supported");
       goto err_destroy_perf;

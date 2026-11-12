@@ -30,13 +30,93 @@
 extern DWORD
 CalculateQualityFromQP( DWORD QP );
 
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH265VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH265VProfile_Main_420_8:
+         return PIPE_FORMAT_NV12;
+      case eAVEncH265VProfile_Main_420_10:
+         return PIPE_FORMAT_P010;
+      case eAVEncH265VProfile_Main_422_8:
+         return PIPE_FORMAT_YUYV;
+      case eAVEncH265VProfile_Main_422_10:
+         return PIPE_FORMAT_Y210;
+      case eAVEncH265VProfile_Main_444_8:
+         return PIPE_FORMAT_AYUV;
+      case eAVEncH265VProfile_Main_444_10:
+         return PIPE_FORMAT_Y410;
+      default:
+         UNREACHABLE( "Unsupported H.265 profile" );
+         return PIPE_FORMAT_NONE;
+   }
+}
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH265VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH265VProfile_Main_420_8:
+         return MFVideoFormat_NV12;
+      case eAVEncH265VProfile_Main_420_10:
+         return MFVideoFormat_P010;
+      case eAVEncH265VProfile_Main_422_8:
+         return MFVideoFormat_YUY2;
+      case eAVEncH265VProfile_Main_422_10:
+         return MFVideoFormat_Y210;
+      case eAVEncH265VProfile_Main_444_8:
+         return MFVideoFormat_AYUV;
+      case eAVEncH265VProfile_Main_444_10:
+         return MFVideoFormat_Y410;
+      default:
+         UNREACHABLE( "Unsupported H.265 profile" );
+         return GUID_NULL;
+   }
+}
+
+// utility to convert from pipe_h2645_enc_picture_type to string description
+static const char *
+ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType )
+{
+   switch( picType )
+   {
+      case PIPE_H2645_ENC_PICTURE_TYPE_P:
+      {
+         return "H265_P_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_B:
+      {
+         return "H265_B_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_I:
+      {
+         return "H265_I_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_IDR:
+      {
+         return "H265_IDR_FRAME";
+      }
+      break;
+      default:
+      {
+         UNREACHABLE( "Unsupported pipe_h2645_enc_picture_type" );
+      }
+      break;
+   }
+}
+
 // utility function to compute the cropping rectangle given texture and output dimensions
 static void
 ComputeCroppingRect( const UINT32 textureWidth,
                      const UINT32 textureHeight,
                      const UINT uiOutputWidth,
                      const UINT uiOutputHeight,
-                     const enum pipe_video_profile outputPipeProfile,
+                     const eAVEncH265VProfile hevcProfile,
                      BOOL &bFrameCroppingFlag,
                      UINT32 &uiFrameCropRightOffset,
                      UINT32 &uiFrameCropBottomOffset )
@@ -46,7 +126,7 @@ ComputeCroppingRect( const UINT32 textureWidth,
 
    if( iCropRight || iCropBottom )
    {
-      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertProfileToFormat( outputPipeProfile ) );
+      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( hevcProfile ) );
       UINT32 cropUnitX = 1;
       UINT32 cropUnitY = 1;
       switch( chromaFormatIdc )
@@ -113,7 +193,7 @@ CDX12EncHMFT::UpdateH265EncPictureDesc( pipe_h265_enc_picture_desc *pPicInfo,
    pPicInfo->seq.ip_period = ip_period;
    pPicInfo->seq.pic_width_in_luma_samples = pic_width_in_luma_samples;
    pPicInfo->seq.pic_height_in_luma_samples = pic_height_in_luma_samples;
-   pPicInfo->seq.chroma_format_idc = GetChromaFormatIdc( ConvertProfileToFormat( m_outputPipeProfile ) );
+   pPicInfo->seq.chroma_format_idc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
    pPicInfo->seq.log2_max_pic_order_cnt_lsb_minus4 = log2_max_pic_order_cnt_lsb_minus4;
    pPicInfo->seq.log2_min_luma_coding_block_size_minus3 =
@@ -776,7 +856,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
                         alignedHeight,
                         m_uiOutputWidth,
                         m_uiOutputHeight,
-                        m_outputPipeProfile,
+                        m_uiProfile,
                         m_bFrameCroppingFlag,
                         m_uiFrameCropRightOffset,
                         m_uiFrameCropBottomOffset );
@@ -1040,7 +1120,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
          m_pPipeVideoCodec,
          static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
          static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
-         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         ConvertAVEncVProfileToPipeFormat( m_uiProfile ),
          m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
             ( m_bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/,
          hr );
@@ -1049,6 +1129,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
 
    m_pGOPTracker = new reference_frames_tracker_hevc( this,
                                                       m_pPipeVideoCodec,
+                                                      m_uiProfile,
                                                       textureWidth,
                                                       textureHeight,
                                                       m_uiGopSize,
@@ -1071,4 +1152,96 @@ done:
    return hr;
 }
 
+// utility to convert from AVEncVProfile to pipe_video_profile
+enum pipe_video_profile
+CDX12EncHMFT::ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncH265VProfile profile )
+{
+   enum pipe_video_profile pipeProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
+
+   switch( profile )
+   {
+      case eAVEncH265VProfile_Main_420_8:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN;
+         break;
+      case eAVEncH265VProfile_Main_420_10:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_10;
+         break;
+      case eAVEncH265VProfile_Main_422_8:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_422;
+         break;
+      case eAVEncH265VProfile_Main_422_10:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN10_422;
+         break;
+      case eAVEncH265VProfile_Main_444_8:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_444;
+         break;
+      case eAVEncH265VProfile_Main_444_10:
+         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN10_444;
+         break;
+   }
+
+   if( !vlScreen->pscreen->get_video_param( vlScreen->pscreen, pipeProfile, PIPE_VIDEO_ENTRYPOINT_ENCODE, PIPE_VIDEO_CAP_SUPPORTED ) )
+   {
+      return PIPE_VIDEO_PROFILE_UNKNOWN;
+   }
+
+   return pipeProfile;
+}
+
+HRESULT
+CDX12EncHMFT::CheckOutputMediaSubType( IMFMediaType *pmt, enum pipe_video_profile &videoProfile )
+{
+   HRESULT hr;
+   enum eAVEncH265VProfile AVEncProfile = eAVEncH265VProfile_Main_420_8; // default value when user don't set profile explicitly
+   GUID subType;
+
+   videoProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
+   CHECKHR_GOTO( pmt->GetGUID( MF_MT_SUBTYPE, &subType ), done );
+   CHECKBOOL_GOTO( subType.Data1 == FOURCC_HEVC, MF_E_INVALIDMEDIATYPE, done );
+   (void) pmt->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &AVEncProfile ); // use default value if not set by user
+   CHECKBOOL_GOTO( ( AVEncProfile == eAVEncH265VProfile_Main_420_8 ) || ( AVEncProfile == eAVEncH265VProfile_Main_420_10 ) ||
+                      ( AVEncProfile == eAVEncH265VProfile_Main_422_8 ) || ( AVEncProfile == eAVEncH265VProfile_Main_422_10 ) ||
+                      ( AVEncProfile == eAVEncH265VProfile_Main_444_8 ) || ( AVEncProfile == eAVEncH265VProfile_Main_444_10 ),
+                   MF_E_INVALIDMEDIATYPE,
+                   done );
+   CHECKNULL_GOTO( m_pVlScreen, MF_E_INVALIDMEDIATYPE, done );
+   videoProfile = ConvertAVEncVProfileToPipeVideoProfile( m_pVlScreen, AVEncProfile );
+
+done:
+   if( FAILED( hr ) )
+   {
+      MFE_ERROR( "[dx12 hmft 0x%p] Invalid media subtype - hr=0x%x", this, hr );
+   }
+   return hr;
+}
+
+HRESULT
+CDX12EncHMFT::CheckInputMediaSubType( IMFMediaType *pmt )
+{
+   HRESULT hr;
+   GUID subType;
+
+   CHECKHR_GOTO( pmt->GetGUID( MF_MT_SUBTYPE, &subType ), done );
+
+   switch( subType.Data1 )
+   {
+      case FOURCC_NV12:
+      case FOURCC_P010:
+      case FOURCC_AYUV:
+      case FOURCC_Y210:
+      case FOURCC_Y410:
+      case FOURCC_YUY2:
+         hr = S_OK;
+         break;
+      default:
+         hr = MF_E_INVALIDMEDIATYPE;
+         break;
+   }
+done:
+   if( FAILED( hr ) )
+   {
+      MFE_ERROR( "[dx12 hmft 0x%p] Invalid media subtype - hr=0x%x", this, hr );
+   }
+   return hr;
+}
 #endif

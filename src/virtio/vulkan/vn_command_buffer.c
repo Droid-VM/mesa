@@ -276,21 +276,21 @@ vn_cmd_fix_image_memory_barrier_common(const struct vn_image *img,
 }
 
 static void
-vn_cmd_set_external_acquire_unmodified(VkBaseOutStructure *chain,
+vn_cmd_set_external_acquire_unmodified(void *barrier,
                                        struct vn_cmd_cached_storage *storage)
 {
    VkExternalMemoryAcquireUnmodifiedEXT *acquire_unmodified =
-      vk_find_struct(chain->pNext, EXTERNAL_MEMORY_ACQUIRE_UNMODIFIED_EXT);
+      vk_find_struct(barrier, EXTERNAL_MEMORY_ACQUIRE_UNMODIFIED_EXT);
    if (acquire_unmodified) {
       acquire_unmodified->acquireUnmodifiedMemory = VK_TRUE;
    } else {
       acquire_unmodified = vn_cached_get_acquire_unmodified(storage);
       *acquire_unmodified = (VkExternalMemoryAcquireUnmodifiedEXT){
          .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_ACQUIRE_UNMODIFIED_EXT,
-         .pNext = chain->pNext,
+         .pNext = vk_pnext_get_next(barrier),
          .acquireUnmodifiedMemory = VK_TRUE,
       };
-      chain->pNext = (void *)acquire_unmodified;
+      vk_pnext_set_next(barrier, acquire_unmodified);
    }
 }
 
@@ -315,8 +315,7 @@ vn_cmd_fix_image_memory_barrier(const struct vn_command_buffer *cmd,
    if (result.external_acquire_unmodified &&
        dev->physical_device->renderer_extensions
           .EXT_external_memory_acquire_unmodified)
-      vn_cmd_set_external_acquire_unmodified((VkBaseOutStructure *)barrier,
-                                             storage);
+      vn_cmd_set_external_acquire_unmodified(barrier, storage);
 }
 
 static void
@@ -344,8 +343,7 @@ vn_cmd_fix_image_memory_barrier2(const struct vn_command_buffer *cmd,
    if (result.external_acquire_unmodified &&
        dev->physical_device->renderer_extensions
           .EXT_external_memory_acquire_unmodified) {
-      vn_cmd_set_external_acquire_unmodified((VkBaseOutStructure *)barrier,
-                                             storage);
+      vn_cmd_set_external_acquire_unmodified(barrier, storage);
    }
 }
 
@@ -711,7 +709,7 @@ vn_CreateCommandPool(VkDevice device,
 
    list_inithead(&pool->free_query_records);
 
-   vn_cached_storage_init(&pool->storage, alloc);
+   vn_cached_storage_init(&pool->storage, &pool->base.vk.alloc);
 
    VkCommandPool pool_handle = vn_command_pool_to_handle(pool);
    vn_async_vkCreateCommandPool(dev->primary_ring, device, pCreateInfo, NULL,
@@ -731,7 +729,7 @@ vn_cmd_reset(struct vn_command_buffer *cmd)
 
    vn_cs_encoder_reset(&cmd->cs);
 
-   cmd->base.vk.state = MESA_VK_COMMAND_BUFFER_STATE_INITIAL;
+   vk_command_buffer_reset(&cmd->base.vk);
 
    /* reset cmd builder */
    vk_free(&cmd->base.vk.pool->alloc, cmd->builder.present_src_images);
@@ -763,13 +761,14 @@ vn_DestroyCommandPool(VkDevice device,
    vn_async_vkDestroyCommandPool(dev->primary_ring, device, commandPool,
                                  NULL);
 
+   vn_cached_storage_fini(&pool->storage);
+
+   vn_command_pool_base_fini(&pool->base);
+
    list_for_each_entry_safe(struct vn_cmd_query_record, record,
                             &pool->free_query_records, head)
       vk_free(alloc, record);
 
-   vn_cached_storage_fini(&pool->storage);
-
-   vn_command_pool_base_fini(&pool->base);
    vk_free(alloc, pool);
 }
 
@@ -989,11 +988,10 @@ vn_fix_command_buffer_begin_info(struct vn_command_buffer *cmd,
     * VkCommandBufferBeginInfo::flags, parameters of this structure are
     * ignored.
     */
-   VkBaseOutStructure *head = NULL;
-   VkBaseOutStructure *tail = NULL;
-   vk_foreach_struct_const(src, local->inheritance.pNext) {
+   void *cur = &local->inheritance;
+   vk_foreach_struct_const(sType, src, local->inheritance.pNext) {
       void *pnext = NULL;
-      switch (src->sType) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT:
          memcpy(
             &local->conditional_rendering, src,
@@ -1016,15 +1014,11 @@ vn_fix_command_buffer_begin_info(struct vn_command_buffer *cmd,
       }
 
       if (pnext) {
-         if (!head)
-            head = pnext;
-         else
-            tail->pNext = pnext;
-
-         tail = pnext;
+         vk_pnext_set_next(cur, pnext);
+         cur = pnext;
       }
    }
-   local->inheritance.pNext = head;
+   vk_pnext_set_next(cur, NULL);
 
    return &local->begin;
 }
@@ -2323,6 +2317,8 @@ vn_CmdPushDescriptorSetWithTemplate(
                templ->iub_count);
    STACK_ARRAY(VkWriteDescriptorSetAccelerationStructureKHR, accels,
                templ->accel_count);
+   STACK_ARRAY(VkAccelerationStructureKHR, accel_handles,
+               templ->accel_handle_count);
    struct vn_descriptor_set_update update = {
       .writes = writes,
       .img_infos = img_infos,
@@ -2330,6 +2326,7 @@ vn_CmdPushDescriptorSetWithTemplate(
       .bview_handles = bview_handles,
       .iubs = iubs,
       .accels = accels,
+      .accel_handles = accel_handles,
    };
    vn_descriptor_set_fill_update_with_template(templ, VK_NULL_HANDLE, pData,
                                                &update);
@@ -2344,6 +2341,7 @@ vn_CmdPushDescriptorSetWithTemplate(
    STACK_ARRAY_FINISH(bview_handles);
    STACK_ARRAY_FINISH(iubs);
    STACK_ARRAY_FINISH(accels);
+   STACK_ARRAY_FINISH(accel_handles);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2363,6 +2361,8 @@ vn_CmdPushDescriptorSetWithTemplate2(VkCommandBuffer commandBuffer,
                templ->iub_count);
    STACK_ARRAY(VkWriteDescriptorSetAccelerationStructureKHR, accels,
                templ->accel_count);
+   STACK_ARRAY(VkAccelerationStructureKHR, accel_handles,
+               templ->accel_handle_count);
    struct vn_descriptor_set_update update = {
       .writes = writes,
       .img_infos = img_infos,
@@ -2370,6 +2370,7 @@ vn_CmdPushDescriptorSetWithTemplate2(VkCommandBuffer commandBuffer,
       .bview_handles = bview_handles,
       .iubs = iubs,
       .accels = accels,
+      .accel_handles = accel_handles,
    };
    vn_descriptor_set_fill_update_with_template(
       templ, VK_NULL_HANDLE, pPushDescriptorSetWithTemplateInfo->pData,
@@ -2417,6 +2418,7 @@ vn_CmdPushDescriptorSetWithTemplate2(VkCommandBuffer commandBuffer,
    STACK_ARRAY_FINISH(bview_handles);
    STACK_ARRAY_FINISH(iubs);
    STACK_ARRAY_FINISH(accels);
+   STACK_ARRAY_FINISH(accel_handles);
 }
 
 VKAPI_ATTR void VKAPI_CALL

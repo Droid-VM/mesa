@@ -239,6 +239,8 @@ enum tu_cmd_flush_bits {
    TU_CMD_FLAG_BLIT_CACHE_CLEAN = 1 << 11,
    TU_CMD_FLAG_RTU_INVALIDATE = 1 << 12,
    TU_CMD_FLAG_WAIT_FOR_BR = 1 << 13,
+   TU_CMD_FLAG_CACHE_INVALIDATE_GMEM = 1 << 14,
+   TU_CMD_FLAG_SUBPASS_SLICE_FENCE = 1 << 15,
 
    TU_CMD_FLAG_ALL_CLEAN =
       TU_CMD_FLAG_CCU_CLEAN_DEPTH |
@@ -253,6 +255,7 @@ enum tu_cmd_flush_bits {
       TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
       TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
       TU_CMD_FLAG_CACHE_INVALIDATE |
+      TU_CMD_FLAG_CACHE_INVALIDATE_GMEM |
       TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE |
       TU_CMD_FLAG_CCHE_INVALIDATE |
       /* Treat CP_WAIT_FOR_ME as a "cache" that needs to be invalidated when a
@@ -291,6 +294,14 @@ struct tu_vs_params {
    uint32_t vertex_offset;
    uint32_t first_instance;
    uint32_t draw_id;
+   uint32_t view_index;
+   uint32_t draw_id_offset;
+   /* Whether the last emitted params were for a SW multiview replay. Both the
+    * size of the uploaded const and whether VFD registers are part of the draw
+    * state depend on it, so it has to invalidate the cache below.
+    */
+   bool sw_multiview;
+   bool indirect;
    bool empty;
 };
 
@@ -315,6 +326,17 @@ struct tu_render_pass_state
    bool disable_gmem;
    bool sysmem_single_prim_mode;
    bool lrz_disable_for_next_rp;
+   /* Sticky for the RP duration */
+   bool lrz_write_disabled;
+
+   /* We need to track a specific stencil state to determine if we can keep LRZ writes
+    * in stencil-writes-based-on-depth-test case.
+    */
+   struct {
+      uint8_t write_mask;
+      bool has_depth_dependent_stencil_write;
+      bool incompatible;
+   } lrz_stencil_tag;
 
    /* This is set if, at any point in the render pass, we were not able to
     * duplicate the viewport per-view due to the user using multiple viewports
@@ -326,6 +348,16 @@ struct tu_render_pass_state
 
    /* Track whether conditional predicate for COND_REG_EXEC is changed in draw_cs */
    bool draw_cs_writes_to_cond_pred;
+
+   /* Track whether there has been a pipeline barrier in the subpass with an
+    * INPUT_ATTACHMENT_READ destination access.
+    */
+   bool input_attachment_read_barrier;
+
+   /* Track whether any FS have used dynamic rendering with read-only input
+    * attachments.
+    */
+   bool read_only_input_attachments;
 
    uint32_t drawcall_count;
 
@@ -358,7 +390,11 @@ struct tu_render_pass_state
    const char *lrz_write_disable_reason;
    uint32_t lrz_write_disabled_at_draw;
 
-   const char *gmem_disable_reason;
+   /* Which check took the SYSMEM/GMEM decision away from the autotuner, or NULL
+    * if the autotuner was free to choose.
+    */
+   const char *force_render_mode_reason;
+
    const char *cb_disable_reason;
 };
 
@@ -563,7 +599,8 @@ struct tu_cmd_state
       struct tu_framebuffer *framebuffer;
       VkRect2D render_areas[MAX_VIEWS];
       bool per_layer_render_area;
-      bool fdm_subsampled;
+      bool fdm_any_subsampled;
+      bool fdm_custom_resolve_subsampled;
       enum tu_gmem_layout gmem_layout;
       uint32_t gmem_layout_divisor;
 
@@ -571,10 +608,12 @@ struct tu_cmd_state
       VkClearValue *clear_values;
 
       struct tu_lrz_state lrz;
+      bool lrz_write_disabled;
    } suspended_pass;
 
    bool fdm_enabled;
-   bool fdm_subsampled;
+   bool fdm_any_subsampled;
+   bool fdm_custom_resolve_subsampled;
 
    bool tessfactor_addr_set;
    bool predication_active;
@@ -624,6 +663,13 @@ struct tu_cmd_state
 
    struct tu_vs_params last_vs_params;
    bool last_draw_indexed;
+
+   /* Set by tu_sw_multiview_draw() while it replays a draw for a single view
+    * on devices without HW multiview. Outside of it SW multiview is never
+    * active, so ordinary draws are unaffected.
+    */
+   bool sw_multiview;
+   uint32_t sw_view_index;
 
    struct tu_tess_params tess_params;
 
@@ -697,6 +743,11 @@ struct tu_cmd_buffer
    struct tu_subpass_attachment dynamic_color_attachments[MAX_RTS];
    struct tu_subpass_attachment dynamic_input_attachments[MAX_RTS + 1];
    struct tu_subpass_attachment dynamic_resolve_attachments[MAX_RTS + 1];
+   /* The color attachments of the custom resolve subpass, which cannot share
+    * dynamic_resolve_attachments: the main subpass still needs its resolve
+    * list for any fixed-function resolves mixed into the pass.
+    */
+   struct tu_subpass_attachment dynamic_custom_resolve_attachments[MAX_RTS];
    struct tu_subpass_attachment dynamic_unresolve_attachments[MAX_RTS + 1];
    const struct tu_image_view *dynamic_attachments[3 * (MAX_RTS + 1) + 2];
    VkClearValue dynamic_clear_values[3 * (MAX_RTS + 1)];
@@ -752,6 +803,17 @@ struct tu_cmd_buffer
 
    bool prev_fsr_is_null;
 };
+
+struct vk_device_dispatch_table;
+
+/* Replaces the draw entrypoints with wrappers emulating multiview by replaying
+ * each draw once per view. Only for devices without HW multiview.
+ */
+void
+tu_install_sw_multiview_draw_entrypoints(
+   struct vk_device_dispatch_table *dispatch_table,
+   const struct fd_dev_info *info);
+
 VK_DEFINE_HANDLE_CASTS(tu_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
@@ -778,9 +840,6 @@ tu_attachment_gmem_offset_stencil(struct tu_cmd_buffer *cmd,
       layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height *
       att->samples;
 }
-
-void tu_render_pass_state_merge(struct tu_render_pass_state *dst,
-                                const struct tu_render_pass_state *src);
 
 VkResult tu_cmd_buffer_begin(struct tu_cmd_buffer *cmd_buffer,
                              const VkCommandBufferBeginInfo *pBeginInfo);
@@ -843,6 +902,7 @@ tu_emit_event_write(struct tu_cmd_buffer *cmd,
                     struct tu_cs *cs,
                     enum fd_gpu_event event);
 
+template <chip CHIP>
 void
 tu_flush_for_access(struct tu_cache_state *cache,
                     enum tu_cmd_access_mask src_mask,

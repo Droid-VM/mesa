@@ -390,7 +390,7 @@ static void si_decompress_depth(struct si_context *sctx, struct si_texture *tex,
        * when we don't decompress but TC-compatible planes are dirty.
        */
       si_make_DB_shader_coherent(sctx, tex->buffer.b.b.nr_samples, inplace_planes & PIPE_MASK_S,
-                                 tc_compat_htile);
+                                 tc_compat_htile, tex->htile_pipe_misaligned);
    }
    /* set_framebuffer_state takes care of coherency for single-sample.
     * The DB->CB copy uses CB for the final writes.
@@ -399,12 +399,11 @@ static void si_decompress_depth(struct si_context *sctx, struct si_texture *tex,
       si_make_CB_shader_coherent(sctx, tex->buffer.b.b.nr_samples, false, true /* no DCC */);
 }
 
-static bool si_decompress_sampler_depth_textures(struct si_context *sctx,
+static void si_decompress_sampler_depth_textures(struct si_context *sctx,
                                                  struct si_samplers *textures)
 {
    unsigned i;
    unsigned mask = textures->needs_depth_decompress_mask;
-   bool need_flush = false;
 
    assert(sctx->gfx_level < GFX12);
 
@@ -425,14 +424,7 @@ static bool si_decompress_sampler_depth_textures(struct si_context *sctx,
       si_decompress_depth(sctx, tex, sview->is_stencil_sampler ? PIPE_MASK_S : PIPE_MASK_Z,
                           view->u.tex.first_level, view->u.tex.last_level, 0,
                           util_max_layer(&tex->buffer.b.b, view->u.tex.first_level));
-
-      if (tex->need_flush_after_depth_decompression) {
-         need_flush = true;
-         tex->need_flush_after_depth_decompression = false;
-      }
    }
-
-   return need_flush;
 }
 
 static void si_blit_decompress_color(struct si_context *sctx, struct si_texture *tex,
@@ -507,7 +499,7 @@ static void si_blit_decompress_color(struct si_context *sctx, struct si_texture 
          /* Required before and after FMASK and DCC_DECOMPRESS. */
          if (custom_blend == sctx->custom_blend_fmask_decompress ||
              custom_blend == sctx->custom_blend_dcc_decompress)
-            si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_CB);
+            si_set_barrier_flags(sctx, AC_BARRIER_SYNC_AND_INV_CB);
 
          si_blitter_begin(sctx, SI_DECOMPRESS);
          util_blitter_custom_color(sctx->blitter, &cbsurf, custom_blend);
@@ -515,7 +507,7 @@ static void si_blit_decompress_color(struct si_context *sctx, struct si_texture 
 
          if (custom_blend == sctx->custom_blend_fmask_decompress ||
              custom_blend == sctx->custom_blend_dcc_decompress) {
-            si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_CB);
+            si_set_barrier_flags(sctx, AC_BARRIER_SYNC_AND_INV_CB);
          }
 
          /* When running FMASK decompression with DCC, we need to run the "eliminate fast clear" pass
@@ -811,7 +803,6 @@ static void si_decompress_resident_images(struct si_context *sctx)
 void gfx6_decompress_textures(struct si_context *sctx, unsigned shader_mask)
 {
    unsigned compressed_colortex_counter, mask;
-   bool need_flush = false;
 
    if (sctx->blitter_running)
       return;
@@ -829,7 +820,7 @@ void gfx6_decompress_textures(struct si_context *sctx, unsigned shader_mask)
       unsigned i = u_bit_scan(&mask);
 
       if (sctx->samplers[i].needs_depth_decompress_mask) {
-         need_flush |= si_decompress_sampler_depth_textures(sctx, &sctx->samplers[i]);
+         si_decompress_sampler_depth_textures(sctx, &sctx->samplers[i]);
       }
       if (sctx->samplers[i].needs_color_decompress_mask) {
          si_decompress_sampler_color_textures(sctx, &sctx->samplers[i]);
@@ -837,16 +828,6 @@ void gfx6_decompress_textures(struct si_context *sctx, unsigned shader_mask)
       if (sctx->images[i].needs_color_decompress_mask) {
          si_decompress_image_color_textures(sctx, &sctx->images[i]);
       }
-   }
-
-   if (sctx->gfx_level == GFX10_3 && need_flush) {
-      /* This fixes a corruption with the following sequence:
-       *   - fast clear depth
-       *   - decompress depth
-       *   - draw
-       * (see https://gitlab.freedesktop.org/drm/amd/-/issues/1810#note_1170171)
-       */
-      sctx->b.flush(&sctx->b, NULL, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW);
    }
 
    if (sctx->uses_bindless_samplers & shader_mask) {
@@ -1081,8 +1062,8 @@ static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
       simple_mtx_unlock(&sscreen->async_compute_context_lock);
    }
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdCopyImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdCopyImage;
 
    if (si_compute_blit(sctx, info, NULL, 0, 0, true))
       return;
@@ -1106,8 +1087,8 @@ void si_gfx_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
                              info->src.box.z, info->src.box.z + info->src.box.depth - 1,
                              false);
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdBlitImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdBlitImage;
 
    /* Use a custom MSAA resolving pixel shader. */
    void *fs = NULL;
@@ -1121,7 +1102,7 @@ void si_gfx_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
         /* No scaling */
         (info->dst.box.width == abs(info->src.box.width) &&
          info->dst.box.height == abs(info->src.box.height)))) {
-      union ac_ps_resolve_key key;
+      ac_ps_resolve_key key;
       key.key = 0;
 
       /* LLVM is slower on GFX10.3 and older because it doesn't form VMEM clauses and it's more
@@ -1204,7 +1185,7 @@ static bool si_generate_mipmap(struct pipe_context *ctx, struct pipe_resource *t
 
    si_blitter_begin(sctx, SI_BLIT | SI_DISABLE_RENDER_COND);
    util_blitter_generate_mipmap(sctx->blitter, tex, format, base_level, last_level, first_layer,
-                                last_layer);
+                                last_layer, 1);
    si_blitter_end(sctx);
 
    sctx->generate_mipmap_for_depth = false;

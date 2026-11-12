@@ -5,7 +5,9 @@ use crate::format::Format;
 use crate::image::Image;
 use crate::tiling::{GOBType, Tiling};
 
-use bitview::*;
+use mesa_util::bitview::*;
+use mesa_util::format::pipe_format::*;
+use mesa_util::format::*;
 
 pub const MAX_DRM_FORMAT_MODS: usize = 7;
 
@@ -245,7 +247,7 @@ impl BlockLinearModifier {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_drm_format_mods_for_format(
     dev: &nil_rs_bindings::nv_device_info,
     format: Format,
@@ -274,9 +276,9 @@ pub fn drm_format_mods_for_format(
     }
 
     // These formats don't have a corresponding fourcc format
-    let p_format: nil_rs_bindings::pipe_format = format.into();
-    if p_format == nil_rs_bindings::PIPE_FORMAT_R11G11B10_FLOAT
-        || p_format == nil_rs_bindings::PIPE_FORMAT_R9G9B9E5_FLOAT
+    let p_format: pipe_format = format.into();
+    if p_format == PIPE_FORMAT_R11G11B10_FLOAT
+        || p_format == PIPE_FORMAT_R9G9B9E5_FLOAT
     {
         return;
     }
@@ -393,7 +395,7 @@ pub fn select_best_drm_format_mod(
     best
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_select_best_drm_format_mod(
     dev: &nil_rs_bindings::nv_device_info,
     format: Format,

@@ -191,7 +191,11 @@ anv_direct_descriptor_data_for_type(const struct anv_physical_device *device,
       UNREACHABLE("Unsupported descriptor type");
    }
 
-   if (binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
+   if (device->uses_efficient_64bit) {
+      /* BTI doesn't exist in 64bit mode */
+      data &= ~(ANV_DESCRIPTOR_BTI_SURFACE_STATE |
+                ANV_DESCRIPTOR_BTI_SAMPLER_STATE);
+   } else if (binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
       if (set_flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT) {
          /* Push descriptors are special with descriptor buffers. On Gfx12.5+
           * they have their own pool and are not reachable by the binding
@@ -273,11 +277,9 @@ anv_descriptor_data_size(enum anv_descriptor_data data,
    unsigned surface_size = 0;
    unsigned sampler_size = 0;
 
-   if (data & ANV_DESCRIPTOR_INDIRECT_SAMPLED_IMAGE)
-      surface_size += align(sizeof(struct anv_sampled_image_descriptor), 8);
-
-   if (data & ANV_DESCRIPTOR_INDIRECT_STORAGE_IMAGE)
-      surface_size += align(sizeof(struct anv_storage_image_descriptor), 8);
+   if (data & (ANV_DESCRIPTOR_INDIRECT_SAMPLED_IMAGE |
+               ANV_DESCRIPTOR_INDIRECT_STORAGE_IMAGE))
+      surface_size += align(sizeof(struct anv_image_descriptor), 8);
 
    if (data & ANV_DESCRIPTOR_INDIRECT_ADDRESS_RANGE)
       surface_size += align(sizeof(struct anv_address_range_descriptor), 8);
@@ -448,7 +450,11 @@ anv_descriptor_requires_bindless(const struct anv_physical_device *pdevice,
                                  const struct anv_descriptor_set_layout *set,
                                  const struct anv_descriptor_set_binding_layout *binding)
 {
-   if (ANV_DEBUG(BINDLESS))
+   /* No binding table in efficient 64bit mode, always bindless */
+   if (pdevice->uses_efficient_64bit)
+      return true;
+
+   if (pdevice->drirc.features.always_bindless)
       return anv_descriptor_supports_bindless(pdevice, set, binding);
 
    if (set->vk.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT)
@@ -1125,8 +1131,10 @@ anv_descriptor_pool_heap_init(struct anv_device *device,
       heap->size = align(size, 4096);
 
       enum anv_bo_alloc_flags alloc_flags;
-      alloc_flags = samplers ? ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL_FLAGS :
-                               ANV_BO_ALLOC_DESCRIPTOR_POOL_FLAGS;
+      alloc_flags =
+         device->physical->uses_efficient_64bit ? ANV_BO_ALLOC_DESCRIPTOR_POOL_FLAGS :
+         samplers ? ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL_FLAGS :
+         ANV_BO_ALLOC_DESCRIPTOR_POOL_FLAGS;
       VkResult result = anv_device_alloc_bo(device,
                                             bo_name, heap->size,
                                             alloc_flags,
@@ -1254,7 +1262,7 @@ VkResult anv_CreateDescriptorPool(
     * samplers.
     */
    uint32_t max_descriptor_count = 0;
-   if (device->physical->instance->drirc.debug.upper_bound_desc_pool_sampler &&
+   if (device->physical->drirc.debug.upper_bound_desc_pool_sampler &&
        !device->physical->indirect_descriptors) {
       for (uint32_t i = 0; i < pCreateInfo->poolSizeCount; i++) {
          max_descriptor_count = MAX2(pCreateInfo->pPoolSizes[i].descriptorCount,
@@ -2040,16 +2048,13 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
       bind_layout->data;
 
    if (data & ANV_DESCRIPTOR_INDIRECT_SAMPLED_IMAGE) {
-      struct anv_sampled_image_descriptor desc_data[3];
+      struct anv_image_descriptor desc_data[3];
       memset(desc_data, 0, sizeof(desc_data));
 
       if (image_view) {
          for (unsigned p = 0; p < image_view->n_planes; p++) {
-            const struct anv_surface_state *sstate =
-               anv_image_view_texture_surface_state(image_view, p,
-                                                    desc->layout);
-            desc_data[p].image =
-               anv_surface_state_to_handle(device->physical, sstate->state);
+            desc_data[p] = *anv_image_view_texture_indirect_descriptor(
+               image_view, p, desc->layout);
          }
       }
 
@@ -2069,21 +2074,9 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
    if (data & ANV_DESCRIPTOR_INDIRECT_STORAGE_IMAGE) {
       if (image_view) {
          assert(image_view->n_planes == 1);
-         struct anv_storage_image_descriptor desc_data = {
-            .vanilla = anv_surface_state_to_handle(
-               device->physical,
-               anv_image_view_storage_surface_state(image_view)->state),
-            .image_depth = image_view->vk.storage.z_slice_count,
-            .image_address =  anv_address_physical(
-               image_view->image->bindings[
-                  ANV_IMAGE_MEMORY_BINDING_MAIN].address),
-            .tile_mode = image_view->image->planes[0].primary_surface.isl.tiling == ISL_TILING_LINEAR ? 0 : 0xffffffff,
-            .row_pitch_B = image_view->image->planes[0].primary_surface.isl.row_pitch_B,
-            .qpitch = image_view->image->planes[0].primary_surface.isl.array_pitch_el_rows,
-            .format = image_view->planes[0].isl.format,
-            .min_array_element = image_view->vk.base_array_layer,
-         };
-         memcpy(desc_surface_map, &desc_data, sizeof(desc_data));
+         memcpy(desc_surface_map,
+                &image_view->planes[0].storage_indirect_descriptor,
+                sizeof(image_view->planes[0].storage_indirect_descriptor));
       } else {
          memset(desc_surface_map, 0, bind_layout->descriptor_surface_stride);
       }
@@ -2205,20 +2198,32 @@ anv_descriptor_set_write_buffer_view(struct anv_device *device,
    }
 
    if (data & ANV_DESCRIPTOR_INDIRECT_SAMPLED_IMAGE) {
-      struct anv_sampled_image_descriptor desc_data = {
+      const uint32_t format_bs = isl_format_get_layout(buffer_view->format)->bpb / 8;
+      struct anv_image_descriptor desc_data = {
          .image = anv_surface_state_to_handle(
             device->physical, buffer_view->general.state),
+         .width = buffer_view->vk.range / format_bs,
+         .address = anv_address_physical(buffer_view->address),
+         .format = buffer_view->format,
+         .height = 1,
+         .depth_or_layer_count = 1,
+         .level_count = 1,
       };
       memcpy(desc_map, &desc_data, sizeof(desc_data));
    }
 
    if (data & ANV_DESCRIPTOR_INDIRECT_STORAGE_IMAGE) {
-      struct anv_storage_image_descriptor desc_data = {
-         .vanilla = anv_surface_state_to_handle(
+      const uint32_t format_bs = isl_format_get_layout(buffer_view->format)->bpb / 8;
+      struct anv_image_descriptor desc_data = {
+         .image = anv_surface_state_to_handle(
             device->physical, buffer_view->storage.state),
-         .image_address = anv_address_physical(buffer_view->address),
+         .width = buffer_view->vk.range / format_bs,
+         .address = anv_address_physical(buffer_view->address),
          /* tile_mode, row_pitch_B, qpitch = 0 */
          .format = buffer_view->format,
+         .height = 1,
+         .depth_or_layer_count = 1,
+         .level_count = 1,
       };
       memcpy(desc_map, &desc_data, sizeof(desc_data));
    }
@@ -3062,8 +3067,8 @@ VkResult anv_WriteResourceDescriptorsEXT(
                enum isl_aux_usage aux_usage =
                   anv_layout_to_aux_usage(device->info, image, aspect,
                                           is_storage ?
-                                          VK_IMAGE_USAGE_STORAGE_BIT :
-                                          VK_IMAGE_USAGE_SAMPLED_BIT,
+                                          VK_IMAGE_USAGE_2_STORAGE_BIT_KHR :
+                                          VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,
                                           img_info->layout,
                                           VK_QUEUE_GRAPHICS_BIT |
                                           VK_QUEUE_COMPUTE_BIT);
@@ -3077,7 +3082,7 @@ VkResult anv_WriteResourceDescriptorsEXT(
                                             aux_usage, NULL,
                                             read_only_layout ?
                                             ANV_IMAGE_VIEW_STATE_TEXTURE_OPTIMAL : 0,
-                                            &state);
+                                            &state, NULL);
 
                memcpy(out->address + vplane * ANV_SURFACE_STATE_SIZE,
                       state.state_data.data, ANV_SURFACE_STATE_SIZE);

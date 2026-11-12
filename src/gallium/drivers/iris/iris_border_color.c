@@ -71,6 +71,9 @@ iris_init_border_color_pool(struct iris_bufmgr *bufmgr,
 void
 iris_destroy_border_color_pool(struct iris_border_color_pool *pool)
 {
+   if (!pool->bo)
+      return;
+
    iris_bo_unreference(pool->bo);
    ralloc_free(pool->ht);
    simple_mtx_destroy(&pool->lock);

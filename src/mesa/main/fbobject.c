@@ -595,11 +595,6 @@ _mesa_update_texture_renderbuffer(struct gl_context *ctx,
          return;
       }
       att->Renderbuffer = rb;
-
-      /* This can't get called on a texture renderbuffer, so set it to NULL
-       * for clarity compared to user renderbuffers.
-       */
-      rb->AllocStorage = NULL;
    }
 
    if (!texImage)
@@ -1320,6 +1315,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
    GLint numColorStorageSamples = -1;
    GLint numDepthSamples = -1;
    GLint fixedSampleLocations = -1;
+   int msrttSamples = -1;
    GLint i;
    GLuint j;
    /* Covers max_layer_count, is_layered, and layer_tex_target */
@@ -1427,7 +1423,8 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
          if (!is_format_color_renderable(ctx, attFormat,
                                          texImg->InternalFormat) &&
              !is_legal_depth_format(ctx, f) &&
-             f != GL_STENCIL_INDEX) {
+             f != GL_STENCIL_INDEX &&
+            !util_format_is_yuv(attFormat)) {
             fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             fbo_incomplete(ctx, "texture attachment incomplete", -1);
             return;
@@ -1472,6 +1469,25 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
       else {
          assert(att->Type == GL_NONE);
          continue;
+      }
+
+      /* From the GL_EXT_multisampled_render_to_texture spec:
+       *
+       *    "Also, FBOs cannot combine attachments that have associated
+       *    multisample data specified by the mechanisms described in this
+       *    extension with attachments allocated using the core OpenGL ES 3.1
+       *    mechanisms, such as TexStorage2DMultisample."
+       */
+      if (attNumSamples > 0) {
+         bool msrtt = att->Type == GL_TEXTURE ? att->NumSamples > 0
+                                              : att->Renderbuffer->msrtt;
+         if (msrttSamples < 0) {
+            msrttSamples = msrtt;
+         } else if (msrttSamples != msrtt) {
+            fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+            fbo_incomplete(ctx, "implicit and explicit multisample mixed", -1);
+            return;
+         }
       }
 
       if (i >= 0) {
@@ -1807,7 +1823,6 @@ allocate_renderbuffer_locked(struct gl_context *ctx, GLuint renderbuffer,
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
       return NULL;
    }
-   assert(newRb->AllocStorage);
    _mesa_HashInsertLocked(&ctx->Shared->RenderBuffers, renderbuffer,
                           newRb);
 
@@ -2768,7 +2783,7 @@ void
 _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
                            GLenum internalFormat, GLsizei width,
                            GLsizei height, GLsizei samples,
-                           GLsizei storageSamples)
+                           GLsizei storageSamples, bool msrtt)
 {
    const GLenum baseFormat = _mesa_base_fbo_format(ctx, internalFormat);
 
@@ -2793,7 +2808,8 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
        rb->Width == (GLuint) width &&
        rb->Height == (GLuint) height &&
        rb->NumSamples == samples &&
-       rb->NumStorageSamples == storageSamples) {
+       rb->NumStorageSamples == storageSamples &&
+       rb->msrtt == msrtt) {
       /* no change in allocation needed */
       return;
    }
@@ -2802,10 +2818,10 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
    rb->Format = MESA_FORMAT_NONE;
    rb->NumSamples = samples;
    rb->NumStorageSamples = storageSamples;
+   rb->msrtt = msrtt;
 
    /* Now allocate the storage */
-   assert(rb->AllocStorage);
-   if (rb->AllocStorage(ctx, rb, internalFormat, width, height)) {
+   if (_mesa_renderbuffer_alloc_storage(ctx, rb, internalFormat, width, height)) {
       /* No error - check/set fields now */
       /* If rb->Format == MESA_FORMAT_NONE, the format is unsupported. */
       assert(rb->Width == (GLuint) width);
@@ -2840,7 +2856,7 @@ static void
 renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
                      GLenum internalFormat, GLsizei width,
                      GLsizei height, GLsizei samples, GLsizei storageSamples,
-                     const char *func)
+                     bool msrtt, const char *func)
 {
    GLenum baseFormat;
    GLenum sample_count_error;
@@ -2894,7 +2910,7 @@ renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
    }
 
    _mesa_renderbuffer_storage(ctx, rb, internalFormat, width, height, samples,
-                              storageSamples);
+                              storageSamples, msrtt && samples > 0);
 }
 
 /**
@@ -2917,7 +2933,7 @@ renderbuffer_storage_named(GLuint renderbuffer, GLenum internalFormat,
    }
 
    renderbuffer_storage(ctx, rb, internalFormat, width, height, samples,
-                        storageSamples, func);
+                        storageSamples, false, func);
 }
 
 /**
@@ -2928,7 +2944,8 @@ renderbuffer_storage_named(GLuint renderbuffer, GLenum internalFormat,
 static void
 renderbuffer_storage_target(GLenum target, GLenum internalFormat,
                             GLsizei width, GLsizei height, GLsizei samples,
-                            GLsizei storageSamples, const char *func)
+                            GLsizei storageSamples, bool msrtt,
+                            const char *func)
 {
    GET_CURRENT_CONTEXT(ctx);
 
@@ -2944,7 +2961,7 @@ renderbuffer_storage_target(GLenum target, GLenum internalFormat,
    }
 
    renderbuffer_storage(ctx, ctx->CurrentRenderbuffer, internalFormat, width,
-                        height, samples, storageSamples, func);
+                        height, samples, storageSamples, msrtt, func);
 }
 
 void GLAPIENTRY
@@ -2980,6 +2997,7 @@ _mesa_EGLImageTargetRenderbufferStorageOES(GLenum target, GLeglImageOES image)
 
    FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
 
+   rb->msrtt = false;
    st_egl_image_target_renderbuffer_storage(ctx, rb, image);
 }
 
@@ -3012,7 +3030,7 @@ _mesa_RenderbufferStorage(GLenum target, GLenum internalFormat,
     * a token value here just for error reporting purposes.
     */
    renderbuffer_storage_target(target, internalFormat, width, height,
-                               NO_SAMPLES, 0, "glRenderbufferStorage");
+                               NO_SAMPLES, 0, false, "glRenderbufferStorage");
 }
 
 
@@ -3022,8 +3040,33 @@ _mesa_RenderbufferStorageMultisample(GLenum target, GLsizei samples,
                                      GLsizei width, GLsizei height)
 {
    renderbuffer_storage_target(target, internalFormat, width, height,
-                               samples, samples,
+                               samples, samples, false,
                                "glRenderbufferStorageMultisample");
+}
+
+
+void GLAPIENTRY
+_mesa_RenderbufferStorageMultisampleEXT(GLenum target, GLsizei samples,
+                                        GLenum internalFormat,
+                                        GLsizei width, GLsizei height)
+{
+   GET_CURRENT_CONTEXT(ctx);
+
+   /* From the GL_EXT_multisampled_render_to_texture spec, like that of
+    * GL_EXT_framebuffer_multisample:
+    *
+    *    "If [...] samples is greater than the value of MAX_SAMPLES_EXT, then
+    *    the error INVALID_VALUE is generated."
+    */
+   if (samples > ctx->Const.MaxSamples) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "glRenderbufferStorageMultisampleEXT(samples=%d)", samples);
+      return;
+   }
+
+   renderbuffer_storage_target(target, internalFormat, width, height,
+                               samples, samples, _mesa_is_gles(ctx),
+                               "glRenderbufferStorageMultisampleEXT");
 }
 
 
@@ -3044,7 +3087,7 @@ _mesa_RenderbufferStorageMultisampleAdvancedAMD(
    }
 
    renderbuffer_storage_target(target, internalFormat, width, height,
-                               samples, storageSamples,
+                               samples, storageSamples, false,
                                "glRenderbufferStorageMultisampleAdvancedAMD");
 }
 
@@ -3077,7 +3120,7 @@ _mesa_NamedRenderbufferStorageEXT(GLuint renderbuffer, GLenum internalformat,
    _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
 
    renderbuffer_storage(ctx, rb, internalformat, width, height, NO_SAMPLES,
-                        0, "glNamedRenderbufferStorageEXT");
+                        0, false, "glNamedRenderbufferStorageEXT");
 }
 
 
@@ -3109,7 +3152,7 @@ _mesa_NamedRenderbufferStorageMultisampleEXT(GLuint renderbuffer, GLsizei sample
    _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
 
    renderbuffer_storage(ctx, rb, internalformat, width, height,
-                        samples, samples,
+                        samples, samples, false,
                         "glNamedRenderbufferStorageMultisample");
 }
 
@@ -3832,13 +3875,6 @@ check_multiview_texture_target(struct gl_context *ctx, GLuint texture, GLenum ta
             _mesa_enum_to_string(target));
       ret = false;
    }
-   else if (level > 0)
-   {
-       _mesa_error(ctx, GL_INVALID_OPERATION,
-            "%s(invalid texture target %s), multisample is supported by OVR_multiview2", caller,
-            _mesa_enum_to_string(target));
-      ret = false;
-   }
    else if ((numViews > MAX_VIEWS_OVR) || (numViews <= 0))
    {
       _mesa_error(ctx, GL_INVALID_VALUE,
@@ -3959,6 +3995,15 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
       err = dims != 3 ||
             (_mesa_is_gles2(ctx) && !ctx->Extensions.OES_texture_3D);
       break;
+   /* GL_EXT_YUV_target: TEXTURE_EXTERNAL_OES is a 2D texture target.
+    * It requires GLES3 and EXT_YUV_target extension.
+    * Note: OES_EGL_image_external also supports TEXTURE_EXTERNAL_OES,
+    * but EXT_YUV_target adds rendering capability.
+    */
+   case GL_TEXTURE_EXTERNAL_OES:
+      err = dims != 2 || !(_mesa_is_gles3(ctx) && ctx->Extensions.EXT_YUV_target &&
+            ctx->Extensions.OES_EGL_image_external);
+      break;
    default:
       _mesa_error(ctx, GL_INVALID_ENUM,
                   "%s(unknown textarget 0x%x)", caller, textarget);
@@ -4053,8 +4098,14 @@ check_level(struct gl_context *ctx, struct gl_texture_object *texObj,
     *    "If texture refers to an immutable-format texture, level must be
     *     greater than or equal to zero and smaller than the value of
     *     TEXTURE_VIEW_NUM_LEVELS for texture."
+    *
+    * This same restriction was added for OpenGL ES 3.2 but not for 3.1 or
+    * 3.0. In these cases, the level only has to be no larger than log2 of the
+    * maximum, which is enforced by _mesa_max_texture_levels().
     */
-   const int max_levels = texObj->Immutable ? texObj->Attrib.ImmutableLevels :
+   const bool is_immutable = texObj->Immutable &&
+                             (!_mesa_is_gles(ctx) || _mesa_is_gles32(ctx));
+   const int max_levels = is_immutable ? texObj->Attrib.ImmutableLevels :
                           _mesa_max_texture_levels(ctx, target);
 
    if (level < 0 || level >= max_levels) {
@@ -4076,6 +4127,19 @@ static bool
 check_samples(struct gl_context *ctx, struct gl_texture_object *texObj,
             GLenum target, GLint level, GLint samples, const char *caller)
 {
+   /* From the GL_EXT_multisampled_render_to_texture spec:
+    *
+    *    "If samples is greater than the value of MAX_SAMPLES_EXT, then the
+    *    error INVALID_VALUE is generated."
+    *
+    * GL_OVR_multiview_multisampled_render_to_texture has the same error, and
+    * a negative sizei is INVALID_VALUE as usual.
+    */
+   if (samples < 0 || samples > ctx->Const.MaxSamples) {
+      _mesa_error(ctx, GL_INVALID_VALUE, "%s(samples=%d)", caller, samples);
+      return false;
+   }
+
    if (samples > 0) {
       const struct gl_texture_image *texImage =
          texObj->Image[_mesa_tex_target_to_face(target)][level];
@@ -4267,6 +4331,31 @@ framebuffer_texture_with_dims(int dims, GLenum target, GLuint framebuffer,
       if (!check_textarget(ctx, dims, texObj->Target, textarget, caller))
          return;
 
+      /* GL_EXT_YUV_target: TEXTURE_EXTERNAL_OES can only attach to COLOR_ATTACHMENT0 */
+      if (texObj->Target == GL_TEXTURE_EXTERNAL_OES && attachment != GL_COLOR_ATTACHMENT0) {
+            _mesa_error(ctx, GL_INVALID_OPERATION,
+                        "%s(TEXTURE_EXTERNAL_OES can only attach to COLOR_ATTACHMENT0)",
+                        caller);
+            return;
+      }
+
+      /* GL_EXT_YUV_target spec:
+       * "TEXTURE_EXTERNAL_OES target with RGB color format are not allowed
+       *  with this extension."
+       * Only YUV-format external textures may be used as render targets.
+       * If the texture is surface-based (EGL image) and its pipe format is
+       * not a YUV format, reject the attachment.
+       */
+      if (textarget == GL_TEXTURE_EXTERNAL_OES &&
+          ctx->Extensions.EXT_YUV_target &&
+          texObj->surface_based &&
+          !util_format_is_yuv(texObj->surface_format)) {
+         _mesa_error(ctx, GL_INVALID_OPERATION,
+                     "%s(TEXTURE_EXTERNAL_OES with RGB color format is not "
+                     "allowed with GL_EXT_YUV_target)", caller);
+         return;
+      }
+
       if ((dims == 3) && !check_layer(ctx, texObj->Target, layer, caller))
          return;
 
@@ -4330,6 +4419,24 @@ _mesa_FramebufferTexture2DMultisampleEXT(GLenum target, GLenum attachment,
                                          GLenum textarget, GLuint texture,
                                          GLint level, GLsizei samples)
 {
+   GET_CURRENT_CONTEXT(ctx);
+
+   /* From the GL_EXT_multisampled_render_to_texture spec:
+    *
+    *    "The error INVALID_ENUM is generated if
+    *    FramebufferTexture2DMultisampleEXT is called with a <textarget> that
+    *    is not TEXTURE_2D, TEXTURE_CUBE_MAP_POSITIVE_X, [...]"
+    *
+    * unlike FramebufferTexture2D, which raises INVALID_OPERATION for other
+    * texture targets.
+    */
+   if (textarget != GL_TEXTURE_2D && !_mesa_is_cube_face(textarget)) {
+      _mesa_error(ctx, GL_INVALID_ENUM,
+                  "glFramebufferTexture2DMultisampleEXT(textarget=%s)",
+                  _mesa_enum_to_string(textarget));
+      return;
+   }
+
    framebuffer_texture_with_dims(2, target, 0, attachment, textarget, texture,
                                  level, samples, 0,
                                  "glFramebufferTexture2DMultisampleEXT",
@@ -4438,11 +4545,7 @@ frame_buffer_texture(GLuint framebuffer, GLenum target,
       if (multiview) {
          /* We do this regardless of no_error because this sets multiviews */
          if (!check_multiview_texture_target(ctx, texture, texObj->Target, level, layer, numviews, func))
-         {
-            _mesa_error(ctx, GL_INVALID_OPERATION, "%s(invalid target %s)",
-                        func, _mesa_enum_to_string(target));
             return;
-         }
       }
 
       if (!no_error) {

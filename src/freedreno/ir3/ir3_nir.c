@@ -90,6 +90,7 @@ load_driver_ubo(nir_builder *b, unsigned components, nir_def *ubo, unsigned offs
 {
    return nir_load_ubo(b, components, 32, ubo,
                        nir_imm_int(b, offset * sizeof(uint32_t)),
+                       .access = ACCESS_CAN_SPECULATE,
                        .align_mul = 16,
                        .align_offset = (offset % 4) * sizeof(uint32_t),
                        .range_base = offset * sizeof(uint32_t),
@@ -203,11 +204,19 @@ ir3_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
          num_components <= 4;
    }
 
+   int size = num_components * byte_size;
+
+   if ((low->intrinsic == nir_intrinsic_load_scratch) ||
+       (low->intrinsic == nir_intrinsic_store_scratch)) {
+      /* limit max size/alignment to 32b */
+      return size <= 32 && align_mul >= byte_size &&
+         align_offset % byte_size == 0 &&
+         num_components <= 4;
+   }
+
    assert(bit_size >= 8);
    if (bit_size != 32)
       return false;
-
-   int size = num_components * byte_size;
 
    /* Don't care about alignment past vec4. */
    assert(util_is_power_of_two_nonzero(align_mul));
@@ -270,6 +279,8 @@ ir3_lower_bit_size(const nir_instr *instr, UNUSED void *data)
       case nir_op_uge:
       case nir_op_ult:
       case nir_op_bit_count:
+      case nir_op_bitz:
+      case nir_op_bitnz:
          return nir_src_bit_size(alu->src[0].src) == 8 ? 16 : 0;
       default:
          break;
@@ -321,9 +332,9 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       if (gcm == -1)
          gcm = debug_get_num_option("GCM", 0);
       if (gcm == 1)
-         progress |= OPT(s, nir_opt_gcm, true, true);
+         progress |= OPT(s, nir_opt_gcm, true);
       else if (gcm == 2)
-         progress |= OPT(s, nir_opt_gcm, false, true);
+         progress |= OPT(s, nir_opt_gcm, false);
       nir_opt_peephole_select_options peephole_select_options = {
          .limit = 16,
          .indirect_load_ok = true,
@@ -344,15 +355,13 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       if (is_compute_or_frag(s->info.stage)) {
          progress |= OPT(s, nir_opt_phi_precision);
       }
+      progress |= OPT(s, nir_opt_fp_math_ctrl);
       progress |= OPT(s, nir_opt_algebraic);
       progress |= OPT(s, nir_lower_alu);
       progress |= OPT(s, nir_lower_pack);
       progress |= OPT(s, nir_lower_bit_size, ir3_lower_bit_size, NULL);
       progress |= OPT(s, nir_opt_constant_folding);
       progress |= OPT(s, nir_opt_uub, &options->opt_uub_options);
-
-      /* Remove unused components from IO loads. */
-      progress |= OPT(s, nir_opt_shrink_vectors, true);
 
       const nir_opt_offsets_options offset_options = {
          /* How large an offset we can encode in the instr's immediate field.
@@ -392,6 +401,7 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       }
       progress |= OPT(s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       progress |= OPT(s, nir_opt_loop_unroll);
+      progress |= OPT(s, nir_opt_phi_to_bool);
       progress |= OPT(s, nir_opt_remove_phis);
       progress |= OPT(s, nir_opt_undef);
       did_progress |= progress;
@@ -803,8 +813,11 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
    nir_lower_idiv_options idiv_options = {
       .allow_fp16 = true,
    };
-   bool idiv_progress = OPT(s, nir_opt_idiv_const, 8);
-   idiv_progress |= OPT(s, nir_lower_idiv, &idiv_options);
+   bool progress = OPT(s, nir_opt_idiv_const, 8);
+   progress |= OPT(s, nir_lower_idiv, &idiv_options);
+
+   /* Remove unused components from IO loads. */
+   progress |= OPT(s, nir_opt_shrink_vectors, true);
 
    /* Do load/store vectorization after the first opt loop to give us a chance
     * to optimize lowered SSBO pointers. Without the first opt loop every
@@ -813,14 +826,14 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
     */
    nir_load_store_vectorize_options vectorize_opts = {
       .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_shared |
-               nir_var_uniform | nir_var_mem_global,
+               nir_var_uniform | nir_var_mem_global | nir_var_shader_temp,
       .callback = ir3_nir_should_vectorize_mem,
       .robust_modes = options->robust_modes,
       .cb_data = compiler,
    };
-   bool vectorize_progress = OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
+   progress |= OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
 
-   if (idiv_progress || vectorize_progress)
+   if (progress)
       ir3_optimize_loop(compiler, &optimize_options, s);
 
    OPT(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
@@ -998,7 +1011,6 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
       NIR_PASS(_, s, nir_opt_barycentric, true);
       NIR_PASS(_, s, ir3_nir_lower_load_sample_pos);
       NIR_PASS(_, s, ir3_nir_lower_load_barycentric_at_offset);
-      NIR_PASS(_, s, ir3_nir_move_varying_inputs);
       NIR_PASS(_, s, nir_lower_fb_read);
       NIR_PASS(_, s, ir3_nir_lower_layer_id);
       if (!compiler->info->props.shading_rate_matches_vk)
@@ -1065,6 +1077,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
             .lower_rotate_to_shuffle = !compiler->has_shfl,
             .lower_rotate_clustered_to_shuffle = true,
             .lower_inverse_ballot = true,
+            .lower_quad_vote = true,
             .lower_reduce = true,
             .filter = ir3_nir_lower_subgroups_filter,
             .filter_data = compiler,
@@ -1101,6 +1114,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
    OPT(s, ir3_nir_apply_trig_workarounds);
 
    const nir_lower_image_options lower_image_opts = {
+      /* resinfo returns a cube (array)'s layer count, not its cube count. */
       .lower_cube_size = true,
       .lower_image_samples_to_one = true
    };
@@ -1112,8 +1126,11 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
    NIR_PASS(_, s, nir_lower_idiv,
             &lower_idiv_options); /* idiv generated by cube lowering */
 
-   /* The resinfo opcode returns the size in dwords on a4xx */
-   if (compiler->gen == 4)
+   /* The resinfo opcode returns the size in dwords on a4xx and a5xx, which is
+    * what the SSBO descriptor's size is (and what loads and stores are
+    * bounds-checked against).
+    */
+   if (compiler->gen < 6)
       OPT(s, ir3_nir_lower_ssbo_size, 2);
 
    /* The resinfo opcode we have for getting the SSBO size on a6xx returns a
@@ -1240,6 +1257,7 @@ ir3_get_ra_size_align_bytes(const glsl_type *type, unsigned *size, unsigned *ali
    case GLSL_TYPE_UINT:
    case GLSL_TYPE_INT:
    case GLSL_TYPE_FLOAT:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
    case GLSL_TYPE_DOUBLE:
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64: {
@@ -1452,6 +1470,25 @@ ir3_nir_set_threadsize(struct ir3_shader_variant *v, const nir_shader *s)
    }
 }
 
+static bool
+lower_draw_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_draw_id)
+      return false;
+
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def_rewrite_uses_after(&intr->def,
+                        nir_iadd(b, &intr->def, nir_load_draw_id_offset_ir3(b)));
+   return true;
+}
+
+static bool
+ir3_nir_lower_draw_id(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader, lower_draw_id,
+                                     nir_metadata_control_flow, NULL);
+}
+
 void
 ir3_nir_lower_variant(struct ir3_shader_variant *so,
                       const struct ir3_shader_nir_options *options,
@@ -1521,6 +1558,16 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
       }
    }
 
+   const enum nir_lower_non_uniform_access_type non_uniform_access_types =
+      nir_lower_non_uniform_ubo_access | nir_lower_non_uniform_ssbo_access |
+      nir_lower_non_uniform_get_ssbo_size |
+      nir_lower_non_uniform_texture_access |
+      nir_lower_non_uniform_texture_query | nir_lower_non_uniform_image_access |
+      nir_lower_non_uniform_image_query;
+
+   if (nir_has_non_uniform_access(s, non_uniform_access_types))
+      progress |= OPT(s, nir_opt_non_uniform_access);
+
    /* Move large constant variables to the constants attached to the NIR
     * shader, which we will upload in the immediates range.  This generates
     * amuls, so we need to clean those up after.
@@ -1570,6 +1617,9 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
    progress |= OPT(s, nir_lower_64bit_phis);
 
    progress |= OPT(s, ir3_nir_opt_subgroups, so);
+
+   if (so->compiler->options.lower_draw_id)
+      progress |= OPT(s, ir3_nir_lower_draw_id);
 
    if (so->compiler->info->props.load_shader_consts_via_preamble)
       progress |= OPT(s, ir3_nir_lower_driver_params_to_ubo, so);
@@ -1703,6 +1753,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
          };
          OPT(s, nir_opt_16bit_tex_image, &opt_16bit_options);
       }
+      OPT(s, nir_opt_algebraic_distribute_src_mods);
       OPT(s, nir_opt_constant_folding);
       OPT(s, nir_opt_copy_prop);
       OPT(s, nir_opt_dce);
@@ -1721,7 +1772,9 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
 }
 
 bool
-ir3_get_driver_param_info(const nir_shader *shader, nir_intrinsic_instr *intr,
+ir3_get_driver_param_info(const nir_shader *shader,
+                          const struct ir3_shader_key *key,
+                          nir_intrinsic_instr *intr,
                           struct driver_param_info *param_info)
 {
    param_info->extra_size = 0;
@@ -1760,6 +1813,9 @@ ir3_get_driver_param_info(const nir_shader *shader, nir_intrinsic_instr *intr,
    case nir_intrinsic_load_draw_id:
       param_info->offset = IR3_DP_VS(draw_id);
       break;
+   case nir_intrinsic_load_draw_id_offset_ir3:
+      param_info->offset = IR3_DP_VS(draw_id_offset);
+      break;
    case nir_intrinsic_load_base_instance:
       param_info->offset = IR3_DP_VS(instid_base);
       break;
@@ -1796,6 +1852,20 @@ ir3_get_driver_param_info(const nir_shader *shader, nir_intrinsic_instr *intr,
    case nir_intrinsic_load_alpha_to_coverage_enable_ir3:
       param_info->offset = IR3_DP_FS(alpha_to_coverage_enable);
       break;
+   case nir_intrinsic_load_view_index:
+      /* Report the driver-param offset for the software-multiview path
+       * (devices without HW multiview), where the view index is supplied as
+       * a VS driver param.
+       * Placed at dword 5 (view_index) to avoid being overwritten by
+       * CP_DRAW_INDIRECT_MULTI which zeroes dwords 0-3 at DST_OFF.
+       */
+      if (key && key->sw_multiview &&
+          (shader->info.stage == MESA_SHADER_VERTEX ||
+           shader->info.stage == MESA_SHADER_TESS_EVAL)) {
+         param_info->offset = IR3_DP_VS(view_index);
+         break;
+      }
+      return false;
    default:
       return false;
    }
@@ -1805,6 +1875,7 @@ ir3_get_driver_param_info(const nir_shader *shader, nir_intrinsic_instr *intr,
 
 uint32_t
 ir3_nir_scan_driver_consts(struct ir3_compiler *compiler, nir_shader *shader,
+                           const struct ir3_shader_key *key,
                            struct ir3_const_image_dims *image_dims)
 {
    uint32_t num_driver_params = 0;
@@ -1826,11 +1897,16 @@ ir3_nir_scan_driver_consts(struct ir3_compiler *compiler, nir_shader *shader,
                case nir_intrinsic_image_atomic_swap:
                case nir_intrinsic_image_load:
                case nir_intrinsic_image_store:
-               case nir_intrinsic_image_size:
-                  /* a4xx gets these supplied by the hw directly (maybe CP?) */
-                  if (compiler->gen == 5 &&
-                     !(intr->intrinsic == nir_intrinsic_image_load &&
-                        !(nir_intrinsic_access(intr) & ACCESS_COHERENT))) {
+                  /* a4xx gets these supplied by the hw directly (maybe CP?).
+                   *
+                   * Every image intrinsic still present here is emitted with
+                   * ldib/stib, which needs the dimensions to compute its byte
+                   * offset: an image_load that could have used the texture
+                   * path was turned into a tex instruction by
+                   * nir_lower_readonly_images_to_tex long before this runs.
+                   * (image_size is a resinfo, which needs no dimensions.)
+                   */
+                  if (compiler->gen == 5) {
                      idx = nir_src_as_uint(intr->src[0]);
                      if (image_dims->mask & (1 << idx))
                         break;
@@ -1845,7 +1921,7 @@ ir3_nir_scan_driver_consts(struct ir3_compiler *compiler, nir_shader *shader,
             }
 
             struct driver_param_info param_info;
-            if (ir3_get_driver_param_info(shader, intr, &param_info)) {
+            if (ir3_get_driver_param_info(shader, key, intr, &param_info)) {
                num_driver_params =
                   MAX2(num_driver_params,
                        param_info.offset + param_info.extra_size +
@@ -1973,7 +2049,8 @@ ir3_setup_const_state(nir_shader *nir, struct ir3_shader_variant *v,
    unsigned ptrsz = ir3_pointer_size(compiler);
 
    const_state->num_driver_params =
-      ir3_nir_scan_driver_consts(compiler, nir, &const_state->image_dims);
+      ir3_nir_scan_driver_consts(compiler, nir, &v->key,
+                                 &const_state->image_dims);
 
    if ((compiler->gen < 5) && (v->stream_output.num_outputs > 0)) {
       const_state->num_driver_params =
@@ -2095,4 +2172,58 @@ ir3_nir_get_global_offset(nir_builder *b, struct ir3_compiler *compiler,
       .def = offset,
       .shift = offset_shift,
    };
+}
+
+/* Early preamble may execute even if no shader invocations are dynamically
+ * executed. In order for this to be safe, every instruction must be
+ * speculatable, i.e. it cannot cause faults no matter what data the user throws
+ * at it. Generally this means descriptors are in-bounds and (if loading from
+ * descriptors) they contain valid data.
+ */
+
+bool
+ir3_nir_is_preamble_speculatable(nir_shader *s)
+{
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(s);
+
+   bool in_preamble = false;
+   nir_foreach_block (block, entrypoint) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+
+         if (intrin->intrinsic == nir_intrinsic_preamble_start_ir3) {
+            in_preamble = true;
+            continue;
+         }
+
+         /* We've reached the end of the preamble without finding a
+          * non-speculatable instruction.
+          */
+         if (intrin->intrinsic == nir_intrinsic_preamble_end_ir3)
+            return true;
+
+         /* As a special case, copy_push_const_to_uniform isn't marked
+          * can_reorder but it's speculatable anyway. We don't currently have
+          * a way to mark always-speculatable-but-not-reorderable intrinsics.
+          * Ignore elect_any_ir3 as it can only be part of the scaffolding we
+          * emit for the preamble.
+          */
+         if (intrin->intrinsic == nir_intrinsic_copy_push_const_to_uniform_ir3 ||
+             intrin->intrinsic == nir_intrinsic_elect_any_ir3)
+            continue;
+
+         /* Ignore anything outside the preamble. */
+         if (!in_preamble)
+            continue;
+
+         if (nir_intrinsic_has_access(intrin) &&
+             !(nir_intrinsic_access(intrin) & ACCESS_CAN_SPECULATE))
+            return false;
+      }
+   }
+
+   return true;
 }

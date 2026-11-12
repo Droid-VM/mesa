@@ -64,6 +64,7 @@ __glFreeAttributeState(struct glx_context * gc)
 static void
 indirect_destroy_context(struct glx_context *gc)
 {
+   glx_display_remove_context(gc);
    __glXFreeVertexArrayState(gc);
 
    free((char *) gc->vendor);

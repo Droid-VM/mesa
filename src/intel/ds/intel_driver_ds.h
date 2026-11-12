@@ -184,7 +184,9 @@ struct intel_ds_queue {
    /* Unique name of the queue */
    char name[80];
 
-   /* Counter incremented on each intel_ds_end_submit() call */
+   /* Process-wide unique ID of the current submission, assigned by
+    * intel_ds_begin_submit().
+    */
    uint64_t submission_id;
 
    struct intel_ds_stage stages[INTEL_DS_QUEUE_STAGE_N_STAGES];

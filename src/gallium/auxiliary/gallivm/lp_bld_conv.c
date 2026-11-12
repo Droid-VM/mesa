@@ -655,14 +655,10 @@ lp_build_conv(struct gallivm_state *gallivm,
                 */
                if (dst_type.sign) {
                   tmp[j] = lp_build_min(&bld, bld.one, src[j]);
-
                }
                else {
-                  if (1) {
-                     tmp[j] = lp_build_min_ext(&bld, bld.one, src[j],
-                                               GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN);
-                  }
-                  tmp[j] = src[j];
+                  tmp[j] = lp_build_min_ext(&bld, bld.one, src[j],
+                                            GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN);
                }
                tmp[j] = LLVMBuildFMul(builder, tmp[j], const_scale, "");
                tmp[j] = lp_build_iround(&bld, tmp[j]);

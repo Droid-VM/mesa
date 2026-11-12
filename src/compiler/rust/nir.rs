@@ -4,6 +4,7 @@
 use crate::bindings::*;
 use crate::memstream::MemStream;
 
+use mesa_util::format::pipe_format;
 use std::ffi::{c_void, CStr};
 use std::io;
 use std::marker::PhantomData;
@@ -294,6 +295,15 @@ impl nir_intrinsic_instr {
         self.const_index[usize::from(idx - 1)] as u32
     }
 
+    /// Reads a multi-word index (`size > 1` in nir_intrinsics.py) into an array
+    pub fn get_const_index_words<const N: usize>(&self, name: u32) -> [u32; N] {
+        let name: usize = name.try_into().unwrap();
+        let idx = self.info().index_map[name];
+        assert!(idx > 0);
+        let start = usize::from(idx - 1);
+        std::array::from_fn(|i| self.const_index[start + i] as u32)
+    }
+
     pub fn base(&self) -> i32 {
         self.get_const_index(NIR_INTRINSIC_BASE) as i32
     }
@@ -339,7 +349,9 @@ impl nir_intrinsic_instr {
     }
 
     pub fn format(&self) -> pipe_format {
-        self.get_const_index(NIR_INTRINSIC_FORMAT) as pipe_format
+        self.get_const_index(NIR_INTRINSIC_FORMAT)
+            .try_into()
+            .unwrap()
     }
 
     pub fn access(&self) -> gl_access_qualifier {
@@ -379,6 +391,12 @@ impl nir_intrinsic_instr {
 
     pub fn memory_modes(&self) -> nir_variable_mode {
         self.get_const_index(NIR_INTRINSIC_MEMORY_MODES)
+    }
+
+    pub fn io_semantics(&self) -> nir_io_semantics {
+        // A bitfield struct spanning two const_index slots, so reinterpret it
+        let words = self.get_const_index_words::<2>(NIR_INTRINSIC_IO_SEMANTICS);
+        unsafe { std::mem::transmute(words) }
     }
 
     pub fn flags(&self) -> u32 {

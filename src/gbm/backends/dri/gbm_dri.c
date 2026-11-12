@@ -207,23 +207,17 @@ kopper_get_drawable_info(struct dri_drawable *driDrawable,
 }
 
 static const __DRIimageLookupExtension image_lookup_extension = {
-   .base = { __DRI_IMAGE_LOOKUP, 2 },
-
    .validateEGLImage        = dri_validate_egl_image,
    .lookupEGLImageValidated = dri_lookup_egl_image_validated,
 };
 
 static const __DRIimageLoaderExtension image_loader_extension = {
-   .base = { __DRI_IMAGE_LOADER, 2 },
-
    .getBuffers          = image_get_buffers,
    .flushFrontBuffer    = dri_flush_front_buffer,
    .getCapability       = dri_get_capability,
 };
 
 static const __DRIswrastLoaderExtension swrast_loader_extension = {
-   .base = { __DRI_SWRAST_LOADER, 2 },
-
    .getDrawableInfo = swrast_get_drawable_info,
    .putImage        = swrast_put_image,
    .getImage        = swrast_get_image,
@@ -231,18 +225,15 @@ static const __DRIswrastLoaderExtension swrast_loader_extension = {
 };
 
 static const __DRIkopperLoaderExtension kopper_loader_extension = {
-    .base = { __DRI_KOPPER_LOADER, 1 },
-
     .SetSurfaceCreateInfo   = NULL,
     .GetDrawableInfo        = kopper_get_drawable_info,
 };
 
-static const __DRIextension *gbm_dri_screen_extensions[] = {
-   &image_lookup_extension.base,
-   &image_loader_extension.base,
-   &swrast_loader_extension.base,
-   &kopper_loader_extension.base,
-   NULL,
+static const struct dri_loader_funcs gbm_dri_screen_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &image_loader_extension,
+   .swrast = &swrast_loader_extension,
+   .kopper = &kopper_loader_extension,
 };
 
 static int
@@ -263,9 +254,8 @@ dri_screen_create_for_driver(struct gbm_dri_device *dri, char *driver_name, bool
 
    dri->swrast = swrast;
 
-   dri->loader_extensions = gbm_dri_screen_extensions;
    dri->screen = driCreateNewScreen3(0, swrast ? -1 : dri->base.v0.fd,
-                                             dri->loader_extensions,
+                                             &gbm_dri_screen_funcs,
                                              type,
                                              &dri->driver_configs, driver_name_is_inferred, true, dri);
    if (dri->screen == NULL)
@@ -353,6 +343,25 @@ static const struct gbm_dri_visual gbm_dri_visuals_table[] = {
    { DRM_FORMAT_BGR161616F,    PIPE_FORMAT_R16G16B16_FLOAT },
    { DRM_FORMAT_BGR323232F,    PIPE_FORMAT_R32G32B32_FLOAT },
    { DRM_FORMAT_ABGR32323232F, PIPE_FORMAT_R32G32B32A32_FLOAT },
+   { DRM_FORMAT_YUYV,   PIPE_FORMAT_YUYV },
+   { DRM_FORMAT_YVYU,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_UYVY,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_VYUY,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_AYUV,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_NV12,   PIPE_FORMAT_NV12 },
+   { DRM_FORMAT_NV21,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_NV16,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_NV61,   PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YUV410, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YVU410, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YUV411, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YVU411, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YUV420, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YVU420, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YUV422, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YVU422, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YUV444, PIPE_FORMAT_NONE },
+   { DRM_FORMAT_YVU444, PIPE_FORMAT_NONE },
 };
 
 static int
@@ -1012,11 +1021,10 @@ gbm_dri_bo_create(struct gbm_device *gbm,
       mods_comp = NULL;
    }
 
-   bo->image = dri_create_image_with_modifiers(dri->screen, width, height,
-                                       pipe_format, dri_use,
-                                       mods_filtered ? mods_filtered : modifiers,
-                                       mods_filtered ? count_filtered : count,
-                                       bo);
+   bo->image = dri_create_image(dri->screen, width, height, pipe_format,
+                                mods_filtered ? mods_filtered : modifiers,
+                                mods_filtered ? count_filtered : count,
+                                dri_use, bo);
    if (bo->image == NULL)
       goto failed;
 
@@ -1172,15 +1180,12 @@ static void
 dri_destroy(struct gbm_device *gbm)
 {
    struct gbm_dri_device *dri = gbm_dri_device(gbm);
-   unsigned i;
 
    if (dri->context)
       driDestroyContext(dri->context);
 
    driDestroyScreen(dri->screen);
-   for (i = 0; dri->driver_configs[i]; i++)
-      free((struct dri_config *) dri->driver_configs[i]);
-   free(dri->driver_configs);
+   driDestroyConfigs(dri->driver_configs);
    free(dri->driver_name);
 
    free(dri);

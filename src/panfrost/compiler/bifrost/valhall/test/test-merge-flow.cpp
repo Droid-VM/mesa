@@ -318,3 +318,50 @@ TEST_F(MergeFlow, PreserveTerminalBarriers)
          flow(END);
       });
 }
+
+TEST_F(MergeFlow, HoistConstantAboveWait)
+{
+   CASE(
+      {
+         flow(WAIT0);
+         bi_mov_i32_to(b, bi_register(7), bi_imm_u32(99));
+         bi_fadd_f32_to(b, bi_register(0), bi_register(0), bi_register(7));
+      },
+      {
+         I = bi_mov_i32_to(b, bi_register(7), bi_imm_u32(99));
+         I->flow = VA_FLOW_WAIT0;
+         bi_fadd_f32_to(b, bi_register(0), bi_register(0), bi_register(7));
+      });
+}
+
+TEST_F(MergeFlow, CantHoistDestConflict)
+{
+   /* The MOV writes r7, but the intermediate FADD also writes r7.
+    * Hoisting MOV above the NOP would change what FADD overwrites.
+    */
+   NEGCASE({
+      flow(WAIT0);
+      bi_fadd_f32_to(b, bi_register(7), bi_register(0), bi_register(0));
+      bi_mov_i32_to(b, bi_register(7), bi_imm_u32(99));
+   });
+}
+
+TEST_F(MergeFlow, CantHoistAsyncInstr)
+{
+   NEGCASE({
+      flow(WAIT0);
+      bi_ld_var_buf_imm_f32_to(b, bi_register(16), atest,
+                               BI_REGISTER_FORMAT_F32, BI_SAMPLE_CENTER,
+                               BI_SOURCE_FORMAT_F32, BI_UPDATE_STORE,
+                               BI_VECSIZE_V4, 0);
+   });
+}
+
+TEST_F(MergeFlow, CantHoistInstrWithFlow)
+{
+   NEGCASE({
+      flow(WAIT0);
+      I = bi_mov_i32_to(b, bi_register(7), bi_imm_u32(99));
+      I->flow = VA_FLOW_END;
+   });
+}

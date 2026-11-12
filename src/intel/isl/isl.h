@@ -617,14 +617,22 @@ typedef uint32_t isl_tiling_flags_t;
                                            ISL_TILING_ICL_Ys_BIT)
 
 /** The Skylake BSpec refers to Yf and Ys as "standard tiling formats". */
-#define ISL_TILING_STD_Y_MASK             (ISL_TILING_SKL_Yf_BIT | \
-                                           ISL_TILING_SKL_Ys_BIT | \
-                                           ISL_TILING_ICL_Yf_BIT | \
-                                           ISL_TILING_ICL_Ys_BIT)
+#define ISL_TILING_STD_4KB_MASK           (ISL_TILING_SKL_Yf_BIT | \
+                                           ISL_TILING_ICL_Yf_BIT)
 
-/** Any Tiling 64 */
-#define ISL_TILING_STD_64_MASK            (ISL_TILING_64_BIT | \
+/** The Alchemist PRM states that Tile64 "support[s] standard-tiling". */
+#define ISL_TILING_STD_64KB_MASK          (ISL_TILING_SKL_Ys_BIT | \
+                                           ISL_TILING_ICL_Ys_BIT | \
+                                           ISL_TILING_64_BIT | \
                                            ISL_TILING_64_XE2_BIT)
+
+/**
+ * Standard tiling is the term used by the hardware documents to describe the
+ * set of tilings supporting tiled-resource / sparse features (e.g.,
+ * miptails), including their 4KB sub-tilings with share similar feature sets.
+ */
+#define ISL_TILING_STANDARD_MASK          (ISL_TILING_STD_4KB_MASK | \
+                                           ISL_TILING_STD_64KB_MASK)
 
 /** @} */
 
@@ -1538,14 +1546,6 @@ struct isl_tile_info {
    struct isl_extent4d logical_extent_el;
 
    /**
-    * The maximum number of miplevels that will fit in the miptail.
-    *
-    * This does not guarantee that the given number of miplevels will fit in
-    * the miptail as that is also dependent on the size of the miplevels.
-    */
-   uint32_t max_miptail_levels;
-
-   /**
     * The physical size of the tile in bytes and rows of bytes
     *
     * This field determines how the tiles of a surface are physically laid
@@ -1559,14 +1559,14 @@ struct isl_tile_info {
    struct isl_extent2d phys_extent_B;
 
    /**
-    * Swizzle of the virtual address
-    */
-   const uint8_t *swiz;
-
-   /**
     * Number of bit swizzles in swiz[]
     */
    uint8_t swiz_count;
+
+   /**
+    * Swizzle of the virtual address
+    */
+   const uint8_t *swiz;
 };
 
 typedef union {
@@ -2398,15 +2398,9 @@ isl_tiling_is_any_y(enum isl_tiling tiling)
 }
 
 static inline bool
-isl_tiling_is_std_y(enum isl_tiling tiling)
+isl_tiling_is_standard(enum isl_tiling tiling)
 {
-   return (1u << tiling) & ISL_TILING_STD_Y_MASK;
-}
-
-static inline bool
-isl_tiling_is_64(enum isl_tiling tiling)
-{
-   return (1u << tiling) & ISL_TILING_STD_64_MASK;
+   return (1u << tiling) & ISL_TILING_STANDARD_MASK;
 }
 
 uint32_t
@@ -3106,7 +3100,8 @@ isl_surf_get_image_offset_B_tile_sa(const struct isl_surf *surf,
                                     uint32_t logical_z_offset_px,
                                     uint64_t *offset_B,
                                     uint32_t *x_offset_sa,
-                                    uint32_t *y_offset_sa);
+                                    uint32_t *y_offset_sa,
+                                    uint32_t *z_offset_sa);
 
 /**
  * Calculate the offset, in bytes and intratile surface elements, to a
@@ -3126,7 +3121,8 @@ isl_surf_get_image_offset_B_tile_el(const struct isl_surf *surf,
                                     uint32_t logical_z_offset_px,
                                     uint64_t *offset_B,
                                     uint32_t *x_offset_el,
-                                    uint32_t *y_offset_el);
+                                    uint32_t *y_offset_el,
+                                    uint32_t *z_offset_el);
 
 /* Returns whether or not a subresource range maps to a tile-aligned memory
  * range which doesn't overlap other subresources.
@@ -3154,6 +3150,7 @@ isl_surf_image_has_unique_tiles(const struct isl_surf *surf,
  */
 void
 isl_surf_get_image_range_B_tile(const struct isl_surf *surf,
+                                const struct isl_tile_info *tile_info,
                                 uint32_t level,
                                 uint32_t logical_array_layer,
                                 uint32_t logical_z_offset_px,
@@ -3181,7 +3178,8 @@ isl_surf_get_image_surf(const struct isl_device *dev,
                         struct isl_surf *image_surf,
                         uint64_t *offset_B,
                         uint32_t *x_offset_sa,
-                        uint32_t *y_offset_sa);
+                        uint32_t *y_offset_sa,
+                        uint32_t *z_offset_sa);
 
 /**
  * Create an isl_surf that is an uncompressed view of a compressed isl_surf

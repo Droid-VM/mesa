@@ -18,7 +18,7 @@
 #define XE_LATENCY_DELTA      1  /* Extra cycles for wider SIMD sizes */
 #define XE_LATENCY_DELTA_MATH 4
 #define XE_LATENCY_ARF        16 /* Latency for ARF dependencies */
-#define XE_LATENCY_DPAS 21 /* Latency for DPAS 8x1 */
+#define XE_LATENCY_DPAS       21 /* Latency for DPAS 8x1 */
 
 /* Latency for SIMD16 SLM messages. If accessing the same location it takes 28
  * cycles. For the sequential access pattern it takes 26 cycles.
@@ -123,13 +123,15 @@ static unsigned
 jay_send_src_latency(jay_shader *s, jay_inst *I)
 {
    /* ARB cycle + GRF read lengths */
-   return XE_LATENCY_SEND_ARB + jay_send_mlen(I) + jay_send_ex_mlen(I);
+   return XE_LATENCY_SEND_ARB +
+      gen_message_desc_decode(s->devinfo, jay_send_desc_imm(I)).msg_length +
+      gen_message_ex_desc_ex_mlen(s->devinfo, jay_send_ex_desc_imm(I));
 }
 
 static unsigned
 jay_occupancy(jay_shader *s, jay_inst *I)
 {
-   unsigned exec_size = jay_simd_width_logical(s, I);
+   unsigned exec_size = jay_simd_width_logical(s, I) >> I->simd_split;
    unsigned native = jay_ugpr_per_grf(s);
    uint16_t scale = (exec_size <= native)     ? 1 :
                     (exec_size == native * 2) ? 2 :
@@ -152,11 +154,11 @@ jay_occupancy(jay_shader *s, jay_inst *I)
 gen_pipe
 jay_inst_exec_pipe(const struct intel_device_info *devinfo, jay_inst *I)
 {
-   return jay_inst_is_unordered(I)       ? GEN_PIPE_NONE :
-          I->op == JAY_OPCODE_MATH       ? GEN_PIPE_MATH :
-          I->type == JAY_TYPE_F64        ? GEN_PIPE_LONG :
-          jay_type_is_any_float(I->type) ? GEN_PIPE_FLOAT :
-                                           GEN_PIPE_INT;
+   return jay_inst_is_unordered(devinfo, I) ? GEN_PIPE_NONE :
+          I->op == JAY_OPCODE_MATH          ? GEN_PIPE_MATH :
+          I->type == JAY_TYPE_F64           ? GEN_PIPE_LONG :
+          jay_type_is_any_float(I->type)    ? GEN_PIPE_FLOAT :
+                                              GEN_PIPE_INT;
 }
 
 /**
@@ -216,36 +218,56 @@ fifo_get(struct alu_fifo *fifo, unsigned index)
 static unsigned
 estimate_block_cycles(jay_function *f, jay_block *block)
 {
-   unsigned cycles = 0;
+   unsigned cycle = 0;
    jay_inst *prev = NULL;
    jay_shader *shader = f->shader;
 
    struct alu_fifo alu[GEN_PIPE_ALL] = { 0 };
    unsigned acc[8] = { 0 }, flag[8] = { 0 };
    jay_inst *sbid[32] = { NULL };
-   unsigned sbid_time[32] = { 0 };
+   unsigned sbid_issue[32] = { 0 };
 
    jay_foreach_inst_in_block(block, I) {
       if (prev) {
-         cycles += jay_occupancy(shader, prev);
+         cycle += jay_occupancy(shader, prev);
       }
 
-      unsigned dep_cycles = 0;
-      if (I->dep.mode && sbid[I->dep.pipe]) {
-         unsigned latency = 0;
-         if (I->dep.mode == GEN_SBID_SRC) {
-            if (I->op == JAY_OPCODE_SEND) {
-               latency = jay_send_src_latency(shader, sbid[I->dep.pipe]);
+      uint32_t wait_src = 0, wait_dst = 0;
+
+      if (I->op == JAY_OPCODE_SYNC) {
+         if (jay_sync_op(I) == TGL_SYNC_ALLWR) {
+            wait_dst = jay_as_uint(I->src[0]);
+         } else if (jay_sync_op(I) == TGL_SYNC_ALLRD) {
+            wait_src = jay_as_uint(I->src[0]);
+         }
+      }
+
+      if (I->dep.mode == GEN_SBID_SRC) {
+         wait_src |= BITFIELD_BIT(I->dep.sbid);
+      } else if (I->dep.mode == GEN_SBID_DST || I->dep.mode == GEN_SBID_SET) {
+         wait_dst |= BITFIELD_BIT(I->dep.sbid);
+      }
+
+      u_foreach_bit(sb, wait_src) {
+         if (sbid[sb]) {
+            unsigned latency = 0;
+            if (sbid[sb]->op == JAY_OPCODE_SEND) {
+               latency = jay_send_src_latency(shader, sbid[sb]);
             } else {
                /* IGC uses occupancy for this. Hit only by DPAS */
-               latency = jay_occupancy(shader, sbid[I->dep.pipe]);
+               latency = jay_occupancy(shader, sbid[sb]);
             }
-         } else {
-            latency = jay_latency(shader, sbid[I->dep.pipe], false);
-            sbid[I->dep.pipe] = NULL;
-         }
 
-         dep_cycles = sbid_time[I->dep.sbid] + latency;
+            cycle = MAX2(cycle, sbid_issue[sb] + latency);
+         }
+      }
+
+      u_foreach_bit(sb, wait_dst) {
+         if (sbid[sb]) {
+            cycle = MAX2(cycle,
+                         sbid_issue[sb] + jay_latency(shader, sbid[sb], false));
+            sbid[sb] = NULL;
+         }
       }
 
       if (I->dep.regdist) {
@@ -254,51 +276,55 @@ estimate_block_cycles(jay_function *f, jay_block *block)
                              BITFIELD_BIT(I->dep.pipe);
 
          u_foreach_bit(pipe, pipes) {
-            dep_cycles = MAX2(dep_cycles, fifo_get(&alu[pipe], I->dep.regdist));
+            cycle = MAX2(cycle, fifo_get(&alu[pipe], I->dep.regdist));
          }
       }
 
       jay_foreach_src(I, s) {
          if (I->src[s].file == ACCUM) {
-            dep_cycles = MAX2(dep_cycles, acc[I->src[s].reg]);
+            cycle = MAX2(cycle, acc[I->src[s].reg]);
          } else if (jay_is_flag(I->src[s])) {
-            dep_cycles = MAX2(dep_cycles, flag[I->src[s].reg]);
+            cycle = MAX2(cycle, flag[I->src[s].reg]);
          }
       }
 
-      cycles = MAX2(cycles, dep_cycles);
-      unsigned ready_cycle = cycles + jay_latency(shader, I, false);
-      fifo_add(&alu[jay_inst_exec_pipe(shader->devinfo, I)], ready_cycle);
-
-      if (I->dst.file == ACCUM) {
-         acc[I->dst.reg] = ready_cycle;
-      } else if (jay_is_flag(I->dst)) {
-         flag[I->dst.reg] = ready_cycle;
+      if (0) {
+         printf("%4u: ", cycle);
+         jay_print_inst(stderr, f, I);
       }
 
-      if (jay_is_flag(I->cond_flag)) {
-         flag[I->cond_flag.reg] = ready_cycle;
+      unsigned ready_cycle = cycle + jay_latency(shader, I, false);
+      gen_pipe exec_pipe = jay_inst_exec_pipe(shader->devinfo, I);
+      if (exec_pipe != GEN_PIPE_NONE) {
+         fifo_add(&alu[exec_pipe], ready_cycle);
+      }
+
+      jay_foreach_dst(I, dst) {
+         if (dst.file == ACCUM) {
+            acc[dst.reg] = ready_cycle;
+         } else if (jay_is_flag(dst)) {
+            flag[dst.reg] = ready_cycle;
+         }
       }
 
       if (I->dep.mode == GEN_SBID_SET) {
          sbid[I->dep.sbid] = I;
-         sbid_time[I->dep.sbid] = ready_cycle;
+         sbid_issue[I->dep.sbid] = cycle;
       }
 
       prev = I;
    }
 
-   return cycles;
+   return cycle;
 }
 
 unsigned
 jay_estimate_cycles(jay_function *f)
 {
-   unsigned cycles = 0;
+   float cycles = 0;
 
    jay_foreach_block(f, block) {
-      /* TODO: Scale by block repetition */
-      cycles += estimate_block_cycles(f, block);
+      cycles += block->weight * (float) estimate_block_cycles(f, block);
    }
 
    return cycles;

@@ -30,7 +30,7 @@ class PanfrostDevice {
 
 class PanfrostPerf {
  public:
-   PanfrostPerf(const PanfrostDevice &dev);
+   PanfrostPerf();
    ~PanfrostPerf();
 
    PanfrostPerf(const PanfrostPerf &) = delete;
@@ -39,6 +39,7 @@ class PanfrostPerf {
    PanfrostPerf(PanfrostPerf &&);
    PanfrostPerf &operator=(PanfrostPerf &&);
 
+   bool init(const PanfrostDevice &dev);
    int enable(uint64_t sampling_period_ns);
    void disable();
    bool dump();

@@ -327,6 +327,8 @@ iris_create_context(struct pipe_screen *pscreen, void *priv, unsigned flags)
    genX_call(devinfo, init_blorp, ice);
    genX_call(devinfo, init_query, ice);
 
+   if (flags & PIPE_CONTEXT_REALTIME_PRIORITY)
+      ice->priority = IRIS_CONTEXT_REALTIME_PRIORITY;
    if (flags & PIPE_CONTEXT_HIGH_PRIORITY)
       ice->priority = IRIS_CONTEXT_HIGH_PRIORITY;
    if (flags & PIPE_CONTEXT_LOW_PRIORITY)

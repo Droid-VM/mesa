@@ -210,15 +210,12 @@ anv_shader_internal_deserialize(struct vk_pipeline_cache *cache,
       blob_read_bytes(blob, prog_data.base.num_relocs *
                             sizeof(prog_data.base.relocs[0]));
 
-   void *mem_ctx = ralloc_context(NULL);
    uint32_t num_stats = blob_read_uint32(blob);
    const struct genisa_stats *stats =
       blob_read_bytes(blob, num_stats * sizeof(stats[0]));
 
-   if (blob->overrun) {
-      ralloc_free(mem_ctx);
+   if (blob->overrun)
       return NULL;
-   }
 
    struct anv_shader_internal *shader =
       anv_shader_internal_create(device, stage,
@@ -226,8 +223,6 @@ anv_shader_internal_deserialize(struct vk_pipeline_cache *cache,
                                  kernel_data, kernel_size,
                                  &prog_data.base, prog_data_size,
                                  stats, num_stats);
-
-   ralloc_free(mem_ctx);
 
    if (shader == NULL)
       return NULL;

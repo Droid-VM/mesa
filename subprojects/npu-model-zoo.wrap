@@ -1,0 +1,5 @@
+[wrap-file]
+directory = npu-model-zoo-20260926-yolox-ti-lite
+source_url = https://gitlab.freedesktop.org/tomeu/npu-model-zoo/-/archive/20260926-yolox-ti-lite/npu-model-zoo-20260926-yolox-ti-lite.tar.gz
+source_filename = npu-model-zoo-20260926-yolox-ti-lite.tar.gz
+source_hash = fecf51e3114ded452238f90b02989b7772521842fdad6ad00166314fb5590e4f

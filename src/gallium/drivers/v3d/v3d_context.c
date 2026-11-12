@@ -88,6 +88,10 @@ v3d_pipe_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
 static void
 v3d_texture_barrier(struct pipe_context *pctx, unsigned int flags)
 {
+        /* Framebuffer fetch is coherent, so barriers are a no-op. */
+        if (flags == PIPE_TEXTURE_BARRIER_FRAMEBUFFER)
+                return;
+
         v3d_flush(pctx);
 }
 

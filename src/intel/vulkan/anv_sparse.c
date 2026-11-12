@@ -182,9 +182,7 @@ vk_extent3d_el_to_px(const VkExtent3D extent_el,
 static bool
 isl_tiling_supports_standard_block_shapes(enum isl_tiling tiling)
 {
-   return isl_tiling_is_64(tiling) ||
-          tiling == ISL_TILING_ICL_Ys ||
-          tiling == ISL_TILING_SKL_Ys;
+   return (1 << tiling) & ISL_TILING_STD_64KB_MASK;
 }
 
 static uint32_t
@@ -681,13 +679,13 @@ anv_trtt_first_bind_init(struct anv_device *device)
     * before the TRTT mutex for consistency with the order of other paths
     * (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* This means we have already initialized the first bind. */
    if (likely(trtt->l3_addr)) {
       simple_mtx_unlock(&trtt->mutex);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
       return VK_SUCCESS;
    }
 
@@ -733,7 +731,7 @@ out:
       trtt->l3_addr = 0;
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    return result;
 }
 
@@ -768,7 +766,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
     * before the TRTT mutex for consistency with the order that locking is
     * done around other paths (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* Do this so we can avoid reallocs later. */
@@ -875,7 +873,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    list_addtail(&submit->link, &trtt->in_flight_batches);
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 
    ANV_RMV(vm_binds, device, sparse_submit->binds, sparse_submit->binds_len);
 
@@ -886,7 +884,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    util_dynarray_fini(&l3l2_binds);
  out_add_bind:
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    anv_async_submit_fini(&submit->base);
  out_async:
    vk_free(&device->vk.alloc, submit);
@@ -1264,7 +1262,7 @@ anv_sparse_calc_miptail_properties(struct anv_device *device,
    struct isl_tile_info tile_info;
    isl_surf_get_tile_info(surf, &tile_info);
    uint64_t layer1_offset;
-   uint32_t x_off, y_off;
+   uint32_t x_off, y_off, z_off;
 
    /* Treat the whole thing as a single miptail. We should have already
     * reported this image as VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT.
@@ -1284,8 +1282,8 @@ anv_sparse_calc_miptail_properties(struct anv_device *device,
       layer1_offset = surf->size_B;
    } else {
       isl_surf_get_image_offset_B_tile_sa(surf, 0, 1, 0, &layer1_offset,
-                                          &x_off, &y_off);
-      if (x_off || y_off)
+                                          &x_off, &y_off, &z_off);
+      if (x_off || y_off || z_off)
          goto out_everything_is_miptail;
    }
    assert(layer1_offset % ANV_SPARSE_BLOCK_SIZE == 0);
@@ -1303,8 +1301,7 @@ anv_sparse_calc_miptail_properties(struct anv_device *device,
    uint64_t miptail_offset = 0;
    isl_surf_get_image_offset_B_tile_sa(surf, miptail_first_level, 0, 0,
                                        &miptail_offset,
-                                       &x_off, &y_off);
-   assert(x_off == 0 && y_off == 0);
+                                       &x_off, &y_off, &z_off);
    assert(miptail_offset % ANV_SPARSE_BLOCK_SIZE == 0);
 
    *imageMipTailFirstLod = miptail_first_level;
@@ -1522,12 +1519,13 @@ anv_sparse_bind_image_memory(struct anv_queue *queue,
         z < bind_offset_el.z + bind_extent_el.depth;
         z += block_shape_el.depth) {
       uint64_t subresource_offset_B;
-      uint32_t subresource_x_offset, subresource_y_offset;
+      uint32_t subresource_x_offset, subresource_y_offset,
+               subresource_z_offset;
       isl_surf_get_image_offset_B_tile_sa(surf, mip_level, array_layer, z,
                                           &subresource_offset_B,
                                           &subresource_x_offset,
-                                          &subresource_y_offset);
-      assert(subresource_x_offset == 0 && subresource_y_offset == 0);
+                                          &subresource_y_offset,
+                                          &subresource_z_offset);
       assert(subresource_offset_B % ANV_SPARSE_BLOCK_SIZE == 0);
 
       for (uint32_t y = bind_offset_el.y;

@@ -72,6 +72,13 @@ fd3_emit_const_bo(struct fd_ringbuffer *ring,
 
    emit_const_asserts(v, regid, sizedwords);
 
+   /* indirect const loads can wedge the FD307 when following other const
+    * loads, unless we guard with a WFI here. earlier we tried a
+    * HLSQ_FLUSH here, which fixed some hangcheck reproducers but caused
+    * new ones. see mesa#12634 + mesa!44653
+    */
+   OUT_WFI(ring);
+
    OUT_PKT3(ring, CP_LOAD_STATE, 2);
    OUT_RING(ring, CP_LOAD_STATE_0_DST_OFF(dst_off) |
                      CP_LOAD_STATE_0_STATE_SRC(SS_INDIRECT) |
@@ -211,7 +218,7 @@ emit_textures(struct fd_context *ctx, struct fd_ringbuffer *ring,
             tex->textures[i] ? fd3_pipe_sampler_view(tex->textures[i])
                              : &dummy_view;
          struct fd_resource *rsc = fd_resource(view->base.texture);
-         if (rsc && rsc->b.b.target == PIPE_BUFFER) {
+         if (rsc && view->base.target == PIPE_BUFFER) {
             OUT_RELOC(ring, rsc->bo, view->base.u.buf.offset, 0, 0);
             j = 1;
          } else {
@@ -419,7 +426,11 @@ fd3_emit_vertex_bufs(struct fd_ringbuffer *ring, struct fd3_emit *emit)
                                 A3XX_VFD_FETCH_INSTR_0_INSTANCED) |
                            A3XX_VFD_FETCH_INSTR_0_STEPRATE(
                               MAX2(1, elem->instance_divisor)));
-         OUT_RELOC(ring, rsc->bo, off, 0, 0);
+         /* undefined results are allowed here, a crash is not */
+         if (rsc)
+            OUT_RELOC(ring, rsc->bo, off, 0, 0);
+         else
+            OUT_RING(ring, 0); /* VFD_FETCH_INSTR_1 */
 
          OUT_PKT0(ring, REG_A3XX_VFD_DECODE_INSTR(j), 1);
          OUT_RING(ring,

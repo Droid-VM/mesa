@@ -25,6 +25,10 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
+#include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -34,6 +38,8 @@
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <utime.h>
@@ -41,9 +47,11 @@
 #include "util/detect_os.h"
 #include "util/disk_cache_os.h"
 #include "util/disk_cache.h"
+#include "util/macros.h"
 #include "util/mesa-blake3.h"
 #include "util/os_misc.h"
 #include "util/ralloc.h"
+#include "util/u_atomic.h"
 
 #ifdef FOZ_DB_UTIL_DYNAMIC_LIST
 #include <sys/inotify.h>
@@ -1521,3 +1529,339 @@ TEST_F(Cache, DeleteOldCache)
    rmdir(dir_name);
 #endif
 }
+
+class CacheMultiFile : public Cache {
+protected:
+   struct disk_cache *cache = NULL;
+
+   void SetUp() override {
+#if !defined(ENABLE_SHADER_CACHE)
+      GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_ANDROID
+      GTEST_SKIP() << "Android does not write cache files to disk.";
+#else
+#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+      os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
+#endif /* SHADER_CACHE_DISABLE_BY_DEFAULT */
+      os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
+      os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/multi-file", true);
+      os_set_option("MESA_SHADER_CACHE_MAX_SIZE", "1M", true);
+      open_cache();
+#endif
+   }
+
+   void TearDown() override {
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+      close_cache();
+      os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
+      os_unset_option("MESA_SHADER_CACHE_DIR");
+      os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
+      rmrf_local(CACHE_TEST_TMP);
+#endif
+   }
+
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+   void open_cache() {
+      cache = disk_cache_create("test", "make_check", 0);
+      ASSERT_NE(cache, nullptr);
+      ASSERT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
+   }
+
+   void close_cache() {
+      if (cache)
+         disk_cache_destroy(cache);
+      cache = NULL;
+   }
+
+   uint64_t counter() {
+      return p_atomic_read(&cache->size->value);
+   }
+
+   void set_counter(uint64_t value) {
+      p_atomic_set(&cache->size->value, value);
+   }
+
+   void put(unsigned seed, size_t size, cache_key key) {
+      uint8_t *data = (uint8_t *) malloc(size);
+      uint32_t state = seed * 2654435761u + 1;
+      for (size_t i = 0; i < size; i++) {
+         state = state * 1664525u + 1013904223u;
+         data[i] = state >> 24;
+      }
+      disk_cache_compute_key(cache, data, size, key);
+      disk_cache_put(cache, key, data, size, NULL);
+      disk_cache_wait_for_idle(cache);
+      free(data);
+   }
+
+   std::string item_dir(const cache_key key) {
+      char *filename = disk_cache_get_cache_filename(cache, key);
+      std::string dir(filename);
+      free(filename);
+      return dir.substr(0, dir.rfind('/'));
+   }
+
+   uint64_t size_on_disk() {
+      uint64_t total = 0;
+      for (unsigned i = 0; i < 256; i++) {
+         char *dir_path = ralloc_asprintf(mem_ctx, "%s/%02x", cache->path, i);
+         DIR *dir = opendir(dir_path);
+         if (!dir)
+            continue;
+         struct dirent *ent;
+         while ((ent = readdir(dir)) != NULL) {
+            size_t len = strlen(ent->d_name);
+            if (len >= 4 && !strcmp(&ent->d_name[len - 4], ".tmp"))
+               continue;
+            char *path = ralloc_asprintf(mem_ctx, "%s/%s", dir_path, ent->d_name);
+            struct stat sb;
+            if (lstat(path, &sb) == 0 && S_ISREG(sb.st_mode))
+               total += (uint64_t) sb.st_blocks * 512;
+         }
+         closedir(dir);
+      }
+      return total;
+   }
+
+   void write_counter_to_index(const std::string &cache_path, uint64_t value) {
+      std::string index = cache_path + "/index";
+      int fd = open(index.c_str(), O_WRONLY);
+      ASSERT_NE(fd, -1);
+      ASSERT_EQ(pwrite(fd, &value, sizeof(value), 0), (ssize_t) sizeof(value));
+      close(fd);
+   }
+
+   void reopen_with_counter(uint64_t value) {
+      std::string cache_path(cache->path);
+      close_cache();
+      write_counter_to_index(cache_path, value);
+      open_cache();
+   }
+
+   static void create_file(const std::string &path, time_t mtime) {
+      static const char data[4096] = { 1 };
+      int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      ASSERT_NE(fd, -1);
+      ASSERT_EQ(write(fd, data, sizeof(data)), (ssize_t) sizeof(data));
+      close(fd);
+      struct utimbuf times = { mtime, mtime };
+      ASSERT_EQ(utime(path.c_str(), &times), 0);
+   }
+
+   static bool is_readable_memory(const void *ptr) {
+      int fds[2];
+      if (pipe(fds) != 0)
+         return false;
+      ssize_t ret = write(fds[1], ptr, 1);
+      close(fds[0]);
+      close(fds[1]);
+      return ret == 1;
+   }
+#endif
+};
+
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+
+#define IMPOSSIBLE_UNALIGNED_SIZE UINT64_C(0xefffffbd7fa092)
+#define IMPOSSIBLE_HUGE_SIZE (UINT64_MAX & ~UINT64_C(511))
+
+TEST_F(CacheMultiFile, SizeIsValid)
+{
+   set_counter(0);
+   EXPECT_TRUE(disk_cache_size_is_valid(cache));
+
+   set_counter(512);
+   EXPECT_TRUE(disk_cache_size_is_valid(cache));
+
+   set_counter(513);
+   EXPECT_FALSE(disk_cache_size_is_valid(cache));
+
+   set_counter(IMPOSSIBLE_UNALIGNED_SIZE);
+   EXPECT_FALSE(disk_cache_size_is_valid(cache));
+
+   set_counter(IMPOSSIBLE_HUGE_SIZE);
+   EXPECT_FALSE(disk_cache_size_is_valid(cache));
+
+   set_counter(0);
+}
+
+TEST_F(CacheMultiFile, RecomputeUnalignedSizeOnOpen)
+{
+   cache_key keys[3];
+   put(1, 100, keys[0]);
+   put(2, 5000, keys[1]);
+   put(3, 20000, keys[2]);
+
+   const uint64_t expected = size_on_disk();
+   ASSERT_GT(expected, 0u);
+   EXPECT_EQ(counter(), expected);
+
+   reopen_with_counter(IMPOSSIBLE_UNALIGNED_SIZE);
+
+   EXPECT_EQ(counter(), expected);
+   for (unsigned i = 0; i < ARRAY_SIZE(keys); i++)
+      EXPECT_TRUE(does_cache_contain(cache, keys[i]));
+}
+
+TEST_F(CacheMultiFile, RecomputeHugeSizeOnOpen)
+{
+   cache_key keys[2];
+   put(1, 3000, keys[0]);
+   put(2, 9000, keys[1]);
+
+   const uint64_t expected = size_on_disk();
+   ASSERT_GT(expected, 0u);
+
+   reopen_with_counter(IMPOSSIBLE_HUGE_SIZE);
+
+   EXPECT_EQ(counter(), expected);
+   for (unsigned i = 0; i < ARRAY_SIZE(keys); i++)
+      EXPECT_TRUE(does_cache_contain(cache, keys[i]));
+}
+
+TEST_F(CacheMultiFile, RecomputeEmptyCacheOnOpen)
+{
+   reopen_with_counter(IMPOSSIBLE_UNALIGNED_SIZE);
+
+   EXPECT_EQ(counter(), 0u);
+
+   cache_key key;
+   put(1, 3000, key);
+   EXPECT_TRUE(does_cache_contain(cache, key));
+   EXPECT_EQ(counter(), size_on_disk());
+}
+
+TEST_F(CacheMultiFile, PutWithImpossibleSizeDoesNotEvict)
+{
+   cache_key first, second;
+   put(1, 3000, first);
+   ASSERT_TRUE(does_cache_contain(cache, first));
+
+   set_counter(IMPOSSIBLE_UNALIGNED_SIZE);
+   put(2, 3000, second);
+
+   EXPECT_TRUE(does_cache_contain(cache, first));
+   EXPECT_TRUE(does_cache_contain(cache, second));
+   EXPECT_EQ(counter(), size_on_disk());
+}
+
+TEST_F(CacheMultiFile, PutWithOvercountedSizeRecomputes)
+{
+   cache_key first, second;
+   put(1, 3000, first);
+   ASSERT_TRUE(does_cache_contain(cache, first));
+
+   set_counter(64 * 1024 * 1024);
+   ASSERT_TRUE(disk_cache_size_is_valid(cache));
+   put(2, 3000, second);
+
+   EXPECT_TRUE(does_cache_contain(cache, second));
+   EXPECT_EQ(counter(), size_on_disk());
+}
+
+TEST_F(CacheMultiFile, PutIntoEmptyCacheWithOvercountedSizeRecomputes)
+{
+   set_counter(64 * 1024 * 1024);
+   ASSERT_TRUE(disk_cache_size_is_valid(cache));
+
+   cache_key key;
+   put(1, 3000, key);
+
+   EXPECT_TRUE(does_cache_contain(cache, key));
+   EXPECT_EQ(counter(), size_on_disk());
+}
+
+TEST_F(CacheMultiFile, EvictLruItemReportsWhetherItRemovedAFile)
+{
+   EXPECT_FALSE(disk_cache_evict_lru_item(cache));
+   EXPECT_EQ(counter(), 0u);
+
+   cache_key key;
+   put(1, 3000, key);
+   ASSERT_GT(counter(), 0u);
+
+   EXPECT_TRUE(disk_cache_evict_lru_item(cache));
+   EXPECT_FALSE(does_cache_contain(cache, key));
+   EXPECT_EQ(counter(), 0u);
+
+   EXPECT_FALSE(disk_cache_evict_lru_item(cache));
+   EXPECT_EQ(counter(), 0u);
+}
+
+TEST_F(CacheMultiFile, RemoveKeepsSizeWhenUnlinkFails)
+{
+   if (geteuid() == 0)
+      GTEST_SKIP() << "Directory permissions do not stop root from unlinking.";
+
+   cache_key key;
+   put(1, 3000, key);
+   ASSERT_TRUE(does_cache_contain(cache, key));
+
+   const uint64_t before = counter();
+   ASSERT_GT(before, 0u);
+
+   const std::string dir = item_dir(key);
+   ASSERT_EQ(chmod(dir.c_str(), 0555), 0);
+   disk_cache_remove(cache, key);
+   EXPECT_EQ(chmod(dir.c_str(), 0755), 0);
+
+   EXPECT_EQ(counter(), before);
+   EXPECT_TRUE(does_cache_contain(cache, key));
+
+   disk_cache_remove(cache, key);
+   EXPECT_EQ(counter(), 0u);
+   EXPECT_FALSE(does_cache_contain(cache, key));
+}
+
+TEST_F(CacheMultiFile, RecomputeRemovesStaleTmpFiles)
+{
+   cache_key key;
+   put(1, 3000, key);
+
+   const std::string dir = item_dir(key);
+   const std::string stale = dir + "/stale.tmp";
+   const std::string fresh = dir + "/fresh.tmp";
+   const time_t now = time(NULL);
+
+   create_file(stale, now - 2 * 60 * 60);
+   create_file(fresh, now);
+
+#ifdef HAVE_FLOCK
+   const std::string locked = dir + "/locked.tmp";
+   create_file(locked, now - 2 * 60 * 60);
+   int locked_fd = open(locked.c_str(), O_WRONLY);
+   ASSERT_NE(locked_fd, -1);
+   ASSERT_EQ(flock(locked_fd, LOCK_EX | LOCK_NB), 0);
+#endif
+
+   const uint64_t expected = size_on_disk();
+   reopen_with_counter(IMPOSSIBLE_UNALIGNED_SIZE);
+
+   struct stat sb;
+   EXPECT_EQ(stat(stale.c_str(), &sb), -1);
+   EXPECT_EQ(errno, ENOENT);
+   EXPECT_EQ(stat(fresh.c_str(), &sb), 0);
+#ifdef HAVE_FLOCK
+   EXPECT_EQ(stat(locked.c_str(), &sb), 0);
+   close(locked_fd);
+#endif
+
+   EXPECT_EQ(counter(), expected);
+   EXPECT_TRUE(does_cache_contain(cache, key));
+}
+
+TEST_F(CacheMultiFile, IndexMappingHasGuardPages)
+{
+   const size_t page_size = sysconf(_SC_PAGESIZE);
+
+   ASSERT_NE(cache->index_reserve, nullptr);
+   EXPECT_EQ(cache->index_reserve + page_size, cache->index_mmap);
+
+   EXPECT_TRUE(is_readable_memory(cache->index_mmap));
+   EXPECT_FALSE(is_readable_memory(cache->index_mmap - 1));
+   EXPECT_FALSE(is_readable_memory(cache->index_reserve));
+   EXPECT_FALSE(is_readable_memory(cache->index_reserve +
+                                   cache->index_reserve_size - 1));
+}
+
+#endif /* ENABLE_SHADER_CACHE && !DETECT_OS_ANDROID */

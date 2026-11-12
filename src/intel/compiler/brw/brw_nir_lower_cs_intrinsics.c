@@ -43,11 +43,18 @@ compute_local_index_id(struct lower_intrinsics_state *state, nir_intrinsic_instr
 
       if (state->hw_generated_local_id) {
          assert(nir->info.derivative_group != DERIVATIVE_GROUP_QUADS);
+         assert(!nir->info.workgroup_size_variable);
 
+         /* Make sure we do not generate references to load_local_invocation_id
+          * components that the hardware will not actually produce.
+          */
          nir_def *local_id_vec = nir_load_local_invocation_id(b);
-         nir_def *local_id[3] = { nir_channel(b, local_id_vec, 0),
-                                  nir_channel(b, local_id_vec, 1),
-                                  nir_channel(b, local_id_vec, 2) };
+         nir_def *local_id[3];
+         for (unsigned i = 0; i < 3; ++i) {
+            local_id[i] = nir->info.workgroup_size[i] > 1 ?
+                          nir_channel(b, local_id_vec, i) : nir_imm_int(b, 0);
+         }
+
          nir_def *size_x = nir_imm_int(b, nir->info.workgroup_size[0]);
          nir_def *size_y = nir_imm_int(b, nir->info.workgroup_size[1]);
 
@@ -326,8 +333,7 @@ brw_nir_lower_cs_intrinsics(nir_shader *nir,
        nir->info.derivative_group != DERIVATIVE_GROUP_QUADS &&
        !nir->info.workgroup_size_variable &&
        util_is_power_of_two_nonzero(nir->info.workgroup_size[0]) &&
-       util_is_power_of_two_nonzero(nir->info.workgroup_size[1]) &&
-       !intel_use_jay(devinfo, nir->info.stage)) {
+       util_is_power_of_two_nonzero(nir->info.workgroup_size[1])) {
 
       state.hw_generated_local_id = true;
 

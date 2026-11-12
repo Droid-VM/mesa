@@ -34,6 +34,8 @@ layout (constant_id = SUBGROUP_SIZE_ID) const int SUBGROUP_SIZE = 64;
 layout (constant_id = BVH_BOUNDS_OFFSET_ID) const int BVH_BOUNDS_OFFSET = 0;
 layout (constant_id = BUILD_FLAGS_ID) const int BUILD_FLAGS = 0;
 layout (constant_id = ROOT_FLAGS_OFFSET_ID) const int ROOT_FLAGS_OFFSET = -1;
+layout (constant_id = MORTON_SORT_WORKGROUP_SIZE_ID) const int MORTON_SORT_WORKGROUP_SIZE = 512;
+layout (constant_id = MORTON_SORT_KVS_PER_THREAD_ID) const int MORTON_SORT_KVS_PER_THREAD = 2;
 
 /* copied from u_math.h */
 uint32_t
@@ -74,10 +76,10 @@ pack_ir_node_id(uint32_t offset, uint32_t type)
 }
 
 float
-aabb_surface_area(vk_aabb aabb)
+aabb_half_surface_area(vk_aabb aabb)
 {
    vec3 diagonal = aabb.max - aabb.min;
-   return 2 * diagonal.x * diagonal.y + 2 * diagonal.y * diagonal.z + 2 * diagonal.x * diagonal.z;
+   return diagonal.x * diagonal.y + diagonal.y * diagonal.z + diagonal.x * diagonal.z;
 }
 
 /* Just a wrapper for 3 uints. */

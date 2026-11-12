@@ -48,7 +48,7 @@ algebraic_late = [
     # integer, the vectorization changes. So there's no one-shot hardware
     # instruction for f2i8. Instead, lower to two NIR instructions that map
     # directly to the hardware.
-    (('f2i8', a), ('i2i8', ('f2i16', a))),
+    (('f2i8', a), ('u2u8', ('f2i16', a))),
     (('f2u8', a), ('u2u8', ('f2u16', a))),
 
     # XXX: Duplicate of nir_lower_pack
@@ -82,7 +82,7 @@ algebraic_late = [
 
     # TODO: these could be handled in the backend for lighter register pressure
     (('f2u16', a), ('u2u16', ('f2u32', a)), 'is_kraid'),
-    (('f2i16', a), ('i2i16', ('f2i32', a)), 'is_kraid'),
+    (('f2i16', a), ('u2u16', ('f2i32', a)), 'is_kraid'),
 
     # Copy-prop will clean these up
     (('pack_uvec2_to_uint', a), ('pack_32_2x16', ('u2u16', a))),
@@ -102,11 +102,7 @@ for bits in [8, 16, 32]:
 # On v11+, ICMP_OR.v4u8 was removed
 for cond in ['ilt', 'ige', 'ieq', 'ine', 'ult', 'uge']:
     convert_8bit = 'u2u8'
-    convert_16bit = 'u2u16'
-
-    if cond[0] == 'i':
-        convert_8bit = 'i2i8'
-        convert_16bit = 'i2i16'
+    convert_16bit = 'i2i16' if cond[0] == 'i' else 'u2u16'
 
     algebraic_late += [
         ((f'{cond}_pan@8', a, b), (convert_8bit, (f'{cond}_pan', (convert_16bit, a), (convert_16bit, b))), 'gpu_arch >= 11'),
@@ -120,24 +116,34 @@ for cond in ['ilt', 'ige', 'ieq', 'ine', 'ult', 'uge']:
 # Because this lowering must happen late, NIR won't squash inot in
 # automatically. Do so explicitly. (The more specific pattern must be first.)
 for fsz in [16, 32]:
-    a_fsz = (f'i2i{fsz}', a)
+    for bsz in [8, 16, 32, 64]:
+        if bsz > fsz:
+            bcast = (f'u2u{fsz}', a)
+        elif bsz < fsz:
+            bcast = (f'i2i{fsz}', a)
+        else:
+            bcast = a
 
-    algebraic_late += [
-        ((f'b2f{fsz}', ('inot', f'a@{fsz}')), ('bcsel_pan', a, 0.0, 1.0)),
-        ((f'b2f{fsz}', ('inot', a)), ('bcsel_pan', a_fsz, 0.0, 1.0)),
-        ((f'b2f{fsz}', f'a@{fsz}'), ('bcsel_pan', a, 1.0, 0.0)),
-        ((f'b2f{fsz}', a), ('bcsel_pan', a_fsz, 1.0, 0.0)),
-    ]
+        algebraic_late += [
+            ((f'b2f{fsz}', ('inot', f'a@{bsz}')), ('bcsel_pan', bcast, 0.0, 1.0)),
+            ((f'b2f{fsz}', f'a@{bsz}'), ('bcsel_pan', bcast, 1.0, 0.0)),
+        ]
 
-for isz in [8, 16, 32]:
-    a_isz = (f'i2i{isz}', a)
+for isz in [8, 16, 32, 64]:
+    for bsz in [8, 16, 32, 64]:
+        if bsz > isz:
+            bcast = (f'u2u{isz}', a)
+        elif bsz < isz:
+            bcast = (f'i2i{isz}', a)
+        else:
+            bcast = a
 
-    algebraic_late += [
-        ((f'b2i{isz}', ('inot', f'a@{isz}')), ('bcsel_pan', a, 0, 1), 'is_kraid'),
-        ((f'b2i{isz}', ('inot', a)), ('bcsel_pan', a_isz, 0, 1), 'is_kraid'),
-        ((f'b2i{isz}', f'a@{isz}'), ('bcsel_pan', a, 1, 0), 'is_kraid'),
-        ((f'b2i{isz}', a), ('bcsel_pan', a_isz, 1, 0), 'is_kraid'),
-    ]
+        algebraic_late += [
+            ((f'b2i{isz}', ('inot', f'a@{bsz}')),
+             ('bcsel_pan', bcast, 0, 1), 'is_kraid'),
+            ((f'b2i{isz}', f'a@{bsz}'),
+             ('bcsel_pan', bcast, 1, 0), 'is_kraid'),
+        ]
 
 LOPS = ['and', 'or', 'xor']
 SHIFTS = [
@@ -171,7 +177,6 @@ algebraic_late += [
     (('iand', a, b), ('lshift_and_pan', a, 0, b), 'is_kraid'),
     (('ior', a, b), ('lshift_or_pan', a, 0, b), 'is_kraid'),
     (('ixor', a, b), ('lshift_xor_pan', a, 0, b), 'is_kraid'),
-    (('inot', a), ('lshift_xor_pan', a, 0, -1), 'is_kraid'),
     (('ishl', a, b), ('lshift_or_pan', a, ('u2u8', b), 0), 'is_kraid'),
     (('ushr', a, b), ('rshift_or_pan', a, ('u2u8', b), 0), 'is_kraid'),
     (('ishr', a, b), ('arshift_or_pan', a, ('u2u8', b), 0), 'is_kraid'),
@@ -223,7 +228,7 @@ algebraic_late += [
 # exponents in LDEXP.v2f16.
 algebraic_late += [
     (('ldexp', 'a@16', b),
-     ('ldexp16_pan', a, ('i2i16', ('imin', ('imax', b, -127), 127))))
+     ('ldexp16_pan', a, ('u2u16', ('imin', ('imax', b, -127), 127))))
 ]
 
 

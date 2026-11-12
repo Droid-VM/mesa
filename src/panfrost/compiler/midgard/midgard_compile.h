@@ -9,12 +9,11 @@
 
 #include "compiler/nir/nir.h"
 #include "panfrost/compiler/pan_compiler.h"
-#include "panfrost/compiler/pan_nir.h"
 #include "util/u_dynarray.h"
 
-void midgard_preprocess_nir(nir_shader *nir, uint64_t gpu_id);
-void midgard_postprocess_nir(nir_shader *nir, uint64_t gpu_id);
-void midgard_lower_texture_nir(nir_shader *nir, uint64_t gpu_id);
+void midgard_preprocess_nir(nir_shader *nir);
+void midgard_postprocess_nir(nir_shader *nir, unsigned arch);
+void midgard_lower_texture_nir(nir_shader *nir, unsigned arch);
 
 bool midgard_will_dump_shaders(void);
 
@@ -44,8 +43,6 @@ static const nir_shader_compiler_options midgard_nir_options = {
    .lower_bit_count = true,
    .lower_ifind_msb = true,
    .lower_find_lsb = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_ineg = true,
    .lower_fisnormal = true,
    .lower_scmp = true,
@@ -88,7 +85,7 @@ static const nir_shader_compiler_options midgard_nir_options = {
    .lower_doubles_options = nir_lower_dmod,
    .support_indirect_inputs = 0 /* TODO support indirect varyings */,
    .max_samples = 16,
-   .lower_mediump_io = pan_nir_lower_mediump_io,
+   .io_options = nir_io_non_interpolated_as_uint,
 };
 
 #endif

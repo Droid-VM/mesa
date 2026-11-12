@@ -27,13 +27,13 @@
 #define FAMILY_NV      0x8F //# 143 / Navi: 10
 #define FAMILY_VGH     0x90 //# 144 / Van Gogh
 #define FAMILY_NV3     0x91 //# 145 / Navi: 3x
-#define FAMILY_STX     0x96
+#define FAMILY_STX     0x96 //# 150 / Strix
 #define FAMILY_PHX     0x94 //# 148 / Phoenix
-#define FAMILY_GFX1170 0x9A
+#define FAMILY_GFX1170 0x9A //# 154 / Gfx1170
 #define FAMILY_RMB     0x92 //# 146 / Rembrandt
 #define FAMILY_RPL     0x95 //# 149 / Raphael
 #define FAMILY_MDN     0x97 //# 151 / Mendocino
-#define FAMILY_NV4     0x98
+#define FAMILY_NV4     0x98 //# 152 / Gfx12x
 
 // AMDGPU_FAMILY_IS(familyId, familyName)
 #define FAMILY_IS(f, fn)     (f == FAMILY_##fn)
@@ -96,7 +96,6 @@
 #define AMDGPU_NAVI22_RANGE     0x32, 0x3C //# 50  <= x < 60
 #define AMDGPU_NAVI23_RANGE     0x3C, 0x46 //# 60  <= x < 70
 #define AMDGPU_NAVI24_RANGE     0x46, 0x50 //# 70  <= x < 80
-
 #define AMDGPU_VANGOGH_RANGE    0x01, 0xFF //# 1 <= x < max
 
 #define AMDGPU_NAVI31_RANGE     0x01, 0x10 //# 01 <= x < 16
@@ -118,9 +117,8 @@
 #define AMDGPU_RAPHAEL_RANGE    0x01, 0xFF //# 1 <= x < max
 #define AMDGPU_MENDOCINO_RANGE  0x01, 0xFF //# 1 <= x < max
 
-#define AMDGPU_GFX1200_RANGE    0x40, 0x50
-#define AMDGPU_GFX1201_RANGE    0x50, 0xFF
-
+#define AMDGPU_GFX1200_RANGE    0x40, 0x50 //# 64 <= x < 80
+#define AMDGPU_GFX1201_RANGE    0x50, 0xFF //# 80 <= x < 255
 
 #define AMDGPU_EXPAND_FIX(x) x
 #define AMDGPU_RANGE_HELPER(val, min, max) ((val >= min) && (val < max))
@@ -202,5 +200,5 @@
 #define ASICREV_IS_MENDOCINO(r)        ASICREV_IS(r, MENDOCINO)
 
 #define ASICREV_IS_GFX1200(r)          ASICREV_IS(r, GFX1200)
-
+#define ASICREV_IS_GFX1201(r)          ASICREV_IS(r, GFX1201)
 #endif // _AMDGPU_ASIC_ADDR_H

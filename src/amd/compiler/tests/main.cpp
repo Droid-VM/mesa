@@ -33,7 +33,7 @@ static const char* help_message =
    "  -l --list   List unit tests.\n"
    "  --no-check  Print test output instead of checking it.\n";
 
-std::map<std::string, TestDef> *tests = NULL;
+std::map<std::string, TestDef>* tests = NULL;
 FILE* output = NULL;
 
 static TestDef current_test;

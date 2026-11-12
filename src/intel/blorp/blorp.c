@@ -32,7 +32,10 @@ blorp_op_to_intel_measure_snapshot(enum blorp_op op)
    enum intel_measure_snapshot_type vals[] = {
 #define MAP(name) [BLORP_OP_##name] = INTEL_SNAPSHOT_##name
       MAP(BLIT),
-      MAP(COPY),
+      MAP(BLIT_COPY),
+      MAP(MEM_COPY),
+      MAP(COPY_INDIRECT),
+      MAP(COPY_IMAGE_INDIRECT),
       MAP(CCS_AMBIGUATE),
       MAP(CCS_COLOR_CLEAR),
       MAP(CCS_PARTIAL_RESOLVE),
@@ -63,7 +66,10 @@ const char *blorp_op_to_name(enum blorp_op op)
    const char *names[] = {
 #define MAP(name) [BLORP_OP_##name] = #name
       MAP(BLIT),
-      MAP(COPY),
+      MAP(BLIT_COPY),
+      MAP(MEM_COPY),
+      MAP(COPY_INDIRECT),
+      MAP(COPY_IMAGE_INDIRECT),
       MAP(CCS_AMBIGUATE),
       MAP(CCS_COLOR_CLEAR),
       MAP(CCS_PARTIAL_RESOLVE),
@@ -93,12 +99,14 @@ const char *
 blorp_shader_type_to_name(enum blorp_shader_type type)
 {
    static const char *shader_name[] = {
-      [BLORP_SHADER_TYPE_COPY]                = "BLORP-copy",
+      [BLORP_SHADER_TYPE_MEM_COPY]            = "BLORP-mem-copy",
+      [BLORP_SHADER_TYPE_BLIT_COPY]           = "BLORP-blit-copy",
       [BLORP_SHADER_TYPE_BLIT]                = "BLORP-blit",
       [BLORP_SHADER_TYPE_CLEAR]               = "BLORP-clear",
       [BLORP_SHADER_TYPE_MCS_PARTIAL_RESOLVE] = "BLORP-mcs-partial-resolve",
       [BLORP_SHADER_TYPE_LAYER_OFFSET_VS]     = "BLORP-layer-offset-vs",
       [BLORP_SHADER_TYPE_GFX4_SF]             = "BLORP-gfx4-sf",
+      [BLORP_SHADER_TYPE_COPY_INDIRECT]       = "BLORP-copy-indirect",
    };
    assert(type < ARRAY_SIZE(shader_name));
 
@@ -277,12 +285,14 @@ blorp_surface_info_init(struct blorp_batch *batch,
 
 
 void
-blorp_params_init(struct blorp_params *params)
+blorp_params_init(struct blorp_params *params,
+                  struct blorp_context *blorp)
 {
    memset(params, 0, sizeof(*params));
    params->num_samples = 1;
    params->num_draw_buffers = 1;
    params->num_layers = 1;
+   params->use_efficient_64bit = blorp->config.use_efficient_64bit;
 }
 
 void
@@ -293,7 +303,7 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
    const struct intel_device_info *devinfo = batch->blorp->isl_dev->info;
 
    struct blorp_params params;
-   blorp_params_init(&params);
+   blorp_params_init(&params, batch->blorp);
 
    params.hiz_op = op;
    params.full_surface_hiz_op = true;

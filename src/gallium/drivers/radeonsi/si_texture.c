@@ -223,8 +223,7 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
             flags |= RADEON_SURF_NO_HTILE;
       }
 
-      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) ||
-                           sscreen->info.gfx12_supports_display_dcc)) {
+      if (!is_imported) {
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */
@@ -522,8 +521,11 @@ static void si_reallocate_texture_inplace(struct si_context *sctx, struct si_tex
 
    templ.bind |= new_bind_flag;
 
-   if (tex->buffer.b.is_shared || tex->num_planes > 1)
+   if (tex->buffer.b.is_shared || tex->plane_index != 0)
       return;
+
+   if (tex->multi_plane_format != PIPE_FORMAT_NONE)
+      templ.format = tex->multi_plane_format;
 
    if (new_bind_flag == PIPE_BIND_LINEAR) {
       if (tex->surface.is_linear)
@@ -544,77 +546,88 @@ static void si_reallocate_texture_inplace(struct si_context *sctx, struct si_tex
    if (!new_tex)
       return;
 
-   /* Copy the pixels to the new texture. */
-   if (!invalidate_storage) {
-      for (i = 0; i <= templ.last_level; i++) {
-         struct pipe_box box;
+   struct si_texture *new_tex0 = new_tex;
 
-         u_box_3d(0, 0, 0, u_minify(templ.width0, i), u_minify(templ.height0, i),
-                  util_num_layers(&templ, i), &box);
+   while (tex) {
+      /* Copy the pixels to the new texture. */
+      if (!invalidate_storage) {
+         unsigned w = util_format_get_plane_width(templ.format, tex->plane_index, templ.width0);
+         unsigned h = util_format_get_plane_height(templ.format, tex->plane_index, templ.height0);
 
-         si_resource_copy_region(&sctx->b, &new_tex->buffer.b.b,
-                                 i, 0, 0, 0, &tex->buffer.b.b, i, &box);
+         for (i = 0; i <= templ.last_level; i++) {
+            struct pipe_box box;
+
+            u_box_3d(0, 0, 0, u_minify(w, i), u_minify(h, i),
+                     util_num_layers(&templ, i), &box);
+
+            si_resource_copy_region(&sctx->b, &new_tex->buffer.b.b,
+                                    i, 0, 0, 0, &tex->buffer.b.b, i, &box);
+         }
       }
+
+      if (new_bind_flag == PIPE_BIND_LINEAR) {
+         si_texture_discard_cmask(sctx->screen, tex);
+         si_texture_discard_dcc(sctx->screen, tex);
+      }
+
+      /* Replace the structure fields of tex. */
+      tex->buffer.b.b.bind = templ.bind;
+      radeon_bo_reference(sctx->screen->ws, &tex->buffer.buf, new_tex->buffer.buf);
+      tex->buffer.gpu_address = new_tex->buffer.gpu_address;
+      tex->buffer.bo_size = new_tex->buffer.bo_size;
+      tex->buffer.bo_alignment_log2 = new_tex->buffer.bo_alignment_log2;
+      tex->buffer.domains = new_tex->buffer.domains;
+      tex->buffer.flags = new_tex->buffer.flags;
+
+      tex->surface = new_tex->surface;
+      si_texture_reference(&tex->flushed_depth_texture, new_tex->flushed_depth_texture);
+
+      tex->surface.fmask_offset = new_tex->surface.fmask_offset;
+      tex->surface.cmask_offset = new_tex->surface.cmask_offset;
+      tex->cmask_base_address_reg = new_tex->cmask_base_address_reg;
+
+      if (tex->cmask_buffer == &tex->buffer)
+         tex->cmask_buffer = NULL;
+      else
+         si_resource_reference(&tex->cmask_buffer, NULL);
+
+      if (new_tex->cmask_buffer == &new_tex->buffer)
+         tex->cmask_buffer = &tex->buffer;
+      else
+         si_resource_reference(&tex->cmask_buffer, new_tex->cmask_buffer);
+
+      tex->surface.meta_offset = new_tex->surface.meta_offset;
+      tex->cb_color_info = new_tex->cb_color_info;
+      memcpy(tex->color_clear_value, new_tex->color_clear_value, sizeof(tex->color_clear_value));
+
+      memcpy(tex->depth_clear_value, new_tex->depth_clear_value, sizeof(tex->depth_clear_value));
+      tex->dirty_level_mask = new_tex->dirty_level_mask;
+      tex->stencil_dirty_level_mask = new_tex->stencil_dirty_level_mask;
+      tex->db_render_format = new_tex->db_render_format;
+      memcpy(tex->stencil_clear_value, new_tex->stencil_clear_value, sizeof(tex->stencil_clear_value));
+      tex->tc_compatible_htile = new_tex->tc_compatible_htile;
+      tex->depth_cleared_level_mask_once = new_tex->depth_cleared_level_mask_once;
+      tex->stencil_cleared_level_mask_once = new_tex->stencil_cleared_level_mask_once;
+      tex->upgraded_depth = new_tex->upgraded_depth;
+      tex->db_compatible = new_tex->db_compatible;
+      tex->can_sample_z = new_tex->can_sample_z;
+      tex->can_sample_s = new_tex->can_sample_s;
+
+      tex->displayable_dcc_dirty = new_tex->displayable_dcc_dirty;
+
+      if (new_bind_flag == PIPE_BIND_LINEAR) {
+         assert(!tex->surface.meta_offset);
+         assert(!tex->cmask_buffer);
+         assert(!tex->surface.fmask_size);
+         assert(!tex->is_depth);
+      }
+
+      tex = (struct si_texture *)tex->buffer.b.b.next;
+      new_tex = (struct si_texture *)new_tex->buffer.b.b.next;
+      assert(!tex == !new_tex);
    }
 
-   if (new_bind_flag == PIPE_BIND_LINEAR) {
-      si_texture_discard_cmask(sctx->screen, tex);
-      si_texture_discard_dcc(sctx->screen, tex);
-   }
-
-   /* Replace the structure fields of tex. */
-   tex->buffer.b.b.bind = templ.bind;
-   radeon_bo_reference(sctx->screen->ws, &tex->buffer.buf, new_tex->buffer.buf);
-   tex->buffer.gpu_address = new_tex->buffer.gpu_address;
-   tex->buffer.bo_size = new_tex->buffer.bo_size;
-   tex->buffer.bo_alignment_log2 = new_tex->buffer.bo_alignment_log2;
-   tex->buffer.domains = new_tex->buffer.domains;
-   tex->buffer.flags = new_tex->buffer.flags;
-
-   tex->surface = new_tex->surface;
-   si_texture_reference(&tex->flushed_depth_texture, new_tex->flushed_depth_texture);
-
-   tex->surface.fmask_offset = new_tex->surface.fmask_offset;
-   tex->surface.cmask_offset = new_tex->surface.cmask_offset;
-   tex->cmask_base_address_reg = new_tex->cmask_base_address_reg;
-
-   if (tex->cmask_buffer == &tex->buffer)
-      tex->cmask_buffer = NULL;
-   else
-      si_resource_reference(&tex->cmask_buffer, NULL);
-
-   if (new_tex->cmask_buffer == &new_tex->buffer)
-      tex->cmask_buffer = &tex->buffer;
-   else
-      si_resource_reference(&tex->cmask_buffer, new_tex->cmask_buffer);
-
-   tex->surface.meta_offset = new_tex->surface.meta_offset;
-   tex->cb_color_info = new_tex->cb_color_info;
-   memcpy(tex->color_clear_value, new_tex->color_clear_value, sizeof(tex->color_clear_value));
-
-   memcpy(tex->depth_clear_value, new_tex->depth_clear_value, sizeof(tex->depth_clear_value));
-   tex->dirty_level_mask = new_tex->dirty_level_mask;
-   tex->stencil_dirty_level_mask = new_tex->stencil_dirty_level_mask;
-   tex->db_render_format = new_tex->db_render_format;
-   memcpy(tex->stencil_clear_value, new_tex->stencil_clear_value, sizeof(tex->stencil_clear_value));
-   tex->tc_compatible_htile = new_tex->tc_compatible_htile;
-   tex->depth_cleared_level_mask_once = new_tex->depth_cleared_level_mask_once;
-   tex->stencil_cleared_level_mask_once = new_tex->stencil_cleared_level_mask_once;
-   tex->upgraded_depth = new_tex->upgraded_depth;
-   tex->db_compatible = new_tex->db_compatible;
-   tex->can_sample_z = new_tex->can_sample_z;
-   tex->can_sample_s = new_tex->can_sample_s;
-
-   tex->displayable_dcc_dirty = new_tex->displayable_dcc_dirty;
-
-   if (new_bind_flag == PIPE_BIND_LINEAR) {
-      assert(!tex->surface.meta_offset);
-      assert(!tex->cmask_buffer);
-      assert(!tex->surface.fmask_size);
-      assert(!tex->is_depth);
-   }
-
-   si_texture_reference(&new_tex, NULL);
+   si_texture_reference(&new_tex0, NULL);
 
    p_atomic_inc(&sctx->screen->dirty_tex_counter);
 }
@@ -778,7 +791,7 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
    bool flush = false;
 
-   ctx = threaded_context_unwrap_sync(ctx);
+   ctx = pipe_get_driver_context(threaded_context_unwrap_sync(ctx));
    sctx = ctx ? (struct si_context *)ctx : si_get_aux_context(sscreen, &sscreen->aux_context.general);
 
    if (resource->target != PIPE_BUFFER) {
@@ -1161,7 +1174,8 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
        *
        * Sparse textures don't have any backing storage at this point.
        */
-      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE) &&
+          !(surface->flags & RADEON_SURF_IMPORTED))
          si_set_tex_bo_metadata(sscreen, tex);
       return tex;
    }
@@ -1176,6 +1190,13 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
 
    if (tex->surface.flags & RADEON_SURF_TC_COMPATIBLE_HTILE) {
       assert(sscreen->info.gfx_level < GFX12);
+
+      if (sscreen->info.gfx_level >= GFX10) {
+         tex->htile_pipe_misaligned =
+            ac_surface_is_meta_pipe_misaligned(&sscreen->info, tex->surface.bpe,
+                                               base->nr_storage_samples, util_num_layers(base, 0),
+                                               true);
+      }
 
       /* On GFX8, HTILE uses different tiling depending on the TC_COMPATIBLE_HTILE
        * setting, so we have to enable it if we enabled it at allocation.
@@ -1480,16 +1501,11 @@ si_texture_create_with_modifier(struct pipe_screen *screen,
    /* Compute texture or plane layouts and offsets. */
    for (unsigned i = 0; i < num_planes; i++) {
       plane_templ[i] = *templ;
+      plane_templ[i].next = NULL;
       plane_templ[i].format = si_get_plane_format(templ->format, i);
       plane_templ[i].width0 = util_format_get_plane_width(templ->format, i, templ->width0);
       plane_templ[i].height0 = util_format_get_plane_height(templ->format, i, templ->height0);
 
-      /* Multi-plane allocations need PIPE_BIND_SHARED, because we can't
-       * reallocate the storage to add PIPE_BIND_SHARED, because it's
-       * shared by 3 pipe_resources.
-       */
-      if (num_planes > 1)
-         plane_templ[i].bind |= PIPE_BIND_SHARED;
       /* Setting metadata on suballocated buffers is impossible. So use PIPE_BIND_CUSTOM to
        * request a non-suballocated buffer.
        */
@@ -1687,14 +1703,23 @@ si_get_dmabuf_modifier_planes(struct pipe_screen *pscreen, uint64_t modifier,
 {
    unsigned planes = util_format_get_num_planes(format);
 
+   if (!IS_AMD_FMT_MOD(modifier))
+      return planes;
+
    if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) < AMD_FMT_MOD_TILE_VER_GFX12) {
-      if (IS_AMD_FMT_MOD(modifier) && planes == 1) {
-         if (AMD_FMT_MOD_GET(DCC_RETILE, modifier))
+      if (planes == 1) {
+         if (ac_modifier_has_dcc_retile(modifier))
             return 3;
-         else if (AMD_FMT_MOD_GET(DCC, modifier))
+         else if (ac_modifier_has_dcc(modifier))
             return 2;
          else
             return 1;
+      }
+
+      /* Disallow multi-plane formats with macrotiling, for now. */
+      if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) == AMD_FMT_MOD_TILE_VER_GFX6 &&
+          AMD_FMT_MOD_GET(TILE, modifier) >= AMD_FMT_MOD_TILE_GFX6_2D_TILED_THIN1) {
+         return 1;
       }
    }
 
@@ -1810,7 +1835,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
           md_flags & (1u << AC_SURF_METADATA_FLAG_FAMILY_OVERRIDEN_BIT)) {
          mesa_loge("si_texture_from_winsys_buffer: fail texture import due to "
                    "AC_SURF_METADATA_FLAG_FAMILY_OVERRIDEN_BIT being set.");
-         return NULL;
+         goto fail;
       }
    } else {
       /**
@@ -1841,7 +1866,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
    r = si_init_surface(sscreen, &surface, templ, metadata.mode, modifier, true,
                        surface.flags & RADEON_SURF_SCANOUT, false, false);
    if (r)
-      return NULL;
+      goto fail;
 
    /* This is a hack to skip alignment checking for 3D textures */
    if (templ->target == PIPE_TEXTURE_3D)
@@ -1850,7 +1875,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
    tex = si_texture_create_object(&sscreen->b, templ, &surface, NULL, buf,
                                   offset, stride, 0, 0);
    if (!tex)
-      return NULL;
+      goto fail;
 
    if (!take_ownership) {
       struct pb_buffer_lean *tmp = NULL;
@@ -1920,6 +1945,11 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
 
    assert(tex->surface.tile_swizzle == 0);
    return &tex->buffer.b.b;
+
+fail:
+   if (take_ownership)
+      radeon_bo_drop_reference(sscreen->ws, buf);
+   return NULL;
 }
 
 static struct pipe_resource *si_texture_from_handle(struct pipe_screen *screen,
@@ -2122,7 +2152,8 @@ static void *si_texture_transfer_map(struct pipe_context *ctx, struct pipe_resou
    if (tex->buffer.b.b.flags & SI_RESOURCE_AUX_PLANE)
       return NULL;
 
-   if ((tex->buffer.flags & RADEON_FLAG_ENCRYPTED) && usage & PIPE_MAP_READ)
+   if ((tex->buffer.flags & RADEON_FLAG_ENCRYPTED) &&
+       (usage & PIPE_MAP_READ || !sctx->is_gfx_queue))
       return NULL;
 
    if (tex->is_depth || tex->buffer.flags & RADEON_FLAG_SPARSE) {
@@ -2535,7 +2566,7 @@ void si_init_screen_texture_functions(struct si_screen *sscreen)
     * which works around some applications using modifiers that are not
     * allowed in combination with lack of error reporting in
     * gbm_dri_surface_create */
-   if (sscreen->info.gfx_level >= GFX9 && sscreen->info.kernel_has_modifiers) {
+   if (sscreen->info.kernel_has_modifiers) {
       sscreen->b.resource_create_with_modifiers = si_texture_create_with_modifiers;
       sscreen->b.query_dmabuf_modifiers = si_query_dmabuf_modifiers;
       sscreen->b.is_dmabuf_modifier_supported = si_is_dmabuf_modifier_supported;

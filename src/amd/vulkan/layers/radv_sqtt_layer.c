@@ -15,9 +15,9 @@
 #include "radv_shader.h"
 #include "vk_semaphore.h"
 
+#include "util/u_memory.h"
 #include "ac_rgp.h"
 #include "ac_sqtt.h"
-#include "util/u_memory.h"
 
 void
 radv_sqtt_emit_relocated_shaders(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pipeline *pipeline)
@@ -126,7 +126,7 @@ radv_sqtt_reloc_graphics_shaders(struct radv_device *device, struct radv_graphic
       else
          dest_ptr = slab_ptr + offset;
 
-      memcpy(dest_ptr, shader->code, shader->code_size);
+      radv_shader_get_code(device, shader, dest_ptr);
 
       offset += align(shader->code_size, RADV_SHADER_ALLOC_ALIGNMENT);
    }
@@ -345,7 +345,7 @@ radv_gfx12_write_draw_marker(struct radv_cmd_buffer *cmd_buffer, const struct ra
 }
 
 void
-radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *draw_info, bool use_gang_cs)
+radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info draw_info, bool use_gang_cs)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -356,7 +356,7 @@ radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_in
                            RADV_SQTT_USERDATA_MAIN_CS | (use_gang_cs ? RADV_SQTT_USERDATA_GANG_CS : 0));
 
    if (pdev->info.gfx_level >= GFX12)
-      radv_gfx12_write_draw_marker(cmd_buffer, draw_info);
+      radv_gfx12_write_draw_marker(cmd_buffer, &draw_info);
 }
 
 void
@@ -417,38 +417,7 @@ radv_describe_barrier_end_delayed(struct radv_cmd_buffer *cmd_buffer)
 
    marker.num_layout_transitions = cmd_buffer->state.num_layout_transitions;
 
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_WAIT_ON_EOP_TS)
-      marker.wait_on_eop_ts = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_VS_PARTIAL_FLUSH)
-      marker.vs_partial_flush = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_PS_PARTIAL_FLUSH)
-      marker.ps_partial_flush = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_CS_PARTIAL_FLUSH)
-      marker.cs_partial_flush = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_PFP_SYNC_ME)
-      marker.pfp_sync_me = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_SYNC_CP_DMA)
-      marker.sync_cp_dma = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_VMEM_L0)
-      marker.inval_tcp = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_ICACHE)
-      marker.inval_sqI = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_SMEM_L0)
-      marker.inval_sqK = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_FLUSH_L2)
-      marker.flush_tcc = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_L2)
-      marker.inval_tcc = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_FLUSH_CB)
-      marker.flush_cb = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_CB)
-      marker.inval_cb = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_FLUSH_DB)
-      marker.flush_db = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_DB)
-      marker.inval_db = true;
-   if (cmd_buffer->state.sqtt_flush_bits & RGP_FLUSH_INVAL_L1)
-      marker.inval_gl1 = true;
+   ac_rgp_flush_bits_to_barrier_marker(cmd_buffer->state.rgp_flush_bits, &marker);
 
    radv_emit_sqtt_userdata(cmd_buffer, &marker, sizeof(marker) / 4, RADV_SQTT_USERDATA_MAIN_CS);
 
@@ -470,7 +439,7 @@ radv_describe_barrier_start(struct radv_cmd_buffer *cmd_buffer, enum rgp_barrier
    }
 
    radv_describe_barrier_end_delayed(cmd_buffer);
-   cmd_buffer->state.sqtt_flush_bits = 0;
+   cmd_buffer->state.rgp_flush_bits = 0;
    cmd_buffer->state.in_barrier = true;
 
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_BARRIER_START;
@@ -653,7 +622,8 @@ radv_handle_sqtt(VkQueue _queue)
    if (device->sqtt_enabled) {
       if (!radv_sqtt_stop_capturing(queue)) {
          /* Try to capture the next frame if the buffer was too small initially. */
-         trigger = true;
+         if (!device->sqtt.capture_cancelled)
+            trigger = true;
       }
    }
 
@@ -756,7 +726,6 @@ radv_sqtt_wsi_submit(VkQueue _queue, uint32_t submitCount, const VkSubmitInfo2 *
 
       FREE(new_cmdbufs);
    }
-
 
    return result;
 
@@ -1495,7 +1464,8 @@ radv_fill_code_object_record(struct radv_device *device, struct rgp_shader_data 
    shader_data->hash[1] = (uint64_t)(uintptr_t)shader >> 32;
    shader_data->code_size =
       shader->exec_size; /* Only include executable size so RGP doesn't try to disassemble constant data. */
-   shader_data->code = shader->code;
+   shader_data->code = malloc(shader->code_size);
+   radv_shader_get_code(device, shader, shader_data->code);
    shader_data->vgpr_count = shader->config.num_vgprs;
    shader_data->sgpr_count = shader->config.num_sgprs;
    shader_data->scratch_memory_size = shader->config.scratch_bytes_per_wave;
@@ -1631,8 +1601,8 @@ radv_register_rt_stage(struct radv_device *device, struct radv_ray_tracing_pipel
    result = ac_sqtt_add_code_object_loader_event(&device->sqtt, *(uint64_t *)blake3, shader->va);
    if (!result)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
-   result =
-      radv_add_rt_record(device, &device->sqtt.rgp_code_object, pipeline, shader, stack_size, index, *(uint64_t *)blake3);
+   result = radv_add_rt_record(device, &device->sqtt.rgp_code_object, pipeline, shader, stack_size, index,
+                               *(uint64_t *)blake3);
    return result;
 }
 
@@ -1746,6 +1716,8 @@ radv_unregister_records(struct radv_device *device, uint64_t hash)
       if (record->pipeline_hash[0] == hash) {
          code_object->record_count--;
          list_del(&record->list);
+         u_foreach_bit (i, record->shader_stages_mask)
+            free(record->shader_data[i].code);
          free(record);
          break;
       }

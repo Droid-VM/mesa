@@ -17,6 +17,7 @@ enum mali_perf_block_type {
    MALI_PERF_BLOCK_MEMSYS,
    MALI_PERF_BLOCK_SHADER_CORE,
    MALI_PERF_BLOCK_TILER,
+   MALI_PERF_BLOCK_NEURAL,
    MALI_PERF_BLOCK_TYPE_COUNT,
 };
 
@@ -45,6 +46,7 @@ enum mali_perf_counter_units {
    MALI_PERF_COUNTER_UNITS_BOXES,
    MALI_PERF_COUNTER_UNITS_BYTES_PER_SECOND,
    MALI_PERF_COUNTER_UNITS_INSTANCES,
+   MALI_PERF_COUNTER_UNITS_BLOCKS,
 };
 
 struct mali_perf_constants {
@@ -135,9 +137,9 @@ mali_perf_block_count(enum mali_perf_block_type block_type,
 {
    switch (block_type) {
    case MALI_PERF_BLOCK_MEMSYS:
-      return constants->shader_core_count;
-   case MALI_PERF_BLOCK_SHADER_CORE:
       return constants->l2_cache_count;
+   case MALI_PERF_BLOCK_SHADER_CORE:
+      return constants->shader_core_count;
    case MALI_PERF_BLOCK_GPU_FRONT_END:
    case MALI_PERF_BLOCK_TILER:
    case MALI_PERF_BLOCK_NONE:

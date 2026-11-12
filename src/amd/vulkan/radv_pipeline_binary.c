@@ -222,10 +222,14 @@ radv_create_pipeline_binary_from_rt_shader(struct radv_device *device, const VkA
 
    blob_init(&blob);
    blob_write_bytes(&blob, &header, sizeof(header));
-   if (header.has_shader)
+   if (header.has_shader) {
+      size_t shader_size_offset = blob_reserve_uint32(&blob);
       radv_shader_serialize(shader, &blob);
+      blob_overwrite_uint32(&blob, shader_size_offset, blob.size - shader_size_offset - 4);
+   }
    if (header.has_nir) {
       struct vk_raw_data_cache_object *nir_object = container_of(nir, struct vk_raw_data_cache_object, base);
+      blob_write_uint32(&blob, nir_object->data_size);
       blob_write_bytes(&blob, nir_object->data, nir_object->data_size);
    }
    blob_finish_get_buffer(&blob, &data, &data_size);

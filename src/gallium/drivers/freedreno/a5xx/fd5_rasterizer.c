@@ -12,6 +12,8 @@
 
 #include "fd5_context.h"
 #include "fd5_format.h"
+#include "freedreno_state.h"
+
 #include "fd5_rasterizer.h"
 
 void *
@@ -65,13 +67,18 @@ fd5_rasterizer_state_create(struct pipe_context *pctx,
    if (cso->offset_tri)
       so->gras_su_cntl |= A5XX_GRAS_SU_CNTL_POLY_OFFSET;
 
-   if (!cso->flatshade_first)
+   /* strips and fans keep the provoking vertex first only in the D3D order */
+   if (cso->flatshade_first)
+      so->pc_primitive_cntl |= A5XX_PC_PRIMITIVE_CNTL_D3D_VERTEX_ORDERING;
+   else
       so->pc_primitive_cntl |= A5XX_PC_PRIMITIVE_CNTL_PROVOKING_VTX_LAST;
 
-//   if (!cso->depth_clip)
-//      so->gras_cl_clip_cntl |=
-//            A5XX_GRAS_CL_CLIP_CNTL_ZNEAR_CLIP_DISABLE |
-//            A5XX_GRAS_CL_CLIP_CNTL_ZFAR_CLIP_DISABLE;
+   if (!cso->depth_clip_near)
+      so->gras_cl_clip_cntl |= A5XX_GRAS_CL_CNTL_ZNEAR_CLIP_DISABLE;
+   if (!cso->depth_clip_far)
+      so->gras_cl_clip_cntl |= A5XX_GRAS_CL_CNTL_ZFAR_CLIP_DISABLE;
+   if (fd_rast_depth_clamp_enabled(cso))
+      so->gras_cl_clip_cntl |= A5XX_GRAS_CL_CNTL_Z_CLAMP_ENABLE;
    if (cso->clip_halfz)
       so->gras_cl_clip_cntl |= A5XX_GRAS_CL_CNTL_ZERO_GB_SCALE_Z;
 

@@ -90,9 +90,9 @@ panlib_copy_ts_query_result(uint64_t pool_addr, global uint32_t *available_addr,
    if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
       vk_write_query(dst, 1, flags, available);
 }
-#endif
 
-#if (PAN_ARCH >= 6 && PAN_ARCH < 10)
+#else
+
 static inline void
 write_occlusion_query_result(uintptr_t dst_addr, int32_t idx, uint32_t flags,
                              global uint64_t *report_addr,

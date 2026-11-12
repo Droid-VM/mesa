@@ -24,6 +24,10 @@
 #ifndef V3D_TFU_H
 #define V3D_TFU_H
 
+#include <stdint.h>
+
+#include "util/macros.h"
+
 /* Maximum width and height (in pixels) per submitted TFU job. The ios
  * register encodes width and height as 14-bit values each.
  */
@@ -76,5 +80,57 @@
 #define V3D71_TFU_ICFG_FORMAT_UBLINEAR_2_COLUMN  5
 #define V3D71_TFU_ICFG_FORMAT_UIF_NO_XOR         6
 #define V3D71_TFU_ICFG_FORMAT_UIF_XOR            7
+
+#define V3D71_TFU_ICFG_SVSWIZ_SHIFT             28
+#define V3D71_TFU_ICFG_SVSWIZ_NONE              15
+
+#define V3D71_TFU_ICFG_SVTWID_SHIFT             26
+#define V3D71_TFU_ICFG_SVTWID_128                0
+
+#define V3D71_TFU_ICFG_ICFMT_SHIFT               8
+#define V3D71_TFU_ICFG_ICFMT_8BIT                1
+#define V3D71_TFU_ICFG_ICFMT_101010_2            3
+
+/* Limits used to shape TFU jobs for buffer fills and copies.
+ *
+ * These limits are not defined by the hardware. They were selected after
+ * analyzing the memory throughput of buffer fills and copies for different
+ * width and height sizes.
+ */
+#define V3D_TFU_RASTER_SINGLE_ROW_MAX 1024
+#define V3D_TFU_RASTER_ROW_MAX_PIXELS 256
+#define V3D_TFU_RASTER_ROW_MAX_BYTES 1024
+#define V3D_TFU_RASTER_ROW_MIN_PIXELS 64
+
+/* Uses a divisor search to find the width of the raster TFU job. The
+ * algorithm aims to avoid an extra remainder job for sizes that aren't
+ * a multiple of the maximum row width.
+ */
+static inline uint32_t
+v3d_tfu_raster_job_width(uint32_t pixels, uint32_t cpp)
+{
+   if (pixels <= V3D_TFU_RASTER_SINGLE_ROW_MAX)
+      return pixels;
+
+   /* Rows are kept at most V3D_TFU_RASTER_ROW_MAX_PIXELS pixels and at
+    * most V3D_TFU_RASTER_ROW_MAX_BYTES bytes wide (caps the stride of
+    * wide pixels, such as 8 or 16 bytes).
+    */
+   const uint32_t max_width =
+      MIN2(V3D_TFU_RASTER_ROW_MAX_PIXELS, V3D_TFU_RASTER_ROW_MAX_BYTES / cpp);
+
+   if (pixels % max_width == 0 || pixels >= V3D_TFU_MAX_DIM)
+      return max_width;
+
+   /* Prefer a narrower width that divides the pixel count, so the whole
+    * operation is placed in a single job.
+    */
+   for (uint32_t w = max_width - 1; w >= V3D_TFU_RASTER_ROW_MIN_PIXELS; w--) {
+      if (pixels % w == 0)
+         return w;
+   }
+
+   return max_width;
+}
 
 #endif

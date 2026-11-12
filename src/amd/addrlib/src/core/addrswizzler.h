@@ -26,8 +26,8 @@ class LutAddresser;
 typedef void (*UnalignedCopyMemImgFunc)(
     void*               pImgBlockSliceStart,  // Block corresponding to beginning of slice
     void*               pBuf,                 // Pointer to data starting from the copy origin.
-    size_t              bufStrideY,           // Stride of each row in pBuf
-    size_t              bufStrideZ,           // Stride of each slice in pBuf
+    UINT_64             bufStrideY,           // Stride of each row in pBuf
+    UINT_64             bufStrideZ,           // Stride of each slice in pBuf
     UINT_32             imageBlocksY,         // Width of the image slice, in blocks.
     UINT_32             imageBlocksZ,         // Depth pitch of the image slice, in blocks.
     ADDR_COORD3D        origin,               // Absolute origin, in elements
@@ -48,7 +48,8 @@ public:
 
     LutAddresser();
 
-    void Init(const ADDR_BIT_SETTING* pEq, UINT_32 eqSize, ADDR_EXTENT3D blockSize, UINT_8 blkBits);
+    void Init(const ADDR_BIT_SETTING* pEq, UINT_32 eqSize, ADDR_EXTENT3D blockSize, UINT_32 blkBits);
+    void InitFromEquation(const ADDR_EQUATION* pEq, ADDR_EXTENT3D blockSize, UINT_8 blkBits, UINT_8 bpeLog2);
 
     // Does a full calculation to get the offset within a block. Takes an *absolute* coordinate,
     // not the coordinate within the block.
@@ -75,6 +76,7 @@ public:
     UINT_32  GetMicroBlockX() const { return m_microBlockSize.width; }
     UINT_32  GetMicroBlockY() const { return m_microBlockSize.height; }
     UINT_32  GetMicroBlockZ() const { return m_microBlockSize.depth; }
+    UINT_32  GetMicroBlockBits() const { return m_microBlockBits; }
 
     // Get other image props
     UINT_32  GetBpeLog2() const { return m_bpeLog2; }
@@ -120,6 +122,7 @@ private:
     
     // The microblock size
     ADDR_EXTENT3D m_microBlockSize;
+    UINT_32       m_microBlockBits;
 
     // Number of 'x' bits at the bottom of the equation. Must be a pow2 and at least 1.
     // This will be used as a simple optimization to batch together operations on adjacent x pixels.

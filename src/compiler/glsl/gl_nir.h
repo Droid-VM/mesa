@@ -47,7 +47,9 @@ bool gl_nir_lower_samplers(nir_shader *shader,
 bool gl_nir_lower_samplers_as_deref(nir_shader *shader,
                                     const struct gl_shader_program *shader_program);
 
-bool gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent);
+/* `modes` is the bitmask of enum pipe_advanced_blend_mode to lower. */
+bool gl_nir_lower_blend_equation_advanced(nir_shader *sh, bool coherent,
+                                          unsigned modes);
 
 bool gl_nir_lower_buffers(nir_shader *shader,
                           const struct gl_shader_program *shader_program);

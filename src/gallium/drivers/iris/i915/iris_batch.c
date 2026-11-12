@@ -35,6 +35,8 @@ static int
 iris_context_priority_to_i915_priority(enum iris_context_priority priority)
 {
    switch (priority) {
+   case IRIS_CONTEXT_REALTIME_PRIORITY:
+      return INTEL_CONTEXT_REALTIME_PRIORITY;
    case IRIS_CONTEXT_HIGH_PRIORITY:
       return INTEL_CONTEXT_HIGH_PRIORITY;
    case IRIS_CONTEXT_LOW_PRIORITY:

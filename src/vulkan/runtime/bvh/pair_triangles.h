@@ -95,7 +95,7 @@ main(void)
             vk_aabb merged_aabb;
             merged_aabb.min = min(bounds.min, v3);
             merged_aabb.max = max(bounds.max, v3);
-            float surface_area = aabb_surface_area(merged_aabb);
+            float surface_area = aabb_half_surface_area(merged_aabb);
             float min_surface_area = subgroupMin(surface_area);
             if (surface_area != min_surface_area)
                should_merge = false;

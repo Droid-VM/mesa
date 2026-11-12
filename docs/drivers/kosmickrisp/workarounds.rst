@@ -49,6 +49,37 @@ info on what was updated.
 Workarounds
 ===========
 
+KK_WORKAROUND_19
+----------------
+| macOS version: 26 and 27
+| Metal ticket: FB25516856 (@aitor)
+| Metal ticket status: Waiting resolution
+| CTS test failure: ``dEQP-VK.clipping.*vert_tess_geom*`` and ``dEQP-VK.tessellation.geometry_interaction.*``
+| Comments:
+
+Only affects M1/2. When a kernel has enough register pressure, the compiler may
+spill registers to threadgroup memory. Whether it does depends on the pipeline's
+``maxTotalThreadsPerThreadgroup``. Under ``dispatchThreadsWithIndirectBuffer:``,
+only the first few bytes of a threadgroup's spill area work and spilled values
+beyond that read back as zero. A simple workaround is to add a 16 byte
+``[[threadgroup(0)]]`` argument and a conditional read and write in the shader
+that will never execute to stop the compiler from spilling.
+
+KK_WORKAROUND_18
+----------------
+| macOS version: 26.x
+| Metal ticket: Not reported
+| Metal ticket status:
+| CTS test failure: ``dEQP-VK.memory_model.message_passing.ext.u32.noncoherent.atomic_fence.atomicwrite.queuefamily.payload_local.buffer.guard_local.physbuffer.comp`` and similars
+| Comments:
+
+Tests fail because they get stale reads after a memory barrier. Potentially caused by
+a bug in the MSL compiler or a hardware bug in M3+. Worked around by adding a device load
+post barrier used as a conditional for a duplicated barrier that will never be read.
+
+| Log:
+| 2026-08-26: Workaround implemented. Fixed in macOS 27
+
 KK_WORKAROUND_17
 ----------------
 | macOS version: 26.x
@@ -140,7 +171,7 @@ KK_WORKAROUND_11
 ----------------
 | macOS version: 26.5
 | Metal ticket: FB22683138
-| Metal ticket status: Waiting resolution
+| Metal ticket status: Resolved in macOS 27 beta 5
 | CTS test failure: ``dEQP-VK.api.object_management.multithreaded_per_thread_device.merged_pipeline_cache``
 | Comments:
 
@@ -158,6 +189,10 @@ ensure that each device only has one compiler instance to share. `MTLDevice`
 instances are unique within the process, so no matter how many Vulkan devices
 we create, the same GPU uses the same `MTLDevice`. Each `MTL4Compiler` instance
 is still capable of performing concurrent compilation.
+
+| Log:
+| 2026-05-28: Workaround implemented
+| 2026-08-10: Resolved in macOS 27 beta 5
 
 KK_WORKAROUND_10
 ----------------
@@ -178,6 +213,7 @@ of the ``bcsel``.
 
 | Log:
 | 2026-05-14: Workaround implemented
+| 2026-11-05: Workaround disabled on M3+
 
 KK_WORKAROUND_9
 ---------------
@@ -213,7 +249,7 @@ KK_WORKAROUND_8
 ---------------
 | macOS version: 26.4.1
 | Metal ticket: FB22579201 (@squidbus)
-| Metal ticket status: Waiting resolution
+| Metal ticket status: Resolved between macOS 26.5 and macOS 27 beta 5
 | CTS test failure: N/A
 | Comments:
 
@@ -236,6 +272,7 @@ minimum of 16K, prevening this scenario from occurring.
 
 | Log:
 | 2026-04-27: Workaround implemented
+| 2026-08-10: Confirmed fixed as of macOS 27 beta 5
 
 KK_WORKAROUND_7
 ---------------

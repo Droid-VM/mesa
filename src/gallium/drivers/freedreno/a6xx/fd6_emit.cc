@@ -291,8 +291,8 @@ build_prog_fb_rast(struct fd6_emit *emit) assert_dt
       .frag_writes_sampmask = fs->writes_smask && pfb->samples > 1,
       .frag_writes_stencilref = fs->writes_stencilref,
    ));
-   crb.add(A6XX_RB_PS_MRT_CNTL(.mrt = nr));
-   crb.add(A6XX_SP_PS_MRT_CNTL(.mrt = nr));
+   crb.add(A6XX_RB_PS_MRT_CNTL(.mrt = nr))
+      .add(A6XX_SP_PS_MRT_CNTL(.mrt = nr));
 
    unsigned mrt_components = 0;
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
@@ -305,10 +305,17 @@ build_prog_fb_rast(struct fd6_emit *emit) assert_dt
    if (blend->use_dual_src_blend)
       mrt_components |= 0xf << 4;
 
+   /* For multi-planar YUV, the RB treats the chroma plane as a separate MRT,
+    * so enable its write mask even though the shader only outputs to MRT0.
+    */
+   if (blend->base.is_yuv)
+      mrt_components |= 0xf << 4;
+
    mrt_components &= prog->mrt_components;
 
    crb.add(A6XX_SP_PS_OUTPUT_MASK(.dword = mrt_components))
       .add(A6XX_RB_PS_OUTPUT_MASK(.dword = mrt_components));
+
 
    return crb;
 }
@@ -396,9 +403,15 @@ fd6_emit_streamout(fd_cs &cs, struct fd6_emit *emit) assert_dt
       if (so->reset & (1 << i)) {
          assert(so->offsets[i] == 0);
 
+         /* The counter in offset_bo is maintained by the hardware in the
+          * units of VPC_SO_FLUSH_BASE, which are dwords on a6xx and bytes on
+          * a7xx, while VPC_SO_BUFFER_OFFSET is bytes on both.  Seed each of
+          * them in its own units.
+          */
          fd_pkt7(cs, CP_MEM_WRITE, 3)
             .add(A5XX_CP_MEM_WRITE_ADDR(offset_bo))
-            .add(target->base.buffer_offset);
+            .add(CHIP == A6XX ? target->base.buffer_offset >> 2
+                              : target->base.buffer_offset);
 
          fd_pkt4(cs, 1)
             .add(VPC_SO_BUFFER_OFFSET(CHIP, i,target->base.buffer_offset));
@@ -407,7 +420,7 @@ fd6_emit_streamout(fd_cs &cs, struct fd6_emit *emit) assert_dt
             .add(CP_MEM_TO_REG_0(
                .reg = VPC_SO_BUFFER_OFFSET(CHIP, i).reg,
                .shift_by_2 = CHIP == A6XX,
-               .unk31 = true,
+               .wait_cache_flush = true,
             ))
             .add(A5XX_CP_MEM_TO_REG_SRC(offset_bo));
       }
@@ -838,7 +851,7 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
 {
    struct fd_screen *screen = ctx->screen;
 
-   fd_ncrb<CHIP> ncrb(cs, 29 + ARRAY_SIZE(screen->info->magic_raw));
+   fd_ncrb<CHIP> ncrb(cs, 28 + ARRAY_SIZE(screen->info->magic_raw));
 
    if (CHIP == A7XX) {
       /* On A7XX, RB_CCU_CNTL was broken into two registers, RB_CCU_CNTL which has
@@ -886,8 +899,7 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
    /* gen8 moves magic reg setup to KMD and blocks access from UMD:
     */
    if (CHIP < A8XX) {
-      ncrb.add(A6XX_RB_DBG_ECO_CNTL(.dword = screen->info->magic.RB_DBG_ECO_CNTL));
-      ncrb.add(A6XX_SP_NC_MODE_CNTL_2(.f16_no_inf = true));
+      ncrb.add(A6XX_SP_NC_MODE_CNTL_2(.f16_no_inf = false));
       ncrb.add(VPC_LB_MODE_CNTL(CHIP));
       ncrb.add(PC_CONTEXT_SWITCH_GFX_PREEMPTION_MODE(CHIP));
    }
@@ -944,11 +956,6 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
 
    crb.add(SP_GFX_USIZE(CHIP));
    crb.add(A6XX_TPL1_PS_ROTATION_CNTL());
-
-   /* gen8 moves magic reg programming to KMD and blocks access for UMD: */
-   if (CHIP < A8XX) {
-      crb.add(A6XX_RB_RBP_CNTL(.dword = screen->info->magic.RB_RBP_CNTL));
-   }
 
    crb.add(A6XX_SP_UNKNOWN_A9A8());
 

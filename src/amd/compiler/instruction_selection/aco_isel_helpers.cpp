@@ -184,29 +184,31 @@ emit_split_vector(isel_context* ctx, Temp vec_src, unsigned num_components)
  * come from the original vector. The other elements are undefined. */
 void
 expand_vector(isel_context* ctx, Temp vec_src, Temp dst, unsigned num_components, unsigned mask,
-              bool zero_padding)
+              bool zero_padding, bool unpacked_d16)
 {
    assert(vec_src.type() == RegType::vgpr);
    Builder bld(ctx->program, ctx->block);
 
    if (dst.type() == RegType::sgpr && num_components > dst.size()) {
       Temp tmp_dst = bld.tmp(RegClass::get(RegType::vgpr, 2 * num_components));
-      expand_vector(ctx, vec_src, tmp_dst, num_components, mask, zero_padding);
+      expand_vector(ctx, vec_src, tmp_dst, num_components, mask, zero_padding, unpacked_d16);
       bld.pseudo(aco_opcode::p_as_uniform, Definition(dst), tmp_dst);
       ctx->allocated_vec[dst.id()] = ctx->allocated_vec[tmp_dst.id()];
       return;
    }
 
-   emit_split_vector(ctx, vec_src, util_bitcount(mask));
+   emit_split_vector(ctx, vec_src, util_bitcount(mask) * (unpacked_d16 ? 2 : 1));
 
    if (vec_src == dst)
       return;
 
    if (num_components == 1) {
-      if (dst.type() == RegType::sgpr)
+      if (dst.type() == RegType::sgpr) {
          bld.pseudo(aco_opcode::p_as_uniform, Definition(dst), vec_src);
-      else
+      } else {
+         vec_src = emit_extract_vector(ctx, vec_src, 0, dst.regClass());
          bld.copy(Definition(dst), vec_src);
+      }
       return;
    }
 
@@ -226,7 +228,7 @@ expand_vector(isel_context* ctx, Temp vec_src, Temp dst, unsigned num_components
    unsigned k = 0;
    for (unsigned i = 0; i < num_components; i++) {
       if (mask & (1 << i)) {
-         Temp src = emit_extract_vector(ctx, vec_src, k++, src_rc);
+         Temp src = emit_extract_vector(ctx, vec_src, k++ * (unpacked_d16 ? 2 : 1), src_rc);
          if (dst.type() == RegType::sgpr)
             src = bld.as_uniform(src);
          vec->operands[i] = Operand(src);
@@ -480,29 +482,25 @@ emit_interp_instr(isel_context* ctx, unsigned idx, unsigned component, Temp src,
 
 void
 emit_interp_mov_instr(isel_context* ctx, unsigned idx, unsigned component, unsigned vertex_id,
-                      Temp dst, Temp prim_mask, bool high_16bits)
+                      Temp dst, Temp prim_mask)
 {
    Builder bld(ctx->program, ctx->block);
-   Temp tmp = dst.bytes() == 2 ? bld.tmp(v1) : dst;
    if (ctx->options->gfx_level >= GFX11) {
       uint16_t dpp_ctrl = dpp_quad_perm(vertex_id, vertex_id, vertex_id, vertex_id);
       if (ctx->cf_info.in_divergent_cf || ctx->cf_info.had_divergent_discard) {
-         bld.pseudo(aco_opcode::p_interp_gfx11, Definition(tmp), Operand(lv1), Operand::c32(idx),
+         bld.pseudo(aco_opcode::p_interp_gfx11, Definition(dst), Operand(lv1), Operand::c32(idx),
                     Operand::c32(component), Operand::c32(dpp_ctrl), bld.m0(prim_mask));
       } else {
          Temp p =
             bld.ldsdir(aco_opcode::lds_param_load, bld.def(v1), bld.m0(prim_mask), idx, component);
-         bld.vop1_dpp(aco_opcode::v_mov_b32, Definition(tmp), p, dpp_ctrl);
+         bld.vop1_dpp(aco_opcode::v_mov_b32, Definition(dst), p, dpp_ctrl);
          /* lds_param_load must be done in WQM, and the result kept valid for helper lanes. */
          set_wqm(ctx, true);
       }
    } else {
-      bld.vintrp(aco_opcode::v_interp_mov_f32, Definition(tmp), Operand::c32((vertex_id + 2) % 3),
+      bld.vintrp(aco_opcode::v_interp_mov_f32, Definition(dst), Operand::c32((vertex_id + 2) % 3),
                  bld.m0(prim_mask), idx, component);
    }
-
-   if (dst.id() != tmp.id())
-      bld.pseudo(aco_opcode::p_extract_vector, Definition(dst), tmp, Operand::c32(high_16bits));
 }
 
 /* Packs multiple Temps of different sizes in to a vector of v1 Temps.
@@ -715,14 +713,13 @@ void
 build_end_with_regs(isel_context* ctx, std::vector<Operand>& regs)
 {
    aco_ptr<Instruction> end{
-      create_instruction(aco_opcode::p_end_with_regs, Format::PSEUDO, regs.size(), 0)};
+      create_instruction(aco_opcode::p_end_with_regs, Format::PSEUDO, 1 + regs.size(), 0)};
 
+   end->operands[0] = Operand(ctx->program->lane_mask);
    for (unsigned i = 0; i < regs.size(); i++)
-      end->operands[i] = regs[i];
+      end->operands[1 + i] = regs[i];
 
    ctx->block->instructions.emplace_back(std::move(end));
-
-   ctx->block->kind |= block_kind_end_with_regs;
 }
 
 Instruction*
@@ -824,6 +821,11 @@ add_startpgm(struct isel_context* ctx, bool is_callee)
 static void
 cleanup_cfg(Program* program)
 {
+   for (const Block& block : program->blocks) {
+      assert(block.linear_succs.empty());
+      assert(block.logical_succs.empty());
+   }
+
    /* create linear_succs/logical_succs */
    for (Block& BB : program->blocks) {
       for (unsigned idx : BB.linear_preds)
@@ -853,11 +855,12 @@ finish_program(isel_context* ctx)
       /* Delay transistion to Exact to help optimizations and scheduling */
       while (it != instrs->end()) {
          aco_ptr<Instruction>& instr = *it;
-         /* End WQM before: */
+         /* End WQM before or combine: */
          if (instr->isDS() || instr->isEXP() ||
              instr->opcode == aco_opcode::p_dual_src_export_gfx11 ||
              instr->opcode == aco_opcode::p_jump_to_epilog ||
-             instr->opcode == aco_opcode::p_logical_start)
+             instr->opcode == aco_opcode::p_logical_start ||
+             instr->opcode == aco_opcode::p_end_with_regs)
             break;
 
          ++it;
@@ -865,14 +868,16 @@ finish_program(isel_context* ctx)
          /* End WQM after: */
          if (instr->opcode == aco_opcode::p_logical_end ||
              instr->opcode == aco_opcode::p_discard_if ||
-             instr->opcode == aco_opcode::p_demote_to_helper ||
-             instr->opcode == aco_opcode::p_end_with_regs)
+             instr->opcode == aco_opcode::p_demote_to_helper)
             break;
       }
 
-      Builder bld(ctx->program);
-      bld.reset(instrs, it);
-      bld.pseudo(aco_opcode::p_end_wqm);
+      if (it == instrs->end() ? instrs->back()->opcode != aco_opcode::p_end_with_regs
+                              : (*it)->opcode != aco_opcode::p_end_with_regs) {
+         Builder bld(ctx->program);
+         bld.reset(instrs, it);
+         bld.pseudo(aco_opcode::p_end_wqm);
+      }
    }
 }
 

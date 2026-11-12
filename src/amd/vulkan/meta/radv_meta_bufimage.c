@@ -441,7 +441,7 @@ create_iview(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *s
                            .pNext = &iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(surf->image),
-                           .viewType = radv_meta_get_view_type(surf->image),
+                           .viewType = radv_meta_get_view_type(surf->image, false),
                            .format = format,
                            .subresourceRange = {.aspectMask = aspects,
                                                 .baseMipLevel = surf->level,
@@ -512,7 +512,7 @@ fixup_gfx9_cs_copy(struct radv_cmd_buffer *cmd_buffer, const struct radv_meta_bl
        * while we're fixing them. If we're writing to an image, we do not need
        * to wait because the compute shader cannot write to those texels
        */
-      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_L2 | RADV_CMD_FLAG_INV_VCACHE;
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2 | AC_BARRIER_INV_VMEM;
    }
 
    if (image->bindings[0].bo)

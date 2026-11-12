@@ -15,6 +15,7 @@ use compiler::bindings::*;
 use compiler::cfg::CFGBuilder;
 use compiler::nir::*;
 use compiler::nir_instr_printer::NirInstrPrinter;
+use mesa_util::format::pipe_format::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::cmp::max;
 use std::ops::Index;
@@ -74,12 +75,20 @@ fn init_info_from_nir(
             }),
             MESA_SHADER_FRAGMENT => {
                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                let (z_min_bounded, z_max_bounded) =
+                    match info_fs.depth_layout() {
+                        FRAG_DEPTH_LAYOUT_GREATER => (true, false),
+                        FRAG_DEPTH_LAYOUT_LESS => (false, true),
+                        _ => (false, false),
+                    };
                 ShaderStageInfo::Fragment(FragmentShaderInfo {
                     uses_kill: false,
-                    does_interlock: false,
+                    reads_interlock_ticket: false,
                     post_depth_coverage: info_fs.post_depth_coverage(),
                     early_fragment_tests: info_fs.early_fragment_tests(),
                     uses_sample_shading: info_fs.uses_sample_shading(),
+                    z_min_bounded,
+                    z_max_bounded,
                 })
             }
             MESA_SHADER_GEOMETRY => {
@@ -1571,6 +1580,16 @@ impl<'a> ShaderFromNir<'a> {
             nir_op_imul_2x32_64 | nir_op_umul_2x32_64 => {
                 let signed = alu.op == nir_op_imul_2x32_64;
                 b.imul_2x32_64(srcs(0), srcs(1), signed)
+            }
+            nir_op_umad_2x32_64 => {
+                assert!(self.sm.sm() >= 70);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, 2);
+                b.push_op(OpIMad64 {
+                    dst: dst.clone().into(),
+                    srcs: [srcs(0), srcs(1), srcs(2)],
+                    signed: false,
+                });
+                dst.into()
             }
             nir_op_imul_high | nir_op_umul_high => {
                 let signed = alu.op == nir_op_imul_high;
@@ -3502,6 +3521,17 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_load_sysval_nv => {
                 let idx = u8::try_from(intrin.base()).unwrap();
+
+                if idx == NAK_SV_ORDERING_TICKET {
+                    if let ShaderStageInfo::Fragment(info) =
+                        &mut self.info.stage
+                    {
+                        info.reads_interlock_ticket = true;
+                    } else {
+                        panic!("Ordering ticket is only available in fragment shaders");
+                    }
+                }
+
                 debug_assert!(intrin.def.num_components == 1);
                 debug_assert!(
                     intrin.def.bit_size == 32 || intrin.def.bit_size == 64
@@ -3541,7 +3571,7 @@ impl<'a> ShaderFromNir<'a> {
                         buf: CBuf::Binding(idx_imm),
                         offset: off_imm,
                     };
-                    if srcs[1].is_zero() {
+                    if srcs[1].is_zero() && size_B >= 4 {
                         for (i, comp) in dst.iter().enumerate() {
                             let i = u16::try_from(i).unwrap();
                             b.copy_to(
@@ -3596,7 +3626,7 @@ impl<'a> ShaderFromNir<'a> {
                 };
 
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
-                if srcs[1].is_zero() {
+                if srcs[1].is_zero() && size_B >= 4 {
                     for (i, comp) in dst.iter().enumerate() {
                         let i = u16::try_from(i).unwrap();
                         b.copy_to(

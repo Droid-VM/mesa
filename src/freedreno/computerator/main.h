@@ -66,6 +66,7 @@ struct backend {
    }
 
 struct backend *a4xx_init(struct fd_device *dev, const struct fd_dev_id *dev_id);
+struct backend *a5xx_init(struct fd_device *dev, const struct fd_dev_id *dev_id);
 template<chip CHIP>
 struct backend *a6xx_init(struct fd_device *dev, const struct fd_dev_id *dev_id);
 

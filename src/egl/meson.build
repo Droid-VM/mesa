@@ -108,7 +108,7 @@ if with_dri
     deps_for_egl += [dep_wayland_client, dep_wayland_server, dep_wayland_egl_headers]
     link_for_egl += libloader_wayland_helper
     files_egl += files('drivers/dri2/platform_wayland.c')
-    files_egl += wp_files['linux-dmabuf-unstable-v1']
+    files_egl += wp_files['linux-dmabuf-v1']
     files_egl += wp_files['presentation-time']
     if with_wayland_bind_display
       files_egl += [wayland_drm_client_protocol_h]
@@ -163,6 +163,7 @@ else
   deps_for_egl += dep_glvnd
   files_egl += [g_egldispatchstubs]
   files_egl += files('main/eglglvnd.c', 'main/egldispatchstubs.c')
+  link_args_for_egl += ld_args_nodelete
 endif
 
 if with_ld_version_script
@@ -190,6 +191,41 @@ if egl_native_platform != ''
   c_args_for_egl += '-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_@0@'.format(egl_native_platform.to_upper())
 endif
 
+link_whole_for_egl = []
+if with_apitrace and not with_glvnd
+  apitrace_egl_rename_h = custom_target(
+    'apitrace_egl_rename.h',
+    input : [apitrace_gen_py, 'egl-symbols.txt'],
+    output : 'apitrace_egl_rename.h',
+    command : [
+      prog_python, '@INPUT0@', apitrace_source_dir, 'rename', '--egl',
+      '--symbols', '@INPUT1@',
+    ],
+    capture : true,
+  )
+  apitrace_egl_wrap_cpp = custom_target(
+    'apitrace_egl_wrap.cpp',
+    input : [apitrace_gen_py, 'egl-symbols.txt'],
+    output : 'apitrace_egl_wrap.cpp',
+    command : [
+      prog_python, '@INPUT0@', apitrace_source_dir, 'wrap', '--egl',
+      '--symbols', '@INPUT1@',
+    ],
+    capture : true,
+  )
+  link_whole_for_egl += static_library(
+    'egl_apitrace',
+    [apitrace_egl_wrap_cpp, apitrace_glproc_h],
+    cpp_args : apitrace_cpp_args,
+    gnu_symbol_visibility : 'hidden',
+    include_directories : [inc_include, inc_src, inc_mesa],
+    dependencies : dep_apitrace_headers,
+    override_options : apitrace_override_options,
+  )
+  files_egl += apitrace_egl_rename_h
+  c_args_for_egl += ['-include', apitrace_egl_rename_h.full_path()]
+endif
+
 libegl = shared_library(
   egl_lib_name,
   files_egl,
@@ -200,7 +236,8 @@ libegl = shared_library(
   gnu_symbol_visibility : 'hidden',
   include_directories : incs_for_egl,
   link_with : [link_for_egl],
-  link_args : [ld_args_bsymbolic, ld_args_gc_sections, link_args_for_egl],
+  link_whole : link_whole_for_egl,
+  link_args : [ld_args_bsymbolic, ld_args_gc_sections, ld_args_apitrace, link_args_for_egl],
   link_depends : [link_deps_for_egl],
   dependencies : [deps_for_egl, dep_dl, dep_libdrm, dep_clock, dep_thread, idep_mesautil],
   install : true,

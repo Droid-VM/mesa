@@ -210,6 +210,7 @@ dri3_create_surface(_EGLDisplay *disp, EGLint type, _EGLConfig *conf,
 
    dri3_surf->loader_drawable.is_protected_content =
       dri3_surf->surf.base.ProtectedContent;
+   dri3_surf->surf.dri_drawable = dri3_surf->loader_drawable.dri_drawable;
 
    return &dri3_surf->surf.base;
 
@@ -423,27 +424,19 @@ dri3_flush_front_buffer(struct dri_drawable *driDrawable, void *loaderPrivate)
 }
 
 const __DRIimageLoaderExtension dri3_image_loader_extension = {
-   .base = {__DRI_IMAGE_LOADER, 1},
-
    .getBuffers = loader_dri3_get_buffers,
    .flushFrontBuffer = dri3_flush_front_buffer,
 };
 
 static EGLBoolean
-dri3_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
-                              const EGLint *rects, EGLint n_rects)
+dri3_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+                  const EGLint *rects, EGLint n_rects)
 {
    struct dri3_egl_surface *dri3_surf = dri3_egl_surface(draw);
 
    return loader_dri3_swap_buffers_msc(
              &dri3_surf->loader_drawable, 0, 0, 0, 0, rects, n_rects,
              draw->SwapBehavior == EGL_BUFFER_PRESERVED) != -1;
-}
-
-static EGLBoolean
-dri3_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
-{
-   return dri3_swap_buffers_with_damage(disp, draw, NULL, 0);
 }
 
 static EGLBoolean
@@ -488,14 +481,6 @@ dri3_query_surface(_EGLDisplay *disp, _EGLSurface *surf, EGLint attribute,
    return _eglQuerySurface(disp, surf, attribute, value);
 }
 
-static struct dri_drawable *
-dri3_get_dri_drawable(_EGLSurface *surf)
-{
-   struct dri3_egl_surface *dri3_surf = dri3_egl_surface(surf);
-
-   return dri3_surf->loader_drawable.dri_drawable;
-}
-
 static void
 dri3_close_screen_notify(_EGLDisplay *disp)
 {
@@ -513,13 +498,11 @@ struct dri2_egl_display_vtbl dri3_x11_display_vtbl = {
    .create_image = dri3_create_image_khr,
    .swap_interval = dri3_set_swap_interval,
    .swap_buffers = dri3_swap_buffers,
-   .swap_buffers_with_damage = dri3_swap_buffers_with_damage,
    .copy_buffers = dri3_copy_buffers,
    .query_buffer_age = dri3_query_buffer_age,
    .query_surface = dri3_query_surface,
    .get_sync_values = dri3_get_sync_values,
    .get_msc_rate = dri2_x11_get_msc_rate,
-   .get_dri_drawable = dri3_get_dri_drawable,
    .close_screen_notify = dri3_close_screen_notify,
 };
 

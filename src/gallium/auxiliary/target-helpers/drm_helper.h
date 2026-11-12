@@ -39,9 +39,9 @@ const struct drm_driver_descriptor descriptor_name = {         \
    }                                                                    \
    DRM_DRIVER_DESCRIPTOR(driver, NULL, 0)
 
-#define DRM_DRIVER_DESCRIPTOR_ALIAS(driver, alias, driconf, driconf_count) \
+#define DRM_DRIVER_DESCRIPTOR_ALIAS(driver, alias, driconf, driconf_count, ...) \
    DEFINE_DRM_DRIVER_DESCRIPTOR(alias##_driver_descriptor, alias, driconf, \
-                                driconf_count, pipe_##driver##_create_screen, NULL)
+                                driconf_count, pipe_##driver##_create_screen, __VA_ARGS__)
 
 #ifdef GALLIUM_KMSRO_ONLY
 #undef GALLIUM_V3D
@@ -152,7 +152,7 @@ pipe_r300_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct radeon_winsys *rw;
 
-   rw = radeon_drm_winsys_create(fd, config, r300_screen_create);
+   rw = radeon_drm_winsys_create(fd, config, r300_screen_create, 0);
    return rw ? debug_screen_wrap(rw->screen) : NULL;
 }
 const driOptionDescription r300_driconf[] = {
@@ -173,7 +173,7 @@ pipe_r600_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct radeon_winsys *rw;
 
-   rw = radeon_drm_winsys_create(fd, config, r600_screen_create);
+   rw = radeon_drm_winsys_create(fd, config, r600_screen_create, 0);
    return rw ? debug_screen_wrap(rw->screen) : NULL;
 }
 DRM_DRIVER_DESCRIPTOR(r600, NULL, 0)
@@ -329,8 +329,11 @@ pipe_panfrost_create_screen(int fd, const struct pipe_screen_config *config)
 const driOptionDescription pan_driconf[] = {
       #include "panfrost/driinfo_panfrost.h"
 };
-DRM_DRIVER_DESCRIPTOR(panfrost, pan_driconf, ARRAY_SIZE(pan_driconf))
-DRM_DRIVER_DESCRIPTOR_ALIAS(panfrost, panthor, pan_driconf, ARRAY_SIZE(pan_driconf))
+DRM_DRIVER_DESCRIPTOR(panfrost, pan_driconf, ARRAY_SIZE(pan_driconf),
+                      .probe_nctx = panfrost_drm_probe_nctx)
+DRM_DRIVER_DESCRIPTOR_ALIAS(panfrost, panthor, pan_driconf,
+                            ARRAY_SIZE(pan_driconf),
+                            .probe_nctx = panfrost_drm_probe_nctx)
 
 #else
 DRM_DRIVER_DESCRIPTOR_STUB(panfrost)

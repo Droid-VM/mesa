@@ -123,19 +123,25 @@ pan_format_get_plane_blocksize(enum pipe_format format, unsigned plane_idx)
    }
 }
 
+static inline bool pan_format_is_yuv(enum pipe_format f);
+
 static inline unsigned
 pan_format_tib_size(enum pipe_format format, bool internal)
 {
-   if (internal && !util_format_is_float(format)) {
-      /* Blendable UNORM and sRGB formats are always 32-bits in the tile
-       * buffer, extra bits are used as padding or to dither */
+   /* YUV8* uses R8G8B8A8, YUV10* uses R8G8B8A2 internal formats so all YUV
+    * render targets use a 32-bit tile buffer */
+   if (pan_format_is_yuv(format))
       return 4;
-   } else {
-      /* Non-blendable and float formats are raw, rounded up to the nearest
-       * power-of-two size */
-      unsigned bytes = util_format_get_blocksize(format);
-      return util_next_power_of_two(bytes);
-   }
+
+   /* Blendable UNORM and sRGB formats are always 32-bits in the tile buffer,
+    * extra bits are used as padding or to dither */
+   if (internal && !util_format_is_float(format))
+      return 4;
+
+   /* Non-blendable and float formats are raw, rounded up to the nearest
+    * power-of-two size */
+   unsigned bytes = util_format_get_blocksize(format);
+   return util_next_power_of_two(bytes);
 }
 
 typedef uint32_t mali_pixel_format;
@@ -174,6 +180,8 @@ extern const struct pan_blendable_format
 extern const struct pan_blendable_format
    pan_blendable_formats_v10[PIPE_FORMAT_COUNT];
 extern const struct pan_blendable_format
+   pan_blendable_formats_v11[PIPE_FORMAT_COUNT];
+extern const struct pan_blendable_format
    pan_blendable_formats_v12[PIPE_FORMAT_COUNT];
 extern const struct pan_blendable_format
    pan_blendable_formats_v13[PIPE_FORMAT_COUNT];
@@ -193,6 +201,7 @@ pan_blendable_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   FMT_TABLE(11);
    FMT_TABLE(12);
    FMT_TABLE(13);
    FMT_TABLE(14);
@@ -209,6 +218,7 @@ extern const struct pan_format pan_pipe_format_v6[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v7[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v9[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v10[PIPE_FORMAT_COUNT];
+extern const struct pan_format pan_pipe_format_v11[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v12[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v13[PIPE_FORMAT_COUNT];
 extern const struct pan_format pan_pipe_format_v14[PIPE_FORMAT_COUNT];
@@ -224,6 +234,7 @@ pan_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   FMT_TABLE(11);
    FMT_TABLE(12);
    FMT_TABLE(13);
    FMT_TABLE(14);
@@ -337,6 +348,22 @@ pan_format_is_yuv(enum pipe_format f)
           layout == UTIL_FORMAT_LAYOUT_PLANAR3;
 }
 
+static inline enum pipe_format
+pan_yuv_rt_internal_format(enum pipe_format format)
+{
+   assert(pan_format_is_yuv(format));
+
+   switch (format) {
+   case PIPE_FORMAT_G8_B8R8_420_UNORM:
+   case PIPE_FORMAT_G8_B8_R8_420_UNORM:
+      return PIPE_FORMAT_R8G8B8A8_UNORM;
+   case PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM:
+      return PIPE_FORMAT_R10G10B10A2_UNORM;
+   default:
+      UNREACHABLE("Unsupported YUV RT format");
+   }
+}
+
 #ifdef PAN_ARCH
 static inline const struct pan_format *
 GENX(pan_format_from_pipe_format)(enum pipe_format f)
@@ -354,6 +381,9 @@ GENX(pan_blendable_format_from_pipe_format)(enum pipe_format f)
 static inline unsigned
 GENX(pan_dithered_format_from_pipe_format)(enum pipe_format f, bool dithered)
 {
+   if (pan_format_is_yuv(f))
+      f = pan_yuv_rt_internal_format(f);
+
    mali_pixel_format pixfmt = GENX(pan_blendable_formats)[f].bifrost[dithered];
 
    /* Formats requiring blend shaders are stored raw in the tilebuffer and will

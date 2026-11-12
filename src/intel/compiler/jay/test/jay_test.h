@@ -13,7 +13,7 @@
 static inline jay_block *
 jay_test_block(jay_function *f)
 {
-   jay_block *blk = jay_new_block(f);
+   jay_block *blk = jay_new_block(f, 1.0f);
    list_addtail(&blk->link, &f->blocks);
    return blk;
 }

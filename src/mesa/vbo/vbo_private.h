@@ -35,9 +35,11 @@
 #include "vbo/vbo_attrib.h"
 #include "vbo/vbo_exec.h"
 #include "vbo/vbo_save.h"
+#include "main/arrayobj.h"
 #include "main/varray.h"
 #include "main/macros.h"
 #include "state_tracker/st_atom.h"
+#include "gallium/include/pipe/p_screen.h"
 
 
 struct _glapi_table;
@@ -263,6 +265,17 @@ _vbo_set_attrib_format(struct gl_context *ctx,
    }
 
    vao->VertexAttrib[attr].Ptr = ADD_POINTERS(buffer_offset, offset);
+}
+
+static inline void _vbo_release_pool_entry(struct gl_context *ctx, struct free_bo_pool_entry * entry)
+{
+   _mesa_reference_buffer_object(ctx, &entry->bo, NULL);
+   for (gl_vertex_processing_mode vpm = VP_MODE_FF; vpm < VP_MODE_MAX; ++vpm) {
+      _mesa_reference_vao(ctx, &entry->VAO[vpm], NULL);
+   }
+   ctx->screen->fence_reference(ctx->screen, &entry->release_fence, NULL);
+   memset(&entry->free_mask, 0xff, sizeof(entry->free_mask));
+   memset(&entry->dirty_mask, 0, sizeof(entry->dirty_mask));
 }
 
 

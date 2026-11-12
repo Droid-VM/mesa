@@ -17,6 +17,8 @@
 
 typedef struct {
    const ac_nir_lower_ps_early_options *options;
+   bool centroid_to_pixel;
+   bool sample_to_pixel;
 
    nir_variable *persp_center;
    nir_variable *persp_centroid;
@@ -59,19 +61,19 @@ get_baryc_var(nir_builder *b, nir_intrinsic_op baryc_op, enum glsl_interp_mode m
    case nir_intrinsic_load_barycentric_centroid:
       if (mode == INTERP_MODE_NOPERSPECTIVE) {
          return get_baryc_var_common(b, s->options->sample_shading ||
-                                     s->options->msaa_disabled, &s->linear_centroid,
+                                     s->centroid_to_pixel, &s->linear_centroid,
                                      "linear_centroid");
       } else {
          return get_baryc_var_common(b, s->options->sample_shading ||
-                                     s->options->msaa_disabled, &s->persp_centroid,
+                                     s->centroid_to_pixel, &s->persp_centroid,
                                      "persp_centroid");
       }
    case nir_intrinsic_load_barycentric_sample:
       if (mode == INTERP_MODE_NOPERSPECTIVE) {
-         return get_baryc_var_common(b, s->options->msaa_disabled, &s->linear_sample,
+         return get_baryc_var_common(b, s->sample_to_pixel, &s->linear_sample,
                                      "linear_sample");
       } else {
-         return get_baryc_var_common(b, s->options->msaa_disabled, &s->persp_sample,
+         return get_baryc_var_common(b, s->sample_to_pixel, &s->persp_sample,
                                      "persp_sample");
       }
    default:
@@ -139,8 +141,19 @@ optimize_lower_ps_outputs(nir_builder *b, nir_intrinsic_instr *intrin, lower_ps_
       return true;
 
    case FRAG_RESULT_SAMPLE_MASK:
-      if (!s->options->kill_samplemask)
+      if (s->options->lower_1bit_sample_mask_to_discard) {
+         /* We expect the store to be in the last block, which means its srcs dominate
+          * the end of the function, so we can just use the srcs at the end.
+          */
+         assert(intrin->instr.block == nir_impl_last_block(b->impl));
+
+         /* At the end of the shader, demote if bit 0 of the sample mask is 0. */
+         b->cursor = nir_after_impl(b->impl);
+         nir_def *mask = nir_channel(b, intrin->src[0].ssa, 0);
+         nir_demote_if(b, nir_ieq_imm(b, nir_iand_imm(b, mask, 0x1), 0));
+      } else if (!s->options->kill_samplemask) {
          return false;
+      }
       nir_instr_remove(&intrin->instr);
       return true;
    }
@@ -380,17 +393,37 @@ lower_ps_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       if (s->options->force_front_face) {
          nir_def_replace(&intrin->def, nir_imm_bool(b, s->options->force_front_face == 1));
          return true;
+      } else if (s->options->has_front_face_select) {
+         /* 0=sysval, 1=front, -1=back */
+         b->cursor = nir_after_instr(&intrin->instr);
+         nir_def *select = nir_load_front_face_select_amd(b);
+         nir_def *use_sysval = nir_ieq_imm(b, select, 0);
+         nir_def *const_front_face = nir_ieq_imm(b, select, 1);
+         nir_def_rewrite_uses_after(&intrin->def,
+                                    nir_bcsel(b, use_sysval, &intrin->def, const_front_face));
+         return true;
       }
       break;
    case nir_intrinsic_load_front_face_fsign:
       if (s->options->force_front_face) {
          nir_def_replace(&intrin->def, nir_imm_float(b, s->options->force_front_face == 1 ? 1 : -1));
          return true;
+      } else if (s->options->has_front_face_select) {
+         /* 0=sysval, 1=front, -1=back */
+         b->cursor = nir_after_instr(&intrin->instr);
+         nir_def *select = nir_load_front_face_select_amd(b);
+         nir_def *use_sysval = nir_ieq_imm(b, select, 0);
+         nir_def *const_front_face = nir_i2f32(b, select);
+         nir_def_rewrite_uses_after(&intrin->def,
+                                    nir_bcsel(b, use_sysval, &intrin->def, const_front_face));
+         return true;
       }
       break;
    case nir_intrinsic_load_sample_pos:
       if (s->options->msaa_disabled) {
          nir_def_replace(&intrin->def, nir_imm_vec2(b, 0.5, 0.5));
+      } else if (!s->options->lower_sample_pos) {
+         return false;
       } else {
          /* We have to use the alternative way to get sample_pos. */
          nir_def *num_samples = s->options->load_sample_positions_always_loads_current_ones ?
@@ -419,7 +452,7 @@ lower_ps_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          return true;
       }
 
-      if (s->options->sample_shading &&
+      if (s->options->sample_shading && s->options->custom_sample_locations_disabled &&
           nir_def_is_intrinsic(sample_id) &&
           nir_def_as_intrinsic(sample_id)->intrinsic == nir_intrinsic_load_sample_id) {
          nir_def_replace(&intrin->def, nir_load_barycentric_sample(b, 32, .interp_mode = mode));
@@ -500,13 +533,15 @@ ac_nir_lower_ps_early(nir_shader *nir, const ac_nir_lower_ps_early_options *opti
 
    lower_ps_early_state state = {
       .options = options,
+      .centroid_to_pixel = options->msaa_disabled && options->vrs_disabled,
+      .sample_to_pixel = options->msaa_disabled && options->custom_sample_locations_disabled,
    };
 
    /* Don't gather shader_info. Just gather the single thing we want to know. */
    nir_shader_intrinsics_pass(nir, gather_info, nir_metadata_all, &state);
 
    bool progress = nir_shader_intrinsics_pass(nir, lower_ps_intrinsic,
-                                              nir_metadata_control_flow, &state);
+                                              nir_metadata_none, &state);
 
    if (state.persp_center || state.persp_centroid || state.persp_sample ||
        state.linear_center || state.linear_centroid || state.linear_sample) {

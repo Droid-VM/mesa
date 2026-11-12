@@ -66,8 +66,10 @@ struct trace_context
 
 void
 trace_context_check(const struct pipe_context *pipe);
+
+/* Unwrap the trace layer of a context, if any (see tr_context.c). */
 struct pipe_context *
-trace_get_possibly_threaded_context(struct pipe_context *pipe);
+trace_context_unwrap(struct pipe_context *pipe);
 
 static inline struct trace_context *
 trace_context(struct pipe_context *pipe)

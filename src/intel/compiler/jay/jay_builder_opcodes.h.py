@@ -59,7 +59,7 @@ TEMPLATE = """
     multi_type = len(op.types) > 1
     info_size = f'sizeof(jay_{op.name}_info)' if op.extra_struct else '0'
     operands = ["dst"] + [f"src{i}" for i in range(num_srcs)]
-    if num_srcs > 0 and op.name not in ['zip_ugpr16']:
+    if num_srcs > 0 and op.name not in ['zip']:
         uniform = " && " .join([f"jay_is_uniform(src{i})" for i in range(num_srcs)])
         reg_file = f"({uniform}) ? UGPR : GPR"
     else:
@@ -119,7 +119,7 @@ static inline ${'jay_def' if op.has_dest else 'void'}
 _jay_${OPCODE}_${type}(${signature(op, with_dest = False)})
 {
 % if op.has_dest:
-   jay_def dst = jay_alloc_def(b, ${reg_file}, ${2 if '64' in type else 1});
+   jay_def dst = jay_alloc_def(b, ${reg_file}, 32, ${2 if '64' in type else 1});
 %endif
    jay_${OPCODE}(${signature(op, with_types = True, type_ = 'JAY_TYPE_'+type.upper(), mode = 'call')});
 % if op.has_dest:

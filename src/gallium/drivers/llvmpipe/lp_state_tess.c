@@ -206,3 +206,10 @@ llvmpipe_init_tess_funcs(struct llvmpipe_context *llvmpipe)
    llvmpipe->pipe.set_tess_state = llvmpipe_set_tess_state;
    llvmpipe->pipe.set_patch_vertices = llvmpipe_set_patch_vertices;
 }
+
+void
+llvmpipe_set_tess_ccw_flip(struct pipe_context *pipe, bool enable)
+{
+   struct llvmpipe_context *llvmpipe = llvmpipe_context(pipe);
+   draw_set_tess_ccw_flip(llvmpipe->draw, enable);
+}

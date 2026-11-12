@@ -1,4 +1,5 @@
 # Copyright © 2026 Collabora, Ltd.
+# Copyright © 2026 Arm Ltd.
 # SPDX-License-Identifier: MIT
 
 dep_bitflags = dependency('bitflags',
@@ -47,6 +48,7 @@ _kraid_bindings_rs = rust.bindgen(
     '--allowlist-function', 'pan_.*',
     '--allowlist-function', 'kraid_.*',
     '--allowlist-function', 'val_.*',
+    '--allowlist-function', 'fwrite|fflush',
     '--allowlist-var', 'BI_VA_LOD_MODE_.*',
     '--no-prepend-enum-name',
     '--with-derive-default',
@@ -106,24 +108,44 @@ _libkraid_proc_macros_rs = rust.proc_macro(
   rust_args : rust_global_args,
 )
 
+_libkraid_rust_args = [
+  panfrost_rust_args,
+  '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() / 'isa-v9-v14.xml"',
+  # Otherwise, rustc trips up on -pthread
+  '-Clink-arg=-Wno-unused-command-line-argument',
+]
+
 libpanfrost_kraid = static_library(
   'kraid',
   files('lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
-  rust_args : [
-    panfrost_rust_args,
-    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
-    # Disable dead code warnings for now
-    '-A', 'dead_code',
-    # Otherwise, rustc trips up on -pthread
-    '-Clink-arg=-Wno-unused-command-line-argument',
-  ],
+  rust_args : _libkraid_rust_args,
   dependencies : [
     dep_bitflags,
     dep_paste,
     dep_rustc_hash,
     idep_compiler_rs,
+    idep_mesa_util_rs,
+  ],
+  link_with : [
+    _libkraid_bindings_rs,
+    _libkraid_proc_macros_rs,
+  ],
+)
+
+libpanfrost_kraid_rs = static_library(
+  'kraid_rs',
+  files('lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+  rust_args : _libkraid_rust_args,
+  dependencies : [
+    dep_bitflags,
+    dep_paste,
+    dep_rustc_hash,
+    idep_compiler_rs,
+    idep_mesa_util_rs,
   ],
   link_with : [
     _libkraid_bindings_rs,
@@ -140,12 +162,20 @@ if with_tools.contains('panfrost')
     ],
     native : true,
   )
+
+executable(
+  'pan-dis',
+  files('tools/disassembler.rs'),
+  link_with : [
+    libpanfrost_kraid_rs,
+  ],
+)
 endif
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely
 # with the sanitizers because meson doesn't know to pass -fsanitize to the
-# Rust linker.  See also https://github.com/mesonbuild/meson/issues/11741
-if with_tests and get_option('b_sanitize') == 'none'
+# Rust linker.  See also https://github.com/mesonbuild/meson/issues/15222
+if with_tests and get_option('b_sanitize') == 'none' and not with_platform_android
   subdir('hw_runner')
 
   rust.test(

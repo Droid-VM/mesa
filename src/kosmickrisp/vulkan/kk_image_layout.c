@@ -17,7 +17,8 @@
 #include "util/format/u_format.h"
 
 static enum mtl_texture_type
-vk_image_to_mtl_texture_type(const struct vk_image *image)
+vk_image_to_mtl_texture_type(const struct vk_image *image,
+                             VkImageUsageFlags usage)
 {
    uint32_t array_layers = image->array_layers;
    uint32_t samples = image->samples;
@@ -25,8 +26,7 @@ vk_image_to_mtl_texture_type(const struct vk_image *image)
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
       /* We require input attachments to be arrays */
-      if (array_layers > 1 ||
-          (image->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
+      if (array_layers > 1 || (usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
          return samples > 1u ? MTL_TEXTURE_TYPE_2D_ARRAY_MULTISAMPLE
                              : MTL_TEXTURE_TYPE_2D_ARRAY;
       return samples > 1u ? MTL_TEXTURE_TYPE_2D_MULTISAMPLE
@@ -46,14 +46,12 @@ vk_image_usage_flags_to_mtl_texture_usage(VkImageUsageFlags usage_flags,
 {
    enum mtl_texture_usage usage = 0u;
 
-   const VkImageUsageFlags shader_write =
-      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
-   if (usage_flags & shader_write)
+   if (usage_flags & VK_IMAGE_USAGE_STORAGE_BIT)
       usage |= MTL_TEXTURE_USAGE_SHADER_WRITE;
 
-   const VkImageUsageFlags shader_read = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                         VK_IMAGE_USAGE_SAMPLED_BIT |
-                                         VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+   const VkImageUsageFlags shader_read =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
    if (usage_flags & shader_read)
       usage |= MTL_TEXTURE_USAGE_SHADER_READ;
 
@@ -94,8 +92,7 @@ kk_image_layout_can_optimize(const struct kk_physical_device *pdev,
        !util_format_is_compressed(format))
       return false;
 
-   if (!KK_EXPERIMENTAL(M5_OPTIMIZE_E5B9G9R9) &&
-       pdev->info.gpu_apple_family >= 10 &&
+   if (!KK_EXPERIMENTAL(OPTIMIZE_E5B9G9R9) &&
        format == PIPE_FORMAT_R9G9B9E5_FLOAT &&
        (usage &
         (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)))
@@ -132,9 +129,6 @@ kk_image_layout_calc_linear(const struct kk_device *dev,
    layout->layer_stride_B = layout->linear_stride_B * layout->height_px;
    /* Metal only allows for 2D texture with no mipmapping. */
    layout->size_B = layout->layer_stride_B;
-   layout->level_offsets_B[0] = 0;
-   /* We add the end offset so we can easily recover the size of a level */
-   layout->level_offsets_B[1] = layout->layer_stride_B;
 }
 
 static void
@@ -148,27 +142,49 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
    if (!kk_image_layout_layer_stride_defined(layout))
       return;
 
-   if (layout->layers != 1) {
-      uint32_t old_layers = layout->layers;
+   uint32_t layer_count = layout->layers;
+   if (layout->type == MTL_TEXTURE_TYPE_3D) {
+      /* 3D texture are laid out as 2D array textures */
+      layer_count = layout->depth_px;
+      layout->layer_stride_B = layout->size_B / layer_count;
+   } else if (layout->layers != 1) {
       layout->layers = 1;
       mtl_heap_texture_size_and_align_with_descriptor(
          dev->mtl_handle, layout, &layout->layer_stride_B, NULL);
-      layout->layers = old_layers;
+      layout->layers = layer_count;
    } else {
       /* For one layer, stride is same as image size */
       layout->layer_stride_B = layout->size_B;
    }
 
    /* Layer stride times number of layers should equal total size. */
-   assert(layout->layer_stride_B * layout->layers == layout->size_B);
+   assert(layout->layer_stride_B * layer_count == layout->size_B);
+}
 
-   /* Stop here if level offsets are not validated for below calculations */
+static void
+kk_image_layout_calc_offsets(const struct kk_device *dev,
+                             struct kk_image_layout *layout)
+{
+   /* Skip if level offsets are not validated for below calculations */
    if (!kk_image_layout_level_offsets_defined(layout))
       return;
+
+   if (layout->linear) {
+      /* We only support one level for linear textures */
+      layout->level_offsets_B[0] = 0;
+      layout->level_offsets_B[1] = layout->layer_stride_B;
+      return;
+   }
 
    struct kk_image_layout calc_layout = *layout;
    calc_layout.layers = 1;
    calc_layout.levels = 1;
+
+   /* 3D texture are laid out as 2D array textures */
+   if (calc_layout.type == MTL_TEXTURE_TYPE_3D) {
+      calc_layout.type = MTL_TEXTURE_TYPE_2D;
+      calc_layout.depth_px = 1u;
+   }
 
    /* Default sparse tile size follows regular tile size */
    uint32_t tile_size_B = mtl_sparse_tile_size_in_bytes(dev->mtl_handle);
@@ -182,10 +198,38 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
    /* We also add the end offset so we can easily recover the size of a level */
    assert(layout->levels < ARRAY_SIZE(layout->level_offsets_B));
 
+   /* Calculate which level the small power-of-two miptree begins at. The
+    * power-of-two miptree is used when either the width or the height is
+    * smaller than a single large tile. Same calculation as HoneyKrisp.
+    *
+    * MTLTexture.firstMipmapInTail is only defined for sparse textures.
+    * macOS 26 always returns 0 if the texture is not sparse so it cannot be
+    * used for non-sparse textures. macOS 27 gives us the value we require for
+    * the computations.
+    */
+   enum pipe_format p_format = layout->format.pipe;
+   uint32_t w_el = util_format_get_nblocksx(p_format, layout->width_px);
+   uint32_t h_el = util_format_get_nblocksy(p_format, layout->height_px);
+   uint32_t bw_px = util_format_get_blockwidth(p_format);
+   uint32_t bh_px = util_format_get_blockheight(p_format);
+   uint32_t pot_level = 0;
+   uint32_t pot_w_px = bw_px * w_el;
+   uint32_t pot_h_px = bh_px * h_el;
+   uint32_t max_blocks_w = tile_size_el.x / bw_px;
+   uint32_t max_blocks_h = tile_size_el.y / bh_px;
+   do {
+      uint32_t pot_w_el = util_format_get_nblocksx(p_format, pot_w_px);
+      uint32_t pot_h_el = util_format_get_nblocksy(p_format, pot_h_px);
+      if (pot_w_el < max_blocks_w || pot_h_el < max_blocks_h)
+         break;
+      pot_w_px = u_minify(pot_w_px, 1);
+      pot_h_px = u_minify(pot_h_px, 1);
+      pot_level++;
+   } while (1);
+
    for (uint8_t level = 0; level < layout->levels; ++level) {
       calc_layout.width_px = u_minify(layout->width_px, level);
       calc_layout.height_px = u_minify(layout->height_px, level);
-      calc_layout.depth_px = u_minify(layout->depth_px, level);
 
       uint64_t level_size;
       mtl_heap_texture_size_and_align_with_descriptor(
@@ -193,13 +237,16 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
 
       /* Based on HoneyKrisp layout calculations. There may be a padding corner
        * tile, which appears to be excluded by Metal calculations when querying
-       * for a single mip level. Add its size on if needed. */
-      uint32_t mip_tiles = (tile_count.x * tile_count.y) >> (level * 2);
-      bool pad_left = tile_count.x & BITFIELD_MASK(level);
-      bool pad_bottom = tile_count.y & BITFIELD_MASK(level);
-      bool pad_corner = pad_left && pad_bottom;
-      if (mip_tiles != 0 && pad_corner)
-         level_size += tile_size_B;
+       * for a single mip level. Add its size on if needed. This only applies
+       * to mip levels before the tail. */
+      if (level < pot_level) {
+         uint32_t mip_tiles = (tile_count.x * tile_count.y) >> (level * 2);
+         bool pad_left = tile_count.x & BITFIELD_MASK(level);
+         bool pad_bottom = tile_count.y & BITFIELD_MASK(level);
+         bool pad_corner = pad_left && pad_bottom;
+         if (mip_tiles != 0 && pad_corner)
+            level_size += tile_size_B;
+      }
 
       layout->level_offsets_B[level + 1] =
          layout->level_offsets_B[level] + level_size;
@@ -217,7 +264,8 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
 {
    const struct kk_physical_device *pdev = kk_device_physical(dev);
    const struct kk_va_format *supported_format = kk_get_va_format(format);
-   layout->type = vk_image_to_mtl_texture_type(image);
+   VkImageUsageFlags usage = vk_image_usage(image, image->aspects);
+   layout->type = vk_image_to_mtl_texture_type(image, usage);
    layout->width_px = image->extent.width / width_scale;
    layout->height_px = image->extent.height / height_scale;
    layout->depth_px = image->extent.depth;
@@ -225,9 +273,9 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
    layout->levels = image->mip_levels;
    layout->linear = image->tiling != VK_IMAGE_TILING_OPTIMAL;
    layout->optimized_layout = kk_image_layout_can_optimize(
-      pdev, image->usage, image->tiling, image->create_flags, format);
+      pdev, usage, image->tiling, image->create_flags, format);
    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
-      image->usage, image->create_flags, supported_format->atomic);
+      usage, image->create_flags, supported_format->atomic);
    layout->create_flags = image->create_flags;
    layout->format.pipe = format;
    layout->format.mtl = supported_format->mtl_pixel_format;
@@ -251,4 +299,6 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
    } else {
       kk_image_layout_calc_tiled(dev, layout);
    }
+
+   kk_image_layout_calc_offsets(dev, layout);
 }

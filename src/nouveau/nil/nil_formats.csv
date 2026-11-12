@@ -35,24 +35,26 @@
 
 R1_UNORM                , NONE                  , R1                , N    , N      , R001 , T
 
-A4B4G4R4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , ABGR , T
-A4R4G4B4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , GBAR , T
-B4G4R4A4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , BGRA , T
+A4B4G4R4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , ABGR , TB
+A4R4G4B4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , GBAR , TB
+B4G4R4A4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , BGRA , TB
 B4G4R4X4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , BGR1 , T
-R4G4B4A4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , RGBA , T
+R4G4B4A4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , RGBA , TB
 R4G4B4X4_UNORM          , NONE                  , A4B4G4R4          , NNNN , N      , RGB1 , T
 
-B5G6R5_UNORM            , R5G6B5                , B5G6R5            , NNN  , N      , BGR1 , CTAD
-R5G6B5_UNORM            , NONE                  , B5G6R5            , NNN  , N      , RGB1 , T
-R5G5B5A1_UNORM          , NONE                  , A1B5G5R5          , NNNN , N      , RGBA , T
-B5G5R5A1_UNORM          , A1R5G5B5              , A1B5G5R5          , NNNN , N      , BGRA , CTAD
+B5G6R5_UNORM            , R5G6B5                , B5G6R5            , NNN  , N      , BGR1 , CTBAD
+R5G6B5_UNORM            , NONE                  , B5G6R5            , NNN  , N      , RGB1 , TB
+R5G5B5A1_UNORM          , NONE                  , A1B5G5R5          , NNNN , N      , RGBA , TB
+B5G5R5A1_UNORM          , A1R5G5B5              , A1B5G5R5          , NNNN , N      , BGRA , CTBAD
 B5G5R5X1_UNORM          , X1R5G5B5              , A1B5G5R5          , NNNN , N      , BGR1 , CTAD
+A1B5G5R5_UNORM          , NONE                  , A5B5G5R1          , NNNN , N      , ABGR , TB
+A1R5G5B5_UNORM          , NONE                  , A5B5G5R1          , NNNN , N      , GBAR , TB
 
 R8_UNORM                , R8                    , R8                , N    , N      , R001 , CTBSA
 R8_SNORM                , RN8                   , R8                , S    , S      , R001 , CTBSA
 R8_SINT                 , RS8                   , R8                , I    , I      , R001 , CTBS
 R8_UINT                 , RU8                   , R8                , U    , U      , R001 , CTBS
-R8_SRGB                 , NONE                  , R8                , N    , N      , R001 , T
+R8_SRGB                 , NONE                  , R8                , N    , N      , R001 , TB
 
 R8G8_UNORM              , G8R8                  , G8R8              , NN   , N      , RG01 , CTBSA
 R8G8_SNORM              , GN8RN8                , G8R8              , SS   , S      , RG01 , CTBSA
@@ -64,25 +66,29 @@ R8G8_UINT               , GU8RU8                , G8R8              , UU   , U  
 # BGRA display formats
 B8G8R8A8_UNORM          , A8R8G8B8              , A8B8G8R8          , NNNN , N      , BGRA , CTBASD
 B8G8R8X8_UNORM          , X8R8G8B8              , A8B8G8R8          , NNNN , N      , BGR1 , CTAD
-B8G8R8A8_SRGB           , A8RL8GL8BL8           , A8B8G8R8          , NNNN , N      , BGRA , CTAD
+B8G8R8A8_SRGB           , A8RL8GL8BL8           , A8B8G8R8          , NNNN , N      , BGRA , CTBAD
 B8G8R8X8_SRGB           , X8RL8GL8BL8           , A8B8G8R8          , NNNN , N      , BGR1 , CTAD
 R8G8B8A8_UNORM          , A8B8G8R8              , A8B8G8R8          , NNNN , N      , RGBA , CTBSA
 R8G8B8X8_UNORM          , X8B8G8R8              , A8B8G8R8          , NNNN , N      , RGB1 , CTA
-R8G8B8A8_SRGB           , A8BL8GL8RL8           , A8B8G8R8          , NNNN , N      , RGBA , CTA
+R8G8B8A8_SRGB           , A8BL8GL8RL8           , A8B8G8R8          , NNNN , N      , RGBA , CTBA
 R8G8B8X8_SRGB           , X8BL8GL8RL8           , A8B8G8R8          , NNNN , N      , RGB1 , CTA
 
+B8G8R8A8_SNORM          , AN8BN8GN8RN8          , A8B8G8R8          , SSSS , S      , BGRA , TB
+B8G8R8A8_SINT           , AS8BS8GS8RS8          , A8B8G8R8          , IIII , I      , BGRA , TB
+B8G8R8A8_UINT           , AU8BU8GU8RU8          , A8B8G8R8          , UUUU , U      , BGRA , TB
 R8G8B8A8_SNORM          , AN8BN8GN8RN8          , A8B8G8R8          , SSSS , S      , RGBA , CTBSA
 R8G8B8A8_SINT           , AS8BS8GS8RS8          , A8B8G8R8          , IIII , I      , RGBA , CTBS
 R8G8B8A8_UINT           , AU8BU8GU8RU8          , A8B8G8R8          , UUUU , U      , RGBA , CTBS
+
 R8G8B8X8_SNORM          , AN8BN8GN8RN8          , A8B8G8R8          , SSSS , S      , RGB1 , T
 R8G8B8X8_SINT           , AS8BS8GS8RS8          , A8B8G8R8          , IIII , I      , RGB1 , CT
 R8G8B8X8_UINT           , AU8BU8GU8RU8          , A8B8G8R8          , UUUU , U      , RGB1 , CT
 
-R9G9B9E5_FLOAT          , NONE                  , E5B9G9R9_SHAREDEXP, FFFF , F      , RGB1 , T
+R9G9B9E5_FLOAT          , NONE                  , E5B9G9R9_SHAREDEXP, FFFF , F      , RGB1 , TB
 
 R10G10B10A2_UNORM       , A2B10G10R10           , A2B10G10R10       , NNNN , N      , RGBA , TCBASD
 R10G10B10X2_UNORM       , A2B10G10R10           , A2B10G10R10       , NNN  , N      , RGB1 , T
-B10G10R10A2_UNORM       , A2R10G10B10           , A2B10G10R10       , NNNN , N      , BGRA , CTA
+B10G10R10A2_UNORM       , A2R10G10B10           , A2B10G10R10       , NNNN , N      , BGRA , CTBA
 B10G10R10X2_UNORM       , A2R10G10B10           , A2B10G10R10       , NNN  , N      , BGR1 , T
 R10G10B10A2_UINT        , AU2BU10GU10RU10       , A2B10G10R10       , UUUU , U      , RGBA , CTBS
 B10G10R10A2_UINT        , NONE                  , A2B10G10R10       , UUUU , U      , BGRA , TB
@@ -145,6 +151,11 @@ R32G32B32X32_UINT       , RU32_GU32_BU32_X32    , R32_G32_B32_A32   , UUUU , U  
 
 R64_SINT                , NONE                  , R32_G32           , II   , I      , RG01 , BS
 R64_UINT                , NONE                  , R32_G32           , UU   , U      , RG01 , BS
+
+X6R10_UNORM             , NONE                  , R16               , N    , N      , R001 , T
+X4R12_UNORM             , NONE                  , R16               , N    , N      , R001 , T
+X6R10X6G10_UNORM        , NONE                  , R16_G16           , NN   , N      , RG01 , T
+X4R12X4G12_UNORM        , NONE                  , R16_G16           , NN   , N      , RG01 , T
 
 # Depth/stencil formats
 Z16_UNORM               , Z16                   , Z16               , N    , N      , R001 , TZ        , MaxwellA

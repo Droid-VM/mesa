@@ -2825,7 +2825,7 @@
     <field name="fau_page_index" pos="62" width="2" type="uint"/>
     <field name="offset" pos="8" width="27" type="pc_rel_label_signed" modifier="shr(3)"/>
   </instruction>
-  <instruction name="CLPER" exec_unit="cvt" since="15" until="15">
+  <instruction name="CLPER" exec_unit="cvt" exec_time="2" since="15" until="15">
     <syntax>
       <name>
         <modifier name="flow"/>
@@ -8921,7 +8921,7 @@
     <field name="fau_page_index" pos="62" width="2" type="uint"/>
     <reserved pos="8" width="8" type="zero"/>
   </instruction>
-  <instruction name="FROUND" variant="f32" exec_unit="fma" since="15" until="15">
+  <instruction name="FROUND" variant="f32" exec_unit="fma" exec_time="2" since="15" until="15">
     <syntax>
       <name>
         <modifier name="flow"/>

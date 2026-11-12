@@ -188,7 +188,7 @@ main(void)
                   shared_bounds.min = min(node_aabbs[index].min, node_aabb.min);
                   shared_bounds.max = max(node_aabbs[index].max, node_aabb.max);
 
-                  uint32_t shared_sa = (floatBitsToUint(aabb_surface_area(shared_bounds)) << 1u) & (~(SUBGROUP_SIZE - 1));
+                  uint32_t shared_sa = (floatBitsToUint(aabb_half_surface_area(shared_bounds)) << 1u) & (~(SUBGROUP_SIZE - 1));
                   if (index >= 0) {
                      uint32_t candidate = shared_sa | index;
                      best_candidate = min(best_candidate, candidate);

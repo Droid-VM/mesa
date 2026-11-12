@@ -56,22 +56,9 @@ VK_ANDROID_NATIVE_BUFFER_TEMPLATE = """\
  * MESA: buffer_handle_t is defined by all Mesa builds, even if
  * one is building for a non-Android target.  This avoids unnecessary
  * conditionals in driver code.
- *
- * We don't need to define buffer_handle_t locally when (__ANDROID__)
- * or ANDROID are set.  Here's the distinction between the two:
- *
- * - AOSP always defines ANDROID, since it just means one is using the
- *   AOSP tree. It means the build environment is Android, roughly.
- * - __ANDROID__ is defined by the toolchain.  This typically means the
- *   build target is Android.
- *
- * If the build environment is Android, AOSP can provide common Android
- * headers, such as <cutils/native_handle.h>.  This allows one to build
- * and test certain aspects of Android window system code, on the host
- * system rather the build target.
  */
 
-#if defined(__ANDROID__) || defined(ANDROID)
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 #include <cutils/native_handle.h>
 #if ANDROID_API_LEVEL < 28
@@ -225,6 +212,7 @@ SOURCES = [
             Source('include/vulkan/vulkan_metal.h',             'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_metal.h'),
             Source('include/vulkan/vulkan_ohos.h',              'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_ohos.h'),
             Source('include/vulkan/vulkan_screen.h',            'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_screen.h'),
+            Source('include/vulkan/vulkan_ubm.h',               'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_ubm.h'),
             Source('include/vulkan/vulkan_vi.h',                'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_vi.h'),
             Source('include/vulkan/vulkan_wayland.h',           'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_wayland.h'),
             Source('include/vulkan/vulkan_win32.h',             'https://github.com/KhronosGroup/Vulkan-Headers/raw/main/include/vulkan/vulkan_win32.h'),

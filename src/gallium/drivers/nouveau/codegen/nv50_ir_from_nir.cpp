@@ -3532,8 +3532,6 @@ nvir_nir_shader_compiler_options(int chipset, uint8_t shader_type)
    op.lower_bit_count = (chipset < NVISA_GF100_CHIPSET);
    op.lower_ifind_msb = (chipset < NVISA_GF100_CHIPSET);
    op.lower_find_lsb = (chipset < NVISA_GF100_CHIPSET);
-   op.lower_uadd_carry = true; // TODO
-   op.lower_usub_borrow = true; // TODO
    op.lower_mul_high = false;
    op.lower_fneg = false;
    op.lower_ineg = false;

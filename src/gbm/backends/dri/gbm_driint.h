@@ -61,7 +61,6 @@ struct gbm_dri_device {
    mtx_t mutex;
 
    const struct dri_config   **driver_configs;
-   const __DRIextension **loader_extensions;
 
    GLboolean (*validate_image)(void *image, void *data);
    struct dri_image *(*lookup_image_validated)(void *image, void *data);

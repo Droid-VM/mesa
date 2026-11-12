@@ -36,7 +36,6 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
-#include "pipe/p_shader_tokens.h"
 #include "cso_cache/cso_context.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
@@ -455,8 +454,8 @@ create_fs(struct st_context *st, bool download,
 
    /* offset_pos = param.xy + f2i(coord.xy) */
    nir_def *offset_pos =
-      nir_iadd(&b, nir_channels(&b, param, TGSI_WRITEMASK_XY),
-               nir_f2i32(&b, nir_channels(&b, coord, TGSI_WRITEMASK_XY)));
+      nir_iadd(&b, nir_trim_vector(&b, param, 2),
+               nir_f2i32(&b, nir_trim_vector(&b, coord, 2)));
 
    /* addr = offset_pos.x + offset_pos.y * stride */
    nir_def *pbo_addr =
@@ -471,7 +470,7 @@ create_fs(struct st_context *st, bool download,
 
    nir_def *texcoord;
    if (download) {
-      texcoord = nir_f2i32(&b, nir_channels(&b, coord, TGSI_WRITEMASK_XY));
+      texcoord = nir_f2i32(&b, nir_trim_vector(&b, coord, 2));
 
       if (target == PIPE_TEXTURE_1D) {
          unsigned sw = 0;

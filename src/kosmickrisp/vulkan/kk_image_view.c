@@ -145,9 +145,6 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
       }
 
       mtl_texture *mtl_handle = image->planes[image_plane].mtl_handle;
-      if (image->vk.image_type == VK_IMAGE_TYPE_3D &&
-          view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D)
-         mtl_handle = image->planes[image_plane].mtl_handle_array;
 
       /* Block texel view requires subresource aliasing. We do it here to avoid
        * having to create a texture for every possible subresource up-front */
@@ -167,6 +164,12 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
          subres_layout.format.pipe = view_layout.format.pipe;
          subres_layout.format.mtl = view_layout.format.mtl;
 
+         if (image->vk.image_type == VK_IMAGE_TYPE_3D &&
+             view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D) {
+            subres_layout.type = MTL_TEXTURE_TYPE_2D_ARRAY;
+            subres_layout.depth_px = 1u;
+         }
+
          mtl_handle = kk_image_plane_create_texture(plane, &subres_layout,
                                                     subres_offset_B);
          view->planes[view_plane].mtl_handle_subres = mtl_handle;
@@ -176,10 +179,12 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
          view_layout.num_levels = subres_layout.levels;
          view_layout.base_array_layer = 0u;
          view_layout.array_len = subres_layout.layers;
+      } else if (image->vk.image_type == VK_IMAGE_TYPE_3D &&
+                 view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D) {
+         mtl_handle = image->planes[image_plane].mtl_handle_array;
       }
 
-      if (view->vk.usage &
-          (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
+      if (view->vk.usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
          view->planes[view_plane].mtl_handle_sampled =
             mtl_new_texture_view_with(mtl_handle, &view_layout);
          view->planes[view_plane].sampled_gpu_resource_id =
@@ -200,38 +205,50 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
                view->planes[view_plane].mtl_handle_storage);
       }
 
-      if (view->vk.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      if (view->vk.usage & (VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
          bool requires_type_change =
             view_layout.view_type != VK_IMAGE_VIEW_TYPE_3D &&
             view_layout.view_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY;
          bool requires_format_change = view->vk.format != image->vk.format;
-         VkImageViewType original_type = view_layout.view_type;
 
          /* Required so sampling from input attachments actually return (d, 0,
           * 0, 1) for d/s attachments and render targets cannot have swizzle
           * according to Metal...
           */
-         if (requires_type_change || requires_format_change) {
-            view_layout.view_type = requires_type_change
-                                       ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                       : original_type;
-            view->planes[view_plane].mtl_handle_input =
-               mtl_new_texture_view_with(mtl_handle, &view_layout);
-         } else
-            view->planes[view_plane].mtl_handle_input = mtl_retain(mtl_handle);
-         view->planes[view_plane].input_gpu_resource_id =
-            mtl_texture_get_gpu_resource_id(
-               view->planes[view_plane].mtl_handle_input);
+         if (view->vk.usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) {
+            VkImageViewType original_type = view_layout.view_type;
+            bool requires_subresource =
+               view_layout.base_array_layer != 0 || view_layout.base_level != 0;
+            if (requires_type_change || requires_format_change ||
+                requires_subresource) {
+               view_layout.view_type = requires_type_change
+                                          ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                          : original_type;
+               view->planes[view_plane].mtl_handle_input =
+                  mtl_new_texture_view_with(mtl_handle, &view_layout);
+            } else
+               view->planes[view_plane].mtl_handle_input =
+                  mtl_retain(mtl_handle);
+            view->planes[view_plane].input_gpu_resource_id =
+               mtl_texture_get_gpu_resource_id(
+                  view->planes[view_plane].mtl_handle_input);
+            view_layout.view_type = original_type;
+         }
 
          /* Handle mutable formats */
-         view->planes[view_plane].render_is_view = requires_format_change;
-         if (requires_format_change) {
-            view_layout.view_type = original_type;
-            view->planes[view_plane].mtl_handle_render =
-               mtl_new_texture_view_with_no_swizzle(mtl_handle, &view_layout);
-         } else /* Subresource indices will be set in attachment descriptor */
-            view->planes[view_plane].mtl_handle_render = mtl_retain(mtl_handle);
+         if (view->vk.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+            view->planes[view_plane].render_is_view = requires_format_change;
+            if (requires_format_change) {
+               view->planes[view_plane].mtl_handle_render =
+                  mtl_new_texture_view_with_no_swizzle(mtl_handle,
+                                                       &view_layout);
+            } else /* Subresource indices will be set in attachment descriptor */
+               view->planes[view_plane].mtl_handle_render =
+                  mtl_retain(mtl_handle);
+         }
       }
    }
 
@@ -297,4 +314,18 @@ kk_DestroyImageView(VkDevice _device, VkImageView imageView,
 
    kk_image_view_finish(dev, view);
    vk_free2(&dev->vk.alloc, pAllocator, view);
+}
+
+void
+kk_image_view_set_label(struct kk_image_view *iview, const char *label)
+{
+   for (uint8_t i = 0; i < iview->plane_count; i++) {
+      if (iview->planes[i].mtl_handle_sampled)
+         mtl_resource_set_label(iview->planes[i].mtl_handle_sampled, label);
+      if (iview->planes[i].mtl_handle_storage)
+         mtl_resource_set_label(iview->planes[i].mtl_handle_storage, label);
+      if (iview->planes[i].mtl_handle_subres)
+         mtl_resource_set_label(iview->planes[i].mtl_handle_subres, label);
+      /* mtl_handle_render and mtl_handle_input might be the VkImage's handle */
+   }
 }

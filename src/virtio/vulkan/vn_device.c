@@ -82,6 +82,8 @@ vn_queue_init(struct vn_device *dev,
 
    const int ring_idx = vn_instance_acquire_ring_idx(dev->instance);
    if (ring_idx < 0) {
+      vn_cached_storage_fini(&queue->storage);
+      vn_queue_base_fini(&queue->base);
       vn_log(dev->instance, "failed binding VkQueue to renderer timeline");
       return VK_ERROR_INITIALIZATION_FAILED;
    }
@@ -139,8 +141,10 @@ vn_device_init_queues(struct vn_device *dev,
          if (result != VK_SUCCESS) {
             for (uint32_t k = 0; k < count; k++)
                vn_queue_fini(&queues[k]);
-            vk_free(alloc, queues);
 
+            /* ring_idx release is deferred until vkDestroyDevice is emitted */
+            dev->queues = queues;
+            dev->queue_count = count;
             return result;
          }
 
@@ -152,6 +156,21 @@ vn_device_init_queues(struct vn_device *dev,
    dev->queue_count = count;
 
    return VK_SUCCESS;
+}
+
+static void
+vn_device_fini_queues_deferred(struct vn_device *dev,
+                               const VkAllocationCallbacks *alloc)
+{
+   /* We must emit vkDestroyDevice before releasing bound ring_idx. Otherwise,
+    * another thread might reuse their ring_idx while they are still bound to
+    * the queues in the renderer.
+    */
+   for (uint32_t i = 0; i < dev->queue_count; i++) {
+      if (!dev->queues[i].emulated)
+         vn_instance_release_ring_idx(dev->instance, dev->queues[i].ring_idx);
+   }
+   vk_free(alloc, dev->queues);
 }
 
 static bool
@@ -570,6 +589,8 @@ out_destroy_device:
          vn_ring_wait_seqno(dev->primary_ring, ring_submit.ring_seqno);
    }
 
+   vn_device_fini_queues_deferred(dev, alloc);
+
    return result;
 }
 
@@ -652,16 +673,7 @@ vn_DestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
 
    vn_async_vkDestroyDevice(dev->primary_ring, device, NULL);
 
-   /* We must emit vkDestroyDevice before releasing bound ring_idx. Otherwise,
-    * another thread might reuse their ring_idx while they are still bound to
-    * the queues in the renderer.
-    */
-   for (uint32_t i = 0; i < dev->queue_count; i++) {
-      if (!dev->queues[i].emulated)
-         vn_instance_release_ring_idx(dev->instance, dev->queues[i].ring_idx);
-   }
-
-   vk_free(alloc, dev->queues);
+   vn_device_fini_queues_deferred(dev, alloc);
 
    vn_device_base_fini(&dev->base);
    vk_free(alloc, dev);

@@ -226,7 +226,7 @@ static inline void crocus_bo_unreference(struct crocus_bo *bo)
 #define MAP_PERSISTENT    PIPE_MAP_PERSISTENT
 #define MAP_COHERENT      PIPE_MAP_COHERENT
 /* internal */
-#define MAP_INTERNAL_MASK (0xff << 24)
+#define MAP_INTERNAL_MASK (0xffu << 24)
 #define MAP_RAW           (0x01 << 24)
 
 #define MAP_FLAGS         (MAP_READ | MAP_WRITE | MAP_ASYNC | \

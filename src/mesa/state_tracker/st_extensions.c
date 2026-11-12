@@ -115,7 +115,7 @@ static unsigned mesa_to_gl_stages(unsigned stages)
  */
 void st_init_limits(struct pipe_screen *screen,
                     struct gl_constants *c, struct gl_extensions *extensions,
-                    gl_api api)
+                    struct st_config_options *options, gl_api api)
 {
    mesa_shader_stage sh;
    bool can_ubo = true;
@@ -123,6 +123,14 @@ void st_init_limits(struct pipe_screen *screen,
 
    c->MaxTextureSize = screen->caps.max_texture_2d_size;
    c->MaxTextureSize = MIN2(c->MaxTextureSize, 1 << (MAX_TEXTURE_LEVELS - 1));
+
+   /* Some applications can't cope with the texture size we advertise, e.g. by
+    * storing it in a 16-bit type, where 65536 becomes 0. Let drirc lower it.
+    * The rectangle, viewport and renderbuffer limits are derived from this
+    * below, so they are limited as well.
+    */
+   if (options->limit_max_texture_size)
+      c->MaxTextureSize = MIN2(c->MaxTextureSize, options->limit_max_texture_size);
 
    c->Max3DTextureLevels
       = _min(screen->caps.max_texture_3d_levels,
@@ -132,6 +140,12 @@ void st_init_limits(struct pipe_screen *screen,
    c->MaxCubeTextureLevels
       = _min(screen->caps.max_texture_cube_levels,
             MAX_TEXTURE_LEVELS);
+
+   if (options->limit_max_texture_size) {
+      c->MaxCubeTextureLevels =
+         _min(c->MaxCubeTextureLevels,
+              util_logbase2(options->limit_max_texture_size) + 1);
+   }
 
    c->MaxTextureRectSize = _min(c->MaxTextureSize, MAX_TEXTURE_RECT_SIZE);
 
@@ -552,16 +566,19 @@ void st_init_limits(struct pipe_screen *screen,
          extensions->ARB_shader_storage_buffer_object = GL_TRUE;
    }
 
-   c->MaxCombinedImageUniforms = MAX3(
-      c->Program[MESA_SHADER_VERTEX].MaxImageUniforms +
-      c->Program[MESA_SHADER_TESS_CTRL].MaxImageUniforms +
-      c->Program[MESA_SHADER_TESS_EVAL].MaxImageUniforms +
-      c->Program[MESA_SHADER_GEOMETRY].MaxImageUniforms +
-      c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
-      c->Program[MESA_SHADER_TASK].MaxImageUniforms +
-      c->Program[MESA_SHADER_MESH].MaxImageUniforms +
-      c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
-      c->Program[MESA_SHADER_COMPUTE].MaxImageUniforms);
+   c->MaxCombinedImageUniforms =
+      likely(!screen->caps.max_combined_image_uniforms) ?
+      MAX3(
+         c->Program[MESA_SHADER_VERTEX].MaxImageUniforms +
+         c->Program[MESA_SHADER_TESS_CTRL].MaxImageUniforms +
+         c->Program[MESA_SHADER_TESS_EVAL].MaxImageUniforms +
+         c->Program[MESA_SHADER_GEOMETRY].MaxImageUniforms +
+         c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
+         c->Program[MESA_SHADER_TASK].MaxImageUniforms +
+         c->Program[MESA_SHADER_MESH].MaxImageUniforms +
+         c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
+         c->Program[MESA_SHADER_COMPUTE].MaxImageUniforms) :
+      screen->caps.max_combined_image_uniforms;
    c->MaxCombinedShaderOutputResources += c->MaxCombinedImageUniforms;
    c->MaxImageUnits = MAX_IMAGE_UNITS;
    if (c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms &&
@@ -1163,6 +1180,7 @@ void st_init_extensions(struct pipe_screen *screen,
    EXT_CAP(OES_texture_view,                 sampler_view_target);
    EXT_CAP(INTEL_blackhole_render,           frontend_noop);
    EXT_CAP(ARM_shader_framebuffer_fetch_depth_stencil, fbfetch_zs);
+   EXT_CAP(MESA_map_buffer_client_pointer,   map_client_pointer);
    EXT_CAP(MESA_texture_const_bandwidth,     has_const_bw);
 
 #undef EXT_CAP
@@ -1187,7 +1205,8 @@ void st_init_extensions(struct pipe_screen *screen,
                           ARRAY_SIZE(depthstencil_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW);
 
-   if (!screen->caps.native_fp32_depth)
+   if (!screen->caps.native_fp32_depth &&
+       (api == API_OPENGL_CORE || api == API_OPENGL_COMPAT))
       extensions->ARB_depth_buffer_float = GL_FALSE;
 
    init_format_extensions(screen, extensions, texture_mapping,
@@ -1219,6 +1238,10 @@ void st_init_extensions(struct pipe_screen *screen,
        options->force_glsl_version <= GLSLVersion) {
       consts->ForceGLSLVersion = options->force_glsl_version;
    }
+
+   consts->DefaultGLSLVersion = api == API_OPENGLES2 ? 100 : 110;
+   if (options->default_glsl_version)
+      consts->DefaultGLSLVersion = options->default_glsl_version;
 
    consts->ForceCompatShaders = options->force_compat_shaders;
 
@@ -1379,11 +1402,18 @@ void st_init_extensions(struct pipe_screen *screen,
       extensions->ARB_draw_indirect = GL_TRUE;
    }
 
-   /* Needs pipe_caps.sample_shading + all the sample-related bits of
-    * ARB_gpu_shader5. This enables all the per-sample shading ES extensions.
+   /* Every driver exposing ARB_gpu_shader5 must also report the sample
+    * variables that it includes.
+    */
+   assert(!extensions->ARB_gpu_shader5 || screen->caps.fs_sample_variables);
+
+   /* OES_sample_shading, OES_sample_variables and
+    * OES_shader_multisample_interpolation all share this flag in
+    * extensions_table.h. Needs sample shading plus fragment shader
+    * sample variables, which every driver exposing ARB_gpu_shader5 reports.
     */
    extensions->OES_sample_variables = extensions->ARB_sample_shading &&
-      extensions->ARB_gpu_shader5;
+      screen->caps.fs_sample_variables;
 
    /* Maximum sample count. */
    {
@@ -1623,7 +1653,10 @@ void st_init_extensions(struct pipe_screen *screen,
    unsigned max_fb_fetch_rts = screen->caps.fbfetch;
    bool coherent_fb_fetch = screen->caps.fbfetch_coherent;
 
-   if (screen->caps.blend_equation_advanced)
+   consts->NativeAdvancedBlendModes = screen->caps.blend_equation_advanced;
+
+   if ((screen->caps.blend_equation_advanced &
+        PIPE_ADVANCED_BLEND_KHR_MODES_MASK) == PIPE_ADVANCED_BLEND_KHR_MODES_MASK)
       extensions->KHR_blend_equation_advanced = true;
 
    if (max_fb_fetch_rts > 0) {
@@ -1789,8 +1822,6 @@ void st_init_extensions(struct pipe_screen *screen,
    extensions->OES_primitive_bounding_box =
       extensions->ARB_ES3_1_compatibility || ESSLVersion >= 310;
 
-   consts->NoPrimitiveBoundingBoxOutput = true;
-
    extensions->ANDROID_extension_pack_es31a =
       consts->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms &&
       extensions->KHR_texture_compression_astc_ldr &&
@@ -1878,4 +1909,19 @@ void st_init_extensions(struct pipe_screen *screen,
       extensions->NV_copy_depth_to_color = true;
    if (screen->caps.device_protected_surface || screen->caps.device_protected_context)
       extensions->EXT_protected_textures = true;
+
+   /* GL_EXT_YUV_target extends TEXTURE_EXTERNAL_OES / samplerExternalOES with
+    * YUV-aware sampling and framebuffer attachment, so it only makes sense on
+    * top of OES_EGL_image_external, and needs the GLSL/ESSL version that
+    * samplerExternal2DY2YEXT relies on.
+    */
+   if (extensions->OES_EGL_image_external &&
+       (GLSLVersion >= 330 || ESSLVersion >= 300) &&
+       (screen->is_format_supported(screen, PIPE_FORMAT_NV12, PIPE_TEXTURE_2D,
+                                    0, 0,
+                                    PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW) ||
+        screen->is_format_supported(screen, PIPE_FORMAT_YUYV, PIPE_TEXTURE_2D,
+                                    0, 0,
+                                    PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)))
+      extensions->EXT_YUV_target = GL_TRUE;
 }

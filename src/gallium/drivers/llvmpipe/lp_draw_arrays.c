@@ -131,13 +131,7 @@ llvmpipe_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    llvmpipe_prepare_tess_eval_images(lp,
                                      lp->num_images[MESA_SHADER_TESS_EVAL],
                                      lp->images[MESA_SHADER_TESS_EVAL]);
-   if (lp->gs && lp->gs->no_tokens) {
-      /* we have an empty geometry shader with stream output, so
-         attach the stream output info to the current vertex shader */
-      if (lp->vs) {
-         draw_vs_attach_so(lp->vs, &lp->gs->stream_output);
-      }
-   }
+
    draw_collect_pipeline_statistics(draw,
                                     lp->active_statistics_queries > 0 &&
                                     !lp->queries_disabled);
@@ -158,14 +152,6 @@ llvmpipe_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    }
    if (mapped_indices) {
       draw_set_indexes(draw, NULL, 0, 0);
-   }
-
-   if (lp->gs && lp->gs->no_tokens) {
-      /* we have attached stream output to the vs for rendering,
-         now lets reset it */
-      if (lp->vs) {
-         draw_vs_reset_so(lp->vs);
-      }
    }
 
    llvmpipe_cleanup_stage_sampling(lp, MESA_SHADER_VERTEX);
@@ -191,4 +177,5 @@ void
 llvmpipe_init_draw_funcs(struct llvmpipe_context *llvmpipe)
 {
    llvmpipe->pipe.draw_vbo = llvmpipe_draw_vbo;
+   llvmpipe->pipe.draw_vbo_buffers = util_draw_vbo_buffers;
 }

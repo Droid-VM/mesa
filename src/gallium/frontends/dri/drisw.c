@@ -54,42 +54,42 @@ DEBUG_GET_ONCE_BOOL_OPTION(swrast_no_present, "SWRAST_NO_PRESENT", false);
 static inline void
 get_drawable_info(struct dri_drawable *drawable, int *x, int *y, int *w, int *h)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
    loader->getDrawableInfo(drawable, x, y, w, h,
                            drawable->loaderPrivate);
 }
 
-static inline void
-put_image(struct dri_drawable *drawable, void *data, unsigned width, unsigned height)
+static void
+drisw_put_image(struct dri_drawable *drawable, void *data, unsigned width, unsigned height)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
    loader->putImage(drawable, __DRI_SWRAST_IMAGE_OP_SWAP,
                     0, 0, width, height,
                     data, drawable->loaderPrivate);
 }
 
-static inline void
-put_image2(struct dri_drawable *drawable, void *data, int x, int y,
-           unsigned width, unsigned height, unsigned stride)
+static void
+drisw_put_image2(struct dri_drawable *drawable, void *data, int x, int y,
+                 unsigned width, unsigned height, unsigned stride)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
    loader->putImage2(drawable, __DRI_SWRAST_IMAGE_OP_SWAP,
                      x, y, width, height, stride,
                      data, drawable->loaderPrivate);
 }
 
-static inline void
-put_image_shm(struct dri_drawable *drawable, int shmid, char *shmaddr,
-              unsigned offset, unsigned offset_x, int x, int y,
-              unsigned width, unsigned height, unsigned stride)
+static void
+drisw_put_image_shm(struct dri_drawable *drawable, int shmid, char *shmaddr,
+                    unsigned offset, unsigned offset_x, int x, int y,
+                    unsigned width, unsigned height, unsigned stride)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
    /* if we have the newer interface, don't have to add the offset_x here. */
-   if (loader->base.version > 4 && loader->putImageShm2)
+   if (loader->putImageShm2)
      loader->putImageShm2(drawable, __DRI_SWRAST_IMAGE_OP_SWAP,
                           x, y, width, height, stride,
                           shmid, shmaddr, offset, drawable->loaderPrivate);
@@ -102,7 +102,7 @@ put_image_shm(struct dri_drawable *drawable, int shmid, char *shmaddr,
 static inline void
 get_image(struct dri_drawable *drawable, int x, int y, int width, int height, void *data)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
    loader->getImage(drawable, x, y, width, height,
                     data, drawable->loaderPrivate);
@@ -111,10 +111,9 @@ get_image(struct dri_drawable *drawable, int x, int y, int width, int height, vo
 static inline void
 get_image2(struct dri_drawable *drawable, int x, int y, int width, int height, int stride, void *data)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
 
-   /* getImage2 support is only in version 3 or newer */
-   if (loader->base.version < 3)
+   if (!loader->getImage2)
       return;
 
    loader->getImage2(drawable, x, y, width, height, stride,
@@ -125,25 +124,25 @@ static inline bool
 get_image_shm(struct dri_drawable *drawable, int x, int y, int width, int height,
               struct pipe_resource *res)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
    struct winsys_handle whandle;
 
    whandle.type = WINSYS_HANDLE_TYPE_SHMID;
 
-   if (loader->base.version < 4 || !loader->getImageShm)
+   if (!loader->getImageShm)
       return false;
 
    if (!res->screen->resource_get_handle(res->screen, NULL, res, &whandle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE))
       return false;
 
-   if (loader->base.version > 5 && loader->getImageShm2)
+   if (loader->getImageShm2)
       return loader->getImageShm2(drawable, x, y, width, height, whandle.handle, drawable->loaderPrivate);
 
    loader->getImageShm(drawable, x, y, width, height, whandle.handle, drawable->loaderPrivate);
    return true;
 }
 
-static void
+void
 drisw_update_drawable_info(struct dri_drawable *drawable)
 {
    int x, y;
@@ -160,31 +159,6 @@ drisw_get_image(struct dri_drawable *drawable,
 
    get_drawable_info(drawable, &draw_x, &draw_y, &draw_w, &draw_h);
    get_image2(drawable, x, y, draw_w, draw_h, stride, data);
-}
-
-static void
-drisw_put_image(struct dri_drawable *drawable,
-                void *data, unsigned width, unsigned height)
-{
-   put_image(drawable, data, width, height);
-}
-
-static void
-drisw_put_image2(struct dri_drawable *drawable,
-                 void *data, int x, int y, unsigned width, unsigned height,
-                 unsigned stride)
-{
-   put_image2(drawable, data, x, y, width, height, stride);
-}
-
-static inline void
-drisw_put_image_shm(struct dri_drawable *drawable,
-                    int shmid, char *shmaddr, unsigned offset,
-                    unsigned offset_x,
-                    int x, int y, unsigned width, unsigned height,
-                    unsigned stride)
-{
-   put_image_shm(drawable, shmid, shmaddr, offset, offset_x, x, y, width, height, stride);
 }
 
 static inline void
@@ -222,8 +196,8 @@ drisw_copy_to_front(struct pipe_context *pipe,
  * Backend functions for pipe_frontend_drawable and swap_buffers.
  */
 
-static void
-drisw_swap_buffers_with_damage(struct dri_drawable *drawable, int nrects, const int *rects)
+void
+drisw_swap_buffers(struct dri_drawable *drawable, int nrects, const int *rects)
 {
    /* Damage regions still require us to update the whole front buffer
     * in case the compositor doesn't obey them, so we will just ignore
@@ -273,12 +247,6 @@ drisw_swap_buffers_with_damage(struct dri_drawable *drawable, int nrects, const 
 }
 
 static void
-drisw_swap_buffers(struct dri_drawable *drawable)
-{
-   drisw_swap_buffers_with_damage(drawable, 0, NULL);
-}
-
-static void
 drisw_copy_sub_buffer(struct dri_drawable *drawable, int x, int y,
                       int w, int h)
 {
@@ -317,7 +285,7 @@ drisw_copy_sub_buffer(struct dri_drawable *drawable, int x, int y,
    }
 }
 
-static bool
+bool
 drisw_flush_frontbuffer(struct dri_context *ctx,
                         struct dri_drawable *drawable,
                         enum st_attachment_type statt)
@@ -347,33 +315,6 @@ drisw_flush_frontbuffer(struct dri_context *ctx,
    return true;
 }
 
-extern bool
-dri_image_drawable_get_buffers(struct dri_drawable *drawable,
-                               struct __DRIimageList *images,
-                               const enum st_attachment_type *statts,
-                               unsigned statts_count);
-
-static void
-handle_in_fence(struct dri_context *ctx, struct dri_image *img)
-{
-   struct pipe_context *pipe = ctx->st->pipe;
-   struct pipe_fence_handle *fence;
-   int fd = img->in_fence_fd;
-
-   if (fd == -1)
-      return;
-
-   validate_fence_fd(fd);
-
-   img->in_fence_fd = -1;
-
-   pipe->create_fence_fd(pipe, &fence, fd, PIPE_FD_TYPE_NATIVE_SYNC);
-   pipe->fence_server_sync(pipe, fence, 0);
-   pipe->screen->fence_reference(pipe->screen, &fence, NULL);
-
-   close(fd);
-}
-
 /**
  * Allocate framebuffer attachments.
  *
@@ -381,19 +322,19 @@ handle_in_fence(struct dri_context *ctx, struct dri_image *img)
  * as they are requested. Unused attachments are not removed, not until the
  * framebuffer is resized or destroyed.
  */
-static void
+void
 drisw_allocate_textures(struct dri_context *stctx,
                         struct dri_drawable *drawable,
                         const enum st_attachment_type *statts,
                         unsigned count)
 {
    struct dri_screen *screen = drawable->screen;
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = drawable->screen->loader.swrast;
    struct pipe_resource templ;
    unsigned width, height;
    bool resized;
    unsigned i;
-   const __DRIimageLoaderExtension *image = screen->image.loader;
+   const __DRIimageLoaderExtension *image = screen->loader.image;
    struct __DRIimageList images;
    bool imported_buffers = true;
 
@@ -433,47 +374,16 @@ drisw_allocate_textures(struct dri_context *stctx,
    templ.last_level = 0;
 
    if (imported_buffers && image) {
-      if (images.image_mask & __DRI_IMAGE_BUFFER_FRONT) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
-         struct pipe_resource *texture = images.front->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-         handle_in_fence(stctx, images.front);
-      }
-
-      if (images.image_mask & __DRI_IMAGE_BUFFER_BACK) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-         struct pipe_resource *texture = images.back->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-         handle_in_fence(stctx, images.back);
-      }
-
-      if (images.image_mask & __DRI_IMAGE_BUFFER_SHARED) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-         struct pipe_resource *texture = images.back->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-         handle_in_fence(stctx, images.back);
-      }
+      dri_drawable_bind_images(stctx, drawable, &images);
 
       /* Note: if there is both a back and a front buffer,
        * then they have the same size.
        */
       templ.width0 = drawable->w;
       templ.height0 = drawable->h;
+
+      dri_drawable_allocate_msaa_textures(stctx, drawable, statts, count,
+                                          &templ);
    } else {
       for (i = 0; i < count; i++) {
          enum pipe_format format;
@@ -499,7 +409,7 @@ drisw_allocate_textures(struct dri_context *stctx,
 
          if (statts[i] == ST_ATTACHMENT_FRONT_LEFT &&
                     screen->base.screen->resource_create_front &&
-                    loader->base.version >= 3) {
+                    loader->getImage2) {
             drawable->textures[statts[i]] =
                screen->base.screen->resource_create_front(screen->base.screen, &templ, (const void *)drawable);
          } else
@@ -583,30 +493,22 @@ static const struct drisw_loader_funcs drisw_shm_lf = {
    .put_image_shm = drisw_put_image_shm
 };
 
-void
-drisw_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits)
-{
-   drawable->allocate_textures = drisw_allocate_textures;
-   drawable->update_drawable_info = drisw_update_drawable_info;
-   drawable->flush_frontbuffer = drisw_flush_frontbuffer;
-   drawable->update_tex_buffer = drisw_update_tex_buffer;
-   drawable->swap_buffers = drisw_swap_buffers;
-   drawable->swap_buffers_with_damage = drisw_swap_buffers_with_damage;
-}
-
 struct pipe_screen *
 drisw_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 {
-   const __DRIswrastLoaderExtension *loader = screen->swrast_loader;
+   const __DRIswrastLoaderExtension *loader = screen->loader.swrast;
    struct pipe_screen *pscreen = NULL;
    const struct drisw_loader_funcs *lf = &drisw_lf;
 
+   if (!loader) {
+      fprintf(stderr, "mesa: swrast interface not found\n");
+      return NULL;
+   }
+
    screen->swrast_no_present = debug_get_option_swrast_no_present();
 
-   if (loader->base.version >= 4) {
-      if (loader->putImageShm)
-         lf = &drisw_shm_lf;
-   }
+   if (loader->putImageShm)
+      lf = &drisw_shm_lf;
 
    bool success = false;
 #ifdef HAVE_DRISW_KMS
@@ -626,7 +528,7 @@ drisw_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 void
 driswCopySubBuffer(struct dri_drawable *drawable, int x, int y, int w, int h)
 {
-   assert(drawable->screen->swrast_loader);
+   assert(drawable->screen->loader.swrast);
 
    drisw_copy_sub_buffer(drawable, x, y, w, h);
 }

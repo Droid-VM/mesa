@@ -6,8 +6,10 @@ static inline void
 zink_select_draw_vbo(struct zink_context *ctx)
 {
    ctx->base.draw_vbo = ctx->draw_vbo[ctx->pipeline_changed[ZINK_PIPELINE_GFX]];
+   ctx->base.draw_vbo_buffers = ctx->draw_vbo_buffers[ctx->pipeline_changed[ZINK_PIPELINE_GFX]];
    ctx->base.draw_vertex_state = ctx->draw_state[ctx->pipeline_changed[ZINK_PIPELINE_GFX]];
    assert(ctx->base.draw_vbo);
+   assert(ctx->base.draw_vbo_buffers);
    assert(ctx->base.draw_vertex_state);
 }
 

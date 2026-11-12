@@ -76,6 +76,10 @@ zink_shader_finalize(struct pipe_screen *pscreen, struct nir_shader *nir, bool o
 void
 zink_shader_free(struct zink_screen *screen, struct zink_shader *shader);
 void
+zink_shobj_reference(struct zink_screen *screen, struct zink_shobj **dst, struct zink_shobj *src);
+void
+zink_shader_set_precompiled(struct zink_screen *screen, struct zink_shader *zs, struct zink_shader_object obj);
+void
 zink_gfx_shader_free(struct zink_screen *screen, struct zink_shader *shader);
 
 struct zink_shader_object

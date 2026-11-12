@@ -430,6 +430,7 @@ struct pipe_h264_picture_desc
    bool     is_long_term[16];
    bool     top_is_reference[16];
    bool     bottom_is_reference[16];
+   bool     is_field[16]; /* the reference was decoded as field pictures */
    bool     is_non_existing[16];
    uint32_t field_order_cnt_list[16][2];
    uint32_t frame_num_list[16];
@@ -764,20 +765,6 @@ struct h265_slice_descriptor
    uint32_t    num_ctu_in_slice;
    /** slice type. */
    enum pipe_h265_slice_type slice_type;
-};
-
-struct pipe_enc_hdr_cll {
-   uint16_t max_cll;
-   uint16_t max_fall;
-};
-
-struct pipe_enc_hdr_mdcv {
-   uint16_t primary_chromaticity_x[3];
-   uint16_t primary_chromaticity_y[3];
-   uint16_t white_point_chromaticity_x;
-   uint16_t white_point_chromaticity_y;
-   uint32_t luminance_max;
-   uint32_t luminance_min;
 };
 
 typedef struct pipe_h264_enc_hrd_params
@@ -1395,9 +1382,6 @@ struct pipe_h265_enc_picture_desc
    unsigned max_slice_bytes;
    enum pipe_video_feedback_metadata_type requested_metadata;
 
-   struct pipe_enc_hdr_cll metadata_hdr_cll;
-   struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
-
    struct pipe_h265_enc_dpb_entry dpb[PIPE_H265_MAX_DPB_SIZE];
    uint8_t dpb_size;
    uint8_t dpb_curr_pic; /* index in dpb */
@@ -1558,6 +1542,18 @@ struct pipe_av1_enc_picture_desc
    struct pipe_enc_quality_modes quality_modes;
    struct pipe_enc_intra_refresh intra_refresh;
    struct pipe_enc_roi roi;
+   struct pipe_enc_dirty_info dirty_info;
+   struct pipe_enc_move_info move_info;
+
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_QP_MAP */
+   struct pipe_resource *gpu_stats_qp_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_SATD_MAP */
+   struct pipe_resource *gpu_stats_satd_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_RATE_CONTROL_BITS_MAP */
+   struct pipe_resource *gpu_stats_rc_bitallocation_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_PSNR */
+   struct pipe_resource *gpu_stats_psnr;
+
    struct pipe_enc_qpmap_input_info input_qpmap_info;
    uint32_t tile_rows;
    uint32_t tile_cols;
@@ -1648,17 +1644,6 @@ struct pipe_av1_enc_picture_desc
 
    enum pipe_video_feedback_metadata_type requested_metadata;
 
-   union {
-      struct {
-         uint32_t hdr_cll:1;
-         uint32_t hdr_mdcv:1;
-      };
-      uint32_t value;
-   } metadata_flags;
-
-   struct pipe_enc_hdr_cll metadata_hdr_cll;
-   struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
-
    struct pipe_av1_enc_dpb_entry dpb[PIPE_AV1_MAX_DPB_SIZE + 1];
    uint8_t dpb_size;
    uint8_t dpb_curr_pic; /* index in dpb */
@@ -1707,6 +1692,16 @@ struct pipe_h265_sps
    uint8_t strong_intra_smoothing_enabled_flag;
    uint8_t no_pic_reordering_flag;
    uint8_t no_bi_pred_flag;
+   /* RExt params */
+   uint8_t transform_skip_rotation_enabled_flag;
+   uint8_t transform_skip_context_enabled_flag;
+   uint8_t implicit_rdpcm_enabled_flag;
+   uint8_t explicit_rdpcm_enabled_flag;
+   uint8_t extended_precision_processing_flag;
+   uint8_t intra_smoothing_disabled_flag;
+   uint8_t high_precision_offsets_enabled_flag;
+   uint8_t persistent_rice_adaptation_enabled_flag;
+   uint8_t cabac_bypass_alignment_enabled_flag;
 };
 
 struct pipe_h265_pps
@@ -1748,6 +1743,16 @@ struct pipe_h265_pps
    uint8_t lists_modification_present_flag;
    uint8_t log2_parallel_merge_level_minus2;
    uint8_t slice_segment_header_extension_present_flag;
+   /* RExt params */
+   uint8_t log2_max_transform_skip_block_size_minus2;
+   uint8_t cross_component_prediction_enabled_flag;
+   uint8_t chroma_qp_offset_list_enabled_flag;
+   uint8_t diff_cu_chroma_qp_offset_depth;
+   uint8_t chroma_qp_offset_list_len_minus1;
+   int8_t cb_qp_offset_list[6];
+   int8_t cr_qp_offset_list[6];
+   uint8_t log2_sao_offset_scale_luma;
+   uint8_t log2_sao_offset_scale_chroma;
 };
 
 struct pipe_h265_picture_desc
@@ -2156,6 +2161,30 @@ struct pipe_vpp_blend
    enum pipe_video_vpp_blend_mode mode;
    /* To be used with PIPE_VIDEO_VPP_BLEND_MODE_GLOBAL_ALPHA */
    float global_alpha;
+   /* To be used with PIPE_VIDEO_VPP_BLEND_MODE_LUMA_KEY.
+    * min and max should be in range [0.0f, 1.0f]
+    */
+   float min_luma;
+   float max_luma;
+};
+
+struct pipe_video_vpp_hdr10metadata
+{
+   bool valid;
+   uint16_t display_primaries_x[3];
+   uint16_t display_primaries_y[3];
+   uint16_t white_point_x;
+   uint16_t white_point_y;
+   uint32_t max_display_mastering_luminance;
+   uint32_t min_display_mastering_luminance;
+   uint16_t max_content_light_level;
+   uint16_t max_pic_average_light_level;
+};
+
+struct pipe_video_filter_strength
+{
+   bool valid;
+   float strength;
 };
 
 struct pipe_vpp_desc
@@ -2184,8 +2213,16 @@ struct pipe_vpp_desc
    enum pipe_video_vpp_matrix_coefficients out_matrix_coefficients;
 
    enum pipe_video_vpp_filter_flag filter_flags;
-};
 
+   struct pipe_video_vpp_hdr10metadata in_hdr10metadata;
+   struct pipe_video_vpp_hdr10metadata out_hdr10metadata;
+
+   struct pipe_video_filter_strength color_balance_brightness;
+   struct pipe_video_filter_strength color_balance_contrast;
+   struct pipe_video_filter_strength color_balance_hue;
+   struct pipe_video_filter_strength color_balance_saturation;
+   struct pipe_video_filter_strength sharpening;
+};
 
 /* To be used with PIPE_VIDEO_CAP_ENC_HEVC_PREDICTION_DIRECTION */
 enum pipe_h265_enc_pred_direction

@@ -49,6 +49,7 @@ foreach gen : intel_shaders_gens
       intel_shader_files, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@', '--',
       '-Wno-initializer-overrides',
       '-DGFX_VERx10=@0@'.format(gen[0]),
+      '-I' + join_paths(meson.project_source_root(), 'include'),
       '-I' + join_paths(meson.current_source_dir(), '.'),
       '-I' + join_paths(dir_source_root, 'src/compiler/libcl'),
       '-I' + join_paths(dir_source_root, 'src'),

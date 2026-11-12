@@ -92,6 +92,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
+      .KHR_maintenance10 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_binary = true,
@@ -111,11 +112,13 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = false,
       .KHR_shader_clock = false,
+      .KHR_shader_constant_data = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
       .KHR_shader_float_controls2 = true,
       .KHR_shader_float16_int8 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_non_semantic_info = true,
@@ -125,6 +128,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_subgroup_rotate = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_shader_terminate_invocation = true,
+      .KHR_shader_untyped_pointers = true,
       .KHR_spirv_1_4 = true,
       .KHR_storage_buffer_storage_class = true,
       .KHR_timeline_semaphore = true,
@@ -190,6 +194,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
 #ifdef HK_USE_WSI_PLATFORM
       .EXT_present_timing = true,
 #endif
+      .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = false,
@@ -417,6 +422,9 @@ hk_get_device_features(
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
 
+      /* VK_KHR_maintenance10 */
+      .maintenance10 = true,
+
       /* VK_KHR_pipeline_binary */
       .pipelineBinaries = true,
 
@@ -444,6 +452,11 @@ hk_get_device_features(
 
       /* VK_KHR_shader_float_controls2 */
       .shaderFloatControls2 = true,
+
+      /* VK_KHR_shader_fma */
+      .shaderFmaFloat16 = true,
+      .shaderFmaFloat32 = true,
+      .shaderFmaFloat64 = false,
 
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
@@ -587,6 +600,9 @@ hk_get_device_features(
       /* VK_EXT_pipeline_robustness */
       .pipelineRobustness = true,
 
+      /* VK_EXT_primitive_restart_index */
+      .primitiveRestartIndex = true,
+
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
       .primitiveTopologyPatchListRestart = false,
@@ -621,6 +637,9 @@ hk_get_device_features(
       /* VK_KHR_shader_subgroup_uniform_control_flow */
       .shaderSubgroupUniformControlFlow = true,
 
+      /* VK_KHR_shader_untyped_pointers */
+      .shaderUntypedPointers = true,
+
       /* VK_EXT_shader_uniform_buffer_unsized_array */
       .shaderUniformBufferUnsizedArray = true,
 
@@ -645,6 +664,9 @@ hk_get_device_features(
 
       /* VK_EXT_blend_operation_advanced */
       .advancedBlendCoherentOperations = true,
+
+      /* VK_KHR_shader_constant_data */
+      .shaderConstantData = true,
 
 #ifdef HK_USE_WSI_PLATFORM
       /* VK_EXT_present_timing */
@@ -969,6 +991,11 @@ hk_get_device_properties(const struct agx_device *dev,
       .image2DViewOf3DSparse = false,
       .defaultVertexAttributeValue =
          VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
+
+      /* VK_KHR_maintenance10 */
+      .rgba4OpaqueBlackSwizzled = true,
+      .resolveSrgbFormatAppliesTransferFunction = true,
+      .resolveSrgbFormatSupportsTransferFunctionControl = true,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
@@ -1403,10 +1430,10 @@ hk_GetPhysicalDeviceMemoryProperties2(
       pMemoryProperties->memoryProperties.memoryTypes[i] = pdev->mem_types[i];
    }
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
-         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
 
          uint64_t sysmem_budget =
             pdev->sysmem ? hk_get_sysmem_heap_available(pdev) : 0;
@@ -1459,7 +1486,7 @@ hk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

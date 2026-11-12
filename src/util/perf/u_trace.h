@@ -31,8 +31,16 @@
 #include "util/hash_table.h"
 #include "util/u_dynarray.h"
 #include "util/macros.h"
+#include "util/memstream.h"
 #include "util/u_atomic.h"
 #include "util/u_queue.h"
+
+/* gzip-compressing trace output needs zlib. */
+#ifdef HAVE_ZLIB
+#define U_TRACE_HAS_COMPRESS 1
+#else
+#define U_TRACE_HAS_COMPRESS 0
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -248,7 +256,19 @@ struct u_trace_context {
    uint64_t max_indirect_size_bytes;
 
    FILE *out;
+   bool out_owned; /* `out` is owned by this context and must be closed */
    struct u_trace_printer *out_printer;
+
+#if U_TRACE_HAS_COMPRESS
+   /* For gzip output, `out` is a memstream buffering one batch; it is drained
+    * into compress_gz (an opaque gzFile, to keep zlib.h out of this header)
+    * and rewound each batch.
+    */
+   struct u_memstream compress_mem;
+   char *compress_buf;
+   size_t compress_buf_size;
+   void *compress_gz;
+#endif
 
    /* Once u_trace_flush() is called u_trace_chunk's are queued up to
     * render tracepoints on a queue.  The per-chunk queue jobs block until
@@ -266,6 +286,8 @@ struct u_trace_context {
     */
    uint64_t last_time_ns;
    uint64_t first_time_ns;
+
+   uint32_t id; /* process-unique id, printed with the output */
 
    uint32_t frame_nr;
    uint32_t batch_nr;
@@ -341,6 +363,13 @@ void u_trace_move(struct u_trace *dst, struct u_trace *src);
 void u_trace_fini(struct u_trace *ut);
 
 void u_trace_state_init(void);
+
+/* Closes any trace file the process-wide state opened and re-arms its
+ * one-time initialisation, so the next context reads the environment again.
+ * Only for tests, which need several configurations in one process; no
+ * trace context may exist across the call.
+ */
+void u_trace_state_reset(void);
 bool u_trace_is_enabled(enum u_trace_type type);
 
 bool u_trace_has_points(struct u_trace *ut);

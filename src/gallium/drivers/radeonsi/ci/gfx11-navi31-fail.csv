@@ -11,8 +11,6 @@ glx@glx-visuals-depth -pixmap,Warn
 glx@glx-visuals-stencil -pixmap,Fail
 spec@!opengl 1.1@line-smooth-stipple,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
-spec@arb_shading_language_packing@execution@built-in-functions@fs-packhalf2x16,Fail
-spec@arb_shading_language_packing@execution@built-in-functions@vs-packhalf2x16,Fail
 spec@egl 1.4@egl-ext_egl_image_storage,Crash
 spec@glsl-es-3.00@execution@built-in-functions@fs-packhalf2x16,Fail
 spec@glsl-es-3.00@execution@built-in-functions@vs-packhalf2x16,Fail

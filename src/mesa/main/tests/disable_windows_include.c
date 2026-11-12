@@ -240,7 +240,6 @@
 #include <util/ralloc.h>
 #include <util/rand_xor.h>
 #include <util/rb_tree.h>
-#include <util/reallocarray.h>
 #include <util/register_allocate.h>
 #include <util/register_allocate_internal.h>
 #include <util/rgtc.h>

@@ -17,6 +17,7 @@
 #include "ds/intel_driver_ds.h"
 #include "ds/intel_tracepoints.h"
 
+#include "iris_bufmgr.h"
 #include "iris_fence.h"
 #include "iris_fine_fence.h"
 
@@ -184,6 +185,16 @@ struct iris_batch {
    bool contains_fence_signal;
 
    /**
+    * Have we emitted a valid viewport to this batch?
+    *
+    * Refer to HSD 14022502615. If any valid viewport state has been emitted
+    * in this batch, we tell blorp to skip the viewport emission in the depth
+    * fast clear path. It is intended to work with flag
+    * BLORP_BATCH_NO_EMIT_DEPTH_CLEAR_VIEWPORT in blorp.
+    */
+   bool dfc_vp_sent;
+
+   /**
     * Number of times iris_batch_sync_region_start() has been called without a
     * matching iris_batch_sync_region_end() on this batch.
     */
@@ -199,6 +210,9 @@ struct iris_batch {
    struct intel_ds_queue ds;
 
    uint8_t num_3d_primitives_emitted;
+
+   /* Only used when 64bit addressing is supported */
+   uint64_t render_target_surfs_state_addr[MESA_SHADER_STAGES];
 };
 
 void iris_init_batches(struct iris_context *ice);
@@ -312,12 +326,15 @@ iris_batch_reference_signal_syncobj(struct iris_batch *batch,
  * Record the size of a piece of state for use in INTEL_DEBUG=bat printing.
  */
 static inline void
-iris_record_state_size(struct hash_table_u64 *ht,
-                       uint32_t offset_from_base,
+iris_record_state_size(struct iris_bufmgr *bufmgr,
+                       struct hash_table_u64 *ht,
+                       uint64_t offset_from_base_or_addr,
                        uint32_t size)
 {
    if (ht) {
-      _mesa_hash_table_u64_insert(ht, offset_from_base,
+      if (!iris_bufmgr_is_eff_64bit_enabled(bufmgr))
+         offset_from_base_or_addr &= UINT32_MAX;
+      _mesa_hash_table_u64_insert(ht, offset_from_base_or_addr,
                                   (void *)(uintptr_t) size);
    }
 }

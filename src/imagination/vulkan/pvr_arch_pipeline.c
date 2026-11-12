@@ -49,7 +49,6 @@
 #include "pvr_macros.h"
 #include "pvr_nir_lower_ycbcr.h"
 #include "pvr_pass.h"
-#include "pvr_pds.h"
 #include "pvr_physical_device.h"
 #include "pvr_robustness.h"
 #include "pvr_sampler.h"
@@ -927,7 +926,8 @@ static void pvr_pipeline_finish(struct pvr_device *device,
 
 static void pvr_early_init_shader_data(pco_data *data,
                                        nir_shader *nir,
-                                       const void *pCreateInfo);
+                                       const void *pCreateInfo,
+                                       struct pvr_device *const device);
 
 static void
 pvr_preprocess_shader_data(pco_data *data,
@@ -1022,8 +1022,8 @@ static VkResult pvr_compute_pipeline_compile(
    if (result != VK_SUCCESS)
       goto err_free_build_context;
 
-   pvr_early_init_shader_data(&shader_data, nir, pCreateInfo);
-   pco_preprocess_nir(pco_ctx, nir);
+   pvr_early_init_shader_data(&shader_data, nir, pCreateInfo, device);
+   pco_preprocess_nir(pco_ctx, nir, &shader_data);
    pvr_preprocess_shader_data(&shader_data,
                               nir,
                               pCreateInfo,
@@ -1055,7 +1055,9 @@ static VkResult pvr_compute_pipeline_compile(
 
    pvr_compute_state_save(compute_pipeline, cs);
 
-   if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) {
+   if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR ||
+       compute_pipeline->base.pipeline_flags &
+          VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) {
       struct pvr_stats stats = pco_get_pvr_stats(cs);
       compute_pipeline->cs_stats =
          vk_zalloc2(&device->vk.alloc,
@@ -1071,7 +1073,9 @@ static VkResult pvr_compute_pipeline_compile(
    }
 
    if (pCreateInfo->flags &
-       VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
+          VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR ||
+       compute_pipeline->base.pipeline_flags &
+          VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
       compute_pipeline->cs_nir_str = nir_shader_as_str(nir, NULL);
    }
 
@@ -1150,6 +1154,9 @@ pvr_compute_pipeline_init(struct pvr_device *device,
 {
    VkResult result;
 
+   compute_pipeline->base.pipeline_flags =
+      vk_compute_pipeline_create_flags(pCreateInfo);
+
    pvr_pipeline_init(device,
                      PVR_PIPELINE_TYPE_COMPUTE,
                      pCreateInfo->layout,
@@ -1202,7 +1209,7 @@ pvr_compute_pipeline_create(struct pvr_device *device,
    return VK_SUCCESS;
 }
 
-static void pvr_pipeline_destroy_shader_data(pco_data *data);
+static void pvr_pipeline_destroy_shader_data(pco_data *data, bool vs);
 
 static void pvr_compute_pipeline_destroy(
    struct pvr_device *const device,
@@ -1219,7 +1226,7 @@ static void pvr_compute_pipeline_destroy(
    pvr_bo_suballoc_free(compute_pipeline->shader_state.coeff_update_shader_bo);
    pvr_bo_suballoc_free(compute_pipeline->shader_state.shader_bo);
 
-   pvr_pipeline_destroy_shader_data(&compute_pipeline->cs_data);
+   pvr_pipeline_destroy_shader_data(&compute_pipeline->cs_data, false);
 
    pvr_pipeline_finish(device, &compute_pipeline->base);
 
@@ -1260,12 +1267,32 @@ VkResult PVR_PER_ARCH(CreateComputePipelines)(
 /******************************************************************************
    Graphics pipeline functions
  ******************************************************************************/
+static void pvr_pipeline_xfb_shader_state_fini(
+   struct pvr_device *const device,
+   struct pvr_graphics_pipeline *const gfx_pipeline,
+   const VkAllocationCallbacks *const allocator)
+{
+   struct pvr_xfb_shader_state *const local_xfb_state =
+      &gfx_pipeline->shader_state.xfb_shader_state;
 
-static void pvr_pipeline_destroy_shader_data(pco_data *data)
+   pvr_bo_suballoc_free(local_xfb_state->indirect_byte_count);
+   local_xfb_state->indirect_byte_count = NULL;
+
+   pvr_bo_suballoc_free(local_xfb_state->counter_buffer_offsets);
+   local_xfb_state->counter_buffer_offsets = NULL;
+
+   vk_free2(&device->vk.alloc, allocator, local_xfb_state->varyings);
+   local_xfb_state->varyings = NULL;
+}
+
+static void pvr_pipeline_destroy_shader_data(pco_data *data, bool vs)
 {
    for (unsigned u = 0; u < ARRAY_SIZE(data->common.desc_sets); ++u) {
       ralloc_free(data->common.desc_sets[u].bindings);
    }
+
+   if (vs)
+      ralloc_free(data->vs.xfb_info);
 }
 
 static void
@@ -1304,11 +1331,12 @@ pvr_graphics_pipeline_destroy(struct pvr_device *const device,
 
    pvr_bo_suballoc_free(gfx_pipeline->shader_state.fragment.shader_bo);
    pvr_bo_suballoc_free(gfx_pipeline->shader_state.vertex.shader_bo);
+   pvr_pipeline_xfb_shader_state_fini(device, gfx_pipeline, allocator);
 
    pvr_pipeline_finish(device, &gfx_pipeline->base);
 
-   pvr_pipeline_destroy_shader_data(&gfx_pipeline->vs_data);
-   pvr_pipeline_destroy_shader_data(&gfx_pipeline->fs_data);
+   pvr_pipeline_destroy_shader_data(&gfx_pipeline->vs_data, true);
+   pvr_pipeline_destroy_shader_data(&gfx_pipeline->fs_data, false);
 
    vk_free2(&device->vk.alloc, allocator, gfx_pipeline->vs_stats);
    vk_free2(&device->vk.alloc, allocator, gfx_pipeline->fs_stats);
@@ -1344,10 +1372,7 @@ static void pvr_fragment_state_save(struct pvr_graphics_pipeline *gfx_pipeline,
    const pco_data *shader_data = pco_shader_data(fs);
    memcpy(&gfx_pipeline->fs_data, shader_data, sizeof(*shader_data));
 
-   /* TODO: add selection for other values of pass type and sample rate. */
-
-   /* TODO: do this dynamically as well */
-   if (shader_data->fs.uses.depth_feedback && !shader_data->fs.uses.early_frag)
+   if (shader_data->fs.uses.depth_feedback)
       fragment_state->pass_type = ROGUE_TA_PASSTYPE_DEPTH_FEEDBACK;
    else if (shader_data->fs.uses.discard)
       fragment_state->pass_type = ROGUE_TA_PASSTYPE_PUNCH_THROUGH;
@@ -1563,7 +1588,7 @@ static void pvr_graphics_pipeline_setup_fragment_coeff_program(
                       "amend nir var linking.");
       }
 
-      unsigned count = vtxout_range->count;
+      unsigned count = cf_range->count / ROGUE_USC_COEFFICIENT_SET_SIZE;
 
       unsigned vtxout = vtxout_range->start;
 
@@ -1807,7 +1832,7 @@ static void pvr_alloc_vs_varyings(pco_data *data, nir_shader *nir)
 
       switch (var->data.interpolation) {
       case INTERP_MODE_NONE:
-         /* pco_rev_link_nir didn't run; override here. */
+         /* pco_rev_link_nir didn't run, probably xfb; override here. */
          var->data.interpolation = INTERP_MODE_SMOOTH;
          FALLTHROUGH;
 
@@ -2233,6 +2258,7 @@ static void pvr_init_fs_blend(pco_data *data,
    if (!cb)
       return;
 
+   blend_opts->scalar_blend_const = true;
    blend_opts->logicop_enable = cb->logic_op_enable;
    blend_opts->logicop_func = vk_logic_op_to_pipe(cb->logic_op);
 
@@ -2442,10 +2468,10 @@ static void pvr_alloc_cs_shmem(pco_data *data, nir_shader *nir)
    } else {
       /* Reserve space in coefficients for use as shared memory. */
       data->cs.shmem.start = data->common.coeffs;
-      data->common.coeffs += data->cs.shmem.count;
 
       /* DWORD granularity. */
       data->cs.shmem.count >>= 2;
+      data->common.coeffs += data->cs.shmem.count;
    }
 }
 
@@ -2453,15 +2479,6 @@ static void pvr_init_descriptors(pco_data *data,
                                  nir_shader *nir,
                                  struct vk_pipeline_layout *layout)
 {
-   const struct pvr_device *device = vk_to_pvr_device(layout->base.device);
-   data->common.robust_buffer_access =
-      device->vk.enabled_features.robustBufferAccess;
-
-   data->common.null_descriptor = device->vk.enabled_features.nullDescriptor;
-
-   data->common.image_2d_view_of_3d =
-      device->vk.enabled_features.image2DViewOf3D;
-
    for (unsigned desc_set = 0; desc_set < layout->set_count; ++desc_set) {
       const struct pvr_descriptor_set_layout *set_layout =
          vk_to_pvr_descriptor_set_layout(layout->set_layouts[desc_set]);
@@ -2486,6 +2503,9 @@ static void pvr_init_descriptors(pco_data *data,
 
          binding_data->is_img_smp = layout_binding->type ==
                                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+         binding_data->is_inline_ubo = layout_binding->type ==
+                                       VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
       }
    }
 }
@@ -2708,6 +2728,9 @@ pvr_preprocess_shader_data(pco_data *data,
          data->fs.meta_present.color_write_enable = true;
       }
 
+      if (state->ms)
+         nir->info.fs.uses_sample_shading |= state->ms->sample_shading_enable;
+
       /* TODO: push consts, dynamic state, etc. */
       break;
    }
@@ -2786,9 +2809,21 @@ static void pvr_postprocess_shader_data(pco_data *data,
 
 static void pvr_early_init_shader_data(pco_data *data,
                                        nir_shader *nir,
-                                       const void *pCreateInfo)
+                                       const void *pCreateInfo,
+                                       struct pvr_device *const device)
 {
    const VkGraphicsPipelineCreateInfo *pGraphicsCreateInfo = pCreateInfo;
+
+   data->common.robust_buffer_access =
+      device->vk.enabled_features.robustBufferAccess;
+
+   data->common.null_descriptor = device->vk.enabled_features.nullDescriptor;
+
+   data->common.image_2d_view_of_3d =
+      device->vk.enabled_features.image2DViewOf3D;
+
+   data->common.image_sliced_view_of_3d =
+      device->vk.enabled_features.imageSlicedViewOf3D;
 
    switch (nir->info.stage) {
    case MESA_SHADER_VERTEX:
@@ -2822,6 +2857,227 @@ static void pvr_early_init_shader_data(pco_data *data,
    default:
       UNREACHABLE("Unsupported stage.");
    }
+}
+
+static void pvr_xfb_sort_outputs(const nir_xfb_info *const xfb_info,
+                                 uint32_t *const indices)
+{
+   for (uint32_t i = 0; i < xfb_info->output_count; i++)
+      indices[i] = i;
+
+   for (uint32_t i = 1; i < xfb_info->output_count; i++) {
+      const uint32_t key = indices[i];
+      const nir_xfb_output_info *const key_out = &xfb_info->outputs[key];
+      uint32_t j = i;
+
+      while (j > 0) {
+         const nir_xfb_output_info *const prev =
+            &xfb_info->outputs[indices[j - 1]];
+
+         if (prev->buffer < key_out->buffer ||
+             (prev->buffer == key_out->buffer &&
+              prev->offset <= key_out->offset)) {
+            break;
+         }
+
+         indices[j] = indices[j - 1];
+         j--;
+      }
+
+      indices[j] = key;
+   }
+}
+
+static bool
+pvr_xfb_output_is_contiguous(const nir_xfb_info *const xfb_info,
+                             const struct pvr_xfb_varying *const run,
+                             const nir_xfb_output_info *const output,
+                             uint32_t out_reg_start)
+{
+   const uint32_t out_reg_count = util_bitcount(output->component_mask);
+
+   /* Must target the same capture buffer. */
+   if (run->xfb_buffer != output->buffer)
+      return false;
+
+   /* Must be the next vertex register. */
+   if (run->register_start + run->register_count != out_reg_start)
+      return false;
+
+   /* Must be the next dword in the capture buffer. */
+   if (run->xfb_offset + PVR_DW_TO_BYTES(run->register_count) != output->offset)
+      return false;
+
+   /* Must share the stride the varying was started with. */
+   if (run->xfb_stride != xfb_info->buffers[run->xfb_buffer].stride)
+      return false;
+
+   /* The combined varying must still fit within the buffer stride. */
+   if (run->register_count + out_reg_count > run->xfb_stride / sizeof(uint32_t))
+      return false;
+
+   return true;
+}
+
+static uint32_t
+pvr_xfb_build_varyings(const struct pvr_graphics_pipeline *const gfx_pipeline,
+                       const nir_xfb_info *const xfb_info,
+                       const uint32_t *const indices,
+                       struct pvr_xfb_varying *const varyings)
+{
+   const nir_xfb_output_info *const first = &xfb_info->outputs[indices[0]];
+   const pco_range *const vs_varyings = gfx_pipeline->vs_data.vs.varyings;
+   struct pvr_xfb_varying run;
+   uint32_t varying_count = 0;
+
+   assert(first->location < ARRAY_SIZE(gfx_pipeline->vs_data.vs.varyings));
+
+   run = (struct pvr_xfb_varying){
+      .register_start =
+         vs_varyings[first->location].start + first->component_offset,
+      .register_count = util_bitcount(first->component_mask),
+      .xfb_buffer = first->buffer,
+      .xfb_offset = first->offset,
+      .xfb_stride = xfb_info->buffers[first->buffer].stride,
+   };
+
+   for (uint32_t i = 1; i < xfb_info->output_count; i++) {
+      const nir_xfb_output_info *const out = &xfb_info->outputs[indices[i]];
+      uint32_t out_reg_start;
+
+      assert(out->location < ARRAY_SIZE(gfx_pipeline->vs_data.vs.varyings));
+
+      out_reg_start = vs_varyings[out->location].start + out->component_offset;
+
+      if (pvr_xfb_output_is_contiguous(xfb_info, &run, out, out_reg_start)) {
+         run.register_count += util_bitcount(out->component_mask);
+         continue;
+      }
+
+      varyings[varying_count++] = run;
+
+      run = (struct pvr_xfb_varying){
+         .register_start = out_reg_start,
+         .register_count = util_bitcount(out->component_mask),
+         .xfb_buffer = out->buffer,
+         .xfb_offset = out->offset,
+         .xfb_stride = xfb_info->buffers[out->buffer].stride,
+      };
+   }
+
+   varyings[varying_count++] = run;
+
+   return varying_count;
+}
+
+static void pvr_xfb_group_varyings(struct pvr_xfb_shader_state *xfb_state,
+                                   uint32_t varying_count)
+{
+   uint32_t group_count = 0;
+
+   uint32_t i = 0;
+   while (i < varying_count) {
+      uint32_t cur_buf = xfb_state->varyings[i].xfb_buffer;
+
+      /* Count varyings in this buffer group. */
+      uint32_t group_size = 0;
+      while (i < varying_count &&
+             xfb_state->varyings[i].xfb_buffer == cur_buf) {
+         group_size++;
+         i++;
+      }
+
+      assert(group_count < ARRAY_SIZE(xfb_state->group_varying_count));
+      xfb_state->group_varying_count[group_count] = group_size;
+      group_count++;
+   }
+
+   xfb_state->buffer_group_count = group_count;
+}
+
+static VkResult pvr_pipeline_xfb_shader_state_init(
+   struct pvr_device *device,
+   struct pvr_graphics_pipeline *const gfx_pipeline,
+   const VkAllocationCallbacks *const allocator)
+{
+   struct pvr_xfb_shader_state *const pipeline_xfb_state =
+      &gfx_pipeline->shader_state.xfb_shader_state;
+   const nir_xfb_info *const xfb_info = gfx_pipeline->vs_data.vs.xfb_info;
+   const uint32_t cache_line_size =
+      pvr_get_slc_cache_line_size(&device->pdevice->dev_info);
+   struct pvr_xfb_shader_state new_state = { 0 };
+   VkResult result;
+
+   if (xfb_info) {
+      assert(xfb_info->streams_written <= PVR_XFB_MAX_STREAMS);
+
+      if (xfb_info->output_count) {
+         uint32_t *sorted_indices;
+
+         new_state.varyings =
+            vk_alloc2(&device->vk.alloc,
+                      allocator,
+                      xfb_info->output_count * sizeof(*new_state.varyings),
+                      8U,
+                      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+         if (!new_state.varyings)
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+         sorted_indices =
+            vk_alloc2(&device->vk.alloc,
+                      allocator,
+                      xfb_info->output_count * sizeof(*sorted_indices),
+                      8U,
+                      VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+         if (!sorted_indices) {
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto err_free_xfb_state;
+         }
+
+         pvr_xfb_sort_outputs(xfb_info, sorted_indices);
+
+         new_state.varying_count = pvr_xfb_build_varyings(gfx_pipeline,
+                                                          xfb_info,
+                                                          sorted_indices,
+                                                          new_state.varyings);
+
+         vk_free2(&device->vk.alloc, allocator, sorted_indices);
+      }
+
+      for (uint32_t i = 0; i < ARRAY_SIZE(new_state.buffer_strides); i++) {
+         if (xfb_info->buffers_written & BITFIELD_BIT(i))
+            new_state.buffer_strides[i] = xfb_info->buffers[i].stride;
+      }
+
+      pvr_xfb_group_varyings(&new_state, new_state.varying_count);
+
+      result = pvr_bo_suballoc(&device->suballoc_general,
+                               sizeof(new_state.buffer_strides),
+                               cache_line_size,
+                               true,
+                               &new_state.counter_buffer_offsets);
+      if (result != VK_SUCCESS)
+         goto err_free_xfb_state;
+   }
+
+   result = pvr_bo_suballoc(&device->suballoc_general,
+                            sizeof(VkDrawIndirectCommand),
+                            cache_line_size,
+                            true,
+                            &new_state.indirect_byte_count);
+   if (result != VK_SUCCESS)
+      goto err_free_xfb_state;
+
+   *pipeline_xfb_state = new_state;
+
+   return VK_SUCCESS;
+
+err_free_xfb_state:
+   pvr_bo_suballoc_free(new_state.indirect_byte_count);
+   pvr_bo_suballoc_free(new_state.counter_buffer_offsets);
+   vk_free2(&device->vk.alloc, allocator, new_state.varyings);
+
+   return result;
 }
 
 static bool pvr_build_fs_passthrough(bool no_fragment_shader,
@@ -2935,8 +3191,9 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
 
       pvr_early_init_shader_data(&shader_data[stage],
                                  nir_shaders[stage],
-                                 pCreateInfo);
-      pco_preprocess_nir(pco_ctx, nir_shaders[stage]);
+                                 pCreateInfo,
+                                 device);
+      pco_preprocess_nir(pco_ctx, nir_shaders[stage], &shader_data[stage]);
    }
 
    for (mesa_shader_stage stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
@@ -3031,7 +3288,9 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
 
    pvr_vertex_state_save(gfx_pipeline, *vs);
 
-   if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) {
+   if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR ||
+       gfx_pipeline->base.pipeline_flags &
+          VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) {
       struct pvr_stats stats = pco_get_pvr_stats(*vs);
       gfx_pipeline->vs_stats = vk_zalloc2(&device->vk.alloc,
                                           allocator,
@@ -3046,7 +3305,9 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
    }
 
    if (pCreateInfo->flags &
-       VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
+          VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR ||
+       gfx_pipeline->base.pipeline_flags &
+          VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
       gfx_pipeline->vs_nir_str =
          nir_shader_as_str(nir_shaders[MESA_SHADER_VERTEX], NULL);
    }
@@ -3065,11 +3326,17 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
    if (result != VK_SUCCESS)
       goto err_free_build_context;
 
+   result = pvr_pipeline_xfb_shader_state_init(device, gfx_pipeline, allocator);
+   if (result != VK_SUCCESS)
+      goto err_free_vertex_bo;
+
    if (*fs) {
       pvr_fragment_state_save(gfx_pipeline, *fs);
       fragment_state->is_passthrough = build_fs_passthrough;
 
-      if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) {
+      if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR ||
+          gfx_pipeline->base.pipeline_flags &
+             VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) {
          struct pvr_stats stats = pco_get_pvr_stats(*fs);
          gfx_pipeline->fs_stats = vk_zalloc2(&device->vk.alloc,
                                              allocator,
@@ -3084,7 +3351,9 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
       }
 
       if (pCreateInfo->flags &
-          VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
+             VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR ||
+          gfx_pipeline->base.pipeline_flags &
+             VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) {
          gfx_pipeline->fs_nir_str =
             nir_shader_as_str(nir_shaders[MESA_SHADER_FRAGMENT], NULL);
       }
@@ -3099,7 +3368,7 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
                                   cache_line_size,
                                   &fragment_state->shader_bo);
       if (result != VK_SUCCESS)
-         goto err_free_vertex_bo;
+         goto err_free_pipeline_xfb_state;
 
       result = pvr_pds_coeff_program_create_and_upload(device,
                                                        allocator,
@@ -3183,6 +3452,8 @@ err_free_coeff_program:
             fragment_state->pds_coeff_program_buffer);
 err_free_fragment_bo:
    pvr_bo_suballoc_free(fragment_state->shader_bo);
+err_free_pipeline_xfb_state:
+   pvr_pipeline_xfb_shader_state_fini(device, gfx_pipeline, allocator);
 err_free_vertex_bo:
    pvr_bo_suballoc_free(vertex_state->shader_bo);
 err_free_build_context:
@@ -3294,6 +3565,9 @@ pvr_graphics_pipeline_init(struct pvr_device *device,
    struct vk_multiview_state mv_state;
    struct vk_render_pass_state rp_state;
    VkResult result;
+
+   gfx_pipeline->base.pipeline_flags =
+      vk_graphics_pipeline_create_flags(pCreateInfo);
 
    pvr_create_renderpass_state(pCreateInfo, &mv_state, &rp_state);
 
@@ -3520,10 +3794,12 @@ VkResult PVR_PER_ARCH(GetPipelineExecutableStatisticsKHR)(
          to_pvr_graphics_pipeline(pipeline);
 
       if (pExecutableInfo->executableIndex == 0) {
-         vk_add_pvr_stats(out, gfx_pipeline->vs_stats);
+         if (gfx_pipeline->vs_stats)
+            vk_add_pvr_stats(out, gfx_pipeline->vs_stats);
       } else {
          assert(pExecutableInfo->executableIndex == 1);
-         vk_add_pvr_stats(out, gfx_pipeline->fs_stats);
+         if (gfx_pipeline->fs_stats)
+            vk_add_pvr_stats(out, gfx_pipeline->fs_stats);
       }
       break;
    }
@@ -3533,7 +3809,8 @@ VkResult PVR_PER_ARCH(GetPipelineExecutableStatisticsKHR)(
          to_pvr_compute_pipeline(pipeline);
 
       assert(pExecutableInfo->executableIndex == 0);
-      vk_add_pvr_stats(out, compute_pipeline->cs_stats);
+      if (compute_pipeline->cs_stats)
+         vk_add_pvr_stats(out, compute_pipeline->cs_stats);
       break;
    }
 

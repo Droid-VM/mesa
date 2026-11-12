@@ -610,27 +610,49 @@ typedef enum {
 } cat6_desc_mode_t;
 
 static inline bool
-is_sat_compatible(opc_t opc)
+is_cat2_float(opc_t opc)
 {
-   /* On a6xx saturation doesn't work on cat4 */
-   if (opc_cat(opc) != 2 && opc_cat(opc) != 3)
-      return false;
-
    switch (opc) {
-   /* On a3xx and a6xx saturation doesn't work on bary.f/flat.b */
-   case OPC_BARY_F:
-   case OPC_FLAT_B:
-   /* On a6xx saturation doesn't work on sel.* */
-   case OPC_SEL_B16:
-   case OPC_SEL_B32:
-   case OPC_SEL_S16:
-   case OPC_SEL_S32:
+   case OPC_ADD_F:
+   case OPC_MIN_F:
+   case OPC_MAX_F:
+   case OPC_MUL_F:
+   case OPC_SIGN_F:
+   case OPC_CMPS_F:
+   case OPC_ABSNEG_F:
+   case OPC_CMPV_F:
+   case OPC_FLOOR_F:
+   case OPC_CEIL_F:
+   case OPC_RNDNE_F:
+   case OPC_RNDAZ_F:
+   case OPC_TRUNC_F:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static inline bool
+is_cat3_float(opc_t opc)
+{
+   switch (opc) {
+   case OPC_MAD_F16:
+   case OPC_MAD_F32:
    case OPC_SEL_F16:
    case OPC_SEL_F32:
-      return false;
-   default:
       return true;
+   default:
+      return false;
    }
+}
+
+/* Is (sat) equivalent to fsat? */
+static inline bool
+sat_is_fsat(opc_t opc)
+{
+   /* On a6xx saturation doesn't work on cat4 */
+   return is_cat2_float(opc) || is_cat3_float(opc);
 }
 
 static inline bool
@@ -786,44 +808,6 @@ is_isam(opc_t opc)
    case OPC_ISAM:
    case OPC_ISAML:
    case OPC_ISAMM:
-      return true;
-   default:
-      return false;
-   }
-}
-
-static inline bool
-is_cat2_float(opc_t opc)
-{
-   switch (opc) {
-   case OPC_ADD_F:
-   case OPC_MIN_F:
-   case OPC_MAX_F:
-   case OPC_MUL_F:
-   case OPC_SIGN_F:
-   case OPC_CMPS_F:
-   case OPC_ABSNEG_F:
-   case OPC_CMPV_F:
-   case OPC_FLOOR_F:
-   case OPC_CEIL_F:
-   case OPC_RNDNE_F:
-   case OPC_RNDAZ_F:
-   case OPC_TRUNC_F:
-      return true;
-
-   default:
-      return false;
-   }
-}
-
-static inline bool
-is_cat3_float(opc_t opc)
-{
-   switch (opc) {
-   case OPC_MAD_F16:
-   case OPC_MAD_F32:
-   case OPC_SEL_F16:
-   case OPC_SEL_F32:
       return true;
    default:
       return false;

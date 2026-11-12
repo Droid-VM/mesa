@@ -169,6 +169,14 @@ enum pipe_advanced_blend_mode {
    PIPE_ADVANCED_BLEND_BLUE,
 };
 
+/* All modes required by KHR_blend_equation_advanced, as a bitmask of
+ * BITFIELD_BIT(enum pipe_advanced_blend_mode).
+ */
+#define PIPE_ADVANCED_BLEND_KHR_MODES_MASK \
+   BITFIELD_RANGE(PIPE_ADVANCED_BLEND_MULTIPLY, \
+                  PIPE_ADVANCED_BLEND_HSL_LUMINOSITY - \
+                  PIPE_ADVANCED_BLEND_MULTIPLY + 1)
+
 enum pipe_blend_overlap_mode {
    PIPE_BLEND_OVERLAP_UNCORRELATED = 0,
    PIPE_BLEND_OVERLAP_CONJOINT = 1,

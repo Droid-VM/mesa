@@ -25,6 +25,8 @@ extern "C" {
 #define ACO_MAX_VERTEX_ATTRIBS 32
 #define ACO_MAX_VBS            32
 
+#define ACO_SPI_SHADER_Z_FORMAT_UNKNOWN 0xff
+
 struct aco_vs_prolog_info {
    struct ac_arg inputs;
 
@@ -74,6 +76,8 @@ struct aco_ps_epilog_info {
    bool kill_depth;
    bool kill_stencil;
    bool kill_samplemask;
+   bool lower_1bit_sample_mask_to_discard;
+   uint8_t spi_shader_z_format;
 
    struct ac_arg alpha_reference;
    struct ac_arg depth;
@@ -182,6 +186,9 @@ enum aco_symbol_id {
    aco_symbol_scratch_addr_lo,
    aco_symbol_scratch_addr_hi,
    aco_symbol_const_data_addr,
+   aco_symbol_abort_buffer_addr_lo,
+   aco_symbol_abort_buffer_addr_hi,
+   aco_symbol_abort_buffer_size,
 };
 
 struct aco_symbol {
@@ -189,7 +196,7 @@ struct aco_symbol {
    unsigned offset;
 };
 
-#define MAX_SGPRS 108
+#define MAX_SGPRS       108
 #define MAX_VGPRS       256
 #define MAX_LDS_SIZE    65536 /* 64 KiB */
 #define NUM_SAVED_VGPRS 2

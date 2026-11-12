@@ -8,74 +8,109 @@
 
 namespace {
 
-class nir_opt_varyings_test_dead_input : public nir_opt_varyings_test
-{};
+class nir_opt_varyings_test_dead_input : public nir_opt_varyings_test {
+ public:
+   nir_def *input;
+   unsigned bitsize;
+
+   void setup(mesa_shader_stage producer, mesa_shader_stage consumer,
+              gl_varying_slot slot, unsigned comp,
+              nir_alu_type ty, unsigned in_bitsize)
+   {
+      bitsize = in_bitsize;
+
+      create_shaders(producer, consumer);
+      input = load_input(b2, slot, comp, ty, 0, 0);
+      store_output(b2, VARYING_SLOT_POS, 0, ty, input, 0, false);
+   }
+
+   void setup_routing(mesa_shader_stage producer, mesa_shader_stage consumer,
+                      gl_varying_slot pslot, gl_varying_slot cslot,
+                      nir_alu_type ty)
+   {
+      create_shaders(producer, consumer);
+      store_output(b1, pslot, 0, ty,
+                   load_input(b1, VARYING_SLOT_POS, 0, ty, 0, 0), 0, false);
+
+      input = load_input(b2, cslot, 0, ty, 0, 0);
+      store_output(b2, VARYING_SLOT_POS, 0, ty, input, 0, false);
+   }
+
+   void check_dead_input_to_undef()
+   {
+      ASSERT_EQ(opt_varyings(), nir_progress_consumer);
+      ASSERT_TRUE(b2->shader->info.inputs_read == 0 &&
+                  b2->shader->info.patch_inputs_read == 0 &&
+                  b2->shader->info.inputs_read_16bit == 0);
+      ASSERT_TRUE(!shader_contains_def(b2, input));
+      ASSERT_TRUE(shader_contains_undef(b2, bitsize));
+   }
+
+   void check_dead_input_to_const(float value)
+   {
+      ASSERT_EQ(opt_varyings(), nir_progress_consumer);
+      ASSERT_TRUE(b2->shader->info.inputs_read == 0 &&
+                  b2->shader->info.patch_inputs_read == 0 &&
+                  b2->shader->info.inputs_read_16bit == 0);
+      ASSERT_TRUE(!shader_contains_def(b2, input));
+      ASSERT_TRUE(shader_contains_const_float(b2, value, bitsize));
+   }
+
+   void check_dead_input_kept(gl_varying_slot slot)
+   {
+      ASSERT_EQ(opt_varyings(), 0);
+      ASSERT_EQ(b2->shader->info.inputs_read, BITFIELD64_BIT(slot));
+      ASSERT_TRUE(shader_contains_def(b2, input));
+   }
+
+   void check_routing_kept(gl_varying_slot pslot, gl_varying_slot cslot)
+   {
+      /* Compaction moves COL1 to COL0. */
+      unsigned pindex = pslot;
+      unsigned cindex = cslot;
+      if (cindex == VARYING_SLOT_COL1) {
+         pindex--;
+         cindex--;
+      }
+
+      ASSERT_EQ(opt_varyings(), 0);
+      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex));
+      ASSERT_EQ(b2->shader->info.inputs_read, BITFIELD64_BIT(cindex));
+      ASSERT_TRUE(shader_contains_def(b2, input));
+   }
+};
 
 #define TEST_DEAD_INPUT_TO_UNDEF(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_input, producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_def *input = load_input(b2, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, 0, 0); \
-   store_output(b2, VARYING_SLOT_POS, 0, nir_type_float##bitsize, input, 0, false); \
-   \
-   ASSERT_EQ(opt_varyings(), nir_progress_consumer); \
-   ASSERT_TRUE(b2->shader->info.inputs_read == 0 && \
-               b2->shader->info.patch_inputs_read == 0 && \
-               b2->shader->info.inputs_read_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_def(b2, input)); \
-   ASSERT_TRUE(shader_contains_undef(b2, bitsize)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, 0, nir_type_float##bitsize, bitsize); \
+   check_dead_input_to_undef(); \
 }
 
 #define TEST_DEAD_INPUT_TO_CONST(producer_stage, consumer_stage, slot, comp, bitsize, value) \
 TEST_F(nir_opt_varyings_test_dead_input, producer_stage##_##consumer_stage##_##slot##_##comp##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_def *input = load_input(b2, VARYING_SLOT_##slot, comp, nir_type_float##bitsize, 0, 0); \
-   store_output(b2, VARYING_SLOT_POS, 0, nir_type_float##bitsize, input, 0, false); \
-   \
-   ASSERT_EQ(opt_varyings(), nir_progress_consumer); \
-   ASSERT_TRUE(b2->shader->info.inputs_read == 0 && \
-               b2->shader->info.patch_inputs_read == 0 && \
-               b2->shader->info.inputs_read_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_def(b2, input)); \
-   ASSERT_TRUE(shader_contains_const_float(b2, value, bitsize)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, comp, nir_type_float##bitsize, bitsize); \
+   check_dead_input_to_const(value); \
 }
 
 #define TEST_DEAD_INPUT_KEPT(producer_stage, consumer_stage, slot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_input, producer_stage##_##consumer_stage##_##slot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   nir_def *input = load_input(b2, VARYING_SLOT_##slot, 0, nir_type_float##bitsize, 0, 0); \
-   store_output(b2, VARYING_SLOT_POS, 0, nir_type_float##bitsize, input, 0, false); \
-   \
-   ASSERT_EQ(opt_varyings(), 0); \
-   ASSERT_EQ(b2->shader->info.inputs_read, VARYING_BIT_##slot); \
-   ASSERT_TRUE(shader_contains_def(b2, input)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, 0, nir_type_float##bitsize, bitsize); \
+   check_dead_input_kept(VARYING_SLOT_##slot); \
 }
 
 #define TEST_OUTPUT_INPUT_ROUTING_KEPT(producer_stage, consumer_stage, pslot, cslot, bitsize) \
 TEST_F(nir_opt_varyings_test_dead_input, \
        routing_##producer_stage##_##pslot##_##consumer_stage##_##cslot##_##bitsize) \
 { \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   store_output(b1, VARYING_SLOT_##pslot, 0, nir_type_float##bitsize, \
-                load_input(b1, VARYING_SLOT_POS, 0, nir_type_float##bitsize, 0, 0), 0, false); \
-   \
-   nir_def *input = load_input(b2, VARYING_SLOT_##cslot, 0, nir_type_float##bitsize, 0, 0); \
-   store_output(b2, VARYING_SLOT_POS, 0, nir_type_float##bitsize, input, 0, false); \
-   \
-   /* Compaction moves COL1 to COL0. */ \
-   unsigned pindex = VARYING_SLOT_##pslot; \
-   unsigned cindex = VARYING_SLOT_##cslot; \
-   if (cindex == VARYING_SLOT_COL1) { \
-      pindex--; \
-      cindex--; \
-   } \
-   \
-   ASSERT_EQ(opt_varyings(), 0); \
-   ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex)); \
-   ASSERT_EQ(b2->shader->info.inputs_read, BITFIELD64_BIT(cindex)); \
-   ASSERT_TRUE(shader_contains_def(b2, input)); \
+   setup_routing(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+                 VARYING_SLOT_##pslot, VARYING_SLOT_##cslot, nir_type_float##bitsize); \
+   check_routing_kept(VARYING_SLOT_##pslot, VARYING_SLOT_##cslot); \
 }
 
 TEST_DEAD_INPUT_TO_UNDEF(VERTEX, TESS_CTRL, POS, 32)

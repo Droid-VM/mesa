@@ -67,16 +67,95 @@ angle-dEQP-GLES2.functional.shaders.algorithm.rgb_to_hsl_vertex,Fail
 # https://github.com/HansKristian-Work/vkd3d-proton/blob/master/docs/sampler_feedback.md
 vkd3d-test_sampler_feedback_implicit_lod_aniso,Fail
 
-vkd3d-test_buffer_descriptor_byte_offset,Fail
+vkd3d-test_query_heap_cpu_resolve_timestamp,Fail
+vkd3d-test_shader_instructions_dxil,Fail
+vkd3d-test_open_heap_from_address,Fail
 
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-# deqp-vk: ../src/freedreno/ir3/ir3_image.c:101: ir3_get_type_for_image_intrinsic: Assertion `bit_size != 64 || instr->intrinsic == nir_intrinsic_bindless_image_atomic || instr->intrinsic == nir_intrinsic_bindless_image_atomic_swap' failed.
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_10_r64ui_strict,Crash
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_16_r64ui,Crash
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_16_r64ui_strict,Crash
+#
+# OpenCL-CTS
+#
 
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-# deqp-vk: ../src/freedreno/vulkan/tu_knl_drm_msm.cc:1373: VkResult msm_queue_submit(tu_queue*, void*, vk_sync_wait*, uint32_t, vk_sync_signal*, uint32_t, tu_u_trace_submission_data*): Assertion `errno_ != EINVAL' failed.
-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_large2,Crash
-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_small2,Crash
-gmem-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_small2,Crash
+# Test bug, doesn't check for CL_FP_DENORM:
+SPIRV new,Fail
+SPIRV new@op_neg_half,Fail
+SPIRV new@op_spec_constant_half_simple,Fail
+
+# Test bug, doesn't properly compute wave divergence point with wave128:
+Subgroups,Fail
+Subgroups@subgroup_functions_clustered_reduce,Fail
+Subgroups@subgroup_functions_ballot,Fail
+
+# timestamp queries seem problematic on a750:
+Device timer,Fail
+Device timer@device_and_host_timers,Fail
+Profiling,Fail
+Profiling@copy_array,Fail
+Profiling@copy_image,Fail
+Profiling@copy_partial_array,Fail
+Profiling@execute,Fail
+Profiling@profiling_timebase,Fail
+Profiling@read_array_char,Fail
+Profiling@read_array_float,Fail
+Profiling@read_array_int,Fail
+Profiling@read_array_long,Fail
+Profiling@read_array_short,Fail
+Profiling@read_array_struct,Fail
+Profiling@read_array_uchar,Fail
+Profiling@read_array_uint,Fail
+Profiling@read_array_ulong,Fail
+Profiling@read_array_ushort,Fail
+Profiling@read_image_char,Fail
+Profiling@read_image_float,Fail
+Profiling@read_image_uchar,Fail
+Profiling@write_array_char,Fail
+Profiling@write_array_float,Fail
+Profiling@write_array_int,Fail
+Profiling@write_array_long,Fail
+Profiling@write_array_short,Fail
+Profiling@write_array_struct,Fail
+Profiling@write_array_uchar,Fail
+Profiling@write_array_uint,Fail
+Profiling@write_array_ulong,Fail
+Profiling@write_array_ushort,Fail
+Profiling@write_image_char,Fail
+Profiling@write_image_float,Fail
+Profiling@write_image_uchar,Fail
+
+#
+# OpenCL-CTS uprev
+#
+
+# https://github.com/KhronosGroup/OpenCL-CTS/issues/2765
+Basic,Fail
+Basic@bufferreadwriterect,Fail
+
+# VKCTS 1.4.6.2 -> 1.4.7.0 uprev
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_frag.case_1,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_frag.case_4,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_frag.case_4_io_ssbo_first,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_tesc_tese_frag.case_1,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_tesc_tese_frag.case_4,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_tesc_tese_frag.case_5,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_tesc_tese_frag.case_8,Fail
+dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.fast_lib.vert_tesc_tese_frag.case_8_io_ssbo_first,Fail
+dEQP-VK.renderpasses.dynamic_rendering.complete_secondary_cmd_buff.fragment_density_map.1_view.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.complete_secondary_cmd_buff.fragment_density_map.2_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.partial_secondary_cmd_buff.fragment_density_map.1_view.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.partial_secondary_cmd_buff.fragment_density_map.2_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.2_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.2_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.4_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.4_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.6_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.fragment_density_map.6_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.renderpass2.fragment_density_map.1_view.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.renderpass2.fragment_density_map.2_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.renderpass2.fragment_density_map.6_views.render.density_formula.1_sample.static_subsampled_4_4,Fail
+dEQP-VK.renderpasses.renderpass2.fragment_density_map.6_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+gmem-dEQP-VK.renderpasses.renderpass2.fragment_density_map.6_views.render_copy.density_formula.1_sample.static_subsampled_4_4,Fail
+
+# CTS bug - https://gerrit.khronos.org/c/vk-gl-cts/+/21455
+dEQP-VK.fragment_operations.early_fragment.sample_count_early_fragment_tests_depth_alpha_to_coverage_samples_2_maintenance5,Fail
+dEQP-VK.fragment_operations.early_fragment.sample_count_early_fragment_tests_depth_alpha_to_coverage_samples_4_maintenance5,Fail
+dEQP-VK.fragment_operations.early_fragment.sample_count_early_fragment_tests_depth_alpha_to_coverage_samples_8_maintenance5,Fail
+dEQP-VK.fragment_operations.early_fragment.sample_count_early_fragment_tests_depth_samples_4_maintenance5,Fail

@@ -70,14 +70,44 @@ vk_address_binding_report(struct vk_instance *instance,
                           uint64_t size,
                           VkDeviceAddressBindingTypeEXT type);
 
-void
-vk_emit_device_memory_report(struct vk_device* device,
-                             VkDeviceMemoryReportEventTypeEXT type,
+static inline void
+vk_device_memory_report_emit(struct vk_device* device,
+                             VkResult result,
+                             bool is_alloc,
+                             bool is_import,
                              uint64_t mem_obj_id,
                              VkDeviceSize size,
                              VkObjectType obj_type,
                              uint64_t obj_handle,
-                             uint32_t heap_index);
+                             uint32_t heap_index)
+{
+   if (likely(!device->memory_reports))
+      return;
+
+   VkDeviceMemoryReportEventTypeEXT type;
+   if (result != VK_SUCCESS) {
+      type = VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT;
+   } else if (is_alloc) {
+      type = is_import ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT
+                       : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT;
+   } else {
+      type = is_import ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT
+                       : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT;
+   }
+
+   const VkDeviceMemoryReportCallbackDataEXT report = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_REPORT_CALLBACK_DATA_EXT,
+      .type = type,
+      .memoryObjectId = mem_obj_id,
+      .size = size,
+      .objectType = obj_type,
+      .objectHandle = obj_handle,
+      .heapIndex = heap_index,
+   };
+
+   for (uint32_t i = 0; i < device->memory_report_count; i++)
+      device->memory_reports[i].callback(&report, device->memory_reports[i].data);
+}
 
 void
 vk_queue_begin_debug_utils_label(struct vk_queue *queue,

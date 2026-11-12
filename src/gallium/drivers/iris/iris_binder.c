@@ -35,6 +35,12 @@
 #include "iris_context.h"
 
 static bool
+binder_is_used(struct iris_binder *binder)
+{
+   return binder->size > 0;
+}
+
+static bool
 binder_has_space(struct iris_binder *binder, unsigned size)
 {
    return binder->insert_point + size <= binder->size;
@@ -93,6 +99,9 @@ iris_binder_reserve(struct iris_context *ice,
 {
    struct iris_binder *binder = &ice->state.binder;
 
+   if (!binder_is_used(binder))
+      return 0;
+
    if (!binder_has_space(binder, size))
       binder_realloc(ice);
 
@@ -108,10 +117,13 @@ iris_binder_reserve_gen(struct iris_context *ice)
 {
    struct iris_binder *binder = &ice->state.binder;
 
+   if (!binder_is_used(binder))
+      return;
+
    binder->bt_offset[MESA_SHADER_FRAGMENT] =
       iris_binder_reserve(ice, sizeof(uint32_t));
 
-   iris_record_state_size(ice->state.sizes,
+   iris_record_state_size(binder->bo->bufmgr, ice->state.sizes,
                           binder->bo->address +
                           binder->bt_offset[MESA_SHADER_FRAGMENT],
                           sizeof(uint32_t));
@@ -131,6 +143,9 @@ iris_binder_reserve_3d(struct iris_context *ice)
    unsigned sizes[MESA_SHADER_STAGES] = {};
    unsigned total_size;
 
+   if (!binder_is_used(binder))
+      return;
+
    /* If nothing is dirty, skip all this. */
    if (!(ice->state.dirty & IRIS_DIRTY_RENDER_BUFFER) &&
        !(ice->state.stage_dirty & IRIS_ALL_STAGE_DIRTY_BINDINGS_FOR_RENDER))
@@ -142,7 +157,8 @@ iris_binder_reserve_3d(struct iris_context *ice)
          continue;
 
       /* Round up the size so our next table has an aligned starting offset */
-      sizes[stage] = align(shaders[stage]->bt.size_bytes, binder->alignment);
+      uint32_t size_bytes = shaders[stage]->bt.total_surf_count * sizeof(uint32_t);
+      sizes[stage] = align(size_bytes, binder->alignment);
    }
 
    /* Make space for the new binding tables...this may take two tries. */
@@ -174,7 +190,7 @@ iris_binder_reserve_3d(struct iris_context *ice)
    for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
       if (ice->state.stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
          binder->bt_offset[stage] = sizes[stage] > 0 ? offset : 0;
-         iris_record_state_size(ice->state.sizes,
+         iris_record_state_size(binder->bo->bufmgr, ice->state.sizes,
                                 binder->bo->address + offset, sizes[stage]);
          offset += sizes[stage];
       }
@@ -188,15 +204,30 @@ iris_binder_reserve_compute(struct iris_context *ice)
       return;
 
    struct iris_binder *binder = &ice->state.binder;
+
+   if (!binder_is_used(binder))
+      return;
+
    struct iris_compiled_shader *shader =
       ice->shaders.prog[MESA_SHADER_COMPUTE];
 
-   unsigned size = shader->bt.size_bytes;
+   unsigned size = shader->bt.total_surf_count * sizeof(uint32_t);
 
    if (size == 0)
       return;
 
    binder->bt_offset[MESA_SHADER_COMPUTE] = iris_binder_reserve(ice, size);
+}
+
+void
+iris_binder_pin(struct iris_batch *batch)
+{
+   struct iris_binder *binder = &batch->ice->state.binder;
+
+   if (!binder_is_used(binder))
+      return;
+
+   iris_use_pinned_bo(batch, binder->bo, false, IRIS_DOMAIN_NONE);
 }
 
 void
@@ -206,6 +237,9 @@ iris_init_binder(struct iris_context *ice)
    const struct intel_device_info *devinfo = screen->devinfo;
 
    memset(&ice->state.binder, 0, sizeof(struct iris_binder));
+
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr))
+      return;
 
    /* We use different binding table pointer formats on various generations.
     *

@@ -277,7 +277,7 @@ main(int argc, const char **argv)
 
    unsigned target_arch = atoi(target_arch_str);
 
-   if (target_arch < 4 || target_arch > 14) {
+   if (target_arch < 6 || target_arch > 14) {
       fprintf(stderr, "Unsupported target arch %d\n", target_arch);
       return 1;
    }
@@ -369,11 +369,9 @@ main(int argc, const char **argv)
          _mesa_blake3_update(&blake3_ctx, &v, sizeof(v));
          _mesa_blake3_final(&blake3_ctx, s->info.source_blake3);
 
-         uint64_t target_gpu_id = (target_arch & 0xf) << 28;
-
          struct pan_compile_inputs inputs = {
-            .gpu_id = target_gpu_id,
-            .gpu_variant = 0,
+            .arch = target_arch,
+            .model = NULL, /* we only know arch when precompiling */
             .fau.reserved = fau_reserved,
          };
 
@@ -436,7 +434,7 @@ main(int argc, const char **argv)
          NIR_PASS(_, s, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
                   glsl_get_cl_type_size_align);
 
-         pan_preprocess_nir(s, inputs.gpu_id);
+         pan_preprocess_nir(s, target_arch);
 
          NIR_PASS(_, s, nir_opt_deref);
          NIR_PASS(_, s, nir_lower_vars_to_ssa);

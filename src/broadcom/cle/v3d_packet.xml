@@ -421,6 +421,9 @@
     <value name="Texture Data Format RGBA32UI" value="113"/>
     <value name="Texture Data Format RGB10_A2UI" value="114"/>
     <value name="Texture Data Format A1_RGB5" value="115"/>
+    <value name="Texture Data Format RGBA10X6" value="116" min_ver="71"/>
+    <value name="Texture Data Format RG10X6" value="117" min_ver="71"/>
+    <value name="Texture Data Format R10X6" value="118" min_ver="71"/>
 
   </enum>
   

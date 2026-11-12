@@ -44,6 +44,8 @@ typedef struct gen_encode_params {
    /* Use compacted encoded form for all instructions that support it. */
    bool compact_all;
 
+   bool use_efficient_64bit;
+
    bool skip_validation;
 
    const gen_inst *insts;
@@ -89,6 +91,8 @@ typedef struct gen_decode_params {
 
    gen_inst *insts;
    int       num_insts;
+
+   bool use_efficient_64bit;
 
    gen_error *errors;
    int        num_errors;
@@ -257,11 +261,20 @@ typedef struct gen_parse_params {
    const char *text;
    int         text_size;
 
-   /* Must be non-NULL, used for allocating `insts` and `errors`. */
+   /* Collect per-instruction Compacted annotations in `compacted`. */
+   bool collect_compacted;
+
+   /* Must be non-NULL, used for allocating the arrays below. */
    void *mem_ctx;
 
    gen_inst *insts;
    int       num_insts;
+
+   /* When collect_compacted is true and parsing succeeds, will contain an array
+    * with `num_insts` elements indicating whether each instruction specified
+    * the Compacted option.  Otherwise, remains NULL.
+    */
+   bool *compacted;
 
    /* For parse errors, `index` is the 1-based input line number. */
    gen_error *errors;
@@ -287,6 +300,10 @@ uint32_t gen_lsc_ex_desc_encode(const struct intel_device_info *devinfo,
                                 enum lsc_opcode op,
                                 const gen_lsc_ex_desc *ex_desc,
                                 uint32_t *ex_desc_imm_extra_out);
+
+uint32_t gen_lsc_ex_desc_imm_encode(const struct intel_device_info *devinfo,
+                                    enum lsc_opcode op,
+                                    const gen_lsc_ex_desc *ex_desc);
 
 gen_urb_desc gen_urb_desc_decode(const struct intel_device_info *devinfo,
                                  uint32_t desc);

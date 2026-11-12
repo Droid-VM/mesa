@@ -102,8 +102,8 @@ vk_device_memory_report_init(struct vk_device *device,
    struct vk_device_memory_report *mem_reports = NULL;
    uint32_t count = 0;
 
-   vk_foreach_struct_const(pnext, pCreateInfo->pNext) {
-      if (pnext->sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT)
+   vk_foreach_struct_const(sType, pnext, pCreateInfo->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT)
          count++;
    }
 
@@ -116,9 +116,9 @@ vk_device_memory_report_init(struct vk_device *device,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    count = 0;
-   vk_foreach_struct_const(pnext, pCreateInfo->pNext) {
-      if (pnext->sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT) {
-         const struct VkDeviceDeviceMemoryReportCreateInfoEXT *report = (void *)pnext;
+   vk_foreach_struct_const(sType, pnext, pCreateInfo->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT) {
+         const struct VkDeviceDeviceMemoryReportCreateInfoEXT *report = pnext;
          mem_reports[count].callback = report->pfnUserCallback;
          mem_reports[count].data = report->pUserData;
          count++;
@@ -249,17 +249,15 @@ vk_device_init(struct vk_device *device,
       UNREACHABLE("Invalid timeline mode");
    }
 
-#ifdef VK_USE_PLATFORM_ANDROID_KHR
    mtx_init(&device->swapchain_private_mtx, mtx_plain);
    device->swapchain_private = NULL;
-#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
    simple_mtx_init(&device->trace_mtx, mtx_plain);
 
-   vk_foreach_struct_const (ext, pCreateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const (sType, ext, pCreateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_DEVICE_PIPELINE_BINARY_INTERNAL_CACHE_CONTROL_KHR: {
-         const VkDevicePipelineBinaryInternalCacheControlKHR *cache_control = (const void *)ext;
+         const VkDevicePipelineBinaryInternalCacheControlKHR *cache_control = ext;
          if (cache_control->disableInternalCache)
             device->disable_internal_cache = true;
          break;
@@ -270,7 +268,8 @@ vk_device_init(struct vk_device *device,
    }
 
    if (device->enabled_extensions.KHR_calibrated_timestamps ||
-       device->enabled_extensions.EXT_calibrated_timestamps) {
+       device->enabled_extensions.EXT_calibrated_timestamps ||
+       device->enabled_extensions.AMD_anti_lag) {
       /* sorted by preference */
       const VkTimeDomainKHR calibrate_domains[] = {
          VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
@@ -306,6 +305,8 @@ vk_device_init(struct vk_device *device,
 
    device->disable_lto = false;
 
+   device->debug_output = stdout;
+
    return VK_SUCCESS;
 }
 
@@ -327,15 +328,16 @@ vk_device_finish(struct vk_device *device)
    vk_device_memory_report_finish(device);
    vk_memory_trace_finish(device);
 
-#ifdef VK_USE_PLATFORM_ANDROID_KHR
    if (device->swapchain_private) {
       hash_table_foreach(device->swapchain_private, entry)
          util_sparse_array_finish(entry->data);
       ralloc_free(device->swapchain_private);
    }
-#endif /* VK_USE_PLATFORM_ANDROID_KHR */
+   mtx_destroy(&device->swapchain_private_mtx);
 
    simple_mtx_destroy(&device->trace_mtx);
+
+   vk_free(&device->alloc, device->app_workarounds_dispatch_table);
 
    vk_object_base_finish(&device->base);
 }

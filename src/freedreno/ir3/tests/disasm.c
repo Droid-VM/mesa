@@ -118,11 +118,32 @@ static const struct test {
    INSTR_6XX(40a500f8_2c000004, "cmps.f.ne p0.x, hr1.x, h(0.0)"),
    INSTR_6XX(438000f8_20010009, "and.b p0.x, hr2.y, h(1)"),
    INSTR_6XX(438000f9_00020001, "and.b p0.y, hr0.y, hr0.z"),
+   INSTR_5XX(43900803_40050003, "(nop1) and.b r0.w, r0.w, (not)r1.y"),
    INSTR_6XX(40080902_50200006, "(rpt1)add.f hr0.z, (r)hr1.z, (neg)(r)hc8.x"),
    INSTR_6XX(42380c01_00040001, "(nop3) add.s (sat)r0.y, r0.y, r1.x"),
    INSTR_6XX(42480000_48801086, "(nop2) sub.u hr0.x, hc33.z, (neg)hr<a0.x + 128>"),
    INSTR_6XX(46b00001_00001020, "clz.b r0.y, c8.x"),
    INSTR_6XX(46700009_00000009, "bfrev.b r2.y, r2.y"),
+   INSTR_5XX(43b00004_60ff0000, "or.b r1.x, r0.x, (not)255"),
+   INSTR_5XX(46f0000d_4006000d, "shr.b r3.y, r3.y, (neg)r1.z"),
+   INSTR_5XX(47100015_40120015, "ashr.b r5.y, r5.y, (neg)r4.z"),
+
+   INSTR_6XX(46700009_00004009, "bfrev.b r2.y, (not)r2.y"), // blob has (neg)
+   INSTR_6XX(46b00009_00004009, "clz.b r2.y, (not)r2.y"), // blob has (neg)
+   INSTR_6XX(43d00009_00004009, "not.b r2.y, (neg)r2.y"),
+   INSTR_6XX(47b00009_00004009, "cbits.b r2.y, (not)r2.y"),
+   INSTR_6XX(43900009_00064009, "and.b r2.y, (not)r2.y, r1.z"),
+   INSTR_6XX(43b00009_00064009, "or.b r2.y, (not)r2.y, r1.z"),
+   INSTR_6XX(43f00009_00064009, "xor.b r2.y, (not)r2.y, r1.z"),
+   INSTR_6XX(43f00009_40060009, "xor.b r2.y, r2.y, (not)r1.z"),
+   INSTR_6XX(46d00009_00064009, "shl.b r2.y, (not)r2.y, r1.z"), // blob has (neg)
+   INSTR_6XX(46d00009_40060009, "shl.b r2.y, r2.y, (neg)r1.z"),
+   INSTR_6XX(46f00009_00064009, "shr.b r2.y, (not)r2.y, r1.z"), // blob has (neg)
+   INSTR_6XX(47100009_00064009, "ashr.b r2.y, (neg)r2.y, r1.z"),
+   INSTR_6XX(47500009_00064009, "mgen.b r2.y, (neg)r2.y, r1.z"),
+   INSTR_6XX(47500009_40060009, "mgen.b r2.y, r2.y, (neg)r1.z"),
+   INSTR_6XX(47700009_00064009, "getbit.b r2.y, (not)r2.y, r1.z"),
+   INSTR_6XX(47700009_40060009, "getbit.b r2.y, r2.y, (neg)r1.z"),
 
    INSTR_7XX(42380800_04010400, "(nop3) add.s r0.x, (last)r0.x, (last)r0.y"),
    INSTR_7XX(42930000_04000406, "cmps.u.ge r0.x, (last)r1.z, (last)r0.x"),
@@ -147,6 +168,14 @@ static const struct test {
    INSTR_6XX(64818802_0002e003, "(nop3) shlm hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
    INSTR_6XX(65018802_0002e003, "(nop3) shrg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
    INSTR_6XX(66018802_0002e003, "(nop3) andg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+
+   /* Never seen emitted by the a530 blob; the comments are its disassembler's
+    * decodes.  Does not decode on a418 blob.
+    */
+   INSTR_5XX(65900820_0c0aac05, "(nop3) shlg hr8.x, hc<a0.x + 5>, hr8.x, hc<a0.x + 10>"), /* (nop3) shlg.b16 hr8.x, (r)hc<a0.x + 5>, (r)hr8.x, hc<a0.x + 10>; */
+   INSTR_5XX(646084c3_1fff300a, "shrm r48.w, 10, r48.y, 4095"), /* shrm.b32 sr48.w, 10, sr48.y, 4095; */
+   INSTR_5XX(66018802_0002e003, "(nop3) andg hr0.z, (neg)hr0.w, hr0.w, hr0.z"), /* (nop3) andg.b16 hr0.z, (neg)(r)hr0.w, (r)hr0.w, hr0.z; */
+
    INSTR_6XX(67018802_1002e003, "(nop3) wmm hr0.z, (neg)hr0.w, hr0.w, 2"), /* (nop3) wmm.f16f16 hr0.z, (abs)(r)hr0.w, (r)hr0.w, 2 */
    INSTR_6XX(67018c02_1002e003, "(nop3) wmm.accu hr0.z, (neg)hr0.w, hr0.w, 2"),
    INSTR_6XX(6701c802_9002a003, "(nop3) wmm r0.z, r0.w, r0.w, 2"), /* (nop3) wmm.f32f32 r0.z, (r)r0.w, (r)r0.w, 2 */
@@ -335,7 +364,10 @@ static const struct test {
 
    /* dEQP-VK.compute.basic.shared_var_single_group */
    INSTR_6XX(c1060500_01800008, "stl.u32 l[r0.z], r1.x, 1"),
+   /* Same, with a 16b type: the data register is a half register. */
+   INSTR_6XX(c1040500_01800008, "stl.u16 l[r0.z], hr1.x, 1"),
    INSTR_6XX(c0460001_01804001, "ldl.u32 r0.y, l[r0.y], 1"),
+   INSTR_6XX(c0440001_01804001, "ldl.u16 hr0.y, l[r0.y], 1"),
 
    INSTR_6XX(c0860018_03820001, "ldp.u32 r6.x, p[r2.x], 3"),
    INSTR_6XX(c0420002_01808019, "ldl.f32 r0.z, l[r0.z+12], 1"),
@@ -456,6 +488,7 @@ static const struct test {
    INSTR_6XX(c1425b50_01803e02, "stp.f32 p[r11.y-176], r0.y, 1"),
    INSTR_6XX(c1425b98_02803e14, "stp.f32 p[r11.y-104], r2.z, 2"),
    INSTR_6XX(c1465ba0_01803e2a, "stp.u32 p[r11.y-96], r5.y, 1"),
+   INSTR_6XX(c1445ba0_01803e2a, "stp.u16 p[r11.y-96], hr5.y, 1"),
    INSTR_6XX(c0860008_01860001, "ldp.u32 r2.x, p[r6.x], 1"),
    /* Custom stp based on above to catch a disasm bug. */
    INSTR_6XX(c1465b00_0180022a, "stp.u32 p[r11.y+256], r5.y, 1"),
@@ -534,6 +567,8 @@ static const struct test {
    /* Custom test since we've never seen the blob emit these. */
    INSTR_6XX(c0260004_00490000, "getspid.u32 r1.x"),
    INSTR_6XX(c0260005_00494000, "getwid.u32 r1.y"),
+   INSTR_5XX(c0260004_00490000, "getspid.u32 r1.x"),
+   INSTR_5XX(c0260005_00494000, "getwid.u32 r1.y"),
 
    /* cat7 */
 

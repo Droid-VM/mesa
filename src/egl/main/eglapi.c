@@ -87,7 +87,6 @@
 #include <string.h>
 #include "c11/threads.h"
 #include "mesa/glapi/glapi/glapi.h"
-#include "util/detect_os.h"
 #include "util/macros.h"
 #include "util/perf/cpu_trace.h"
 #include "util/u_debug.h"
@@ -113,13 +112,24 @@
  *
  * These macros will unlock the display and record the error code.
  */
+static inline const char *
+_eglFuncName(const char *funcName)
+{
+#ifdef HAVE_APITRACE
+   static const char prefix[] = "_mesa_real_";
+   if (!strncmp(funcName, prefix, sizeof(prefix) - 1))
+      funcName += sizeof(prefix) - 1;
+#endif
+   return funcName;
+}
+
 #define RETURN_EGL_ERROR(disp, err, ret)                                       \
    do {                                                                        \
       if (disp)                                                                \
          _eglUnlockDisplay(disp);                                              \
       /* EGL error codes are non-zero */                                       \
       if (err)                                                                 \
-         _eglError(err, __func__);                                             \
+         _eglError(err, _eglFuncName(__func__));                               \
       return ret;                                                              \
    } while (0)
 
@@ -135,13 +145,13 @@
 
 #define _EGL_CHECK_DISPLAY(disp, ret)                                          \
    do {                                                                        \
-      if (!_eglCheckDisplay(disp, __func__))                                   \
+      if (!_eglCheckDisplay(disp, _eglFuncName(__func__)))                     \
          RETURN_EGL_ERROR(disp, 0, ret);                                       \
    } while (0)
 
 #define _EGL_CHECK_OBJECT(disp, type, obj, ret)                                \
    do {                                                                        \
-      if (!_eglCheck##type(disp, obj, __func__))                               \
+      if (!_eglCheck##type(disp, obj, _eglFuncName(__func__)))                 \
          RETURN_EGL_ERROR(disp, 0, ret);                                       \
    } while (0)
 
@@ -334,7 +344,8 @@ _eglSetFuncName(const char *funcName, _EGLDisplay *disp, EGLenum objectType,
 #define _EGL_FUNC_START(disp, objectType, object)                              \
    do {                                                                        \
       MESA_TRACE_FUNC();                                                       \
-      _eglSetFuncName(__func__, disp, objectType, (_EGLResource *)object);     \
+      _eglSetFuncName(_eglFuncName(__func__), disp, objectType,                \
+                      (_EGLResource *)object);                                 \
    } while (0)
 
 /**
@@ -406,13 +417,13 @@ eglGetDisplay(EGLNativeDisplayType nativeDisplay)
    _EGLDisplay *disp;
    void *native_display_ptr;
 
-#if !DETECT_OS_ANDROID
+#ifndef HAVE_ANDROID_PLATFORM
    util_cpu_trace_init();
 #endif
    _EGL_FUNC_START(NULL, EGL_OBJECT_THREAD_KHR, NULL);
 
    STATIC_ASSERT(sizeof(void *) >= sizeof(nativeDisplay));
-   native_display_ptr = (void *)nativeDisplay;
+   native_display_ptr = (void *)(uintptr_t)nativeDisplay;
 
    plat = _eglGetNativePlatform(native_display_ptr);
    disp = _eglFindDisplay(plat, native_display_ptr, NULL);
@@ -473,7 +484,7 @@ eglGetPlatformDisplayEXT(EGLenum platform, void *native_display,
    EGLAttrib *attrib_list;
    EGLDisplay disp;
 
-#if !DETECT_OS_ANDROID
+#ifndef HAVE_ANDROID_PLATFORM
    util_cpu_trace_init();
 #endif
    _EGL_FUNC_START(NULL, EGL_OBJECT_THREAD_KHR, NULL);
@@ -490,7 +501,7 @@ PUBLIC EGLDisplay EGLAPIENTRY
 eglGetPlatformDisplay(EGLenum platform, void *native_display,
                       const EGLAttrib *attrib_list)
 {
-#if !DETECT_OS_ANDROID
+#ifndef HAVE_ANDROID_PLATFORM
    util_cpu_trace_init();
 #endif
    _EGL_FUNC_START(NULL, EGL_OBJECT_THREAD_KHR, NULL);
@@ -652,7 +663,7 @@ _eglComputeVersion(_EGLDisplay *disp)
       disp->Version = 15;
 
       /* For Android P and below limit the EGL version to 1.4 */
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL <= 28
+#if defined(HAVE_ANDROID_PLATFORM) && ANDROID_API_LEVEL <= 28
    disp->Version = 14;
 #endif
 }

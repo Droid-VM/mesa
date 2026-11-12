@@ -1042,7 +1042,6 @@ merge_syncobjs(struct v3dv_device *device,
    }
 
    /* Import the final accumulated fence fd back into the destination syncobj */
-   assert(accum_fd != -1);
    if (drmSyncobjImportSyncFile(drm_fd, dst_syncobj, accum_fd) != 0)
       goto ioctl_error;
 

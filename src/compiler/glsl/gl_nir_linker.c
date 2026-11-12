@@ -871,7 +871,8 @@ add_vars_with_modes(const struct gl_constants *consts,
          sh_var->name.string = NULL;
          resource_name_updated(&sh_var->name);
          sh_var->type = var->type;
-         sh_var->location = var->data.location - loc_bias;
+         sh_var->location = var->data.explicit_location ?
+                            var->data.location - loc_bias : -1;
          sh_var->explicit_location = var->data.explicit_location;
          sh_var->index = var->data.index;
 
@@ -1320,8 +1321,11 @@ preprocess_shader(const struct pipe_screen *screen,
    nir_shader_gather_info(prog->nir, nir_shader_get_entrypoint(prog->nir));
 
    if (prog->info.stage == MESA_SHADER_FRAGMENT && consts->HasFBFetch) {
+      unsigned modes = prog->nir->info.fs.advanced_blend_modes &
+                       ~consts->NativeAdvancedBlendModes;
+
       NIR_PASS(_, prog->nir, gl_nir_lower_blend_equation_advanced,
-                 exts->KHR_blend_equation_advanced_coherent);
+                 exts->KHR_blend_equation_advanced_coherent, modes);
    }
 
    /* Set the next shader stage hint for VS and TES. */

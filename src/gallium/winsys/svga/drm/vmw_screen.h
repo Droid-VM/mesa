@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2024 Broadcom. All Rights Reserved.
+ * Copyright (c) 2009-2026 Broadcom. All Rights Reserved.
  * The term “Broadcom” refers to Broadcom Inc.
  * and/or its subsidiaries.
  * SPDX-License-Identifier: MIT
@@ -79,7 +79,6 @@ struct vmw_winsys_screen
 
    struct {
       struct pb_manager *dma_base;
-      struct pb_manager *dma_mm;
       struct pb_manager *query_mm;
       struct pb_manager *query_fenced;
       struct pb_manager *dma_fenced;

@@ -29,6 +29,7 @@
 #include "util/u_cpu_detect.h"
 #include "lp_bld_debug.h"
 #include "lp_bld_init.h"
+#include "lp_bld_intr.h"
 #include "lp_bld_type.h"
 
 #include <llvm-c/Core.h>
@@ -104,6 +105,22 @@ lp_init_clock_hook(struct gallivm_state *gallivm)
 
    LLVMTypeRef get_time_type = LLVMFunctionType(LLVMInt64TypeInContext(gallivm->context), NULL, 0, 1);
    gallivm->get_time_hook = LLVMAddFunction(gallivm->module, "get_time_hook", get_time_type);
+}
+
+/* RuntimeDyld can't resolve the R_PPC_REL32 relocations of an .eh_frame
+ * section on 32-bit PowerPC. Marking the functions nounwind keeps LLVM from
+ * emitting one.
+ */
+void
+lp_disable_eh_frame(struct gallivm_state *gallivm)
+{
+#if DETECT_ARCH_PPC && !DETECT_ARCH_PPC_64
+   for (LLVMValueRef func = LLVMGetFirstFunction(gallivm->module); func;
+        func = LLVMGetNextFunction(func)) {
+      if (!LLVMIsDeclaration(func))
+         lp_add_function_attr(func, -1, LP_FUNC_ATTR_NOUNWIND);
+   }
+#endif
 }
 
 /**

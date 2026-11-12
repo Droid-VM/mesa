@@ -92,6 +92,10 @@ spirv_builder_emit_cap(struct spirv_builder *b, SpvCapability cap);
 void
 spirv_builder_emit_extension(struct spirv_builder *b, const char *ext);
 
+/* the capabilities for storage buffer elements of this width */
+void
+spirv_builder_emit_storage_int_caps(struct spirv_builder *b, unsigned width);
+
 void
 spirv_builder_emit_source(struct spirv_builder *b, SpvSourceLanguage lang,
                           uint32_t version);

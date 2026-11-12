@@ -10,10 +10,10 @@
 #include "radeon_compiler.h"
 #include "radeon_compiler_util.h"
 #include "radeon_dataflow.h"
-#include "radeon_list.h"
 #include "radeon_variable.h"
 
 #include "util/u_debug.h"
+#include "util/u_dynarray.h"
 
 #define VERBOSE 0
 
@@ -60,7 +60,7 @@ struct schedule_instruction {
    unsigned TexReadCount;
 
    /** For TEX instructions a list of readers */
-   struct rc_list *TexReaders;
+   struct util_dynarray TexReaders;
 };
 
 /**
@@ -129,7 +129,7 @@ struct schedule_state {
    struct schedule_instruction *ReadyAlpha;
    struct schedule_instruction *ReadyTEX;
    /*@}*/
-   struct rc_list *PendingTEX;
+   struct util_dynarray PendingTEX;
 
    void (*CalcScore)(struct schedule_instruction *);
    int PresubNopScore;
@@ -354,21 +354,33 @@ calc_score_readers(struct schedule_instruction *sinst)
    }
 }
 
+static unsigned
+presub_read_mask(struct rc_pair_sub_instruction *sub)
+{
+   unsigned mask = 0;
+   const struct rc_opcode_info *info = rc_get_opcode_info(sub->Opcode);
+
+   for (unsigned i = 0; i < info->NumSrcRegs; i++) {
+      if (sub->Arg[i].Source == RC_PAIR_PRESUB_SRC)
+         mask |= rc_swizzle_to_writemask(sub->Arg[i].Swizzle);
+   }
+   return mask;
+}
+
 static bool
 sub_instruction_reads_presub_from_prev(struct rc_pair_sub_instruction *sub,
-                                       int prev_rgb_index, int prev_alpha_index)
+                                       struct rc_pair_sub_instruction *prev, unsigned read_mask)
 {
    unsigned int num_src;
 
-   if (!sub->Src[RC_PAIR_PRESUB_SRC].Used)
+   if (!(read_mask & prev->WriteMask))
       return false;
 
    num_src = rc_presubtract_src_reg_count(sub->Src[RC_PAIR_PRESUB_SRC].Index);
    for (unsigned int i = 0; i < num_src; i++) {
       unsigned int index = sub->Src[i].Index;
 
-      if (sub->Src[i].File == RC_FILE_TEMPORARY &&
-          (index == prev_rgb_index || index == prev_alpha_index))
+      if (sub->Src[i].File == RC_FILE_TEMPORARY && index == prev->DestIndex)
          return true;
    }
 
@@ -378,30 +390,23 @@ sub_instruction_reads_presub_from_prev(struct rc_pair_sub_instruction *sub,
 static bool
 instruction_reads_presub_from_prev(struct rc_instruction *inst)
 {
-   int prev_rgb_index, prev_alpha_index;
    struct rc_instruction *prev = inst->Prev;
 
    /* We don't need a nop if the previous instruction is a TEX. */
    if (inst->Type != RC_INSTRUCTION_PAIR || prev->Type != RC_INSTRUCTION_PAIR)
       return false;
 
-   if (prev->U.P.RGB.WriteMask)
-      prev_rgb_index = prev->U.P.RGB.DestIndex;
-   else
-      prev_rgb_index = -1;
-   if (prev->U.P.Alpha.WriteMask)
-      prev_alpha_index = prev->U.P.Alpha.DestIndex;
-   else
-      prev_alpha_index = 1;
+   if (!inst->U.P.RGB.Src[RC_PAIR_PRESUB_SRC].Used &&
+       !inst->U.P.Alpha.Src[RC_PAIR_PRESUB_SRC].Used)
+      return false;
 
-   /* Check the previous rgb instruction */
-   if (sub_instruction_reads_presub_from_prev(&inst->U.P.RGB, prev_rgb_index,
-                                             prev_alpha_index))
-      return true;
+   /* Either ALU can read RGB or alpha presubtract components. */
+   unsigned read_mask = presub_read_mask(&inst->U.P.RGB) | presub_read_mask(&inst->U.P.Alpha);
 
-   /* Check the previous alpha instruction. */
-   return sub_instruction_reads_presub_from_prev(&inst->U.P.Alpha, prev_rgb_index,
-                                                prev_alpha_index);
+   return sub_instruction_reads_presub_from_prev(&inst->U.P.RGB, &prev->U.P.RGB,
+                                                read_mask & RC_MASK_XYZ) ||
+          sub_instruction_reads_presub_from_prev(&inst->U.P.Alpha, &prev->U.P.Alpha,
+                                                read_mask & RC_MASK_W);
 }
 
 /**
@@ -452,16 +457,14 @@ commit_update_writes(struct schedule_state *s, struct schedule_instruction *sins
 static void
 notify_sem_wait(struct schedule_state *s)
 {
-   struct rc_list *pend_ptr;
-   for (pend_ptr = s->PendingTEX; pend_ptr; pend_ptr = pend_ptr->Next) {
-      struct rc_list *read_ptr;
-      struct schedule_instruction *pending = pend_ptr->Item;
-      for (read_ptr = pending->TexReaders; read_ptr; read_ptr = read_ptr->Next) {
-         struct schedule_instruction *reader = read_ptr->Item;
+   util_dynarray_foreach(&s->PendingTEX, struct schedule_instruction *, pending_ptr) {
+      struct schedule_instruction *pending = *pending_ptr;
+      util_dynarray_foreach(&pending->TexReaders, struct schedule_instruction *, reader_ptr) {
+         struct schedule_instruction *reader = *reader_ptr;
          reader->TexReadCount--;
       }
    }
-   s->PendingTEX = NULL;
+   util_dynarray_clear(&s->PendingTEX);
 }
 
 static void
@@ -529,7 +532,7 @@ emit_all_tex(struct schedule_state *s, struct rc_instruction *before)
          readytex->Instruction->U.I.TexSemAcquire = 1;
          readytex->Instruction->U.I.TexSemWait = 1;
       }
-      rc_list_add(&s->PendingTEX, rc_list(&s->C->Pool, readytex));
+      util_dynarray_append(&s->PendingTEX, readytex);
       readytex = readytex->NextReady;
    }
 }
@@ -570,10 +573,20 @@ merge_presub_sources(struct rc_pair_instruction *dst_full, struct rc_pair_sub_in
 
    info = rc_get_opcode_info(dst_full->RGB.Opcode);
 
-   if (dst_sub->Src[RC_PAIR_PRESUB_SRC].Used)
-      return 0;
-
    srcp_regs = rc_presubtract_src_reg_count(src.Src[RC_PAIR_PRESUB_SRC].Index);
+   /* Both instructions can share an identical presubtract operation. */
+   if (dst_sub->Src[RC_PAIR_PRESUB_SRC].Used) {
+      if (dst_sub->Src[RC_PAIR_PRESUB_SRC].Index != src.Src[RC_PAIR_PRESUB_SRC].Index)
+         return 0;
+
+      for (srcp_src = 0; srcp_src < srcp_regs; srcp_src++) {
+         if (dst_sub->Src[srcp_src].File != src.Src[srcp_src].File ||
+             dst_sub->Src[srcp_src].Index != src.Src[srcp_src].Index)
+            return 0;
+      }
+      return 1;
+   }
+
    for (srcp_src = 0; srcp_src < srcp_regs; srcp_src++) {
       unsigned int arg;
       int free_source;
@@ -777,6 +790,9 @@ rgb_to_alpha_remap(struct schedule_state *s, struct rc_instruction *inst,
    }
 
    arg->Source = new_src_index;
+
+   /* The old RGB source may now be unused. Free its slot for later pairing. */
+   rc_pair_update_source_usage(&inst->U.P);
 }
 
 static int
@@ -798,6 +814,7 @@ can_convert_opcode_to_alpha(unsigned int opcode)
    case RC_OPCODE_DDX:
    case RC_OPCODE_DDY:
    case RC_OPCODE_DP2:
+   case RC_OPCODE_DP2A:
    case RC_OPCODE_DP3:
    case RC_OPCODE_DP4:
       return 0;
@@ -888,10 +905,14 @@ convert_rgb_to_alpha(struct schedule_state *s, struct schedule_instruction *sche
    /* Even though we checked that we can convert to alpha previously, it is
     * possible that another rgb source of the reader instructions was already
     * converted to alpha and we thus have no longer free alpha sources.
+    * An operand reading both RGB and alpha can reuse RGB source 2 while earlier
+    * alpha sources remain free, so check all three.
     */
    for (i = 0; i < sched_inst->GlobalReaders.ReaderCount; i++) {
       struct rc_reader reader = sched_inst->GlobalReaders.Readers[i];
-      if (reader.Inst->U.P.Alpha.Src[2].Used)
+      if (reader.Inst->U.P.Alpha.Src[0].Used &&
+          reader.Inst->U.P.Alpha.Src[1].Used &&
+          reader.Inst->U.P.Alpha.Src[2].Used)
          return 0;
    }
 
@@ -975,6 +996,7 @@ try_convert_and_pair(struct schedule_state *s, struct schedule_instruction **ins
 {
    struct schedule_instruction *list_ptr = *inst_list;
    while (list_ptr && *inst_list && (*inst_list)->NextReady) {
+      struct schedule_instruction *next = list_ptr->NextReady;
       int paired = 0;
       if (list_ptr->Instruction->U.P.Alpha.Opcode != RC_OPCODE_NOP &&
           list_ptr->Instruction->U.P.RGB.Opcode != RC_OPCODE_REPL_ALPHA) {
@@ -1001,7 +1023,7 @@ try_convert_and_pair(struct schedule_state *s, struct schedule_instruction **ins
       }
       if (!paired) {
       next:
-         list_ptr = list_ptr->NextReady;
+         list_ptr = next;
       }
    }
 }
@@ -1139,7 +1161,7 @@ add_tex_reader(struct schedule_state *s, struct schedule_instruction *writer,
       return;
    }
    reader->TexReadCount++;
-   rc_list_add(&writer->TexReaders, rc_list(&s->C->Pool, reader));
+   util_dynarray_append(&writer->TexReaders, reader);
 }
 
 static void
@@ -1177,13 +1199,13 @@ scan_read(void *data, struct rc_instruction *inst, rc_register_file file, unsign
 
    DBG("%i: read %i[%i] chan %i\n", s->Current->Instruction->IP, file, index, chan);
 
-   reader = memory_pool_malloc(&s->C->Pool, sizeof(*reader));
+   reader = linear_alloc(s->C->Pool, struct reg_value_reader);
    reader->Reader = s->Current;
    if (!*v) {
       /* In this situation, the instruction reads from a register
        * that hasn't been written to or read from in the current
        * block. */
-      *v = memory_pool_malloc(&s->C->Pool, sizeof(struct reg_value));
+      *v = linear_alloc(s->C->Pool, struct reg_value);
       memset(*v, 0, sizeof(struct reg_value));
       (*v)->Readers = reader;
    } else {
@@ -1218,7 +1240,7 @@ scan_write(void *data, struct rc_instruction *inst, rc_register_file file, unsig
 
    DBG("%i: write %i[%i] chan %i\n", s->Current->Instruction->IP, file, index, chan);
 
-   newv = memory_pool_malloc(&s->C->Pool, sizeof(*newv));
+   newv = linear_alloc(s->C->Pool, struct reg_value);
    memset(newv, 0, sizeof(*newv));
 
    newv->Writer = s->Current;
@@ -1256,8 +1278,9 @@ schedule_block(struct schedule_state *s, struct rc_instruction *begin, struct rc
    /* Scan instructions for data dependencies */
    ip = 0;
    for (struct rc_instruction *inst = begin; inst != end; inst = inst->Next) {
-      s->Current = memory_pool_malloc(&s->C->Pool, sizeof(*s->Current));
+      s->Current = linear_alloc(s->C->Pool, struct schedule_instruction);
       memset(s->Current, 0, sizeof(struct schedule_instruction));
+      util_dynarray_init(&s->Current->TexReaders, s->C->Pool);
 
       if (inst->Type == RC_INSTRUCTION_NORMAL) {
          const struct rc_opcode_info *info = rc_get_opcode_info(inst->U.I.Opcode);
@@ -1328,6 +1351,7 @@ rc_pair_schedule(struct radeon_compiler *cc, void *user)
    memset(&s, 0, sizeof(s));
    s.Opt = *opt;
    s.C = &c->Base;
+   util_dynarray_init(&s.PendingTEX, s.C->Pool);
    if (s.C->is_r500) {
       s.CalcScore = calc_score_readers;
       s.PresubNopScore = PRESUB_NOP_SCORE_R500;
@@ -1379,7 +1403,7 @@ rc_pair_schedule(struct radeon_compiler *cc, void *user)
       memset(s.Temporary, 0, sizeof(s.Temporary));
       s.TEXCount = 0;
       schedule_block(&s, first, inst);
-      if (s.PendingTEX) {
+      if (s.PendingTEX.size != 0) {
          s.PrevBlockHasTex = 1;
       }
    }

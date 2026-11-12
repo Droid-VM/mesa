@@ -37,6 +37,7 @@
 #include "main/hash.h"
 #include "main/mtypes.h"
 #include "nir/nir_xfb_info.h"
+#include "nir/nir_draw_helpers.h"
 #include "nir/pipe_nir.h"
 #include "program/prog_parameter.h"
 #include "program/prog_print.h"
@@ -50,7 +51,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "draw/draw_context.h"
 #include "draw/draw_nir.h"
 
@@ -105,7 +105,7 @@ set_affected_state_flags(struct gl_program *prog,
  * This determines which states will be updated when the shader is bound.
  */
 void
-st_set_prog_affected_state_flags(struct gl_program *prog)
+st_set_prog_affected_state_flags(struct st_context *st, struct gl_program *prog)
 {
    BITSET_ZERO(prog->affected_states);
 
@@ -149,6 +149,11 @@ st_set_prog_affected_state_flags(struct gl_program *prog)
                                ST_NEW_TES_UBOS,
                                ST_NEW_TES_SSBOS,
                                ST_NEW_TES_ATOMICS);
+
+      /* The tess eval output primitive feeds the reduced primitive the FS
+       * sees for emulated polygon stipple.
+       */
+      ST_SET_STATES(prog->affected_states, st->ctx->DriverFlags.NewStippleEmulate);
       break;
 
    case MESA_SHADER_GEOMETRY:
@@ -163,6 +168,11 @@ st_set_prog_affected_state_flags(struct gl_program *prog)
                                ST_NEW_GS_UBOS,
                                ST_NEW_GS_SSBOS,
                                ST_NEW_GS_ATOMICS);
+
+      /* The geometry shader output primitive feeds the reduced primitive the FS
+       * sees for emulated polygon stipple.
+       */
+      ST_SET_STATES(prog->affected_states, st->ctx->DriverFlags.NewStippleEmulate);
       break;
 
    case MESA_SHADER_FRAGMENT:
@@ -178,6 +188,12 @@ st_set_prog_affected_state_flags(struct gl_program *prog)
                                ST_NEW_FS_UBOS,
                                ST_NEW_FS_SSBOS,
                                ST_NEW_FS_ATOMICS);
+
+      /* Emulated polygon stipple appends a texture/sampler that isn't part of
+       * the shader's own resources, so make sure those atoms are always
+       * considered active for this shader (even if it otherwise uses no textures).
+       */
+      ST_SET_STATES(prog->affected_states, st->ctx->DriverFlags.NewStippleEmulate);
       break;
 
    case MESA_SHADER_COMPUTE:
@@ -642,8 +658,6 @@ static const struct nir_shader_compiler_options draw_nir_options = {
    .lower_extract_word = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
    .lower_int64_options = nir_lower_imul_2x32_64,
@@ -688,6 +702,38 @@ get_nir_shader(struct st_context *st, struct gl_program *prog, bool is_draw)
       blob_reader_init(&blob_reader, prog->serialized_nir, prog->serialized_nir_size);
    }
    return nir_deserialize(NULL, options, &blob_reader);
+}
+
+static bool
+drop_clip_dist_store(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output &&
+       intr->intrinsic != nir_intrinsic_store_per_vertex_output)
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location != VARYING_SLOT_CLIP_DIST0 &&
+       sem.location != VARYING_SLOT_CLIP_DIST1)
+      return false;
+
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static bool
+drop_clip_dist(nir_shader *nir)
+{
+   assert(nir->info.io_lowered);
+
+   bool progress = nir_shader_intrinsics_pass(nir, drop_clip_dist_store,
+                                              nir_metadata_control_flow, NULL);
+   if (progress) {
+      nir->info.outputs_written &=
+         ~(VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1);
+      nir->info.clip_distance_array_size = 0;
+   }
+
+   return progress;
 }
 
 static void
@@ -841,12 +887,18 @@ st_create_common_variant(struct st_context *st,
       finalize = true;
    }
 
+   if (key->drop_clip_dist) {
+      assert(!options->unify_interfaces);
+      NIR_PASS(finalize, state.ir.nir, drop_clip_dist);
+   }
+
    if (!st->screen->caps.gl_clamp &&
          (key->gl_clamp[0] || key->gl_clamp[1] || key->gl_clamp[2])) {
       nir_lower_tex_options tex_opts = {0};
       tex_opts.saturate_s = key->gl_clamp[0];
       tex_opts.saturate_t = key->gl_clamp[1];
       tex_opts.saturate_r = key->gl_clamp[2];
+      tex_opts.saturate_lod_zero = key->gl_clamp[3];
       NIR_PASS(finalize, state.ir.nir, nir_lower_tex, &tex_opts);
    }
 
@@ -955,12 +1007,13 @@ st_get_common_variant(struct st_context *st,
    if (!v) {
       if (prog->variants != NULL) {
          _mesa_perf_debug(st->ctx, MESA_DEBUG_SEVERITY_MEDIUM,
-                          "Compiling %s shader variant (%s%s%s%s%s%s)",
+                          "Compiling %s shader variant (%s%s%s%s%s%s%s)",
                           _mesa_shader_stage_to_string(prog->info.stage),
                           key->passthrough_edgeflags ? "edgeflags," : "",
                           key->clamp_color ? "clamp_color," : "",
                           key->export_point_size ? "point_size," : "",
                           key->lower_ucp ? "ucp," : "",
+                          key->drop_clip_dist ? "drop_clip_dist," : "",
                           key->is_draw_shader ? "draw," : "",
                           key->gl_clamp[0] || key->gl_clamp[1] || key->gl_clamp[2] ? "GL_CLAMP," : "");
       }
@@ -1012,6 +1065,11 @@ st_translate_fragment_program(struct st_context *st,
          ST_SET_STATE2(prog->affected_states, ST_NEW_FS_SAMPLER_VIEWS,
                        ST_NEW_FS_SAMPLERS);
    }
+   /* Emulated polygon stipple appends a texture/sampler that isn't part of
+    * the shader's own resources, so make sure those atoms are always
+    * considered active for this shader (even if it otherwise uses no textures).
+    */
+   ST_SET_STATES(prog->affected_states, st->ctx->DriverFlags.NewStippleEmulate);
 
    /* Translate to NIR. */
    if (prog->nir && prog->arb.Instructions)
@@ -1044,6 +1102,54 @@ st_translate_fragment_program(struct st_context *st,
    }
 
    return true;
+}
+
+/**
+ * Lower the sampling of the external samplers in key to their YUV planes.
+ */
+void
+st_nir_lower_external_samplers(nir_shader *nir,
+                               const struct st_external_sampler_key *key)
+{
+   nir_lower_tex_options options = {0};
+   options.lower_y_uv_external = key->lower_nv12;
+   options.lower_y_vu_external = key->lower_nv21;
+   options.lower_y_u_v_external = key->lower_iyuv;
+   options.lower_xy_uxvx_external = key->lower_xy_uxvx;
+   options.lower_xy_vxux_external = key->lower_xy_vxux;
+   options.lower_yx_xuxv_external = key->lower_yx_xuxv;
+   options.lower_yx_xvxu_external = key->lower_yx_xvxu;
+   options.lower_ayuv_external = key->lower_ayuv;
+   options.lower_xyuv_external = key->lower_xyuv;
+   options.lower_yuv_external = key->lower_yuv;
+   options.lower_yu_yv_external = key->lower_yu_yv;
+   options.lower_yv_yu_external = key->lower_yv_yu;
+   options.lower_y41x_external = key->lower_y41x;
+   options.lower_sx10_external = key->lower_sx10;
+   options.lower_sx12_external = key->lower_sx12;
+   options.bt709_external = key->bt709;
+   options.bt2020_external = key->bt2020;
+   options.yuv_full_range_external = key->yuv_full_range;
+   options.bypass_csc_external = key->external_y2y;
+   NIR_PASS(_, nir, nir_lower_tex, &options);
+}
+
+/**
+ * Move the samples of the extra planes that st_nir_lower_external_samplers
+ * adds to the sampler slots that st_add_yuv_plane_views gives their views,
+ * taken from free_slots in the same order. Runs once the bindings of the
+ * sampler variables are final.
+ */
+void
+st_nir_lower_external_sampler_planes(nir_shader *nir,
+                                     const struct st_external_sampler_key *key,
+                                     unsigned free_slots)
+{
+   NIR_PASS(_, nir, st_nir_lower_tex_src_plane, free_slots,
+            key->lower_nv12 | key->lower_nv21 |
+               key->lower_xy_uxvx | key->lower_xy_vxux |
+               key->lower_yx_xuxv | key->lower_yx_xvxu,
+            key->lower_iyuv);
 }
 
 static struct st_fp_variant *
@@ -1129,6 +1235,7 @@ st_create_fp_variant(struct st_context *st,
       tex_opts.saturate_s = key->gl_clamp[0];
       tex_opts.saturate_t = key->gl_clamp[1];
       tex_opts.saturate_r = key->gl_clamp[2];
+      tex_opts.saturate_lod_zero = key->gl_clamp[3];
       NIR_PASS(finalize, state.ir.nir, nir_lower_tex, &tex_opts);
    }
 
@@ -1180,6 +1287,23 @@ st_create_fp_variant(struct st_context *st,
       finalize = true;
    }
 
+   /* Emulated polygon stipple: sample a stipple texture and discard the
+    * fragment when the corresponding bit is off.  The lowering picks the
+    * first sampler unit past the highest one already used by the shader; we
+    * remember it so st_atom_texture.c / st_atom_sampler.c can bind the
+    * matching stipple texture/sampler there.
+    */
+   variant->stipple_sampler = -1;
+   if (key->lower_polygon_stipple &&
+      !BITSET_TEST(state.ir.nir->info.samplers_used, PIPE_MAX_SAMPLERS - 1)) {
+      unsigned unit = 0;
+      NIR_PASS(finalize, state.ir.nir, nir_lower_pstipple_fs, &unit, 0,
+               st->screen->caps.fs_position_is_sysval, true /* samplers_as_deref */,
+               nir_type_bool1);
+      variant->stipple_sampler = unit;
+      assert(variant->stipple_sampler < PIPE_MAX_SAMPLERS);
+   }
+
    bool need_lower_tex_src_plane = false;
 
    if (unlikely(key->external.lower_nv12 || key->external.lower_nv21 ||
@@ -1188,31 +1312,13 @@ st_create_fp_variant(struct st_context *st,
                   key->external.lower_yx_xvxu || key->external.lower_xy_vxux ||
                   key->external.lower_ayuv || key->external.lower_xyuv ||
                   key->external.lower_yuv || key->external.lower_yu_yv ||
-                  key->external.lower_yv_yu || key->external.lower_y41x)) {
+                  key->external.lower_yv_yu || key->external.lower_y41x ||
+                  key->external.external_y2y)) {
 
       st_nir_lower_samplers(st->screen, state.ir.nir,
                               fp->shader_program, fp);
 
-      nir_lower_tex_options options = {0};
-      options.lower_y_uv_external = key->external.lower_nv12;
-      options.lower_y_vu_external = key->external.lower_nv21;
-      options.lower_y_u_v_external = key->external.lower_iyuv;
-      options.lower_xy_uxvx_external = key->external.lower_xy_uxvx;
-      options.lower_xy_vxux_external = key->external.lower_xy_vxux;
-      options.lower_yx_xuxv_external = key->external.lower_yx_xuxv;
-      options.lower_yx_xvxu_external = key->external.lower_yx_xvxu;
-      options.lower_ayuv_external = key->external.lower_ayuv;
-      options.lower_xyuv_external = key->external.lower_xyuv;
-      options.lower_yuv_external = key->external.lower_yuv;
-      options.lower_yu_yv_external = key->external.lower_yu_yv;
-      options.lower_yv_yu_external = key->external.lower_yv_yu;
-      options.lower_y41x_external = key->external.lower_y41x;
-      options.lower_sx10_external = key->external.lower_sx10;
-      options.lower_sx12_external = key->external.lower_sx12;
-      options.bt709_external = key->external.bt709;
-      options.bt2020_external = key->external.bt2020;
-      options.yuv_full_range_external = key->external.yuv_full_range;
-      NIR_PASS(_, state.ir.nir, nir_lower_tex, &options);
+      st_nir_lower_external_samplers(state.ir.nir, &key->external);
       finalize = true;
       need_lower_tex_src_plane = true;
    }
@@ -1222,12 +1328,8 @@ st_create_fp_variant(struct st_context *st,
 
    /* This pass needs to happen *after* nir_lower_sampler */
    if (unlikely(need_lower_tex_src_plane)) {
-      NIR_PASS(_, state.ir.nir, st_nir_lower_tex_src_plane,
-                  ~fp->SamplersUsed,
-                  key->external.lower_nv12 | key->external.lower_nv21 |
-                     key->external.lower_xy_uxvx | key->external.lower_xy_vxux |
-                     key->external.lower_yx_xuxv | key->external.lower_yx_xvxu,
-                  key->external.lower_iyuv);
+      st_nir_lower_external_sampler_planes(state.ir.nir, &key->external,
+                                           ~fp->SamplersUsed);
       finalize = true;
    }
 
@@ -1306,7 +1408,7 @@ st_get_fp_variant(struct st_context *st,
 
       if (fp->variants != NULL) {
          _mesa_perf_debug(st->ctx, MESA_DEBUG_SEVERITY_MEDIUM,
-                          "Compiling fragment shader variant (%s%s%s%s%s%s%s%s%s%s%s%s%s%d)",
+                          "Compiling fragment shader variant (%s%s%s%s%s%s%s%s%s%s%s%s%s%s%d)",
                           key->bitmap ? "bitmap," : "",
                           key->drawpixels ? "drawpixels," : "",
                           key->scaleAndBias ? "scale_bias," : "",
@@ -1317,6 +1419,7 @@ st_get_fp_variant(struct st_context *st,
                           key->lower_two_sided_color ? "twoside," : "",
                           key->lower_flatshade ? "flatshade," : "",
                           key->lower_alpha_func != COMPARE_FUNC_ALWAYS ? "alpha_compare," : "",
+                          key->lower_polygon_stipple ? "pstipple," : "",
                           /* skipped ATI_fs targets */
                           fp->ExternalSamplersUsed ? "external?," : "",
                           key->gl_clamp[0] || key->gl_clamp[1] || key->gl_clamp[2] ? "GL_CLAMP," : "",

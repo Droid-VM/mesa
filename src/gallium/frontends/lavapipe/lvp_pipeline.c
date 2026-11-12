@@ -43,22 +43,51 @@
 
 typedef void (*cso_destroy_func)(struct pipe_context*, void*);
 
+struct lvp_retired_cso {
+   mesa_shader_stage stage;
+   void *cso;
+};
+
 static void
-shader_destroy(struct lvp_device *device, struct lvp_shader *shader, bool locked)
+retire_cso(struct lvp_device *device, mesa_shader_stage stage, void *cso)
+{
+   struct lvp_retired_cso retired = { stage, cso };
+
+   simple_mtx_lock(&device->shader_destroys_lock);
+   util_dynarray_append(&device->shader_destroys, retired);
+   simple_mtx_unlock(&device->shader_destroys_lock);
+}
+
+void
+lvp_destroy_shaders(struct lvp_device *device, struct pipe_context *ctx)
+{
+   cso_destroy_func destroy[] = {
+      ctx->delete_vs_state,
+      ctx->delete_tcs_state,
+      ctx->delete_tes_state,
+      ctx->delete_gs_state,
+      ctx->delete_fs_state,
+      ctx->delete_compute_state,
+      ctx->delete_ts_state,
+      ctx->delete_ms_state,
+   };
+
+   simple_mtx_lock(&device->shader_destroys_lock);
+   struct util_dynarray shaders = device->shader_destroys;
+   device->shader_destroys = UTIL_DYNARRAY_INIT;
+   simple_mtx_unlock(&device->shader_destroys_lock);
+
+   util_dynarray_foreach(&shaders, struct lvp_retired_cso, retired)
+      destroy[retired->stage](ctx, retired->cso);
+   util_dynarray_fini(&shaders);
+}
+
+static void
+shader_destroy(struct lvp_device *device, struct lvp_shader *shader)
 {
    if (!shader->pipeline_nir)
       return;
    mesa_shader_stage stage = shader->pipeline_nir->nir->info.stage;
-   cso_destroy_func destroy[] = {
-      device->queue.ctx->delete_vs_state,
-      device->queue.ctx->delete_tcs_state,
-      device->queue.ctx->delete_tes_state,
-      device->queue.ctx->delete_gs_state,
-      device->queue.ctx->delete_fs_state,
-      device->queue.ctx->delete_compute_state,
-      device->queue.ctx->delete_ts_state,
-      device->queue.ctx->delete_ms_state,
-   };
 
    if (shader->heaps && shader->embedded_samplers) {
       pipe_resource_reference(&shader->embedded_samplers, NULL);
@@ -66,33 +95,24 @@ shader_destroy(struct lvp_device *device, struct lvp_shader *shader, bool locked
       device->pscreen->free_memory(device->pscreen, shader->embedded_samplers_memory);
    }
 
-   if (!locked)
-      simple_mtx_lock(&device->queue.lock);
-
    if (shader->shader_cso)
-      destroy[stage](device->queue.ctx, shader->shader_cso);
-   if (shader->tess_ccw_cso)
-      destroy[stage](device->queue.ctx, shader->tess_ccw_cso);
-
-   if (!locked)
-      simple_mtx_unlock(&device->queue.lock);
+      retire_cso(device, stage, shader->shader_cso);
 
    lvp_pipeline_nir_ref(&shader->pipeline_nir, NULL);
-   lvp_pipeline_nir_ref(&shader->tess_ccw, NULL);
 }
 
 void
-lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline, bool locked)
+lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline)
 {
    lvp_forall_stage(i)
-      shader_destroy(device, &pipeline->shaders[i], locked);
+      shader_destroy(device, &pipeline->shaders[i]);
 
    if (pipeline->layout)
       vk_pipeline_layout_unref(&device->vk, &pipeline->layout->vk);
 
    for (unsigned i = 0; i < pipeline->num_groups; i++) {
       VK_FROM_HANDLE(lvp_pipeline, p, pipeline->groups[i]);
-      lvp_pipeline_destroy(device, p, locked);
+      lvp_pipeline_destroy(device, p);
    }
 
    if (pipeline->rt.stages) {
@@ -119,13 +139,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyPipeline(
    if (!_pipeline)
       return;
 
-   if (pipeline->used) {
-      simple_mtx_lock(&device->queue.lock);
-      util_dynarray_append(&device->queue.pipeline_destroys, pipeline);
-      simple_mtx_unlock(&device->queue.lock);
-   } else {
-      lvp_pipeline_destroy(device, pipeline, false);
-   }
+   lvp_pipeline_destroy(device, pipeline);
 }
 
 static void
@@ -559,7 +573,7 @@ lvp_shader_lower(struct lvp_device *pdevice, nir_shader *nir, struct lvp_shader 
    };
 
    if (shader->heaps) {
-      NIR_PASS(_, nir, lvp_nir_lower_desciptor_heaps, mapping);
+      NIR_PASS(_, nir, lvp_nir_lower_descriptor_heaps);
 
       NIR_PASS(_, nir, lvp_nir_lower_push_constants, &shader->push_constant_size);
       NIR_PASS(_, nir, nir_lower_non_uniform_access, &options);
@@ -699,45 +713,6 @@ lvp_shader_compile_to_ir(struct lvp_pipeline *pipeline, const void *pipeline_pNe
 }
 
 static void
-merge_tess_info(struct shader_info *tes_info,
-                const struct shader_info *tcs_info)
-{
-   /* The Vulkan 1.0.38 spec, section 21.1 Tessellator says:
-    *
-    *    "PointMode. Controls generation of points rather than triangles
-    *     or lines. This functionality defaults to disabled, and is
-    *     enabled if either shader stage includes the execution mode.
-    *
-    * and about Triangles, Quads, IsoLines, VertexOrderCw, VertexOrderCcw,
-    * PointMode, SpacingEqual, SpacingFractionalEven, SpacingFractionalOdd,
-    * and OutputVertices, it says:
-    *
-    *    "One mode must be set in at least one of the tessellation
-    *     shader stages."
-    *
-    * So, the fields can be set in either the TCS or TES, but they must
-    * agree if set in both.  Our backend looks at TES, so bitwise-or in
-    * the values from the TCS.
-    */
-   assert(tcs_info->tess.tcs_vertices_out == 0 ||
-          tes_info->tess.tcs_vertices_out == 0 ||
-          tcs_info->tess.tcs_vertices_out == tes_info->tess.tcs_vertices_out);
-   tes_info->tess.tcs_vertices_out |= tcs_info->tess.tcs_vertices_out;
-
-   assert(tcs_info->tess.spacing == TESS_SPACING_UNSPECIFIED ||
-          tes_info->tess.spacing == TESS_SPACING_UNSPECIFIED ||
-          tcs_info->tess.spacing == tes_info->tess.spacing);
-   tes_info->tess.spacing |= tcs_info->tess.spacing;
-
-   assert(tcs_info->tess._primitive_mode == 0 ||
-          tes_info->tess._primitive_mode == 0 ||
-          tcs_info->tess._primitive_mode == tes_info->tess._primitive_mode);
-   tes_info->tess._primitive_mode |= tcs_info->tess._primitive_mode;
-   tes_info->tess.ccw |= tcs_info->tess.ccw;
-   tes_info->tess.point_mode |= tcs_info->tess.point_mode;
-}
-
-static void
 lvp_shader_xfb_init(struct lvp_shader *shader)
 {
    nir_xfb_info *xfb_info = shader->pipeline_nir->nir->xfb_info;
@@ -786,12 +761,14 @@ lvp_pipeline_xfb_init(struct lvp_pipeline *pipeline)
 static void *
 lvp_shader_compile_stage(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir)
 {
+   struct pipe_context *ctx = device->queue[0].ctx;
+
    if (nir->info.stage == MESA_SHADER_COMPUTE) {
       struct pipe_compute_state shstate = {0};
       shstate.prog = nir;
       shstate.ir_type = PIPE_SHADER_IR_NIR;
       shstate.static_shared_mem = nir->info.shared_size;
-      return device->queue.ctx->create_compute_state(device->queue.ctx, &shstate);
+      return ctx->create_compute_state(ctx, &shstate);
    } else {
       struct pipe_shader_state shstate = {0};
       shstate.type = PIPE_SHADER_IR_NIR;
@@ -800,19 +777,19 @@ lvp_shader_compile_stage(struct lvp_device *device, struct lvp_shader *shader, n
 
       switch (nir->info.stage) {
       case MESA_SHADER_FRAGMENT:
-         return device->queue.ctx->create_fs_state(device->queue.ctx, &shstate);
+         return ctx->create_fs_state(ctx, &shstate);
       case MESA_SHADER_VERTEX:
-         return device->queue.ctx->create_vs_state(device->queue.ctx, &shstate);
+         return ctx->create_vs_state(ctx, &shstate);
       case MESA_SHADER_GEOMETRY:
-         return device->queue.ctx->create_gs_state(device->queue.ctx, &shstate);
+         return ctx->create_gs_state(ctx, &shstate);
       case MESA_SHADER_TESS_CTRL:
-         return device->queue.ctx->create_tcs_state(device->queue.ctx, &shstate);
+         return ctx->create_tcs_state(ctx, &shstate);
       case MESA_SHADER_TESS_EVAL:
-         return device->queue.ctx->create_tes_state(device->queue.ctx, &shstate);
+         return ctx->create_tes_state(ctx, &shstate);
       case MESA_SHADER_TASK:
-         return device->queue.ctx->create_ts_state(device->queue.ctx, &shstate);
+         return ctx->create_ts_state(ctx, &shstate);
       case MESA_SHADER_MESH:
-         return device->queue.ctx->create_ms_state(device->queue.ctx, &shstate);
+         return ctx->create_ms_state(ctx, &shstate);
       default:
          UNREACHABLE("illegal shader");
          break;
@@ -822,20 +799,12 @@ lvp_shader_compile_stage(struct lvp_device *device, struct lvp_shader *shader, n
 }
 
 void *
-lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir, bool locked)
+lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir)
 {
    const struct lvp_physical_device *pdev = lvp_device_physical(device);
    pdev->pscreen->finalize_nir(pdev->pscreen, nir, true);
 
-   if (!locked)
-      simple_mtx_lock(&device->queue.lock);
-
-   void *state = lvp_shader_compile_stage(device, shader, nir);
-
-   if (!locked)
-      simple_mtx_unlock(&device->queue.lock);
-
-   return state;
+   return lvp_shader_compile_stage(device, shader, nir);
 }
 
 #ifndef NDEBUG
@@ -938,9 +907,7 @@ copy_shader_sanitized(struct lvp_shader *dst, const struct lvp_shader *src)
 {
    *dst = *src;
    dst->pipeline_nir = NULL; //this gets handled later
-   dst->tess_ccw = NULL; //this gets handled later
    assert(!dst->shader_cso);
-   assert(!dst->tess_ccw_cso);
 }
 
 static VkResult
@@ -1060,15 +1027,6 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
    }
    if (pCreateInfo->stageCount && pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir) {
       nir_lower_patch_vertices(pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir, pipeline->shaders[MESA_SHADER_TESS_CTRL].pipeline_nir->nir->info.tess.tcs_vertices_out, NULL);
-      merge_tess_info(&pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir->info, &pipeline->shaders[MESA_SHADER_TESS_CTRL].pipeline_nir->nir->info);
-      if (BITSET_TEST(pipeline->graphics_state.dynamic,
-                      MESA_VK_DYNAMIC_TS_DOMAIN_ORIGIN)) {
-         pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw = lvp_create_pipeline_nir(nir_shader_clone(NULL, pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir));
-         pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw->nir->info.tess.ccw = !pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir->info.tess.ccw;
-      } else if (pipeline->graphics_state.ts &&
-                 pipeline->graphics_state.ts->domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT) {
-         pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir->info.tess.ccw = !pipeline->shaders[MESA_SHADER_TESS_EVAL].pipeline_nir->nir->info.tess.ccw;
-      }
    }
    if (libstate) {
        for (unsigned i = 0; i < libstate->libraryCount; i++) {
@@ -1084,8 +1042,6 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
                 if (p->shaders[j].pipeline_nir)
                    lvp_pipeline_nir_ref(&pipeline->shaders[j].pipeline_nir, p->shaders[j].pipeline_nir);
              }
-             if (p->shaders[MESA_SHADER_TESS_EVAL].tess_ccw)
-                lvp_pipeline_nir_ref(&pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw, p->shaders[MESA_SHADER_TESS_EVAL].tess_ccw);
           }
        }
    } else if (pipeline->stages & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
@@ -1112,7 +1068,7 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
    }
 
    if (!libstate && !pipeline->library) {
-      lvp_pipeline_shaders_compile(pipeline, false);
+      lvp_pipeline_shaders_compile(pipeline);
    }
 
    return VK_SUCCESS;
@@ -1126,12 +1082,11 @@ fail:
    return result;
 }
 
-void
-lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked)
+static void
+pipeline_shaders_compile(const void *data)
 {
+   struct lvp_pipeline *pipeline = (struct lvp_pipeline *)data;
    struct lvp_device *device = lvp_pipeline_device(pipeline);
-   if (pipeline->compiled)
-      return;
    for (uint32_t i = 0; i < ARRAY_SIZE(pipeline->shaders); i++) {
       if (!pipeline->shaders[i].pipeline_nir)
          continue;
@@ -1140,12 +1095,14 @@ lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked)
       assert(stage == pipeline->shaders[i].pipeline_nir->nir->info.stage);
 
       pipeline->shaders[stage].shader_cso = lvp_shader_compile(device, &pipeline->shaders[stage],
-         nir_shader_clone(NULL, pipeline->shaders[stage].pipeline_nir->nir), locked);
-      if (pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw)
-         pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw_cso = lvp_shader_compile(device, &pipeline->shaders[stage],
-            nir_shader_clone(NULL, pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw->nir), locked);
+         nir_shader_clone(NULL, pipeline->shaders[stage].pipeline_nir->nir));
    }
-   pipeline->compiled = true;
+}
+
+void
+lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline)
+{
+   util_call_once_data(&pipeline->compile_once, pipeline_shaders_compile, pipeline);
 }
 
 static VkResult
@@ -1171,6 +1128,7 @@ lvp_graphics_pipeline_create(
 
    vk_object_base_init(&device->vk, &pipeline->base,
                        VK_OBJECT_TYPE_PIPELINE);
+   pipeline->compile_once = (util_once_flag)UTIL_ONCE_FLAG_INIT;
    uint64_t t0 = os_time_get_nano();
    result = lvp_graphics_pipeline_init(pipeline, device, cache, pCreateInfo, flags);
    if (result != VK_SUCCESS) {
@@ -1250,8 +1208,7 @@ lvp_compute_pipeline_init(struct lvp_pipeline *pipeline,
       return result;
 
    struct lvp_shader *shader = &pipeline->shaders[MESA_SHADER_COMPUTE];
-   shader->shader_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, shader->pipeline_nir->nir), false);
-   pipeline->compiled = true;
+   shader->shader_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, shader->pipeline_nir->nir));
    return VK_SUCCESS;
 }
 
@@ -1343,7 +1300,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyShaderEXT(
 
    if (!shader)
       return;
-   shader_destroy(device, shader, false);
+   shader_destroy(device, shader);
 
    vk_pipeline_layout_unref(&device->vk, &shader->layout->vk);
    blob_finish(&shader->blob);
@@ -1458,9 +1415,6 @@ create_shader_object(struct lvp_device *device, const VkShaderCreateInfoEXT *pCr
    if (stage == MESA_SHADER_TESS_EVAL) {
       /* spec requires that all tess modes are set in both shaders */
       nir_lower_patch_vertices(shader->pipeline_nir->nir, shader->pipeline_nir->nir->info.tess.tcs_vertices_out, NULL);
-      shader->tess_ccw = lvp_create_pipeline_nir(nir_shader_clone(NULL, shader->pipeline_nir->nir));
-      shader->tess_ccw->nir->info.tess.ccw = !shader->pipeline_nir->nir->info.tess.ccw;
-      shader->tess_ccw_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, shader->tess_ccw->nir), false);
    }
    nir_serialize(&shader->blob, nir, true);
 
@@ -1471,7 +1425,7 @@ create_shader_object(struct lvp_device *device, const VkShaderCreateInfoEXT *pCr
    if (shader->embedded_samplers)
       blob_write_bytes(&shader->blob, shader->embedded_samplers_map, embedded_samplers_size);
 
-   shader->shader_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, nir), false);
+   shader->shader_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, nir));
    return lvp_shader_to_handle(shader);
 fail:
    ralloc_free(nir);

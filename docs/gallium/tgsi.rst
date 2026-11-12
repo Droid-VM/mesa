@@ -635,15 +635,6 @@ used.
    Allowed in fragment shaders only.
 
 
-.. opcode:: READ_HELPER - Reads Invocation Helper Status
-
-   This is identical to ``TGSI_SEMANTIC_HELPER_INVOCATION``, except
-   this will read the current value, which might change as a result of
-   a ``DEMOTE`` instruction.
-
-   Allowed in fragment shaders only.
-
-
 .. opcode:: TXB - Texture Lookup With Bias
 
    for cube map array textures and shadow cube maps, the bias value
@@ -2403,60 +2394,6 @@ after lookup.
    with rcpfloat modifier which requires some swizzle handling in the state
    tracker anyway).
 
-.. opcode:: SAMPLE_POS
-
-   Query the position of a sample in the given resource or render target
-   when per-sample fragment shading is in effect.
-
-   Syntax: ``SAMPLE_POS dst, source, sample_index``
-
-   dst receives float4 (x, y, undef, undef) indicated where the sample is
-   located. Sample locations are in the range [0, 1] where 0.5 is the center
-   of the fragment.
-
-   source is either a sampler view (to indicate a shader resource) or temp
-   register (to indicate the render target).  The source register may have
-   an optional swizzle to apply to the returned result
-
-   sample_index is an integer scalar indicating which sample position is to
-   be queried.
-
-   If per-sample shading is not in effect or the source resource or render
-   target is not multisampled, the result is (0.5, 0.5, undef, undef).
-
-   NOTE: no driver has implemented this opcode yet (and no gallium frontend
-   emits it).  This information is subject to change.
-
-.. opcode:: SAMPLE_INFO
-
-   Query the number of samples in a multisampled resource or render target.
-
-   Syntax: ``SAMPLE_INFO dst, source``
-
-   dst receives int4 (n, 0, 0, 0) where n is the number of samples in a
-   resource or the render target.
-
-   source is either a sampler view (to indicate a shader resource) or temp
-   register (to indicate the render target).  The source register may have
-   an optional swizzle to apply to the returned result
-
-   If per-sample shading is not in effect or the source resource or render
-   target is not multisampled, the result is (1, 0, 0, 0).
-
-   NOTE: no driver has implemented this opcode yet (and no gallium frontend
-   emits it).  This information is subject to change.
-
-.. opcode:: LOD - level of detail
-
-   Same syntax as the SAMPLE opcode but instead of performing an actual
-   texture lookup/filter, return the computed LOD information that the
-   texture pipe would use to access the texture. The Y component contains
-   the computed LOD lambda_prime. The X component contains the LOD that will
-   be accessed, based on min/max lod's and mipmap filters.
-   The Z and W components are set to 0.
-
-   Syntax: ``LOD dst, address, sampler_view, sampler``
-
 
 .. _resourceopcodes:
 
@@ -2533,31 +2470,6 @@ For these opcodes, the resource can be a BUFFER, IMAGE, or MEMORY.
    a particular output within a single invocation. Note that result may
    be undefined if a fragment is drawn multiple times without a blend
    barrier in between.
-
-
-.. _bindlessopcodes:
-
-Bindless Opcodes
-^^^^^^^^^^^^^^^^
-
-These opcodes are for working with bindless sampler or image handles and
-require pipe_caps.bindless_texture.
-
-.. opcode:: IMG2HND - Get a bindless handle for a image
-
-   Syntax: ``IMG2HND dst, image``
-
-   Example: ``IMG2HND TEMP[0], IMAGE[0]``
-
-   Sets 'dst' to a bindless handle for 'image'.
-
-.. opcode:: SAMP2HND - Get a bindless handle for a sampler
-
-   Syntax: ``SAMP2HND dst, sampler``
-
-   Example: ``SAMP2HND TEMP[0], SAMP[0]``
-
-   Sets 'dst' to a bindless handle for 'sampler'.
 
 
 .. _threadsyncopcodes:
@@ -2775,105 +2687,6 @@ These atomic operations may only be used with 32-bit integer image formats.
       dst_x = resource[offset]
 
       resource[offset] = (dst_x > src_x ? dst_x : src_x)
-
-
-.. opcode:: ATOMINC_WRAP - Atomic increment + wrap around
-
-   Syntax: ``ATOMINC_WRAP dst, resource, offset, src``
-
-   Example: ``ATOMINC_WRAP TEMP[0], BUFFER[0], TEMP[1], TEMP[2]``
-
-   The following operation is performed atomically:
-
-   .. math::
-
-      dst_x = resource[offset] + 1
-
-      resource[offset] = dst_x <= src_x ? dst_x : 0
-
-
-.. opcode:: ATOMDEC_WRAP - Atomic decrement + wrap around
-
-   Syntax: ``ATOMDEC_WRAP dst, resource, offset, src``
-
-   Example: ``ATOMDEC_WRAP TEMP[0], BUFFER[0], TEMP[1], TEMP[2]``
-
-   The following operation is performed atomically:
-
-   .. math::
-
-      dst_x = resource[offset]
-
-      resource[offset] =
-      \left\{
-      \begin{array}{ c l }
-         dst_x - 1 & \quad \textrm{if } dst_x \gt 0 \textrm{ and } dst_x \lt src_x \\
-         0         & \quad \textrm{otherwise}
-      \end{array}
-      \right.
-
-.. _interlaneopcodes:
-
-Inter-lane opcodes
-^^^^^^^^^^^^^^^^^^
-
-These opcodes reduce the given value across the shader invocations
-running in the current SIMD group. Every thread in the subgroup will receive
-the same result. The BALLOT operations accept a single-channel argument that
-is treated as a boolean and produce a 64-bit value.
-
-.. opcode:: VOTE_ANY - Value is set in any of the active invocations
-
-   Syntax: ``VOTE_ANY dst, value``
-
-   Example: ``VOTE_ANY TEMP[0].x, TEMP[1].x``
-
-
-.. opcode:: VOTE_ALL - Value is set in all of the active invocations
-
-   Syntax: ``VOTE_ALL dst, value``
-
-   Example: ``VOTE_ALL TEMP[0].x, TEMP[1].x``
-
-
-.. opcode:: VOTE_EQ - Value is the same in all of the active invocations
-
-   Syntax: ``VOTE_EQ dst, value``
-
-   Example: ``VOTE_EQ TEMP[0].x, TEMP[1].x``
-
-
-.. opcode:: BALLOT - Lanemask of whether the value is set in each active
-            invocation
-
-   Syntax: ``BALLOT dst, value``
-
-   Example: ``BALLOT TEMP[0].xy, TEMP[1].x``
-
-   When the argument is a constant true, this produces a bitmask of active
-   invocations. In fragment shaders, this can include helper invocations
-   (invocations whose outputs and writes to memory are discarded, but which
-   are used to compute derivatives).
-
-
-.. opcode:: READ_FIRST - Broadcast the value from the first active
-            invocation to all active lanes
-
-   Syntax: ``READ_FIRST dst, value``
-
-   Example: ``READ_FIRST TEMP[0], TEMP[1]``
-
-
-.. opcode:: READ_INVOC - Retrieve the value from the given invocation
-            (need not be uniform)
-
-   Syntax: ``READ_INVOC dst, value, invocation``
-
-   Example: ``READ_INVOC TEMP[0].xy, TEMP[1].xy, TEMP[2].x``
-
-   invocation.x controls the invocation number to read from for all channels.
-   The invocation number must be the same across all active invocations in a
-   sub-group; otherwise, the results are undefined.
 
 
 Explanation of symbols used

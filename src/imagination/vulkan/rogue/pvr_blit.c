@@ -42,6 +42,7 @@
 #include "pvr_physical_device.h"
 #include "pvr_types.h"
 #include "pvr_usc.h"
+#include "pvr_utrace.h"
 #include "util/bitscan.h"
 #include "util/list.h"
 #include "util/macros.h"
@@ -261,6 +262,8 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_BLIT_IMAGE);
+
    if (pBlitImageInfo->filter == VK_FILTER_LINEAR)
       filter = PVR_FILTER_LINEAR;
 
@@ -431,7 +434,7 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
             /* TODO: See if we can allocate all the transfer cmds in one go. */
             transfer_cmd = pvr_transfer_cmd_alloc(cmd_buffer);
             if (!transfer_cmd)
-               return;
+               goto end_cmd_blit_image2;
 
             transfer_cmd->sources[0].mappings[0].src_rect = src_rect;
             transfer_cmd->sources[0].mappings[0].dst_rect = dst_rect;
@@ -450,7 +453,7 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
                pvr_arch_cmd_buffer_add_transfer_cmd(cmd_buffer, transfer_cmd);
             if (result != VK_SUCCESS) {
                vk_free(&cmd_buffer->vk.pool->alloc, transfer_cmd);
-               return;
+               goto end_cmd_blit_image2;
             }
 
             if (src_surface.mem_layout == PVR_MEMLAYOUT_3DTWIDDLED) {
@@ -467,6 +470,9 @@ void pvr_rogue_CmdBlitImage2(VkCommandBuffer commandBuffer,
          }
       }
    }
+
+end_cmd_blit_image2:
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 static VkFormat pvr_get_copy_format(VkFormat format,
@@ -833,6 +839,8 @@ void pvr_rogue_CmdCopyImage2(VkCommandBuffer commandBuffer,
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_COPY_IMAGE);
+
    for (uint32_t i = 0U; i < pCopyImageInfo->regionCount; i++) {
       VkResult result;
 
@@ -866,7 +874,7 @@ void pvr_rogue_CmdCopyImage2(VkCommandBuffer commandBuffer,
                                                             dst,
                                                             &region);
             if (result != VK_SUCCESS)
-               return;
+               goto end_cmd_copy_image2;
 
             /* Skip the next region as it has been processed with the last
              * region.
@@ -883,13 +891,17 @@ void pvr_rogue_CmdCopyImage2(VkCommandBuffer commandBuffer,
                                                 dst,
                                                 &pCopyImageInfo->pRegions[i]);
       if (result != VK_SUCCESS)
-         return;
+         goto end_cmd_copy_image2;
    }
+
+end_cmd_copy_image2:
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 VkResult
 pvr_copy_buffer_to_image_region_format(struct pvr_cmd_buffer *const cmd_buffer,
                                        const pvr_dev_addr_t buffer_dev_addr,
+                                       const uint32_t buffer_alignment,
                                        const struct pvr_image *const image,
                                        const VkBufferImageCopy2 *const region,
                                        const VkFormat src_format,
@@ -928,6 +940,7 @@ pvr_copy_buffer_to_image_region_format(struct pvr_cmd_buffer *const cmd_buffer,
 
    buffer_slice_size = height_in_blks * row_length;
    buffer_layer_size = buffer_slice_size * region->imageExtent.depth;
+   buffer_layer_size = align(buffer_layer_size, buffer_alignment);
 
    layer_count =
       vk_image_subresource_layer_count(&image->vk, &region->imageSubresource);
@@ -999,6 +1012,7 @@ pvr_copy_buffer_to_image_region(struct pvr_cmd_buffer *const cmd_buffer,
                                 const VkBufferImageCopy2 *const region)
 {
    const VkImageAspectFlags aspect_mask = region->imageSubresource.aspectMask;
+   const uint32_t buffer_alignment = 1;
    VkFormat src_format;
    VkFormat dst_format;
    uint32_t flags = 0;
@@ -1029,6 +1043,7 @@ pvr_copy_buffer_to_image_region(struct pvr_cmd_buffer *const cmd_buffer,
 
    return pvr_copy_buffer_to_image_region_format(cmd_buffer,
                                                  buffer_dev_addr,
+                                                 buffer_alignment,
                                                  image,
                                                  region,
                                                  src_format,
@@ -1046,6 +1061,8 @@ void pvr_rogue_CmdCopyBufferToImage2(
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_COPY_BUFFER_TO_IMAGE);
+
    for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
       const VkResult result =
          pvr_copy_buffer_to_image_region(cmd_buffer,
@@ -1053,14 +1070,18 @@ void pvr_rogue_CmdCopyBufferToImage2(
                                          dst,
                                          &pCopyBufferToImageInfo->pRegions[i]);
       if (result != VK_SUCCESS)
-         return;
+         goto end_cmd_copy_buffer_to_image2;
    }
+
+end_cmd_copy_buffer_to_image2:
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 VkResult
 pvr_copy_image_to_buffer_region_format(struct pvr_cmd_buffer *const cmd_buffer,
                                        const struct pvr_image *const image,
                                        const pvr_dev_addr_t buffer_dev_addr,
+                                       const uint32_t buffer_alignment,
                                        const VkBufferImageCopy2 *const region,
                                        const VkFormat src_format,
                                        const VkFormat dst_format)
@@ -1094,6 +1115,8 @@ pvr_copy_image_to_buffer_region_format(struct pvr_cmd_buffer *const cmd_buffer,
 
    buffer_slice_size = buffer_image_height * buffer_row_length *
                        vk_format_get_blocksize(dst_format);
+
+   buffer_slice_size = align(buffer_slice_size, buffer_alignment);
 
    max_depth_slice = region->imageExtent.depth + region->imageOffset.z;
 
@@ -1200,7 +1223,9 @@ pvr_copy_image_to_buffer_region(struct pvr_cmd_buffer *const cmd_buffer,
    const VkImageAspectFlags aspect_mask = region->imageSubresource.aspectMask;
 
    VkFormat src_format = pvr_get_copy_format(image->vk.format, aspect_mask);
+   const uint32_t buffer_alignment = 1;
    VkFormat dst_format;
+
 
    /* From the Vulkan spec:
     *
@@ -1233,6 +1258,7 @@ pvr_copy_image_to_buffer_region(struct pvr_cmd_buffer *const cmd_buffer,
    return pvr_copy_image_to_buffer_region_format(cmd_buffer,
                                                  image,
                                                  buffer_dev_addr,
+                                                 buffer_alignment,
                                                  region,
                                                  src_format,
                                                  dst_format);
@@ -1248,6 +1274,8 @@ void pvr_rogue_CmdCopyImageToBuffer2(
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_COPY_IMAGE_TO_BUFFER);
+
    for (uint32_t i = 0U; i < pCopyImageToBufferInfo->regionCount; i++) {
       const VkBufferImageCopy2 *region = &pCopyImageToBufferInfo->pRegions[i];
 
@@ -1256,8 +1284,11 @@ void pvr_rogue_CmdCopyImageToBuffer2(
                                                               dst->dev_addr,
                                                               region);
       if (result != VK_SUCCESS)
-         return;
+         goto end_cmd_copy_image_to_buffer2;
    }
+
+end_cmd_copy_image_to_buffer2:
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 static void pvr_calc_mip_level_extents(const struct pvr_image *image,
@@ -1548,6 +1579,8 @@ void pvr_rogue_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_COPY_BUFFER);
+
    for (uint32_t i = 0; i < pCopyBufferInfo->regionCount; i++) {
       const VkResult result =
          pvr_cmd_copy_buffer_region(cmd_buffer,
@@ -1559,8 +1592,11 @@ void pvr_rogue_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
                                     0U,
                                     false);
       if (result != VK_SUCCESS)
-         return;
+         goto end_cmd_copy_buffer2;
    }
+
+end_cmd_copy_buffer2:
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 void pvr_rogue_CmdFillBuffer(VkCommandBuffer commandBuffer,
@@ -1573,6 +1609,8 @@ void pvr_rogue_CmdFillBuffer(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(pvr_buffer, dst, dstBuffer);
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
+
+   PVR_TRACE_BEGIN_TRANSFER(cmd_buffer, PVR_TRANSFER_OP_COPY_BUFFER);
 
    fillSize = vk_buffer_range(&dst->vk, dstOffset, fillSize);
 
@@ -1594,6 +1632,8 @@ void pvr_rogue_CmdFillBuffer(VkCommandBuffer commandBuffer,
                               fillSize,
                               data,
                               true);
+
+   PVR_TRACE_END_TRANSFER(cmd_buffer);
 }
 
 /**

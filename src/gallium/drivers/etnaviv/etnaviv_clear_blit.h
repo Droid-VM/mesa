@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 struct etna_context;
+struct etna_screen;
 
 #include "pipe/p_context.h"
 
@@ -41,13 +42,14 @@ etna_copy_resource(struct pipe_context *pctx, struct pipe_resource *dst,
 void
 etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
                        struct pipe_resource *src, int dst_level, int src_level,
-                       struct pipe_box *box, bool rb_swap);
+                       unsigned dstx, unsigned dsty, unsigned dstz,
+                       const struct pipe_box *src_box, bool rb_swap);
 
 void
 etna_blit_save_state(struct etna_context *ctx, bool render_cond);
 
 uint64_t
-etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color);
+etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color, const struct etna_screen *screen);
 
 void
 etna_clear_blit_init(struct pipe_context *pctx);

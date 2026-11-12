@@ -16,8 +16,12 @@ def declare_options():
     import drirc_gen
 
     B = drirc_gen.DrircBool
+    I = drirc_gen.DrircInt
 
     misc_options = [
+        I("hk_geometry_heap_size_mb", 128, 16, 1024,
+          "Size in MiB of the tessellation/geometry-shader scratch heap",
+          c_name="geometry_heap_size_mb"),
         B("hk_disable_border_emulation", False,
           "Disable custom border colour emulation",
           c_name="disable_border_emulation"),

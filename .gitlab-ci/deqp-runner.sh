@@ -31,9 +31,12 @@ if [ -n "${ANGLE_TAG:-}" ]; then
   export LD_LIBRARY_PATH=/angle:$LD_LIBRARY_PATH
 fi
 
-if [ -n "${FLUSTER_TAG:-}" ]; then
-  # Are we using the right Fluster version?
-  ci_tag_test_time_check "FLUSTER_TAG"
+if [ -n "${FLUSTER_TAG:-}" ] || [ -n "${VAAPI:-}" ]; then
+  if [ -n "${FLUSTER_TAG:-}" ]; then
+    # Are we using the right Fluster version?
+    ci_tag_test_time_check "FLUSTER_TAG"
+  fi
+
   export LIBVA_DRIVERS_PATH=$INSTALL/lib/dri/
   # libva spams driver open info by default, and that happens per testcase.
   export LIBVA_MESSAGING_LEVEL=1
@@ -157,8 +160,9 @@ set -x
 # $GPU_VERSION-{fails,flakes,skips}.txt filenames, look through the rest
 # of the tree for other places that need to be kept in sync (e.g.
 # src/**/ci/gitlab-ci*.yml)
-set +e
 deqp-runner -V
+
+DEQP_EXITCODE=0
 deqp-runner \
     suite \
     --suite $INSTALL/deqp-$DEQP_SUITE.toml \
@@ -171,11 +175,16 @@ deqp-runner \
     --jobs ${FDO_CI_CONCURRENT:-4} \
     ${DEQP_RUNNER_MAX_FAILS:+--max-fails "$DEQP_RUNNER_MAX_FAILS"} \
     ${DEQP_RUNNER_SHADER_CACHE_DIR:+--shader-cache-dir "$DEQP_RUNNER_SHADER_CACHE_DIR"} \
-    ${DEQP_FORCE_ASAN:+--env LD_PRELOAD=libasan.so.8:/install/lib/libdlclose-skip.so --env ASAN_OPTIONS=malloc_fill_byte=1}; DEQP_EXITCODE=$?
+    ${DEQP_FORCE_ASAN:+--env LD_PRELOAD=libasan.so.8:/install/lib/libdlclose-skip.so --env ASAN_OPTIONS=malloc_fill_byte=1} \
+    || DEQP_EXITCODE=$?
 
 { set +x; } 2>/dev/null
 
-set -e
+# For external projects running the Mesa CI as a downstream pipeline.
+# For details, see https://gitlab.freedesktop.org/mesa/deqp-runner/-/work_items/82
+if [ "$ALLOW_IMPROVEMENTS_OVER_EXPECTATIONS" = "true" ] && [ $DEQP_EXITCODE -eq 2 ]; then
+  DEQP_EXITCODE=0
+fi
 
 section_switch test_post_process "deqp: post-processing test results"
 set -x

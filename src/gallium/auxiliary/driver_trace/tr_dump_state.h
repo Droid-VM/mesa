@@ -29,7 +29,6 @@
 #define TR_DUMP_STATE_H_
 
 #include "pipe/p_state.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_video_codec.h"
 
 struct winsys_handle;

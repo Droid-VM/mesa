@@ -44,7 +44,8 @@ EXTENSIONS = [
     Extension("VK_MVK_moltenvk",
         nonstandard=True),
     Extension("VK_KHR_surface"),
-    Extension("VK_EXT_headless_surface"),
+    Extension("VK_EXT_headless_surface",
+        conditions=["have_KHR_surface"]),
     Extension("VK_KHR_wayland_surface"),
     Extension("VK_KHR_xcb_surface"),
     Extension("VK_KHR_win32_surface"),
@@ -80,11 +81,11 @@ header_code = """
 
 #include <vulkan/vulkan_core.h>
 
-#ifdef __APPLE__
+#ifdef HAVE_MOLTENVK
 #include "MoltenVK/mvk_vulkan.h"
 // Source of MVK_VERSION
 #include "MoltenVK/mvk_config.h"
-#endif /* __APPLE__ */
+#endif /* HAVE_MOLTENVK */
 
 struct pipe_screen;
 struct zink_screen;

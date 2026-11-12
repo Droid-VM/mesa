@@ -113,6 +113,25 @@ mat_times_scalar(struct vtn_builder *b,
    return dest;
 }
 
+void
+vtn_collect_ssa_sources(struct vtn_builder *b,
+                        const uint32_t *w_srcs,
+                        struct vtn_ssa_value **vtn_src,
+                        unsigned num_srcs)
+{
+   for (unsigned i = 0; i < num_srcs; i++)
+      vtn_src[i] = vtn_ssa_value(b, w_srcs[i]);
+}
+
+void
+vtn_downconvert_ssa_sources(struct vtn_builder *b,
+                            struct vtn_ssa_value **vtn_src,
+                            unsigned num_srcs)
+{
+   for (unsigned i = 0; i < num_srcs; i++)
+      vtn_src[i] = vtn_mediump_downconvert_value(b, vtn_src[i]);
+}
+
 nir_def *
 vtn_mediump_downconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_def *def)
 {
@@ -521,8 +540,7 @@ handle_conversion_opts(struct vtn_builder *b, UNUSED struct vtn_value *val,
 static bool
 vtn_alu_op_mediump_16bit(struct vtn_builder *b, SpvOp opcode, struct vtn_value *dest_val)
 {
-   if (!b->options->mediump_16bit_alu ||
-       !vtn_has_decoration(b, dest_val, SpvDecorationRelaxedPrecision))
+   if (!vtn_value_needs_mediump_16bit(b, dest_val))
       return false;
 
    switch (opcode) {
@@ -539,6 +557,12 @@ vtn_alu_op_mediump_16bit(struct vtn_builder *b, SpvOp opcode, struct vtn_value *
    case SpvOpBitFieldInsert:
    case SpvOpBitFieldSExtract:
    case SpvOpBitFieldUExtract:
+      return false;
+   /* These have struct results, which can't be RelaxedPrecision. */
+   case SpvOpIAddCarry:
+   case SpvOpISubBorrow:
+   case SpvOpUMulExtended:
+   case SpvOpSMulExtended:
       return false;
    default:
       return true;
@@ -753,16 +777,14 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       return;
    }
 
-   bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
-
-   /* Collect the various SSA sources */
    const unsigned num_inputs = count - 3;
    struct vtn_ssa_value *vtn_src[4] = { NULL, };
-   for (unsigned i = 0; i < num_inputs; i++) {
-      vtn_src[i] = vtn_ssa_value(b, w[i + 3]);
-      if (mediump_16bit)
-         vtn_src[i] = vtn_mediump_downconvert_value(b, vtn_src[i]);
-   }
+
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, num_inputs);
+
+   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
 
    if (glsl_type_is_matrix(vtn_src[0]->type) ||
        (num_inputs >= 2 && glsl_type_is_matrix(vtn_src[1]->type))) {
@@ -809,13 +831,17 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpIAddCarry:
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
       dest->elems[0]->def = nir_iadd(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_uadd_carry(&b->nb, src[0], src[1]);
+      dest->elems[1]->def = nir_b2iN(&b->nb,
+                                     nir_ult(&b->nb, dest->elems[0]->def, src[0]),
+                                     src[0]->bit_size);
       break;
 
    case SpvOpISubBorrow:
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
       dest->elems[0]->def = nir_isub(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_usub_borrow(&b->nb, src[0], src[1]);
+      dest->elems[1]->def = nir_b2iN(&b->nb,
+                                     nir_ult(&b->nb, src[0], src[1]),
+                                     src[0]->bit_size);
       break;
 
    case SpvOpUMulExtended: {
@@ -1135,7 +1161,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
          break;
       }
 
-      const bool save_fp_math_ctrl = b->nb.fp_math_ctrl;
+      const unsigned save_fp_math_ctrl = b->nb.fp_math_ctrl;
 
       b->nb.fp_math_ctrl |= extra_fp_math_ctrl;
 

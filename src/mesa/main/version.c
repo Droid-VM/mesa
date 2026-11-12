@@ -253,10 +253,14 @@ compute_version(const struct gl_extensions *extensions,
 
    const bool ver_1_4 = (extensions->ARB_shadow);
    const bool ver_1_5 = ver_1_4;
+   /* OpenGL 2.0 also requires ARB_texture_non_power_of_two, but we are
+    * relaxing the check here for the r300 driver that does not support
+    * NPOT textures in HW and is emulating them on a best-effort basis.
+    * This is what the proprietary driver also did historically.
+    */
    const bool ver_2_0 = (ver_1_5 &&
                          extensions->ARB_vertex_shader &&
                          extensions->ARB_fragment_shader &&
-                         extensions->ARB_texture_non_power_of_two &&
                          extensions->EXT_blend_equation_separate &&
                          extensions->EXT_stencil_two_side);
    const bool ver_2_1 = (ver_2_0 &&
@@ -481,7 +485,6 @@ compute_version_es2(const struct gl_extensions *extensions,
    /* OpenGL ES 2.0 is derived from OpenGL 2.0 */
    const bool ver_2_0 = (extensions->ARB_vertex_shader &&
                          extensions->ARB_fragment_shader &&
-                         extensions->ARB_texture_non_power_of_two &&
                          extensions->EXT_blend_equation_separate);
    /* FINISHME: This list isn't quite right. */
    const bool ver_3_0 = (extensions->ARB_half_float_vertex &&
@@ -491,6 +494,7 @@ compute_version_es2(const struct gl_extensions *extensions,
                          extensions->OES_texture_float &&
                          extensions->OES_texture_half_float &&
                          extensions->OES_texture_half_float_linear &&
+                         extensions->ARB_texture_non_power_of_two &&
                          extensions->ARB_texture_rg &&
                          extensions->ARB_depth_buffer_float &&
                          extensions->ARB_framebuffer_object &&
@@ -717,8 +721,9 @@ _mesa_get_device_luid(struct gl_context *ctx, GLint *luid)
 {
    struct pipe_screen *screen = ctx->pipe->screen;
    assert(GL_LUID_SIZE_EXT >= PIPE_LUID_SIZE);
-   memset(luid, 0, GL_UUID_SIZE_EXT);
-   screen->get_device_luid(screen, (char *)luid);
+   memset(luid, 0, GL_LUID_SIZE_EXT);
+   if (screen->get_device_luid)
+      screen->get_device_luid(screen, (char *)luid);
 }
 
 /**

@@ -121,6 +121,8 @@ struct v3d_simulator_file {
 
         struct mem_block *gmp;
         uint64_t gmp_addr;
+        /** Serializes read-modify-write updates of the GMP table */
+        simple_mtx_t gmp_lock;
 
         /** For specific gpus, use their create ioctl. Otherwise use dumb bo. */
         enum gem_type gem_type;
@@ -199,6 +201,7 @@ set_gmp_flags(struct v3d_simulator_file *file,
         int gmp_offset = offset >> GMP_ALIGN2;
         int gmp_count = align(size, 1 << GMP_ALIGN2) >> GMP_ALIGN2;
         uint32_t *gmp = malloc((gmp_count + gmp_offset)*sizeof(uint32_t));
+        simple_mtx_lock(&file->gmp_lock);
         v3d_hw_read_mem(sim_state.v3d, gmp, file->gmp_addr, (gmp_offset + gmp_count)*sizeof(uint32_t));
 
         assert(flag <= 0x3);
@@ -210,6 +213,7 @@ set_gmp_flags(struct v3d_simulator_file *file,
         }
 
         v3d_hw_write_mem(sim_state.v3d, file->gmp_addr, gmp, (gmp_offset + gmp_count)*sizeof(uint32_t));
+        simple_mtx_unlock(&file->gmp_lock);
         free(gmp);
 }
 
@@ -1240,13 +1244,14 @@ v3d_simulator_init(int fd)
                 _mesa_hash_table_create(sim_file,
                                         _mesa_hash_pointer,
                                         _mesa_key_pointer_equal);
+        simple_mtx_init(&sim_file->gmp_lock, mtx_plain);
 
         simple_mtx_lock(&sim_state.mutex);
         _mesa_hash_table_insert(sim_state.fd_map, int_to_key(fd + 1),
                                 sim_file);
+        sim_file->gmp = u_mmAllocMem(sim_state.heap, 8096, GMP_ALIGN2, 0);
         simple_mtx_unlock(&sim_state.mutex);
 
-        sim_file->gmp = u_mmAllocMem(sim_state.heap, 8096, GMP_ALIGN2, 0);
         sim_file->gmp_addr = sim_file->gmp->ofs;
         v3d_hw_set_mem(sim_state.v3d, sim_file->gmp_addr, 0, 8096);
 
@@ -1264,6 +1269,7 @@ v3d_simulator_destroy(struct v3d_simulator_file *sim_file)
                 /* No memsetting the sim_state struct, because it contains the
                  * mutex. */
         }
+        simple_mtx_destroy(&sim_file->gmp_lock);
         ralloc_free(sim_file);
         simple_mtx_unlock(&sim_state.mutex);
 }

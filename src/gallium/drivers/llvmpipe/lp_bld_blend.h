@@ -41,6 +41,13 @@ struct lp_build_context;
 struct lp_build_mask_context;
 
 
+bool
+lp_build_blend_snorm_needs_alpha_split(struct lp_type type,
+                                       unsigned rgb_src_factor,
+                                       unsigned rgb_dst_factor,
+                                       unsigned alpha_src_factor,
+                                       unsigned alpha_dst_factor);
+
 LLVMValueRef
 lp_build_blend(struct lp_build_context *bld,
                enum pipe_blend_func func,

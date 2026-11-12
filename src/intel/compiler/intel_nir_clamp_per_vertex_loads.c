@@ -12,7 +12,7 @@
  */
 
 #include "intel_nir.h"
-#include "intel_shader_enums.h"
+#include "intel_shader.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_deref.h"
 

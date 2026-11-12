@@ -81,6 +81,8 @@ typedef struct {
 #define __DRI2_FLUSH_DRAWABLE (1 << 0) /* the drawable should be flushed. */
 #define __DRI2_FLUSH_CONTEXT  (1 << 1) /* glFlush should be called */
 #define __DRI2_FLUSH_INVALIDATE_ANCILLARY (1 << 2)
+/* the flush may complete asynchronously (ST_FLUSH_ASYNC) */
+#define __DRI2_FLUSH_ASYNC (1 << 3)
 
 enum __DRI2throttleReason {
    __DRI2_THROTTLE_SWAPBUFFER,
@@ -131,9 +133,7 @@ typedef signed long
  *
  * Version 1 is advertised by the X server.
  */
-#define __DRI_SWRAST_LOADER "DRI_SWRastLoader"
 typedef struct {
-    __DRIextension base;
 
     /*
      * Drawable position and size
@@ -313,83 +313,9 @@ typedef struct {
  */
 #define __DRI_ATTRIB_SWAP_UNDEFINED             0x8063
 
-/**
- * This extension defines the core DRI functionality.  It was introduced when
- * DRI2 and AIGLX were added.
- *
- * Version >= 2 indicates that getConfigAttrib with __DRI_ATTRIB_SWAP_METHOD
- * returns a reliable value.  The X server requires v1 and uses v2.
- */
-typedef struct {
-    __DRIextension base;
-
-    /* Not used by the X server. */
-    struct dri_screen *(*createNewScreen)(int screen, int fd,
-				    unsigned int sarea_handle,
-				    const __DRIextension **extensions,
-				    const struct dri_config ***driverConfigs,
-				    void *loaderPrivate);
-
-    void (*destroyScreen)(struct dri_screen *screen);
-
-    const __DRIextension **(*getExtensions)(struct dri_screen *screen);
-
-    /* Not used by the X server. */
-    int (*getConfigAttrib)(const struct dri_config *config,
-			   unsigned int attrib,
-			   unsigned int *value);
-
-    /* Not used by the X server. */
-    int (*indexConfigAttrib)(const struct dri_config *config, int index,
-			     unsigned int *attrib, unsigned int *value);
-
-    /* Not used by the X server. */
-    struct dri_drawable *(*createNewDrawable)(struct dri_screen *screen,
-					const struct dri_config *config,
-					unsigned int drawable_id,
-					unsigned int head,
-					void *loaderPrivate);
-
-    /* Used by the X server */
-    void (*destroyDrawable)(struct dri_drawable *drawable);
-
-    /* Used by the X server in swrast mode. */
-    void (*swapBuffers)(struct dri_drawable *drawable);
-
-    /* Used by the X server in swrast mode. */
-    struct dri_context *(*createNewContext)(struct dri_screen *screen,
-				      const struct dri_config *config,
-				      struct dri_context *shared,
-				      void *loaderPrivate);
-
-    /* Used by the X server. */
-    int (*copyContext)(struct dri_context *dest,
-		       struct dri_context *src,
-		       unsigned long mask);
-
-    /* Used by the X server. */
-    void (*destroyContext)(struct dri_context *context);
-
-    /* Used by the X server. */
-    int (*bindContext)(struct dri_context *ctx,
-		       struct dri_drawable *pdraw,
-		       struct dri_drawable *pread);
-
-    /* Used by the X server. */
-    int (*unbindContext)(struct dri_context *ctx);
-
-    void (*swapBuffersWithDamage)(struct dri_drawable *drawable, int nrects, const int *rects);
-} __DRIcoreExtension;
-
 /** Common DRI function definitions, shared among DRI2 and Image extensions
  */
 
-typedef struct dri_screen *
-(*__DRIcreateNewScreen2Func)(int screen, int fd,
-                             const __DRIextension **extensions,
-                             const __DRIextension **driver_extensions,
-                             const struct dri_config ***driver_configs,
-                             void *loaderPrivate);
 typedef struct dri_screen *
 (*__DRIcreateNewScreen3Func)(int screen, int fd,
                              const __DRIextension **extensions,
@@ -397,11 +323,6 @@ typedef struct dri_screen *
                              const struct dri_config ***driver_configs,
                              bool implicit,
                              void *loaderPrivate);
-
-typedef struct dri_drawable *
-(*__DRIcreateNewDrawableFunc)(struct dri_screen *screen,
-                              const struct dri_config *config,
-                              void *loaderPrivate);
 
 typedef struct dri_context *
 (*__DRIcreateContextAttribsFunc)(struct dri_screen *screen,
@@ -412,39 +333,6 @@ typedef struct dri_context *
                                  const uint32_t *attribs,
                                  unsigned *error,
                                  void *loaderPrivate);
-
-typedef unsigned int
-(*__DRIgetAPIMaskFunc)(struct dri_screen *screen);
-
-/**
- * DRI2 Loader extension.
- *
- * These definitions are shared with xcb/dri2.h.
- * Changing these definitions would break DRI2.
- */
-#define __DRI_BUFFER_FRONT_LEFT		0
-#define __DRI_BUFFER_BACK_LEFT		1
-#define __DRI_BUFFER_FRONT_RIGHT	2
-#define __DRI_BUFFER_BACK_RIGHT		3
-#define __DRI_BUFFER_DEPTH		4
-#define __DRI_BUFFER_STENCIL		5
-#define __DRI_BUFFER_ACCUM		6
-#define __DRI_BUFFER_FAKE_FRONT_LEFT	7
-#define __DRI_BUFFER_FAKE_FRONT_RIGHT	8
-#define __DRI_BUFFER_DEPTH_STENCIL	9  /**< Only available with DRI2 1.1 */
-#define __DRI_BUFFER_HIZ		10
-
-/* Inofficial and for internal use. Increase when adding a new buffer token. */
-#define __DRI_BUFFER_COUNT		11
-
-/* Used by the X server. */
-typedef struct {
-    unsigned int attachment;
-    unsigned int name;
-    unsigned int pitch;
-    unsigned int cpp;
-    unsigned int flags;
-} __DRIbuffer;
 
 enum dri_loader_cap {
    /* Whether the loader handles RGBA channel ordering correctly. If not,
@@ -685,11 +573,7 @@ enum __DRIFixedRateCompression {
  * but future versions could support other EGLImage-like, opaque types
  * with new lookup functions.
  */
-#define __DRI_IMAGE_LOOKUP "DRI_IMAGE_LOOKUP"
-
 typedef struct {
-    __DRIextension base;
-
     /**
      * Check if EGLImage is associated with the EGL display before lookup with
      * lookupEGLImageValidated(). It will hold EGLDisplay.Mutex, so is separated
@@ -702,49 +586,6 @@ typedef struct {
      */
     struct dri_image *(*lookupEGLImageValidated)(void *image, void *loaderPrivate);
 } __DRIimageLookupExtension;
-
-/**
- * This extension allows for common DRI2 options
- */
-#define __DRI2_CONFIG_QUERY "DRI_CONFIG_QUERY"
-
-typedef struct {
-   __DRIextension base;
-
-   int (*configQueryb)(struct dri_screen *screen, const char *var, unsigned char *val);
-   int (*configQueryi)(struct dri_screen *screen, const char *var, int *val);
-   int (*configQueryf)(struct dri_screen *screen, const char *var, float *val);
-   int (*configQuerys)(struct dri_screen *screen, const char *var, char **val);
-} __DRI2configQueryExtension;
-
-/**
- * DRI config options extension.
- *
- * This extension provides the XML string containing driver options for use by
- * the loader in supporting the driconf application.
- *
- * v2:
- * - Add the getXml getter function which allows the driver more flexibility in
- *   how the XML is provided.
- * - Deprecate the direct xml pointer. It is only provided as a fallback for
- *   older versions of libGL and must not be used by clients that are aware of
- *   the newer version. Future driver versions may set it to NULL.
- */
-#define __DRI_CONFIG_OPTIONS "DRI_ConfigOptions"
-
-typedef struct {
-   __DRIextension base;
-   const char *xml; /**< deprecated since v2, use getXml instead */
-
-   /**
-    * Get an XML string that describes available driver options for use by a
-    * config application.
-    *
-    * The returned string must be heap-allocated. The caller is responsible for
-    * freeing it.
-    */
-   char *(*getXml)(const char *driver_name);
-} __DRIconfigOptionsExtension;
 
 /**
  * Query renderer driver extension
@@ -829,11 +670,7 @@ struct __DRIimageList {
    struct dri_image *front;
 };
 
-#define __DRI_IMAGE_LOADER "DRI_IMAGE_LOADER"
-
 typedef struct {
-    __DRIextension base;
-
    /**
     * Allocate color buffers.
     *
@@ -907,11 +744,7 @@ typedef struct {
  *
  * \see __DRI_MUTABLE_RENDER_BUFFER_DRIVER
  */
-#define __DRI_MUTABLE_RENDER_BUFFER_LOADER "DRI_MutableRenderBufferLoader"
-
 typedef struct {
-   __DRIextension base;
-
    /**
     * Inform the display engine (that is, SurfaceFlinger and/or hwcomposer)
     * that the struct dri_drawable has new content.
@@ -932,6 +765,16 @@ typedef struct {
    void (*displaySharedBuffer)(struct dri_drawable *drawable, int fence_fd,
                                void *loaderPrivate);
 } __DRImutableRenderBufferLoaderExtension;
+
+struct __DRIkopperLoaderExtensionRec;
+
+struct dri_loader_funcs {
+   const __DRIimageLookupExtension *image_lookup;
+   const __DRIimageLoaderExtension *image;
+   const __DRIswrastLoaderExtension *swrast;
+   const __DRImutableRenderBufferLoaderExtension *mutable_render_buffer;
+   const struct __DRIkopperLoaderExtensionRec *kopper;
+};
 
 /* Mesa-internal interface between the GLX, GBM, and EGL DRI driver loaders, and
  * the gallium dri_util.c code.

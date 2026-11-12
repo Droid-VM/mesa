@@ -53,7 +53,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_inlines.h"
 #include "program/prog_instruction.h"
 #include "cso_cache/cso_context.h"

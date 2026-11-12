@@ -16,8 +16,6 @@
    .lower_flrp16 = true,                                                      \
    .lower_fmod = true,                                                        \
    .lower_ufind_msb = true,                                                   \
-   .lower_uadd_carry = true,                                                  \
-   .lower_usub_borrow = true,                                                 \
    .lower_flrp64 = true,                                                      \
    .lower_fisnormal = true,                                                   \
    .lower_fquantize2f16 = true,                                               \

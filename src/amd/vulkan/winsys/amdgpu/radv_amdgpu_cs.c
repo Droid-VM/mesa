@@ -11,9 +11,10 @@
 #include <stdlib.h>
 #include "drm-uapi/amdgpu_drm.h"
 
-#include "tools/radv_debug.h"
 #include "util/detect_os.h"
+#include "util/hash_table.h"
 #include "util/os_time.h"
+#include "util/stack_array.h"
 #include "util/u_memory.h"
 #include "ac_cmdbuf_cp.h"
 #include "ac_debug.h"
@@ -77,6 +78,9 @@ struct radv_amdgpu_cs {
    unsigned hw_ip;
 
    struct hash_table *annotations;
+
+   /* The header dword of the last CP DMA packet in the command buffer. */
+   uint32_t *last_cp_dma_header;
 };
 
 struct radv_winsys_sem_counts {
@@ -203,6 +207,11 @@ radv_amdgpu_cs_domain(const struct radeon_winsys *_ws)
 {
    const struct radv_amdgpu_winsys *ws = (const struct radv_amdgpu_winsys *)_ws;
 
+   if (ws->cs_domain_mode == RADV_AMDGPU_CS_DOMAIN_VRAM)
+      return RADEON_DOMAIN_VRAM;
+   if (ws->cs_domain_mode == RADV_AMDGPU_CS_DOMAIN_GTT)
+      return RADEON_DOMAIN_GTT;
+
    bool enough_vram = ws->info.all_vram_visible || p_atomic_read_relaxed(&ws->alloc_tracker->allocated_vram_vis) * 2 <=
                                                       (uint64_t)ws->info.vram_vis_size_kb * 1024;
 
@@ -212,9 +221,7 @@ radv_amdgpu_cs_domain(const struct radeon_winsys *_ws)
    const uint32_t bandwidth_mbps_threshold = 8 * 0.985 * 1024;
    bool enough_bandwidth = ws->info.pcie_bandwidth_mbps >= bandwidth_mbps_threshold;
 
-   bool use_sam =
-      (enough_vram && enough_bandwidth && ws->info.has_dedicated_vram && !(ws->perftest & RADV_PERFTEST_NO_SAM)) ||
-      (ws->perftest & RADV_PERFTEST_SAM);
+   bool use_sam = enough_vram && enough_bandwidth && ws->info.has_dedicated_vram;
    return use_sam ? RADEON_DOMAIN_VRAM : RADEON_DOMAIN_GTT;
 }
 
@@ -227,7 +234,7 @@ radv_amdgpu_cs_bo_create(struct radv_amdgpu_cs *cs, uint32_t ib_size)
    const bool can_always_use_ib2 = cs->ws->info.gfx_level >= GFX8 && cs->hw_ip == AMD_IP_GFX;
    const bool avoid_vram = cs->is_secondary && !can_always_use_ib2;
    const enum radeon_bo_domain domain = avoid_vram ? RADEON_DOMAIN_GTT : radv_amdgpu_cs_domain(ws);
-   const enum radeon_bo_flag gtt_wc_flag = avoid_vram ? 0 : RADEON_FLAG_GTT_WC;
+   const enum radeon_bo_flag gtt_wc_flag = domain == RADEON_DOMAIN_GTT ? 0 : RADEON_FLAG_GTT_WC;
    /* Bypass GL2 because command buffers are read only once and it's better for latency. */
    const enum radeon_bo_flag flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING |
                                      RADEON_FLAG_READ_ONLY | RADEON_FLAG_GL2_BYPASS | gtt_wc_flag;
@@ -259,6 +266,7 @@ radv_amdgpu_cs_get_new_ib(struct ac_cmdbuf *_cs, uint32_t ib_size)
    cs->base.max_dw = ib_size / 4 - 4;
    cs->ib.size = 0;
    cs->ib.ip_type = cs->hw_ip;
+   cs->last_cp_dma_header = NULL;
 
    if (cs->chain_ib)
       cs->ib_size_ptr = &cs->ib.size;
@@ -445,6 +453,23 @@ radv_amdgpu_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->base.max_dw = ib_size / 4 - 4;
+   cs->last_cp_dma_header = NULL;
+}
+
+static void
+radv_amdgpu_cs_set_last_cp_dma_header(struct ac_cmdbuf *_cs, uint32_t *ib_ptr)
+{
+   struct radv_amdgpu_cs *cs = radv_amdgpu_cs(_cs);
+
+   cs->last_cp_dma_header = ib_ptr;
+}
+
+static uint32_t *
+radv_amdgpu_cs_get_last_cp_dma_header(struct ac_cmdbuf *_cs)
+{
+   struct radv_amdgpu_cs *cs = radv_amdgpu_cs(_cs);
+
+   return cs->last_cp_dma_header;
 }
 
 static void
@@ -516,6 +541,7 @@ radv_amdgpu_cs_reset(struct ac_cmdbuf *_cs)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->status = VK_SUCCESS;
+   cs->last_cp_dma_header = NULL;
 
    for (unsigned i = 0; i < cs->num_buffers; ++i) {
       unsigned hash = cs->handles[i].bo_handle & (ARRAY_SIZE(cs->buffer_hash_table) - 1);
@@ -788,10 +814,12 @@ radv_amdgpu_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       uint64_t *ib_va_ptr = (uint64_t *)(cs->base.buf + cs->base.cdw - 3);
       uint32_t *ib_size_ptr = cs->base.buf + cs->base.cdw - 1;
 
-      /* Writeback L2 because CP isn't coherent with L2 on GFX6-8. */
+      /* L2 should typically already be invalidated here, but GFX8 seems to need another L2
+       * invalidation after the above WRITE_DATA packet.
+       */
       if (cs->ws->info.gfx_level == GFX8) {
          ac_emit_cp_acquire_mem(&cs->base, GFX8, AMD_IP_COMPUTE, V_581A_MICRO_ENGINE,
-                                S_0301F0_TC_WB_ACTION_ENA(1) | S_0301F0_TC_NC_ACTION_ENA(1));
+                                S_0301F0_TC_WB_ACTION_ENA(1) | S_0301F0_TC_NC_ACTION_ENA(1), NULL, NULL);
       }
 
       /* Finalize the current CS. */
@@ -830,6 +858,7 @@ radv_amdgpu_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       cs->base.cdw = 0;
       cs->base.reserved_dw = 0;
       cs->base.max_dw = ib_size / 4 - 4;
+      cs->last_cp_dma_header = NULL;
    }
 }
 
@@ -1144,14 +1173,10 @@ radv_amdgpu_winsys_cs_submit_internal(struct radv_amdgpu_ctx *ctx, int queue_idx
          goto fail;
    }
 
-   free(request.handles);
-
-   if (result != VK_SUCCESS)
-      goto fail;
-
    radv_assign_last_submit(ctx, &request);
 
 fail:
+   free(handles);
    u_rwlock_rdunlock(&ws->global_bo_list.lock);
    STACK_ARRAY_FINISH(ibs);
    return result;
@@ -1377,6 +1402,9 @@ radv_amdgpu_winsys_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *i
    }
    u_rwlock_rdunlock(&cs->ws->global_bo_list.lock);
 
+   if (cs->chained_to)
+      radv_amdgpu_winsys_get_cpu_addr(cs->chained_to, addr, info);
+
    return;
 }
 
@@ -1421,6 +1449,7 @@ radv_amdgpu_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_i
             .trace_id_count = trace_id_count,
             .gfx_level = ws->info.gfx_level,
             .vcn_version = ws->info.vcn_ip_version,
+            .sdma_version = ws->info.sdma_ip_version,
             .family = ws->info.family,
             .ip_type = cs->hw_ip,
             .addr_callback = radv_amdgpu_winsys_get_cpu_addr,
@@ -1464,6 +1493,7 @@ radv_amdgpu_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_i
                .trace_id_count = trace_id_count,
                .gfx_level = ws->info.gfx_level,
                .vcn_version = ws->info.vcn_ip_version,
+               .sdma_version = ws->info.sdma_ip_version,
                .family = ws->info.family,
                .ip_type = cs->hw_ip,
                .addr_callback = radv_amdgpu_winsys_get_cpu_addr,
@@ -1618,28 +1648,28 @@ radv_to_amdgpu_pstate(enum radeon_ctx_pstate radv_pstate)
 }
 
 static int
-radv_amdgpu_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, enum radeon_ctx_pstate pstate)
+radv_amdgpu_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, enum radeon_ctx_pstate pstate, uint64_t timeout)
 {
    struct radv_amdgpu_ctx *ctx = (struct radv_amdgpu_ctx *)rwctx;
    uint32_t new_pstate = radv_to_amdgpu_pstate(pstate);
-   uint32_t current_pstate = 0;
    int r;
 
-   r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_GET_STABLE_PSTATE, 0, &current_pstate);
-   if (r) {
-      fprintf(stderr, "radv/amdgpu: failed to get current pstate\n");
-      return r;
-   }
-
-   /* Do not try to set a new pstate when the current one is already what we want. Otherwise, the
-    * kernel might return -EBUSY if we have multiple AMDGPU contexts in flight.
+   /* The kernel might return -EBUSY with many parallel processes because pstate is per-device, and
+    * not per-context. This happens frequently with dEQP using performance query.
     */
-   if (current_pstate == new_pstate)
-      return 0;
+   const uint64_t abs_timeout_ns = os_time_get_absolute_timeout(timeout);
 
-   r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_SET_STABLE_PSTATE, new_pstate, NULL);
+   r = 0;
+   do {
+      /* Wait 1 ms and try again. */
+      if (r == -EBUSY)
+         os_time_sleep(1000);
+
+      r = ac_drm_cs_ctx_stable_pstate(ctx->ws->dev, ctx->ctx_handle, AMDGPU_CTX_OP_SET_STABLE_PSTATE, new_pstate, NULL);
+   } while (r == -EBUSY && os_time_get_nano() < abs_timeout_ns);
+
    if (r) {
-      fprintf(stderr, "radv/amdgpu: failed to set new pstate\n");
+      fprintf(stderr, "radv/amdgpu: failed to set new pstate. (%i)\n", r);
       return r;
    }
 
@@ -1890,6 +1920,8 @@ radv_amdgpu_cs_init_functions(struct radv_amdgpu_winsys *ws)
    ws->base.cs_create = radv_amdgpu_cs_create;
    ws->base.cs_destroy = radv_amdgpu_cs_destroy;
    ws->base.cs_grow = radv_amdgpu_cs_grow;
+   ws->base.cs_set_last_cp_dma_header = radv_amdgpu_cs_set_last_cp_dma_header;
+   ws->base.cs_get_last_cp_dma_header = radv_amdgpu_cs_get_last_cp_dma_header;
    ws->base.cs_finalize = radv_amdgpu_cs_finalize;
    ws->base.cs_reset = radv_amdgpu_cs_reset;
    ws->base.cs_chain = radv_amdgpu_cs_chain;

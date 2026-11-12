@@ -86,16 +86,28 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
       (device->info->verx10 <= 120 &&
        (usage & VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT));
 
+   /* Bspec 56933 and HSD 14028776404 recommend disabling compression on ray
+    * tracing buffers for better performance. Disable compression if a buffer
+    * will only be used for that purpose.
+    */
+   bool prefer_uncompressed_buffer = (usage & ~(
+      VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR |
+      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+      VK_BUFFER_USAGE_2_MICROMAP_STORAGE_BIT_EXT |
+      VK_BUFFER_USAGE_2_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT
+      )) == 0;
+
    uint32_t memory_types;
    if (flags & VK_BUFFER_CREATE_PROTECTED_BIT)
       memory_types = device->physical->memory.protected_mem_types;
    else if (need_dynamic_visible_buffer)
       memory_types = device->physical->memory.dynamic_visible_mem_types;
-   else if (device->physical->instance->drirc.debug.enable_buffer_comp)
+   else if (prefer_uncompressed_buffer)
+      memory_types = device->physical->memory.default_buffer_mem_types;
+   else
       memory_types = device->physical->memory.default_buffer_mem_types |
                      device->physical->memory.compressed_mem_types;
-   else
-      memory_types = device->physical->memory.default_buffer_mem_types;
 
    /* The GPU appears to write back to main memory in cachelines. Writes to a
     * buffers should not clobber with writes to another buffers so make sure
@@ -130,17 +142,17 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits = memory_types;
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *requirements = (void *)ext;
+         VkMemoryDedicatedRequirements *requirements = ext;
          requirements->prefersDedicatedAllocation = false;
          requirements->requiresDedicatedAllocation = false;
          break;
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -218,7 +230,7 @@ VkResult anv_CreateBuffer(
       uint64_t client_address = 0;
 
       if (buffer->vk.create_flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) {
-         alloc_flags = ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
+         alloc_flags = ANV_BO_ALLOC_CAPTURE_REPLAY;
          const VkBufferOpaqueCaptureAddressCreateInfo *opaque_addr_info =
             vk_find_struct_const(pCreateInfo->pNext,
                                  BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO);
@@ -227,7 +239,7 @@ VkResult anv_CreateBuffer(
       }
 
       if (buffer->vk.create_flags & VK_BUFFER_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
-         alloc_flags = ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
+         alloc_flags = ANV_BO_ALLOC_CAPTURE_REPLAY;
 
          const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_info =
             vk_find_struct_const(pCreateInfo->pNext,
@@ -242,7 +254,7 @@ VkResult anv_CreateBuffer(
       if (buffer->vk.usage & (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
                               VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
                               VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT)) {
-         alloc_flags |= ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL;
+         alloc_flags |= device->physical->uses_efficient_64bit ? ANV_BO_ALLOC_DESCRIPTOR_POOL : ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL;
       }
 
       VkResult result = anv_init_sparse_bindings(device, buffer->vk.size,
@@ -313,7 +325,10 @@ uint64_t anv_GetBufferOpaqueCaptureAddress(
 {
    ANV_FROM_HANDLE(anv_buffer, buffer, pInfo->buffer);
 
-   return anv_address_physical(buffer->address);
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      return anv_address_physical(buffer->address);
+   else
+      return 0;
 }
 
 VkResult anv_GetBufferOpaqueCaptureDescriptorDataEXT(
@@ -323,7 +338,11 @@ VkResult anv_GetBufferOpaqueCaptureDescriptorDataEXT(
 {
    ANV_FROM_HANDLE(anv_buffer, buffer, pInfo->buffer);
 
-   *((uint64_t *)pData) = anv_address_physical(buffer->address);
+   uint64_t address = anv_address_physical(buffer->address);
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      memcpy(pData, &address, sizeof(address));
+   else
+      memset(pData, 0, sizeof(address));
 
    return VK_SUCCESS;
 }
@@ -333,8 +352,6 @@ uint64_t anv_GetDeviceMemoryOpaqueCaptureAddress(
     const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo)
 {
    ANV_FROM_HANDLE(anv_device_memory, memory, pInfo->memory);
-
-   assert(memory->bo->alloc_flags & ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS);
 
    return intel_48b_address(memory->bo->offset);
 }

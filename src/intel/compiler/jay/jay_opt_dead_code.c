@@ -19,17 +19,25 @@ pass(jay_function *f)
 
       jay_foreach_block_rev(f, block) {
          jay_foreach_inst_in_block_safe_rev(block, I) {
+            bool keep = jay_opcode_infos[I->op].side_effects;
             unsigned dst = jay_base_index(I->dst);
             if (!BITSET_TEST_COUNT(live_set, dst, jay_num_values(I->dst)) &&
                 I->op != JAY_OPCODE_SEND) {
 
-               if (I->predication == JAY_PREDICATED_DEFAULT &&
-                   !jay_is_null(I->dst)) {
-                  jay_shrink_sources(I, I->num_srcs - 1);
-                  I->predication = JAY_PREDICATED;
-               }
+               /* Instructions like "mov.f32.ne.f0.0 _, r0.f64" are invalid due
+                * to stride restrictions, so leave the strided destination in
+                * this case. This could be relaxed.
+                */
+               if (I->type == jay_src_type(I, 0)) {
+                  if (I->predication == 2 && !jay_is_null(I->dst)) {
+                     jay_shrink_sources(I, I->num_srcs - 1);
+                     I->predication = 1;
+                  }
 
-               I->dst = jay_null();
+                  I->dst = jay_null();
+               }
+            } else {
+               keep = true;
             }
 
             if (!jay_is_null(I->cond_flag) &&
@@ -38,13 +46,13 @@ pass(jay_function *f)
                 I->op != JAY_OPCODE_SEND) {
 
                I->cond_flag = jay_null();
-               I->conditional_mod = 0;
+               I->conditional_mod = GEN_CONDITION_NONE;
+               I->zero_inactive = false;
+            } else if (!jay_is_null(I->cond_flag)) {
+               keep = true;
             }
 
-            bool no_dest = jay_is_null(I->dst) && jay_is_null(I->cond_flag);
-            bool side_effects = jay_opcode_infos[I->op].side_effects;
-
-            if (no_dest && !side_effects) {
+            if (!keep) {
                jay_remove_instruction(I);
                dead_phis |= (I->op == JAY_OPCODE_PHI_DST);
             } else {

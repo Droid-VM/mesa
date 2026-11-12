@@ -21,8 +21,52 @@ struct fdl_lrz_layout {
    uint32_t lrz_buffer_size;
    uint32_t lrz_fc_offset;
    uint32_t lrz_fc_size;
+   /* What the fast-clear buffer would need to cover the whole LRZ image. When
+    * this exceeds the flag RAM, lrz_fc_size is the covered prefix and the
+    * blocks past it have to be cleared by other means.
+    */
+   uint32_t lrz_fc_full_size;
+   /* Per-layer fast-clear pitch. Needed to work out which LRZ tiles a
+    * partially-covering flag RAM leaves behind.
+    */
+   uint32_t lrz_fc_layer_pitch;
+   /* Per-slice fast-clear pitch (gen8+). */
+   uint32_t lrz_fc_slice_pitch;
    uint32_t lrz_total_size;
 };
+
+/* Offset of the first value in the LRZ buffer that the fast-clear buffer does
+ * not cover, or lrz_layer_size if fully covered.
+ *
+ * The flag buffer is addressed as a flat byte range and the hardware only reads
+ * the first lrz_fc_size bytes of it, with each layer's bits starting at a
+ * 64-byte aligned pitch. One fast-clear block covers 64 LRZ tiles (or 128
+ * bytes in the LRZ image).
+ */
+static inline uint32_t
+fdl6_lrz_fc_first_uncovered_offset(const struct fdl_lrz_layout *lrz, uint32_t layer)
+{
+   uint32_t layer_start = layer * lrz->lrz_fc_layer_pitch;
+
+   if (layer_start >= lrz->lrz_fc_size)
+      return 0; /* nothing of this layer is covered */
+
+   uint32_t covered_bytes = lrz->lrz_fc_size - layer_start;
+
+   /* On A8XX each LRZ slice has its own flags buffer, starting at
+    * lrz_fc_slice_pitch within the layer, the hardware only fast-clears (and
+    * checks) the slices whose flags fit in the flag RAM completely; a slice that
+    * would only partly fit doesn't use the flags. So the covered part of a layer
+    * ends on a slice boundary.
+    */
+   if (lrz->lrz_fc_slice_pitch) {
+      uint32_t covered_slices = covered_bytes / lrz->lrz_fc_slice_pitch;
+      return MIN2(covered_slices * lrz->lrz_slice_pitch, lrz->lrz_layer_size);
+   }
+
+   return MIN2(covered_bytes * 8 /* bits/byte */ *
+      128 /* bytes/fast clear block */, lrz->lrz_layer_size);
+}
 
 void
 fdl5_lrz_layout_init(struct fdl_lrz_layout *lrz_layout, uint32_t width,
@@ -52,65 +96,67 @@ fdl6_lrz_get_super_sampled_size(uint32_t *width, uint32_t *height,
 }
 
 template <chip CHIP>
-static uint32_t
-fdl6_lrz_get_fc_size(uint32_t width, uint32_t height, uint32_t nr_samples,
-                     uint32_t array_layers)
+static inline uint32_t
+fdl6_lrz_get_fc_slice_pitch(uint32_t lrz_slice_pitch)
 {
-   fdl6_lrz_get_super_sampled_size(&width, &height, nr_samples);
+   if constexpr (CHIP >= A8XX)
+      /* 2 fast-clear bits per 8x16-tile LRZ block (256 bytes). */
+      return align(lrz_slice_pitch * 2 / 256, 256) / 8;
+   else
+      return 0;
+}
 
-   unsigned nblocksx = DIV_ROUND_UP(DIV_ROUND_UP(width, 8), 16);
-   unsigned nblocksy = DIV_ROUND_UP(DIV_ROUND_UP(height, 8), 4);
-
-   uint32_t lrz_fc_size =
-      DIV_ROUND_UP(nblocksx * nblocksy, 8) * array_layers;
-
-   /* Fast-clear buffer cannot be larger than 512 bytes on A6XX and 1024 bytes
-    * on A7XX (HW limitation)
-    */
-   if (lrz_fc_size > fd_lrzfc_layout<CHIP>::FC_SIZE) {
-      lrz_fc_size = 0;
+template <chip CHIP>
+static inline uint32_t
+fdl6_lrz_get_fc_layer_pitch(uint32_t lrz_layer_size, uint32_t lrz_slice_pitch,
+                            uint32_t num_slices)
+{
+   if constexpr (CHIP >= A8XX) {
+      /* Each slice padded to 256 bits, the layer to 64 bytes. */
+      return align(fdl6_lrz_get_fc_slice_pitch<CHIP>(lrz_slice_pitch) *
+                   num_slices, 64);
+   } else {
+      return align(lrz_layer_size >> 7, 512) / 8;
    }
+}
+
+/* Size the fast-clear buffer would need to cover the whole LRZ image, before
+ * the flag-RAM limit is applied.
+ */
+template <chip CHIP>
+static inline uint32_t
+fdl6_lrz_get_full_fc_size(uint32_t lrz_layer_size, uint32_t lrz_slice_pitch,
+                          uint32_t num_slices, uint32_t array_layers)
+{
+   return fdl6_lrz_get_fc_layer_pitch<CHIP>(lrz_layer_size, lrz_slice_pitch,
+                                            num_slices) * array_layers;
+}
+
+template <chip CHIP>
+static inline uint32_t
+fdl6_lrz_get_fc_size(uint32_t lrz_layer_size, uint32_t lrz_slice_pitch,
+                     uint32_t num_slices, uint32_t array_layers)
+{
+   uint32_t lrz_fc_size =
+      fdl6_lrz_get_full_fc_size<CHIP>(lrz_layer_size, lrz_slice_pitch,
+                                      num_slices, array_layers);
+
+   /* The flag RAM holds at most 512 bytes on A6XX, 1024 on A7XX and 2048 on
+    * A8XX. Past that only a prefix of the LRZ image can be fast-cleared; the
+    * caller clears the rest (see fdl6_lrz_fc_first_uncovered_offset).
+    */
+   lrz_fc_size = MIN2(lrz_fc_size, (uint32_t) fd_lrzfc_layout<CHIP>::FC_SIZE);
 
    return lrz_fc_size;
 }
 
-struct fdl_lrz_fdm_extra_size {
-   uint32_t extra_width;
-   uint32_t extra_height;
-};
-
-/* Get maximum size of the extra tile for VK_QCOM_fragment_density_map_offset,
- * that keeps LRZ fast-clear enabled, if possible.
+/* Whether the flag RAM covers the whole LRZ image, i.e. no remainder has to be
+ * cleared separately.
  */
-template <chip CHIP>
-static struct fdl_lrz_fdm_extra_size
-fdl6_lrz_get_max_fdm_extra_size(const struct fd_dev_info *dev_info,
-                                uint32_t width, uint32_t height,
-                                uint32_t nr_samples, uint32_t array_layers)
+static inline bool
+fdl6_lrz_fc_fully_covered(const struct fdl_lrz_layout *lrz_layout)
 {
-   constexpr uint32_t MIN_TILE_SIZE_FOR_FDM_OFFSET = 192;
-
-   if (fdl6_lrz_get_fc_size<CHIP>(width, height, nr_samples, array_layers) == 0) {
-      return {dev_info->tile_max_w, dev_info->tile_max_h};
-   }
-
-   uint32_t max_extra_size = MIN2(dev_info->tile_max_w, dev_info->tile_max_h);
-   uint32_t step = MIN2(dev_info->gmem_align_w, dev_info->gmem_align_h);
-   uint32_t min_extra_size = MAX2(step, MIN_TILE_SIZE_FOR_FDM_OFFSET);
-
-   while (max_extra_size > min_extra_size) {
-      if (fdl6_lrz_get_fc_size<CHIP>(width + max_extra_size,
-                                     height + max_extra_size, nr_samples,
-                                     array_layers) != 0) {
-
-         return {util_round_down_npot(max_extra_size, dev_info->gmem_align_w),
-                 util_round_down_npot(max_extra_size, dev_info->gmem_align_h)};
-      }
-
-      max_extra_size -= step;
-   }
-
-   return {dev_info->tile_max_w, dev_info->tile_max_h};
+   return lrz_layout->lrz_fc_size >= lrz_layout->lrz_fc_full_size;
 }
 
 template <chip CHIP>
@@ -162,7 +208,7 @@ fdl6_lrz_layout_init(struct fdl_lrz_layout *lrz_layout,
          DIV_ROUND_UP(layout->height0 + extra_height, lrz_block->height);
 
       lrz_layout->lrz_pitch =
-         align(surface_width_in_blocks * per_slice_block_width_in_tiles, 64);
+         align(surface_width_in_blocks * per_slice_block_width_in_tiles, 32);
 
       /* Construct a "fake" height to use for fallback lrz clear on
        * the blitter.  Since we use lrz_pitch as the width, this is
@@ -192,8 +238,16 @@ fdl6_lrz_layout_init(struct fdl_lrz_layout *lrz_layout,
 
    /* Fast-clear buffer is 1bit/block */
    lrz_layout->lrz_fc_size = fdl6_lrz_get_fc_size<CHIP>(
-      layout->width0 + extra_width, layout->height0 + extra_height,
-      layout->nr_samples, array_layers);
+      lrz_layout->lrz_layer_size, lrz_layout->lrz_slice_pitch,
+      dev_info->num_slices, array_layers);
+   lrz_layout->lrz_fc_full_size = fdl6_lrz_get_full_fc_size<CHIP>(
+      lrz_layout->lrz_layer_size, lrz_layout->lrz_slice_pitch,
+      dev_info->num_slices, array_layers);
+   lrz_layout->lrz_fc_layer_pitch = fdl6_lrz_get_fc_layer_pitch<CHIP>(
+      lrz_layout->lrz_layer_size, lrz_layout->lrz_slice_pitch,
+      dev_info->num_slices);
+   lrz_layout->lrz_fc_slice_pitch =
+      fdl6_lrz_get_fc_slice_pitch<CHIP>(lrz_layout->lrz_slice_pitch);
 
    if (!dev_info->props.enable_lrz_fast_clear) {
       lrz_layout->lrz_fc_size = 0;
@@ -218,6 +272,52 @@ fdl6_lrz_layout_init(struct fdl_lrz_layout *lrz_layout,
       lrz_layout->lrz_height = 0;
       lrz_layout->lrz_total_size = 0;
    }
+}
+
+struct fdl_lrz_fdm_extra_size {
+   uint32_t extra_width;
+   uint32_t extra_height;
+};
+
+/* Get maximum size of the extra tile for VK_QCOM_fragment_density_map_offset,
+ * that keeps LRZ fast-clear enabled, if possible.
+ */
+template <chip CHIP>
+static struct fdl_lrz_fdm_extra_size
+fdl6_lrz_get_max_fdm_extra_size(const struct fd_dev_info *dev_info,
+                                uint32_t width, uint32_t height,
+                                uint32_t nr_samples, uint32_t array_layers)
+{
+   constexpr uint32_t MIN_TILE_SIZE_FOR_FDM_OFFSET = 192;
+
+   struct fdl_layout layout = {
+      .width0 = width,
+      .height0 = height,
+      .nr_samples = nr_samples,
+   };
+   struct fdl_lrz_layout lrz_layout;
+   fdl6_lrz_layout_init<CHIP>(&lrz_layout, &layout, 0, 0, dev_info, 0,
+                              array_layers);
+   if (!fdl6_lrz_fc_fully_covered(&lrz_layout)) {
+      return {dev_info->tile_max_w, dev_info->tile_max_h};
+   }
+
+   uint32_t max_extra_size = MIN2(dev_info->tile_max_w, dev_info->tile_max_h);
+   uint32_t step = MIN2(dev_info->gmem_align_w, dev_info->gmem_align_h);
+   uint32_t min_extra_size = MAX2(step, MIN_TILE_SIZE_FOR_FDM_OFFSET);
+
+   while (max_extra_size > min_extra_size) {
+      fdl6_lrz_layout_init<CHIP>(&lrz_layout, &layout, max_extra_size,
+                                 max_extra_size, dev_info, 0, array_layers);
+      if (fdl6_lrz_fc_fully_covered(&lrz_layout)) {
+         return {util_round_down_npot(max_extra_size, dev_info->gmem_align_w),
+                 util_round_down_npot(max_extra_size, dev_info->gmem_align_h)};
+      }
+
+      max_extra_size -= step;
+   }
+
+   return {dev_info->tile_max_w, dev_info->tile_max_h};
 }
 #endif
 

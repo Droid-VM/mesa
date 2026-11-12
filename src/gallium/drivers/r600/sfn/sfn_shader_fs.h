@@ -19,8 +19,6 @@ public:
 
    bool process_stage_intrinsic(nir_intrinsic_instr *intr) override;
 
-   unsigned image_size_const_offset() override { return m_image_size_const_offset;}
-
 protected:
    static const int s_max_interpolators = 6;
    bool interpolators_used(int i) const { return m_interpolators_used.test(i); }
@@ -38,6 +36,9 @@ private:
 
    void do_get_shader_info(r600_shader *sh_info) override;
 
+   inline unsigned check_input_bary_overlap(const unsigned driver_location,
+                                            const r600_interp_location interp_loc,
+                                            const unsigned new_location);
    bool scan_input(nir_intrinsic_instr *instr, int index_src_id);
 
    bool emit_export_pixel(nir_intrinsic_instr& intr);
@@ -69,10 +70,6 @@ private:
    Register *m_helper_invocation{nullptr};
    int m_nsys_inputs{0};
    bool m_apply_sample_mask{false};
-   int m_rat_base{0};
-   int m_pos_driver_loc{0};
-   int m_face_driver_loc{0};
-   int m_image_size_const_offset{0};
 };
 
 class FragmentShaderR600 : public FragmentShader {

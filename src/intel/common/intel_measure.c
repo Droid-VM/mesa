@@ -220,7 +220,7 @@ intel_measure_init(struct intel_measure_device *device)
    device->frame = 0;
    device->render_pass_count = 0;
    device->release_batch = NULL;
-   pthread_mutex_init(&device->mutex, NULL);
+   simple_mtx_init(&device->mutex, mtx_plain);
    list_inithead(&device->queued_snapshots);
 
    if (env)
@@ -238,7 +238,8 @@ intel_measure_snapshot_string(enum intel_measure_snapshot_type type)
       [INTEL_SNAPSHOT_CCS_PARTIAL_RESOLVE] = "ccs partial resolve",
       [INTEL_SNAPSHOT_CCS_RESOLVE]         = "ccs resolve",
       [INTEL_SNAPSHOT_COMPUTE]             = "compute",
-      [INTEL_SNAPSHOT_COPY]                = "copy",
+      [INTEL_SNAPSHOT_BLIT_COPY]           = "blit copy",
+      [INTEL_SNAPSHOT_MEM_COPY]            = "mem copy",
       [INTEL_SNAPSHOT_DRAW]                = "draw",
       [INTEL_SNAPSHOT_FAST_STENCIL_CLEAR]  = "fast stencil clear",
       [INTEL_SNAPSHOT_HIZ_AMBIGUATE]       = "hiz ambiguate",
@@ -661,6 +662,9 @@ static void
 intel_measure_print(struct intel_measure_device *device,
                     const struct intel_device_info *info)
 {
+   if (!config.cpu_measure && ringbuffer_size(device->ringbuffer) == 0)
+      return;
+
    if (unlikely(config.deferred_create_filename)) {
       config.file = fopen(config.deferred_create_filename, "w");
       if (!config.file) {
@@ -698,7 +702,7 @@ void
 intel_measure_gather(struct intel_measure_device *measure_device,
                      const struct intel_device_info *info)
 {
-   pthread_mutex_lock(&measure_device->mutex);
+   simple_mtx_lock(&measure_device->mutex);
 
    /* Iterate snapshots and collect if ready.  Each snapshot queue will be
     * in-order, but we must determine which queue has the oldest batch.
@@ -728,5 +732,5 @@ intel_measure_gather(struct intel_measure_device *measure_device,
    }
 
    intel_measure_print(measure_device, info);
-   pthread_mutex_unlock(&measure_device->mutex);
+   simple_mtx_unlock(&measure_device->mutex);
 }

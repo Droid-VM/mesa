@@ -127,6 +127,10 @@ print_check_help(FILE *fp)
            "(_verbose.txt, _translated.txt).  Mismatches are printed to stdout; the\n"
            "exit status is non-zero if any case fails.\n"
            "\n"
+           "Bytes may be 8 (compact) or 16 (uncompact), excluding padding.\n"
+           "The {Compacted} option requires compaction when encoding.  Use separate\n"
+           "'<' and '>' cases when pre-compaction changes the decoded assembly.\n"
+           "\n"
            "Example:\n"
            "  gentool check-roundtrip tests/basic.txt tests/basic_verbose.txt\n");
 }
@@ -512,10 +516,10 @@ build_send_desc_diagram(const intel_device_info *devinfo,
    return true;
 }
 
-
 static int
 send_dst_len(const gen_inst *inst)
 {
+   assert(inst->opcode != GEN_OP_SENDG && inst->opcode != GEN_OP_SENDGC);
    if (inst->send.desc_is_reg)
       return -1;
    return (inst->send.desc_imm >> 20) & 0x1F;
@@ -1174,6 +1178,9 @@ cmd_region(int argc, char **argv)
  * The disassembly print mode is chosen by the file name suffix: "_verbose.txt"
  * prints in verbose mode, "_translated.txt" prints SENDs as their translated
  * LSC opcode, any other name uses the default mode.
+ *
+ * Bytes may be 8 (compact) or 16 (uncompact), excluding padding.  The Compacted
+ * option requires successful compaction when encoding.
  */
 
 static std::string_view
@@ -1240,8 +1247,8 @@ rt_parse_hex_bytes(std::string_view field, const char *path, unsigned lineno)
    if (hi >= 0)
       failf("%s:%u: odd number of hex digits", path, lineno);
 
-   if (bytes.size() != 16)
-      failf("%s:%u: byte count must be 16, got %zu",
+   if (bytes.size() != 8 && bytes.size() != 16)
+      failf("%s:%u: byte count must be 8 or 16, got %zu",
             path, lineno, bytes.size());
 
    return bytes;
@@ -1341,12 +1348,25 @@ rt_assemble(const intel_device_info *devinfo, std::string_view text)
    parse.devinfo = devinfo;
    parse.text = text.data();
    parse.text_size = (int)text.size();
+   parse.collect_compacted = true;
    parse.mem_ctx = mem_ctx;
 
    std::vector<uint8_t> bytes;
    if (!gen_parse(&parse) || parse.num_insts == 0) {
       ralloc_free(mem_ctx);
-      return bytes;
+      return {};
+   }
+   const bool compact = parse.compacted[0];
+
+   /* Compaction needs real targets to be in the program, but here we are
+    * checking a standalone instruction.  For now, don't handle Compacted jump
+    * instructions.
+    */
+   if (compact &&
+       (gen_has_jip(parse.insts[0].opcode) ||
+        gen_has_uip(parse.insts[0].opcode))) {
+      ralloc_free(mem_ctx);
+      return {};
    }
 
    const int raw_bytes_size = parse.num_insts * (int)sizeof(gen_raw_inst);
@@ -1355,13 +1375,23 @@ rt_assemble(const intel_device_info *devinfo, std::string_view text)
    encode.devinfo = devinfo;
    encode.insts = parse.insts;
    encode.num_insts = parse.num_insts;
+   encode.compact_all = compact;
    encode.mem_ctx = mem_ctx;
    encode.raw_bytes = rzalloc_size(mem_ctx, raw_bytes_size);
    encode.raw_bytes_size = raw_bytes_size;
 
    if (gen_encode(&encode)) {
       const uint8_t *raw = (const uint8_t *)encode.raw_bytes;
-      bytes.assign(raw, raw + encode.raw_bytes_size);
+      int size = encode.raw_bytes_size;
+      if (compact) {
+         if (!gen_raw_is_compact(raw)) {
+            ralloc_free(mem_ctx);
+            return {};
+         }
+         /* Exclude the encoder's alignment padding. */
+         size = sizeof(gen_raw_compact_inst);
+      }
+      bytes.assign(raw, raw + size);
    }
 
    ralloc_free(mem_ctx);

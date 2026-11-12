@@ -3550,7 +3550,8 @@ draw_tes_llvm_fetch_patch_input(const struct lp_build_tes_iface *tes_iface,
 
 static void
 draw_tes_llvm_generate(struct draw_llvm *llvm,
-                       struct draw_tes_llvm_variant *variant)
+                       struct draw_tes_llvm_variant *variant,
+                       enum mesa_prim prim_mode)
 {
    struct gallivm_state *gallivm = variant->gallivm;
    LLVMContextRef context = gallivm->context;
@@ -3718,7 +3719,7 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
             LLVMValueRef idx = LLVMBuildAdd(builder, lp_loop.counter, lp_build_const_int32(gallivm, j), "");
             LLVMValueRef tc_val;
             if (i == 2) {
-               if (variant->shader->base.prim_mode == MESA_PRIM_TRIANGLES) {
+               if (prim_mode == MESA_PRIM_TRIANGLES) {
                   tc_val = lp_build_const_float(gallivm, 1.0);
                   tc_val = LLVMBuildFSub(builder, tc_val, lp_build_pointer_get2(builder, flt_type, tess_coord[0], idx), "");
                   tc_val = LLVMBuildFSub(builder, tc_val, lp_build_pointer_get2(builder, flt_type, tess_coord[1], idx), "");
@@ -3781,11 +3782,15 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
                              const struct draw_tes_llvm_variant_key *key)
 {
    struct draw_tes_llvm_variant *variant;
+   struct llvm_tess_ctrl_shader *tcs = llvm_tess_ctrl_shader(llvm->draw->tcs.tess_ctrl_shader);
    struct llvm_tess_eval_shader *shader = llvm_tess_eval_shader(llvm->draw->tes.tess_eval_shader);
    char module_name[64];
    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
    struct lp_cached_code cached = { 0 };
    bool needs_caching = false;
+   enum mesa_prim prim_mode = shader->base.tess_info.prim_mode;
+   if (tcs)
+      prim_mode |= tcs->base.tess_info.prim_mode;
 
    variant = MALLOC(sizeof *variant +
                     shader->variant_key_size - sizeof variant->key);
@@ -3823,7 +3828,7 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
       draw_tes_llvm_dump_variant_key(&variant->key);
    }
 
-   draw_tes_llvm_generate(llvm, variant);
+   draw_tes_llvm_generate(llvm, variant, prim_mode);
 
    gallivm_compile_module(variant->gallivm);
 

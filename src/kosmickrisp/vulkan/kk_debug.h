@@ -23,9 +23,9 @@ enum kk_experimental {
    KK_EXPERIMENTAL_CUSTOM_BORDER = 1ull << 0,
    /* Advertise image view min LOD feature */
    KK_EXPERIMENTAL_IMAGE_VIEW_MIN_LOD = 1ull << 1,
-   /* Using allowGPUOptimizedContents on M5 for this format causes
+   /* Using allowGPUOptimizedContents for this format causes
     * vkCmdCopyImage() tests in CTS to fail, but it is otherwise usable */
-   KK_EXPERIMENTAL_M5_OPTIMIZE_E5B9G9R9 = 1ull << 2,
+   KK_EXPERIMENTAL_OPTIMIZE_E5B9G9R9 = 1ull << 2,
 };
 
 extern enum kk_experimental kk_mesa_experimental_flags;

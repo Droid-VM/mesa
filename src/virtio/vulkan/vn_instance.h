@@ -46,6 +46,7 @@ struct vn_instance {
 
    struct {
       struct vn_ring *ring;
+      simple_mtx_t tls_rings_mutex;
       struct list_head tls_rings;
 
       struct vn_watchdog watchdog;

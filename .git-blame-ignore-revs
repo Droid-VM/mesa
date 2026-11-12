@@ -80,3 +80,9 @@ c7bf3b69ebc8f2252dbf724a4de638e6bb2ac402
 
 # radv: re-format using clang-format
 1492de1bc3610539b93d8ad17892e7139cd4b05d
+
+# aco: re-run clang-format
+1221e361d3e4187d30e007e56507a6af7da0baba
+
+# radv: re-run clang-format
+b888682cba909c477f405e377cee881ca68e289d

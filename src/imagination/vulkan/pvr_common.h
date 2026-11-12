@@ -135,7 +135,7 @@ enum pvr_pipeline_stage_bits {
    (PVR_PIPELINE_STAGE_ALL_GRAPHICS_BITS | PVR_PIPELINE_STAGE_COMPUTE_BIT | \
     PVR_PIPELINE_STAGE_TRANSFER_BIT)
 
-#define PVR_NUM_SYNC_PIPELINE_STAGES 4U
+#define PVR_NUM_SYNC_PIPELINE_STAGES 5U
 
 /* Warning: Do not define an invalid stage as 0 since other code relies on 0
  * being the first shader stage. This allows for stages to be split or added
@@ -239,6 +239,8 @@ struct pvr_event {
 struct pvr_descriptor_state {
    struct pvr_descriptor_set *sets[PVR_MAX_DESCRIPTOR_SETS];
    uint32_t dirty_sets;
+   struct pvr_push_descriptor_set *push_set;
+   bool push_set_dirty;
 };
 
 struct pvr_pds_upload {
@@ -254,5 +256,11 @@ struct pvr_pds_upload {
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(pvr_event, base, VkEvent, VK_OBJECT_TYPE_EVENT)
+
+enum pvr_query_pool_index {
+   PVR_QUERY_POOL_INDEX_OCCLUSION,
+   PVR_QUERY_POOL_INDEX_XFB_STREAM_0,
+   PVR_QUERY_POOL_INDEX_COUNT,
+};
 
 #endif /* PVR_COMMON_H */

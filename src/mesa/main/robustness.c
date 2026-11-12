@@ -30,6 +30,7 @@
 #include "dispatch.h" /* for _gloffset_COUNT */
 #include "api_exec_decl.h"
 #include "glthread_marshal.h"
+#include "state_tracker/st_cb_flush.h"
 
 static void GLAPIENTRY
 _context_lost_GetSynciv(GLsync sync, GLenum pname, GLsizei bufSize,
@@ -133,8 +134,7 @@ _mesa_GetGraphicsResetStatusARB( void )
    }
 
    /* Query the reset status of this context from the driver core. */
-   if (ctx->Driver.GetGraphicsResetStatus)
-      status = ctx->Driver.GetGraphicsResetStatus(ctx);
+   status = st_get_graphics_reset_status(ctx);
 
    if (status != GL_NO_ERROR)
       _mesa_set_context_lost_dispatch(ctx);

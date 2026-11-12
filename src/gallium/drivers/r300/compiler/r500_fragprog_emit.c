@@ -72,6 +72,7 @@ translate_rgb_op(struct r300_fragment_program_compiler *c, rc_opcode opcode)
    case RC_OPCODE_CND: return R500_ALU_RGBA_OP_CND;
    case RC_OPCODE_DDX: return R500_ALU_RGBA_OP_MDH;
    case RC_OPCODE_DDY: return R500_ALU_RGBA_OP_MDV;
+   case RC_OPCODE_DP2A: return R500_ALU_RGBA_OP_D2A;
    case RC_OPCODE_DP3: return R500_ALU_RGBA_OP_DP3;
    case RC_OPCODE_DP4: return R500_ALU_RGBA_OP_DP4;
    case RC_OPCODE_FRC: return R500_ALU_RGBA_OP_FRC;
@@ -95,6 +96,7 @@ translate_alpha_op(struct r300_fragment_program_compiler *c, rc_opcode opcode)
    case RC_OPCODE_COS: return R500_ALPHA_OP_COS;
    case RC_OPCODE_DDX: return R500_ALPHA_OP_MDH;
    case RC_OPCODE_DDY: return R500_ALPHA_OP_MDV;
+   case RC_OPCODE_DP2A: return R500_ALPHA_OP_DP;
    case RC_OPCODE_DP3: return R500_ALPHA_OP_DP;
    case RC_OPCODE_DP4: return R500_ALPHA_OP_DP;
    case RC_OPCODE_EX2: return R500_ALPHA_OP_EX2;
@@ -442,8 +444,8 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
       struct branch_info *branch;
       struct r500_loop_info *loop;
    case RC_OPCODE_BGNLOOP:
-      memory_pool_array_reserve(&s->C->Pool, struct r500_loop_info, s->Loops, s->CurrentLoopDepth,
-                                s->LoopsReserved, 1);
+      rc_array_reserve(s->C->Pool, struct r500_loop_info, s->Loops, s->CurrentLoopDepth,
+                       s->LoopsReserved, 1);
 
       loop = &s->Loops[s->CurrentLoopDepth++];
       memset(loop, 0, sizeof(struct r500_loop_info));
@@ -455,7 +457,7 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
       break;
    case RC_OPCODE_BRK:
       loop = &s->Loops[s->CurrentLoopDepth - 1];
-      memory_pool_array_reserve(&s->C->Pool, int, loop->Brks, loop->BrkCount, loop->BrkReserved, 1);
+      rc_array_reserve(s->C->Pool, int, loop->Brks, loop->BrkCount, loop->BrkReserved, 1);
 
       loop->Brks[loop->BrkCount++] = newip;
       s->Code->inst[newip].inst2 =
@@ -465,8 +467,7 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
 
    case RC_OPCODE_CONT:
       loop = &s->Loops[s->CurrentLoopDepth - 1];
-      memory_pool_array_reserve(&s->C->Pool, int, loop->Conts, loop->ContCount, loop->ContReserved,
-                                1);
+      rc_array_reserve(s->C->Pool, int, loop->Conts, loop->ContCount, loop->ContReserved, 1);
       loop->Conts[loop->ContCount++] = newip;
       s->Code->inst[newip].inst2 =
          R500_FC_OP_CONTINUE | R500_FC_JUMP_FUNC(0xff) | R500_FC_B_OP1_DECR |
@@ -501,8 +502,8 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
          rc_error(s->C, "Branch depth exceeds hardware limit");
          return;
       }
-      memory_pool_array_reserve(&s->C->Pool, struct branch_info, s->Branches, s->CurrentBranchDepth,
-                                s->BranchesReserved, 1);
+      rc_array_reserve(s->C->Pool, struct branch_info, s->Branches, s->CurrentBranchDepth,
+                       s->BranchesReserved, 1);
 
       branch = &s->Branches[s->CurrentBranchDepth++];
       branch->If = newip;

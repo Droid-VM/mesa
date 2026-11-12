@@ -41,10 +41,10 @@ DEBUG_GET_ONCE_BOOL_OPTION(all_bos, "RADEON_ALL_BOS", false)
 
 /* Helper function to do the ioctls needed for setup and init. */
 static bool do_winsys_init(struct amdgpu_winsys *aws,
-                           const struct pipe_screen_config *config,
+                           const struct amdgpu_winsys_options *options,
                            int fd)
 {
-   if (ac_query_gpu_info(fd, aws->dev, &aws->info, false, false) != AC_QUERY_GPU_INFO_SUCCESS) {
+   if (!ac_query_gpu_info(fd, aws->dev, &aws->info, false, false)) {
       mesa_loge("amdgpu: ac_query_gpu_info failed.\n");
       goto fail;
    }
@@ -55,18 +55,14 @@ static bool do_winsys_init(struct amdgpu_winsys *aws,
       goto fail;
    }
 
-   aws->check_vm = strstr(debug_get_option("R600_DEBUG", ""), "check_vm") != NULL ||
-                  strstr(debug_get_option("AMD_DEBUG", ""), "check_vm") != NULL;
-   aws->noop_cs = debug_get_bool_option("RADEON_NOOP", false);
+   aws->check_vm = options->check_vm;
+   aws->noop_cs = options->noop_cs;
 #if MESA_DEBUG
    aws->debug_all_bos = debug_get_option_all_bos();
 #endif
-   aws->reserve_vmid = strstr(debug_get_option("R600_DEBUG", ""), "reserve_vmid") != NULL ||
-                      strstr(debug_get_option("AMD_DEBUG", ""), "reserve_vmid") != NULL ||
-                      strstr(debug_get_option("AMD_DEBUG", ""), "sqtt") != NULL;
-   aws->zero_all_vram_allocs = strstr(debug_get_option("R600_DEBUG", ""), "zerovram") != NULL ||
-                              driQueryOptionb(config->options, "radeonsi_zerovram");
-   aws->userq_job_log = strstr(debug_get_option("AMD_DEBUG", ""), "userqjoblog") != NULL;
+   aws->reserve_vmid = options->reserve_vmid;
+   aws->userq_job_log = options->userq_job_log;
+   aws->ib_caches_flush = options->ib_caches_flush;
 
    for (unsigned i = 0; i < ARRAY_SIZE(aws->queues); i++)
       simple_mtx_init(&aws->queues[i].userq.lock, mtx_plain);
@@ -128,10 +124,9 @@ static void do_winsys_deinit(struct amdgpu_winsys *aws)
    FREE(aws);
 }
 
-static void amdgpu_winsys_destroy_locked(struct radeon_winsys *rws, bool locked)
+static void amdgpu_winsys_destroy_locked(struct radeon_winsys *rws, struct amdgpu_winsys *aws, bool locked)
 {
    struct amdgpu_screen_winsys *sws = amdgpu_screen_winsys(rws);
-   struct amdgpu_winsys *aws = sws->aws;
    bool destroy;
 
    /* When the reference counter drops to zero, remove the device pointer
@@ -153,10 +148,12 @@ static void amdgpu_winsys_destroy_locked(struct radeon_winsys *rws, bool locked)
       }
    }
 
+   amdgpu_ctx_reference(&aws->pstate_ctx, NULL);
+
    if (!locked)
       simple_mtx_unlock(&dev_tab_mutex);
 
-   if (sws->fd != aws->fd)
+   if (sws->fd != aws->fd && sws->fd >= 0)
       close(sws->fd);
 
    if (destroy)
@@ -167,7 +164,7 @@ static void amdgpu_winsys_destroy_locked(struct radeon_winsys *rws, bool locked)
 
 static void amdgpu_winsys_destroy(struct radeon_winsys *rws)
 {
-   amdgpu_winsys_destroy_locked(rws, false);
+   amdgpu_winsys_destroy_locked(rws, amdgpu_screen_winsys(rws)->aws, false);
 }
 
 static void amdgpu_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *info)
@@ -352,6 +349,12 @@ static bool
 amdgpu_cs_set_pstate(struct radeon_cmdbuf *rcs, enum radeon_ctx_pstate pstate)
 {
    struct amdgpu_cs *acs = amdgpu_cs(rcs);
+   struct amdgpu_winsys *aws = acs->aws;
+
+   if (aws->pstate_ctx && aws->pstate_ctx != acs->ctx)
+      return true;
+
+   amdgpu_ctx_reference(&aws->pstate_ctx, acs->ctx);
 
    uint32_t amdgpu_pstate = radeon_to_amdgpu_pstate(pstate);
    return ac_drm_cs_ctx_stable_pstate(acs->aws->dev, acs->ctx->ctx_handle,
@@ -390,7 +393,9 @@ amdgpu_drm_winsys_get_fd(struct radeon_winsys *rws)
 
 PUBLIC struct radeon_winsys *
 amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
-		     radeon_screen_create_t screen_create, bool is_virtio)
+                     radeon_screen_create_t screen_create,
+                     uint64_t debug_flags,
+                     const struct amdgpu_winsys_options *options)
 {
    struct amdgpu_screen_winsys *sws;
    struct amdgpu_winsys *aws;
@@ -412,7 +417,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
 
    /* Initialize the amdgpu device. This should always return the same pointer
     * for the same fd. */
-   r = ac_drm_device_initialize(fd, is_virtio, &drm_major, &drm_minor, &dev);
+   r = ac_drm_device_initialize(fd, options->is_virtio, &drm_major, &drm_minor, &dev);
    if (r == -EACCES && drmGetNodeTypeFromFd(fd) != DRM_NODE_RENDER) {
       char *render_device = drmGetRenderDeviceNameFromFd(fd);
 
@@ -420,11 +425,11 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
          int render_fd = open(render_device, O_RDWR | O_CLOEXEC);
 
          if (render_fd >= 0) {
-            r = ac_drm_device_initialize(render_fd, is_virtio, &drm_major, &drm_minor, &dev);
+            r = ac_drm_device_initialize(render_fd, options->is_virtio, &drm_major, &drm_minor, &dev);
             close(render_fd);
             if (r) {
                mesa_logd("amdgpu: amd%s_device_initialize failed for %s\n",
-                         is_virtio ? "vgpu" : "gpu", render_device);
+                         options->is_virtio ? "vgpu" : "gpu", render_device);
             }
          }
 
@@ -433,7 +438,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
    }
 
    if (r) {
-      mesa_loge("amdgpu: amd%s_device_initialize failed.\n", is_virtio ? "vgpu" : "gpu");
+      mesa_loge("amdgpu: amd%s_device_initialize failed.\n", options->is_virtio ? "vgpu" : "gpu");
       goto fail;
    }
 
@@ -495,19 +500,23 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
          goto fail_alloc;
       simple_mtx_init(&aws->vm_ioctl_lock, mtx_plain);
 
-      aws->info.is_virtio = is_virtio;
+      aws->info.is_virtio = options->is_virtio;
 
       /* Only aws and buffer functions are used. */
       aws->dummy_sws.aws = aws;
       amdgpu_bo_init_functions(&aws->dummy_sws);
 
-      if (!do_winsys_init(aws, config, fd))
+      if (!do_winsys_init(aws, options, fd))
          goto fail_alloc;
 
       /* Create managers. */
+      uint64_t cache_mem_kb = aws->info.has_dedicated_vram ?
+         aws->info.vram_size_kb :
+         ((uint64_t)aws->info.vram_size_kb + aws->info.gart_size_kb);
+
       pb_cache_init(&aws->bo_cache, RADEON_NUM_HEAPS,
-                    500000, aws->check_vm ? 1.0f : 1.5f, 0,
-                    ((uint64_t)aws->info.vram_size_kb + aws->info.gart_size_kb) * 1024 / 8,
+                    500000, aws->check_vm ? 1.0f : 1.25f, 0,
+                    cache_mem_kb * 1024 / 8,
                     offsetof(struct amdgpu_bo_real_reusable, cache_entry), aws,
                     /* Cast to void* because one of the function parameters
                      * is a struct pointer instead of void*. */
@@ -523,7 +532,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
                          /* Cast to void* because one of the function parameters
                           * is a struct pointer instead of void*. */
                          (void*)amdgpu_bo_slab_free)) {
-         amdgpu_winsys_destroy_locked(&sws->base, true);
+         amdgpu_winsys_destroy_locked(&sws->base, aws, true);
          simple_mtx_unlock(&dev_tab_mutex);
          return NULL;
       }
@@ -547,7 +556,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
 
       if (!util_queue_init(&aws->cs_queue, "cs", 8, 1,
                            UTIL_QUEUE_INIT_RESIZE_IF_FULL, NULL)) {
-         amdgpu_winsys_destroy_locked(&sws->base, true);
+         amdgpu_winsys_destroy_locked(&sws->base, aws, true);
          simple_mtx_unlock(&dev_tab_mutex);
          return NULL;
       }
@@ -557,7 +566,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
       if (aws->reserve_vmid) {
          r = ac_drm_vm_reserve_vmid(aws->dev, 0);
          if (r) {
-            amdgpu_winsys_destroy_locked(&sws->base, true);
+            amdgpu_winsys_destroy_locked(&sws->base, aws,true);
             simple_mtx_unlock(&dev_tab_mutex);
             return NULL;
          }
@@ -596,9 +605,9 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
     *
     * Alternatively, we could create the screen based on "ws->gen"
     * and link all drivers into one binary blob. */
-   sws->base.screen = screen_create(&sws->base, config);
+   sws->base.screen = screen_create(&sws->base, config, debug_flags);
    if (!sws->base.screen) {
-      amdgpu_winsys_destroy_locked(&sws->base, true);
+      amdgpu_winsys_destroy_locked(&sws->base, sws->aws, true);
       simple_mtx_unlock(&dev_tab_mutex);
       return NULL;
    }

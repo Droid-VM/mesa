@@ -14,8 +14,12 @@
 #include "pan_fb_preload.h"
 #include "pan_jm.h"
 #include "pan_job.h"
-#include "pan_precomp.h"
 #include "pan_trace.h"
+#include "kmod/panfrost_kmod.h"
+
+#if PAN_ARCH >= 6
+#include "pan_precomp.h"
+#endif
 
 #if PAN_ARCH >= 10
 #error "JM helpers are only used for gen < 10"
@@ -90,8 +94,8 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    submit.requirements = reqs;
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
-                                     ctx->in_sync_fd);
+      ret = pan_kmod_sync_import_file(dev->kmod.dev, ctx->in_sync_obj,
+                                       ctx->in_sync_fd);
       assert(!ret);
 
       in_syncs[submit.in_sync_count++] = ctx->in_sync_obj;
@@ -117,17 +121,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
 
       assert(submit.bo_handle_count < batch->num_bos);
       bo_handles[submit.bo_handle_count++] = i;
-
-      /* Update the BO access flags so that panfrost_bo_wait() knows
-       * about all pending accesses.
-       * We only keep the READ/WRITE info since this is all the BO
-       * wait logic cares about.
-       * We also preserve existing flags as this batch might not
-       * be the first one to access the BO.
-       */
-      struct panfrost_bo *bo = pan_lookup_bo(dev, i);
-
-      bo->gpu_access |= flags[i] & (PAN_BO_ACCESS_RW);
+      panfrost_context_report_bo_access(ctx, pan_lookup_bo(dev, i), flags[i]);
    }
 
    panfrost_pool_get_bo_handles(&batch->pool,
@@ -153,8 +147,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    if (ctx->is_noop)
       ret = 0;
    else
-      ret = pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT,
-                           &submit);
+      ret = panfrost_kmod_submit(dev->kmod.dev, &submit);
    free(bo_handles);
 
    if (ret)
@@ -163,8 +156,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    /* Trace the job if we're doing that */
    if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
       /* Wait so we can get errors reported back */
-      ret = drmSyncobjWait(panfrost_device_fd(dev), &out_sync, 1, INT64_MAX,
-                           0, NULL);
+      ret = pan_kmod_sync_wait(dev->kmod.dev, &out_sync, 1, INT64_MAX, 0, NULL);
       if (ret)
          return errno;
 
@@ -554,7 +546,7 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
          struct panfrost_resource *rsrc =
             pan_resource(ctx->occlusion_query->rsrc);
          cfg.occlusion = rsrc->plane.base;
-         panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
+         panfrost_batch_write_rsrc(ctx->batch[PANFROST_BATCH_RENDER], rsrc);
       }
 
 #if PAN_ARCH >= 9
@@ -615,13 +607,16 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
           * target may be written if the fragment shader writes
           * to it AND it actually exists. If the render target
           * doesn't actually exist, the blend descriptor will be
-          * OFF so it may be omitted from the mask.
+          * OFF so it may be omitted from the mask (unless pixel
+          * local storage is on).
           *
           * Only set when there is a fragment shader, since
           * otherwise no colour updates are possible.
           */
-         cfg.flags_1.render_target_mask =
-            (fs->info.outputs_written >> FRAG_RESULT_DATA0) & ctx->fb_rt_mask;
+         cfg.flags_1.render_target_mask = ctx->fb_rt_mask;
+         if (!ctx->pipe_framebuffer.pls_enabled)
+            cfg.flags_1.render_target_mask &=
+               fs->info.outputs_written >> FRAG_RESULT_DATA0;
 
          /* Also use per-sample shading if required by the shader
           */
@@ -1104,7 +1099,7 @@ GENX(jm_emit_write_timestamp)(struct panfrost_batch *batch,
 
    pan_jc_add_job(&batch->jm.jobs.vtc_jc, MALI_JOB_TYPE_WRITE_VALUE, false,
                   false, 0, 0, &job, false);
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   panfrost_batch_write_rsrc(batch, dst);
 }
 
 int
@@ -1148,10 +1143,22 @@ GENX(jm_cleanup_context)(struct panfrost_context *ctx)
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_JM);
 
-   if (!ctx->jm.handle)
-      return;
-
    struct panfrost_device *dev = pan_device(ctx->base.screen);
+
+   if (!ctx->jm.handle) {
+      /* Without an explicit JM context, nothing kills the jobs this context
+       * still has in flight, and they point at memory that is in no job's BO
+       * list -- the screen-wide shader and descriptor pools -- so nothing in
+       * the kernel keeps it alive either. An application that tears down
+       * without a glFinish() would have it released under the GPU, and every
+       * job still queued would fault and hit the scheduler timeout. The
+       * context syncobj is the out-fence of the last job submitted.
+       */
+      drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
+                     NULL);
+      return;
+   }
+
    struct drm_panfrost_jm_ctx_destroy args = {
       .handle = ctx->jm.handle,
    };

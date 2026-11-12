@@ -30,15 +30,24 @@
 #include <codecapi.h>
 #include <mfobjects.h>
 
-enum pipe_video_profile
-ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, UINT32 profile, D3D12_VIDEO_ENCODER_CODEC codec );
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH264VProfile profile );
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH265VProfile profile );
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncAV1VProfile profile );
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH264VProfile profile );
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH265VProfile profile );
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncAV1VProfile profile );
 
 // H264
 enum eAVEncH264PictureType
 ConvertPictureTypeToAVEncH264PictureType( enum pipe_h2645_enc_picture_type picType );
 
-uint32_t
-ConvertPipeProfileToSpecProfile( pipe_video_profile profile );
 enum pipe_format
 ConvertFourCCToPipeFormat( DWORD dwFourCC );
 UINT32
@@ -47,12 +56,8 @@ AdjustStrideForPipeFormatAndWidth( enum pipe_format pipeFormat, UINT32 width );
 UINT32
 GetChromaFormatIdc( enum pipe_format pipeFormat );
 
-enum pipe_format
-ConvertProfileToFormat( enum pipe_video_profile profile );
 GUID ConvertProfileToSubtype( enum pipe_video_profile );
 
 HRESULT
 ConvertErrnoRetToHR( int ret );
 
-const char *
-ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType );

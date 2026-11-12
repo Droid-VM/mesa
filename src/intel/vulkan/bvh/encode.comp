@@ -13,7 +13,8 @@ layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 #include "encode.h"
 
 #define READY_TO_WRITE(offset) ((offset) < VK_NULL_BVH_OFFSET)
-#define ASSIGNED_NODE_TO_ENCODE (gl_GlobalInvocationID.x < DEREF(args.header).ir_internal_node_count)
+#define ASSIGNED_NODE_TO_ENCODE ((gl_GlobalInvocationID.x + push_args.start_node_offset) \
+                                 < DEREF(args.header).ir_internal_node_count)
 
 /* Debugging helper: disable encoding by exiting early. Ensure compiler doesn't
  * dead code eliminate by comparing to value that should never evaluate as true.
@@ -26,8 +27,10 @@ layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 #define NODE_OFFSET(node) (OFFSET(args.intermediate_bvh, ir_id_to_offset(node)))
 
 layout(push_constant) uniform CONSTS {
-   encode_args args;
+   encode_args push_args;
 };
+anv_batch_args args = DEREF(INDEX(anv_batch_args, push_args.batch_args,
+                                  push_args.batch_offset + gl_GlobalInvocationID.y));
 
 void
 debug_dump(uint32_t offset, uint32_t value)
@@ -289,7 +292,7 @@ find_children(vk_ir_box_node src, inout uint32_t children[6],
 
          vk_aabb bounds = DEREF(REF(vk_ir_node)NODE_OFFSET(children[i])).aabb;
 
-         float surface_area = aabb_surface_area(bounds);
+         float surface_area = aabb_half_surface_area(bounds);
          if (surface_area > largest_surface_area) {
             largest_surface_area = surface_area;
             collapsed_child_index = i;
@@ -349,20 +352,12 @@ main()
 {
    /* Each lane will process one vk_ir_node_internal. The root node is sitting
     * at the end of the IR BVH, and we let the lane with
-    * gl_GlobalInvocationID.x == 0 to take care of it. To improve performance,
-    * we remap globalID to reduce chances that the same HW thread will
-    * need to handle it's immediate children too, reducing latency. This hashing
-    * algorithm spreads handling of a node's children to other threads.
+    * gl_GlobalInvocationID.x == 0 to take care of it.
     */
-   uint32_t global_id_hash = (gl_GlobalInvocationID.x <
-                              (DEREF(args.header).ir_internal_node_count & ~0xFF))
-      ? (gl_GlobalInvocationID.x & 0xFFFFFF00)  |
-        ((gl_GlobalInvocationID.x & 0x0F) << 4) |
-        ((gl_GlobalInvocationID.x & 0xF0) >> 4)
-      : gl_GlobalInvocationID.x;
    uint32_t global_id =
-      DEREF(args.header).ir_internal_node_count - 1 -
-      min(global_id_hash, DEREF(args.header).ir_internal_node_count - 1);
+      clamp(DEREF(args.header).ir_internal_node_count -
+            (gl_GlobalInvocationID.x + push_args.start_node_offset + 1),
+            0, DEREF(args.header).ir_internal_node_count - 1);
 
    uint32_t intermediate_leaf_node_size = vk_ir_node_size(args.geometry_type);
 
@@ -380,7 +375,7 @@ main()
       INDEX(vk_ir_box_node, intermediate_internal_nodes, global_id);
    vk_ir_box_node src = DEREF(src_node);
 
-   bool is_root_node = gl_GlobalInvocationID.x == 0;
+   bool is_root_node = (gl_GlobalInvocationID.x + push_args.start_node_offset) == 0;
 
    REF(anv_accel_struct_header) header =
       REF(anv_accel_struct_header)(args.output_bvh - ANV_RT_BVH_HEADER_SIZE);
@@ -389,6 +384,7 @@ main()
       /* Tracks BLOCK where the next children should be encoded. */
       DEREF(args.header).dst_node_offset = 1;
       DEREF(header).instance_count = 0;
+      DEREF(header).root_flags = src.flags;
       if (ANV_TEST_BUILD_FLAG_WRITE_LOOKUP_MAPS_FOR_UPDATE && args.parent_child_map != 0) {
          DEREF(INDEX(uint32_t, args.parent_child_map, 0)) = VK_NULL_BVH_OFFSET;
       }

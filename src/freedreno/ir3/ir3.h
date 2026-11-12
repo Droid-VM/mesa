@@ -37,15 +37,15 @@ struct ir3_info {
    /* byte offset from start of the shader to the NIR constant data. */
    uint32_t constant_data_offset;
    /* Size in dwords of the instructions. */
-   uint16_t sizedwords;
-   uint16_t instrs_count; /* expanded to account for rpt's */
-   uint16_t preamble_instrs_count;
-   uint16_t nops_count;   /* # of nop instructions, including nopN */
-   uint16_t mov_count;
-   uint16_t cov_count;
-   uint16_t loops;
-   uint16_t stp_count;
-   uint16_t ldp_count;
+   uint32_t sizedwords;
+   uint32_t instrs_count; /* expanded to account for rpt's */
+   uint32_t preamble_instrs_count;
+   uint32_t nops_count;   /* # of nop instructions, including nopN */
+   uint32_t mov_count;
+   uint32_t cov_count;
+   uint32_t loops;
+   uint32_t stp_count;
+   uint32_t ldp_count;
    /* NOTE: max_reg, etc, does not include registers not touched
     * by the shader (ie. vertex fetched via VFD_DECODE but not
     * touched by shader)
@@ -64,19 +64,19 @@ struct ir3_info {
    bool uses_ray_intersection;
 
    /* number of sync bits: */
-   uint16_t ss, sy;
+   uint32_t ss, sy;
 
    /* estimate of number of cycles stalled on (ss) */
-   uint16_t sstall;
+   uint32_t sstall;
    /* estimate of number of cycles stalled on (sy) */
-   uint16_t systall;
+   uint32_t systall;
 
-   uint16_t last_baryf; /* instruction # of last varying fetch */
+   uint32_t last_baryf; /* instruction # of last varying fetch */
 
-   uint16_t last_helper; /* last instruction to use helper invocations */
+   uint32_t last_helper; /* last instruction to use helper invocations */
 
    /* Number of instructions of a given category: */
-   uint16_t instrs_per_cat[8];
+   uint32_t instrs_per_cat[8];
 };
 
 struct ir3_merge_set {
@@ -200,6 +200,9 @@ typedef enum ir3_register_flags {
     */
    IR3_REG_UNIFORM = BIT(24),
 } ir3_register_flags;
+
+#define IR3_REG_SRC_MODS (IR3_REG_FNEG | IR3_REG_FABS | IR3_REG_SNEG | \
+                          IR3_REG_SABS | IR3_REG_BNOT)
 
 struct ir3_register {
    BITMASK_ENUM(ir3_register_flags) flags;
@@ -710,7 +713,7 @@ struct ir3_array {
    /* extra stuff used in RA pass: */
    unsigned base; /* base vreg name */
    unsigned reg;  /* base physical reg */
-   uint16_t start_ip, end_ip;
+   uint32_t start_ip, end_ip;
 
    /* Indicates if half-precision */
    bool half;
@@ -750,7 +753,7 @@ struct ir3_block {
    DECLARE_ARRAY(struct ir3_block *, physical_predecessors);
    DECLARE_ARRAY(struct ir3_block *, physical_successors);
 
-   uint16_t start_ip, end_ip;
+   uint32_t start_ip, end_ip;
 
    /**
     * Is the block a reconvergence point within a wave:
@@ -992,6 +995,10 @@ __ssa_srcp_n(struct ir3_instruction *instr, unsigned n)
    list_for_each_entry_safe (struct ir3_block, __block, __list, node)
 #define foreach_block_rev(__block, __list)                                     \
    list_for_each_entry_rev (struct ir3_block, __block, __list, node)
+#define foreach_block_from(__block, __list, __start)                           \
+   list_for_each_entry_from (struct ir3_block, __block, __start, __list, node)
+#define foreach_main_block(__block, __ir)                                      \
+   foreach_block_from (__block, &__ir->block_list, ir3_after_preamble(__ir))
 
 /* iterators for arrays: */
 #define foreach_array(__array, __list)                                         \
@@ -1083,6 +1090,9 @@ unsigned ir3_get_min_reg_count(const struct ir3_shader_variant *v,
 bool ir3_should_double_threadsize(struct ir3_shader_variant *v,
                                   unsigned regs_count);
 
+unsigned ir3_get_waves_per_wg(struct ir3_shader_variant *v,
+                              bool double_threadsize);
+
 struct ir3_block *ir3_block_create(struct ir3 *shader);
 
 struct ir3_instruction *ir3_build_instr(struct ir3_builder *builder, opc_t opc,
@@ -1098,6 +1108,8 @@ void ir3_instr_add_dep(struct ir3_instruction *instr,
                        struct ir3_instruction *dep);
 const char *ir3_instr_name(struct ir3_instruction *instr);
 void ir3_instr_remove(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_prev(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_next(struct ir3_instruction *instr);
 
 void ir3_instr_create_rpt(struct ir3_instruction **instrs, unsigned n);
 bool ir3_instr_is_rpt(const struct ir3_instruction *instr);
@@ -1276,11 +1288,11 @@ is_same_type_reg(struct ir3_register *dst, struct ir3_register *src)
 }
 
 /* Is it a non-transformative (ie. not type changing) mov?  This can
- * also include absneg.s/absneg.f, which for the most part can be
- * treated as a mov (single src argument).
+ * also include absneg.s/absneg.f/not.b, which for the most part can be
+ * treated as a mov (single src argument) with source modifiers.
  */
 static inline bool
-is_same_type_mov(struct ir3_instruction *instr)
+is_same_type_mov(struct ir3_instruction *instr, bool allow_src_mods)
 {
    struct ir3_register *dst;
 
@@ -1288,25 +1300,27 @@ is_same_type_mov(struct ir3_instruction *instr)
    case OPC_MOV:
       if (instr->cat1.src_type != instr->cat1.dst_type)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
-         return false;
       break;
    case OPC_ABSNEG_F:
    case OPC_ABSNEG_S:
+      if (!allow_src_mods)
+         return false;
       if (instr->flags & IR3_INSTR_SAT)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      break;
+   case OPC_NOT_B:
+      if (!allow_src_mods)
          return false;
       break;
    default:
       return false;
    }
+
+   /* If the type of dest reg and src reg are different,
+    * it shouldn't be considered as same type mov
+    */
+   if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      return false;
 
    dst = instr->dsts[0];
 
@@ -1383,6 +1397,12 @@ static inline bool
 is_alu(struct ir3_instruction *instr)
 {
    return (1 <= opc_cat(instr->opc)) && (opc_cat(instr->opc) <= 3);
+}
+
+static inline bool
+is_mov(struct ir3_instruction *instr)
+{
+   return opc_cat(instr->opc) == 1;
 }
 
 static inline bool
@@ -1517,6 +1537,7 @@ is_bool(struct ir3_instruction *instr)
    case OPC_CMPS_F:
    case OPC_CMPS_S:
    case OPC_CMPS_U:
+   case OPC_GETBIT_B:
       return true;
    default:
       return false;
@@ -1883,7 +1904,8 @@ ir3_cat2_int(opc_t opc)
 }
 
 /* map cat2 instruction to valid abs/neg flags: */
-unsigned ir3_cat2_absneg(opc_t opc);
+unsigned ir3_cat2_absneg(struct ir3_compiler *compiler, opc_t opc,
+                         unsigned src_n);
 
 /* map cat3 instructions to valid abs/neg flags: */
 unsigned ir3_cat3_absneg(struct ir3_compiler *compiler, opc_t opc,
@@ -2299,7 +2321,8 @@ void ir3_ra_predicates(struct ir3_shader_variant *v);
 bool ir3_lower_subgroups(struct ir3 *ir);
 
 /* legalize: */
-bool ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary);
+bool ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary,
+                  bool is_preamble_speculatable);
 bool ir3_legalize_relative(struct ir3 *ir);
 
 static inline bool
@@ -3153,11 +3176,14 @@ INSTR2NODST(STC)
 INSTR2NODST(STSC)
 INSTR2(SHFL)
 #ifndef GPU
+#elif GPU >= 500
+INSTR5(LDG_A);
+INSTR6NODST(STG_A);
+#endif
+#ifndef GPU
 #elif GPU >= 600
 INSTR4NODST(STIB);
 INSTR3(LDIB);
-INSTR5(LDG_A);
-INSTR6NODST(STG_A);
 INSTR2(ATOMIC_G_ADD)
 INSTR2(ATOMIC_G_SUB)
 INSTR2(ATOMIC_G_XCHG)
@@ -3422,5 +3448,8 @@ ir3_required_sync_flags(struct ir3_legalize_state *state,
 unsigned ir3_required_delay(struct ir3_legalize_state *state,
                             struct ir3_compiler *compiler,
                             struct ir3_instruction *instr);
+
+bool ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
+                                    struct ir3_instruction *sam);
 
 #endif /* IR3_H_ */

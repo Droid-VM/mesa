@@ -80,10 +80,9 @@ get_output(Program* program, unsigned block_idx, ssa_state* state)
       state->outputs[block_idx] = Operand(Temp(program->allocateTmp(state->rc)));
       init_outputs(program, state, start_idx, end_idx);
       output = state->outputs[block_idx];
-   } else if (std::all_of(block.linear_preds.begin() + 1, block.linear_preds.end(),
-                          [&](unsigned pred) {
-                             return state->outputs[pred] == state->outputs[block.linear_preds[0]];
-                          })) {
+   } else if (std::all_of(
+                 block.linear_preds.begin() + 1, block.linear_preds.end(), [&](unsigned pred)
+                 { return state->outputs[pred] == state->outputs[block.linear_preds[0]]; })) {
       return state->outputs[block.linear_preds[0]];
    } else {
       output = Operand(Temp(program->allocateTmp(state->rc)));

@@ -48,6 +48,7 @@ struct etna_blend_state {
    uint32_t PE_LOGIC_OP;
    uint32_t PE_DITHER[2];
    uint32_t PS_MSAA_CONFIG;
+   uint32_t PE_ADVANCED_ALPHA_CONFIG;
 };
 
 static inline struct etna_blend_state *

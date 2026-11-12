@@ -13,8 +13,8 @@ section_start angle "Building ANGLE"
 # setting up the environment variables locally
 ci_tag_build_time_check "ANGLE_TAG"
 
-ANGLE_REV="be80ce591a481c12d60c50d6040d40c035b40a2b"
-DEPOT_REV="5982a1aeb33dc36382ed8c62eddf52a6135e7dd3"
+ANGLE_REV="bbeb63c968e2a9673f50b8423c2ed46daeee252c"
+DEPOT_REV="6fbb6012d6138844379a2df23eea5e86a2ea6696"
 
 # Set ANGLE_ARCH based on DEBIAN_ARCH if it hasn't been explicitly defined
 if [[ -z "${ANGLE_ARCH:-}" ]]; then
@@ -33,6 +33,7 @@ git fetch --depth 1 origin "$DEPOT_REV"
 git checkout FETCH_HEAD
 export PATH=/depot-tools:$PATH
 export DEPOT_TOOLS_UPDATE=0
+./ensure_bootstrap
 popd
 
 mkdir /angle-build

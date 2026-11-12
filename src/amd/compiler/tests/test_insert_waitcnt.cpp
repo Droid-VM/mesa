@@ -894,8 +894,8 @@ BEGIN_TEST(insert_waitcnt.divergent_branch.no_skip)
       //! p_unit_test %0:v[4]
       bld.reset(program->create_and_insert_block());
       program->blocks[2].linear_preds.push_back(1);
-      program->blocks[2].logical_preds.push_back(1);
       program->blocks[2].logical_preds.push_back(0);
+      program->blocks[2].logical_preds.push_back(1);
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(2));
       bld.pseudo(aco_opcode::p_unit_test, Operand(PhysReg(260), v1));
 
@@ -921,7 +921,8 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       //! p_unit_test %0:v[4]
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(0));
       bld.global(aco_opcode::global_load_dword, dest0, addr, Operand(s1));
-      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
       //>> p_unit_test 1
@@ -933,7 +934,8 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(1));
       bld.ds(aco_opcode::ds_read_b32, dest0, offset);
-      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
       //>> p_unit_test 2
@@ -944,7 +946,8 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       //! p_unit_test %0:v[4]
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(2));
-      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.global(aco_opcode::global_load_dword, dest1, addr, Operand(s1));
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
@@ -956,7 +959,8 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       //! p_unit_test %0:v[4]
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(3));
-      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.ds(aco_opcode::ds_read_b32, dest1, offset);
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
@@ -968,8 +972,10 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       //! p_unit_test %0:v[4]
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(4));
-      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds = true;
-      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
+      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
       //>> p_unit_test 5
@@ -1014,7 +1020,8 @@ BEGIN_TEST(insert_waitcnt.flat.wait_zero)
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(8));
       bld.flat(aco_opcode::flat_load_dword, dest0, addr, Operand(s1));
-      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.pseudo(aco_opcode::p_unit_test, Operand(dest0.physReg(), v1));
 
       finish_waitcnt_test();
@@ -1039,7 +1046,8 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       //! v1: %0:v[4] = flat_load_dword %0:v[0-1], s1: undef may_use_lds
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(0));
       bld.global(aco_opcode::global_load_dword, dest, addr, Operand(s1));
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
 
       //>> p_unit_test 1
       //! v1: %0:v[4] = flat_load_dword %0:v[0-1], s1: undef may_use_lds
@@ -1047,7 +1055,8 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       //! v1: %0:v[4] = global_load_dword %0:v[0-1], s1: undef
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(1));
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.global(aco_opcode::global_load_dword, dest, addr, Operand(s1));
 
       //>> p_unit_test 2
@@ -1057,7 +1066,8 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(2));
       bld.ds(aco_opcode::ds_read_b32, dest, offset);
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
 
       //>> p_unit_test 3
       //! v1: %0:v[4] = flat_load_dword %0:v[0-1], s1: undef may_use_lds
@@ -1065,7 +1075,8 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       //! v1: %0:v[4] = ds_read_b32 %0:v[0]
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(3));
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.ds(aco_opcode::ds_read_b32, dest, offset);
 
       /* In theory, we don't need a wait here, but we don't optimize this. */
@@ -1075,8 +1086,10 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       //! v1: %0:v[4] = flat_load_dword %0:v[0-1], s1: undef may_use_lds
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(4));
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
 
       //>> p_unit_test 5
       //! v1: %0:v[4] = flat_load_dword %0:v[0-1], s1: undef may_use_lds
@@ -1084,7 +1097,8 @@ BEGIN_TEST(insert_waitcnt.flat.waw)
       //! v1: %0:v[4] = image_sample %0:s[8-15], %0:s[0-3], v1: undef, %0:v[0] 1d
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(5));
-      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.mimg(aco_opcode::image_sample, dest, desc_s8, desc_s4, Operand(v1), offset);
 
       //>> p_unit_test 6
@@ -1118,7 +1132,8 @@ BEGIN_TEST(insert_waitcnt.flat.barrier)
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(0));
       bld.global(aco_opcode::global_load_dword, dest0, addr, Operand(s1), 0,
                  memory_sync_info(storage_buffer));
-      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds = true;
+      bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1)).instr->flat().may_use_lds =
+         true;
       bld.barrier(aco_opcode::p_barrier,
                   memory_sync_info(storage_buffer, semantic_acqrel, scope_device), scope_workgroup);
 
@@ -1130,7 +1145,9 @@ BEGIN_TEST(insert_waitcnt.flat.barrier)
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(1));
       bld.flat(aco_opcode::flat_load_dword, dest1, addr, Operand(s1), 0,
-               memory_sync_info(storage_buffer)).instr->flat().may_use_lds = true;
+               memory_sync_info(storage_buffer))
+         .instr->flat()
+         .may_use_lds = true;
       bld.global(aco_opcode::global_load_dword, dest0, addr, Operand(s1), 0);
       bld.barrier(aco_opcode::p_barrier,
                   memory_sync_info(storage_buffer, semantic_acqrel, scope_device), scope_workgroup);
@@ -1143,7 +1160,9 @@ BEGIN_TEST(insert_waitcnt.flat.barrier)
       bld.reset(program->create_and_insert_block());
       bld.pseudo(aco_opcode::p_unit_test, Operand::c32(2));
       bld.flat(aco_opcode::flat_store_dword, addr, Operand(s1), data, 0,
-               memory_sync_info(storage_buffer)).instr->flat().may_use_lds = true;
+               memory_sync_info(storage_buffer))
+         .instr->flat()
+         .may_use_lds = true;
       bld.barrier(aco_opcode::p_barrier,
                   memory_sync_info(storage_buffer, semantic_acqrel, scope_device), scope_workgroup);
 

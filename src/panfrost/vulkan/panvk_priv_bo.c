@@ -18,7 +18,8 @@
 
 VkResult
 panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
-                     VkSystemAllocationScope scope, struct panvk_priv_bo **out)
+                     VkSystemAllocationScope scope, const char *label,
+                     struct panvk_priv_bo **out)
 {
    VkResult result;
    int ret;
@@ -37,6 +38,9 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
 
    priv_bo->bo = bo;
    priv_bo->dev = dev;
+
+   if (label)
+      pan_kmod_set_bo_label(dev->kmod.dev, bo, label);
 
    if (!(flags & PAN_KMOD_BO_FLAG_NO_MMAP)) {
       priv_bo->addr.host =
@@ -60,8 +64,11 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
    };
 
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
+      enum panvk_va_heap_id heap = flags & PAN_KMOD_BO_FLAG_EXECUTABLE
+                                      ? PANVK_EXEC_VA_HEAP
+                                      : PANVK_NO_EXEC_VA_HEAP;
       op.va.start =
-         panvk_as_alloc(dev, dev->as.priv_heap, op.va.size,
+         panvk_as_alloc(dev, heap, op.va.size,
                         pan_choose_gpu_va_alignment(dev->kmod.vm, op.va.size));
       if (!op.va.start) {
          result = panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -94,7 +101,7 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
 
 err_return_va:
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
-      panvk_as_free(dev, dev->as.priv_heap, op.va.start, op.va.size);
+      panvk_as_free(dev, op.va.start, op.va.size);
    }
 
 err_munmap_bo:
@@ -155,7 +162,7 @@ panvk_priv_bo_destroy(struct panvk_priv_bo *priv_bo)
    assert(!ret);
 
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
-      panvk_as_free(dev, dev->as.priv_heap, op.va.start, op.va.size);
+      panvk_as_free(dev, op.va.start, op.va.size);
    }
 
    if (priv_bo->addr.host) {

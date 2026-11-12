@@ -403,9 +403,7 @@ add_single_reg_dep(struct ir3_postsched_deps_state *state,
    unsigned d = 0;
    if (src_n >= 0 && dep && state->direction == F) {
       struct ir3_compiler *compiler = state->ctx->ir->compiler;
-      /* get the dst_n this corresponds to */
-      unsigned dst_n = *dst_n_ptr;
-      d = ir3_delayslots_with_repeat(compiler, dep->instr, node->instr, dst_n, src_n);
+      d = ir3_delayslots(compiler, dep->instr, node->instr, src_n, false);
       if (is_sy_producer(dep->instr))
          node->has_sy_src = true;
       if (needs_ss(compiler, dep->instr, node->instr))
@@ -801,7 +799,7 @@ sched_block(struct ir3_postsched_ctx *ctx, struct ir3_block *block)
 static bool
 is_self_mov(struct ir3_instruction *instr)
 {
-   if (!is_same_type_mov(instr))
+   if (!is_same_type_mov(instr, false))
       return false;
 
    if (instr->dsts[0]->num != instr->srcs[0]->num)
@@ -814,8 +812,7 @@ is_self_mov(struct ir3_instruction *instr)
       return false;
 
    if (instr->srcs[0]->flags &
-       (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_RELATIV | IR3_REG_FNEG |
-        IR3_REG_FABS | IR3_REG_SNEG | IR3_REG_SABS | IR3_REG_BNOT))
+       (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_RELATIV))
       return false;
 
    return true;

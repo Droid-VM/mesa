@@ -16,8 +16,8 @@ descriptor=[
   [ "FRONT_FACE", "CONTEXT_ENUM16(Polygon.FrontFace), NO_EXTRA" ],
   [ "LINE_WIDTH", "CONTEXT_FLOAT(Line.Width), NO_EXTRA" ],
   [ "ALIASED_LINE_WIDTH_RANGE", "CONTEXT_FLOAT2(Const.MinLineWidth), NO_EXTRA" ],
-  [ "MAX_ELEMENTS_VERTICES", "CONTEXT_INT(Const.MaxArrayLockSize), NO_EXTRA" ],
-  [ "MAX_ELEMENTS_INDICES", "CONTEXT_INT(Const.MaxArrayLockSize), NO_EXTRA" ],
+  [ "MAX_ELEMENTS_VERTICES", "CONST(MAX_ARRAY_LOCK_SIZE), NO_EXTRA" ],
+  [ "MAX_ELEMENTS_INDICES", "CONST(MAX_ARRAY_LOCK_SIZE), NO_EXTRA" ],
   [ "MAX_TEXTURE_SIZE", "CONTEXT_INT(Const.MaxTextureSize), NO_EXTRA" ],
   [ "MAX_VIEWPORT_DIMS", "CONTEXT_INT2(Const.MaxViewportWidth), NO_EXTRA" ],
   [ "PACK_ALIGNMENT", "CONTEXT_INT(Pack.Alignment), NO_EXTRA" ],
@@ -32,7 +32,7 @@ descriptor=[
   [ "STENCIL_FUNC", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
   [ "STENCIL_PASS_DEPTH_FAIL", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
   [ "STENCIL_PASS_DEPTH_PASS", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
-  [ "STENCIL_REF", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, NO_EXTRA" ],
+  [ "STENCIL_REF", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, extra_new_buffers" ],
   [ "STENCIL_TEST", "CONTEXT_BOOL(Stencil.Enabled), NO_EXTRA" ],
   [ "STENCIL_VALUE_MASK", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, NO_EXTRA" ],
   [ "STENCIL_WRITEMASK", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, NO_EXTRA" ],
@@ -146,7 +146,7 @@ descriptor=[
 
 # Enums in OpenGL and GLES1
 { "apis": ["GL", "GLES", "GL_CORE"], "params": [
-  [ "MAX_LIGHTS", "CONTEXT_INT(Const.MaxLights), NO_EXTRA" ],
+  [ "MAX_LIGHTS", "CONST(MAX_LIGHTS), NO_EXTRA" ],
   [ "LIGHT0", "CONTEXT_BOOL(Light.Light[0].Enabled), NO_EXTRA" ],
   [ "LIGHT1", "CONTEXT_BOOL(Light.Light[1].Enabled), NO_EXTRA" ],
   [ "LIGHT2", "CONTEXT_BOOL(Light.Light[2].Enabled), NO_EXTRA" ],
@@ -326,7 +326,7 @@ descriptor=[
   [ "STENCIL_BACK_FUNC", "CONTEXT_ENUM16(Stencil.Function[1]), NO_EXTRA" ],
   [ "STENCIL_BACK_VALUE_MASK", "CONTEXT_UINT(Stencil.ValueMask[1]), NO_EXTRA" ],
   [ "STENCIL_BACK_WRITEMASK", "CONTEXT_UINT(Stencil.WriteMask[1]), NO_EXTRA" ],
-  [ "STENCIL_BACK_REF", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, NO_EXTRA" ],
+  [ "STENCIL_BACK_REF", "LOC_CUSTOM, TYPE_UINT, NO_OFFSET, extra_new_buffers" ],
   [ "STENCIL_BACK_FAIL", "CONTEXT_ENUM16(Stencil.FailFunc[1]), NO_EXTRA" ],
   [ "STENCIL_BACK_PASS_DEPTH_FAIL", "CONTEXT_ENUM16(Stencil.ZFailFunc[1]), NO_EXTRA" ],
   [ "STENCIL_BACK_PASS_DEPTH_PASS", "CONTEXT_ENUM16(Stencil.ZPassFunc[1]), NO_EXTRA" ],
@@ -587,7 +587,7 @@ descriptor=[
 
 # GL_ARB_vertex_attrib_binding / GLES 3.1
   [ "MAX_VERTEX_ATTRIB_RELATIVE_OFFSET", "CONTEXT_INT(Const.MaxVertexAttribRelativeOffset), NO_EXTRA" ],
-  [ "MAX_VERTEX_ATTRIB_BINDINGS", "CONTEXT_INT(Const.MaxVertexAttribBindings), NO_EXTRA" ],
+  [ "MAX_VERTEX_ATTRIB_BINDINGS", "CONST(MAX_VERTEX_GENERIC_ATTRIBS), NO_EXTRA" ],
 
 # GL 4.4 / GLES 3.1
   [ "MAX_VERTEX_ATTRIB_STRIDE", "CONTEXT_UINT(Const.MaxVertexAttribStride), NO_EXTRA" ],
@@ -633,15 +633,15 @@ descriptor=[
   [ "PATCH_VERTICES", "CONTEXT_INT(TessCtrlProgram.patch_vertices), extra_ARB_tessellation_shader" ],
   [ "PATCH_DEFAULT_OUTER_LEVEL", "CONTEXT_FLOAT4(TessCtrlProgram.patch_default_outer_level), extra_ARB_tessellation_shader" ],
   [ "PATCH_DEFAULT_INNER_LEVEL", "CONTEXT_FLOAT2(TessCtrlProgram.patch_default_inner_level), extra_ARB_tessellation_shader" ],
-  [ "MAX_TESS_GEN_LEVEL", "CONTEXT_INT(Const.MaxTessGenLevel), extra_ARB_tessellation_shader" ],
-  [ "MAX_PATCH_VERTICES", "CONTEXT_INT(Const.MaxPatchVertices), extra_ARB_tessellation_shader" ],
+  [ "MAX_TESS_GEN_LEVEL", "CONST(MAX_TESS_GEN_LEVEL), extra_ARB_tessellation_shader" ],
+  [ "MAX_PATCH_VERTICES", "CONST(MAX_PATCH_VERTICES), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_CONTROL_UNIFORM_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_CTRL].MaxUniformComponents), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_EVALUATION_UNIFORM_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_EVAL].MaxUniformComponents), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_CTRL].MaxTextureImageUnits), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_EVAL].MaxTextureImageUnits), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_CONTROL_OUTPUT_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_CTRL].MaxOutputComponents), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_PATCH_COMPONENTS", "CONTEXT_INT(Const.MaxTessPatchComponents), extra_ARB_tessellation_shader" ],
-  [ "MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS", "CONTEXT_INT(Const.MaxTessControlTotalOutputComponents), extra_ARB_tessellation_shader" ],
+  [ "MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS", "CONST(MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_EVALUATION_OUTPUT_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_EVAL].MaxOutputComponents), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_CONTROL_INPUT_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_CTRL].MaxInputComponents), extra_ARB_tessellation_shader" ],
   [ "MAX_TESS_EVALUATION_INPUT_COMPONENTS", "CONTEXT_INT(Const.Program[MESA_SHADER_TESS_EVAL].MaxInputComponents), extra_ARB_tessellation_shader" ],
@@ -958,8 +958,8 @@ descriptor=[
   [ "ACTIVE_STENCIL_FACE_EXT", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
 
 # GL_NV_light_max_exponent
-  [ "MAX_SHININESS_NV", "CONTEXT_FLOAT(Const.MaxShininess), NO_EXTRA" ],
-  [ "MAX_SPOT_EXPONENT_NV", "CONTEXT_FLOAT(Const.MaxSpotExponent), NO_EXTRA" ],
+  [ "MAX_SHININESS_NV", "CONST(MAX_SHININESS), NO_EXTRA" ],
+  [ "MAX_SPOT_EXPONENT_NV", "CONST(MAX_SPOT_EXPONENT), NO_EXTRA" ],
 
 # GL_NV_primitive_restart
   [ "PRIMITIVE_RESTART_NV", "CONTEXT_BOOL(Array.PrimitiveRestart), extra_NV_primitive_restart" ],
@@ -979,9 +979,9 @@ descriptor=[
 # == GL_VERTEX_PROGRAM_TWO_SIDE_NV
   [ "VERTEX_PROGRAM_TWO_SIDE_ARB", "CONTEXT_BOOL(VertexProgram.TwoSideEnabled), extra_ARB_vertex_program" ],
 # == GL_MAX_TRACK_MATRIX_STACK_DEPTH_NV
-  [ "MAX_PROGRAM_MATRIX_STACK_DEPTH_ARB", "CONTEXT_INT(Const.MaxProgramMatrixStackDepth), extra_ARB_vertex_program_ARB_fragment_program" ],
+  [ "MAX_PROGRAM_MATRIX_STACK_DEPTH_ARB", "CONST(MAX_PROGRAM_MATRIX_STACK_DEPTH), extra_ARB_vertex_program_ARB_fragment_program" ],
 # == GL_MAX_TRACK_MATRICES_NV
-  [ "MAX_PROGRAM_MATRICES_ARB", "CONTEXT_INT(Const.MaxProgramMatrices), extra_ARB_vertex_program_ARB_fragment_program" ],
+  [ "MAX_PROGRAM_MATRICES_ARB", "CONST(MAX_PROGRAM_MATRICES), extra_ARB_vertex_program_ARB_fragment_program" ],
 # == GL_CURRENT_MATRIX_STACK_DEPTH_NV
   [ "CURRENT_MATRIX_STACK_DEPTH_ARB", "LOC_CUSTOM, TYPE_INT, 0, extra_ARB_vertex_program_ARB_fragment_program" ],
 # == GL_CURRENT_MATRIX_NV

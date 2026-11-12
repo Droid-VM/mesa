@@ -12,6 +12,8 @@
 #define GPU_REV_R0P3 PAN_REV(0, 3)
 #define GPU_REV_R1P1 PAN_REV(1, 1)
 
+#define GPU_FEAT_RAY_INTERSECTION (1u << 2)
+
 #define MODEL(gpu_prod_id_, gpu_variant_, shortname, counters, ...)            \
    {                                                                           \
       .gpu_prod_id = gpu_prod_id_,                                             \
@@ -73,13 +75,16 @@ const struct pan_model pan_model_list[] = {
    MIDGARD_MODEL(0x860,     "T860",   "T880", MODEL_ANISO(NONE), MODEL_TB_SIZES( 8192,  8192)),
    MIDGARD_MODEL(0x880,     "T880",   "T880", MODEL_ANISO(NONE), MODEL_TB_SIZES( 8192,  8192)),
 
-   BIFROST_MODEL(PAN_PROD_ID(6, 0, 0),    "G71",    "G71", MODEL_ANISO(NONE), MODEL_TB_SIZES( 4096,  4096)),
-   BIFROST_MODEL(PAN_PROD_ID(6, 2, 1),    "G72",    "G72", MODEL_ANISO(R0P3), MODEL_TB_SIZES( 8192,  4096)),
-   BIFROST_MODEL(PAN_PROD_ID(7, 0, 0),    "G51",    "G51", MODEL_ANISO(R1P1), MODEL_TB_SIZES( 8192,  8192)),
-   BIFROST_MODEL(PAN_PROD_ID(7, 0, 3),    "G31",    "G31", MODEL_ANISO(ALL),  MODEL_TB_SIZES( 8192,  8192)),
-   BIFROST_MODEL(PAN_PROD_ID(7, 2, 1),    "G76",    "G76", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192)),
-   BIFROST_MODEL(PAN_PROD_ID(7, 2, 2),    "G52",    "G52", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192)),
-   BIFROST_MODEL(PAN_PROD_ID(7, 4, 2),    "G52 r1", "G52", MODEL_ANISO(ALL),  MODEL_TB_SIZES( 8192,  8192)),
+   /* Bifrost pixel, texel and FMA rates are from ARM's GPU datasheet, while
+    * varying rates aren't confirmed yet.
+    */
+   BIFROST_MODEL(PAN_PROD_ID(6, 0, 0),    "G71",    "G71", MODEL_ANISO(NONE), MODEL_TB_SIZES( 4096,  4096), MODEL_RATES(1, 1, 12)),
+   BIFROST_MODEL(PAN_PROD_ID(6, 2, 1),    "G72",    "G72", MODEL_ANISO(R0P3), MODEL_TB_SIZES( 8192,  4096), MODEL_RATES(1, 1, 12)),
+   BIFROST_MODEL(PAN_PROD_ID(7, 0, 0),    "G51",    "G51", MODEL_ANISO(R1P1), MODEL_TB_SIZES( 8192,  8192), MODEL_RATES(2, 2, 12)),
+   BIFROST_MODEL(PAN_PROD_ID(7, 0, 3),    "G31",    "G31", MODEL_ANISO(ALL),  MODEL_TB_SIZES( 8192,  8192), MODEL_RATES(2, 2,  8)),
+   BIFROST_MODEL(PAN_PROD_ID(7, 2, 1),    "G76",    "G76", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192), MODEL_RATES(2, 2, 24)),
+   BIFROST_MODEL(PAN_PROD_ID(7, 2, 2),    "G52",    "G52", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192), MODEL_RATES(2, 2, 24)),
+   BIFROST_MODEL(PAN_PROD_ID(7, 4, 2),    "G52 r1", "G52", MODEL_ANISO(ALL),  MODEL_TB_SIZES( 8192,  8192), MODEL_RATES(2, 2, 24)),
 
    VALHALL_MODEL(PAN_PROD_ID(9, 0, 1), 0, "G57",    "G77", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192),
                                               MODEL_RATES_X(2, 4, 8,  32,  32, 8)),
@@ -93,18 +98,39 @@ const struct pan_model pan_model_list[] = {
    VALHALL_MODEL(PAN_PROD_ID(10, 12, 4), 0, "G310v1",   "G710", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192),
                                               MODEL_RATES_X(2, 2,  8,  16,  16, 4)),
    VALHALL_MODEL(PAN_PROD_ID(10, 12, 4), 1, "G310v2",   "G710", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192),
-                                              MODEL_RATES_X(2, 4, 16,  32,  32, 8)),
+                                              MODEL_RATES_X(2, 4,  8,  32,  32, 8)),
    VALHALL_MODEL(PAN_PROD_ID(10, 12, 4), 2, "G310v3",   "G710", MODEL_ANISO(ALL),  MODEL_TB_SIZES(16384,  8192),
-                                              MODEL_RATES_X(4, 4, 16,  48,  48, 12)),
+                                              MODEL_RATES_X(4, 4,  8,  48,  48, 12)),
    VALHALL_MODEL(PAN_PROD_ID(10, 12, 4), 3, "G310v4",   "G710", MODEL_ANISO(ALL),  MODEL_TB_SIZES(32768, 16384),
-                                              MODEL_RATES_X(4, 8, 16,  48,  48, 12)),
+                                              MODEL_RATES_X(4, 8,  8,  48,  48, 12)),
    VALHALL_MODEL(PAN_PROD_ID(10, 12, 4), 4, "G310v5",   "G710", MODEL_ANISO(ALL),  MODEL_TB_SIZES(32768, 16384),
-                                              MODEL_RATES_X(4, 8, 16,  64,  64, 16)),
+                                              MODEL_RATES_X(4, 8,  8,  64,  64, 16)),
 
+   VALHALL_MODEL(PAN_PROD_ID(11, 8, 2), 4, "G715-Immortalis", "G715", MODEL_ANISO(ALL), MODEL_TB_SIZES(32768, 16384),
+                                              MODEL_RATES_X(4, 8,  8,  64,  64, 16),
+                                              .min_core_count = 10,
+                                              .required_gpu_features = GPU_FEAT_RAY_INTERSECTION),
+   VALHALL_MODEL(PAN_PROD_ID(11, 8, 2), 4,  "G715",   "G715", MODEL_ANISO(ALL),  MODEL_TB_SIZES(32768, 16384),
+                                              MODEL_RATES_X(4, 8, 32,  64, 128, 16)),
+
+   VALHALL_MODEL(PAN_PROD_ID(11, 8, 3), 4,  "G615",   "G715", MODEL_ANISO(ALL),  MODEL_TB_SIZES(32768, 16384),
+                                              MODEL_RATES_X(4, 8, 32,  64, 128, 16)),
+
+   FIFTHGEN_MODEL(PAN_PROD_ID(12, 8, 0), 4, "G720-Immortalis", "G720", MODEL_ANISO(ALL), MODEL_TB_SIZES(65536, 32768),
+                                              MODEL_RATES_X(4, 8, 32,  64, 128, 16),
+                                              .min_core_count = 10,
+                                              .required_gpu_features = GPU_FEAT_RAY_INTERSECTION),
    FIFTHGEN_MODEL(PAN_PROD_ID(12, 8, 0), 4, "G720",  "G720", MODEL_ANISO(ALL),  MODEL_TB_SIZES(65536, 32768),
-                                              MODEL_RATES_X(4, 8, 32,  64, 128, 8)),
+                                              MODEL_RATES_X(4, 8, 32,  64, 128, 16)),
+
+   /** G925 is a G725 with ray tracing and sufficiently many cores. Keep this before G725 to prefer it when both match. */
+   FIFTHGEN_MODEL(PAN_PROD_ID(13, 8, 0), 4, "G925-Immortalis", "G725", MODEL_ANISO(ALL),  MODEL_TB_SIZES(65536, 65536),
+                                              MODEL_RATES_X(4, 8, 32, 128, 128, 16),
+                                              .min_core_count = 10,
+                                              .required_gpu_features = GPU_FEAT_RAY_INTERSECTION),
    FIFTHGEN_MODEL(PAN_PROD_ID(13, 8, 0), 4, "G725",  "G725", MODEL_ANISO(ALL),  MODEL_TB_SIZES(65536, 65536),
-                                              MODEL_RATES_X(4, 8, 32, 128, 128, 8)),
+                                              MODEL_RATES_X(4, 8, 32, 128, 128, 16)),
+
    FIFTHGEN_MODEL(PAN_PROD_ID(14, 8, 0), 4, "G1-Ultra",  "G1", MODEL_ANISO(ALL),  MODEL_TB_SIZES(65536, 65536),
                                               MODEL_RATES(4, 8, 128)),
    FIFTHGEN_MODEL(PAN_PROD_ID(14, 8, 1), 4, "G1-Premium",  "G1", MODEL_ANISO(ALL),  MODEL_TB_SIZES(65536, 65536),
@@ -138,12 +164,16 @@ const struct pan_model pan_model_list[] = {
  * supported at this time.
  */
 const struct pan_model *
-pan_get_model(uint64_t gpu_id, uint32_t gpu_variant)
+pan_get_model(uint64_t gpu_id, uint32_t gpu_variant,
+              unsigned core_count, uint64_t gpu_features)
 {
    uint32_t gpu_prod_id = pan_prod_id(gpu_id);
    for (unsigned i = 0; i < ARRAY_SIZE(pan_model_list); ++i) {
       if (pan_model_list[i].gpu_prod_id == gpu_prod_id &&
-          pan_model_list[i].gpu_variant == gpu_variant)
+          pan_model_list[i].gpu_variant == gpu_variant &&
+          pan_model_list[i].min_core_count <= core_count &&
+          (pan_model_list[i].required_gpu_features & gpu_features) ==
+          pan_model_list[i].required_gpu_features)
          return &pan_model_list[i];
    }
 

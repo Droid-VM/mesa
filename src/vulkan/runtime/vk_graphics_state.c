@@ -1,6 +1,7 @@
 #include "vk_graphics_state.h"
 
 #include "vk_alloc.h"
+#include "vk_android.h"
 #include "vk_command_buffer.h"
 #include "vk_common_entrypoints.h"
 #include "vk_device.h"
@@ -630,8 +631,8 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
    }
    rs->line.width = rs_info->lineWidth;
 
-   vk_foreach_struct_const(ext, rs_info->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, rs_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT: {
          const VkPipelineRasterizationConservativeStateCreateInfoEXT *rcs_info =
             (const VkPipelineRasterizationConservativeStateCreateInfoEXT *)ext;
@@ -1308,6 +1309,14 @@ vk_render_pass_state_init(struct vk_render_pass_state *rp,
    if (r_info == NULL)
       return;
 
+   VkPipelineRenderingCreateInfo local_rendering_info;
+   VkFormat local_color_format;
+   if (vk_android_is_efr_pipeline_rendering_info(info, r_info)) {
+      r_info = vk_android_get_efr_pipeline_rendering_info(
+         info, r_info, &local_rendering_info,
+         &local_color_format);
+   }
+
    const VkCustomResolveCreateInfoEXT *crc_info =
       vk_find_struct_const(info->pNext, CUSTOM_RESOLVE_CREATE_INFO_EXT);
    rp->custom_resolve = crc_info != NULL && crc_info->customResolve;
@@ -1819,10 +1828,12 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    const VkPipelineFragmentShadingRateStateCreateInfoKHR *fsr_info =
       vk_find_struct_const(info->pNext, PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
 
-   const VkRenderingInputAttachmentIndexInfoKHR *ial_info =
-      !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
-                 : vk_find_struct_const(
-                      info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+   const VkRenderingInputAttachmentIndexInfoKHR *ial_info = NULL;
+   if (needs & MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT) {
+      ial_info = !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
+                            : vk_find_struct_const(
+                                info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+   }
 
    const VkRenderingAttachmentLocationInfoKHR *cal_info =
       vk_find_struct_const(info->pNext, RENDERING_ATTACHMENT_LOCATION_INFO_KHR);

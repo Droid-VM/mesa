@@ -28,11 +28,15 @@
  * This NIR lowers pass for polygon and line smoothing by modifying the alpha
  * value of the first fragment output using the sample coverage mask.
  */
+typedef struct {
+   bool use_load_sample_mask_in;
+   unsigned num_smooth_aa_sample;
+} lower_poly_line_smooth_state;
 
 static bool
 lower_polylinesmooth(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   unsigned *num_smooth_aa_sample = data;
+   const lower_poly_line_smooth_state *s = data;
 
    if (intr->intrinsic != nir_intrinsic_store_output)
       return false;
@@ -46,12 +50,18 @@ lower_polylinesmooth(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    b->cursor = nir_before_instr(&intr->instr);
 
-   nir_def *coverage = nir_load_sample_mask_in(b);
+   nir_def *coverage;
+
+   if (s->use_load_sample_mask_in) {
+      coverage = nir_load_sample_mask_in(b);
+   } else {
+      coverage = nir_load_poly_line_smooth_coverage(b);
+   }
 
    /* coverage = (coverage) / num_smooth_aa_sample */
    coverage = nir_bit_count(b, coverage);
    coverage = nir_u2fN(b, coverage, intr->src[0].ssa->bit_size);
-   coverage = nir_fmul_imm(b, coverage, 1.0 / *num_smooth_aa_sample);
+   coverage = nir_fmul_imm(b, coverage, 1.0 / s->num_smooth_aa_sample);
 
    nir_def *smooth_enabled = nir_load_poly_line_smooth_enabled(b);
    nir_def *alpha = nir_channel(b, intr->src[0].ssa, alpha_comp);
@@ -65,10 +75,15 @@ lower_polylinesmooth(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-nir_lower_poly_line_smooth(nir_shader *shader, unsigned num_smooth_aa_sample)
+nir_lower_poly_line_smooth(nir_shader *shader, bool use_load_sample_mask_in,
+                           unsigned num_smooth_aa_sample)
 {
+   lower_poly_line_smooth_state state = {
+      .use_load_sample_mask_in = use_load_sample_mask_in,
+      .num_smooth_aa_sample = num_smooth_aa_sample,
+   };
+
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
    return nir_shader_intrinsics_pass(shader, lower_polylinesmooth,
-                                     nir_metadata_control_flow,
-                                     &num_smooth_aa_sample);
+                                     nir_metadata_control_flow, &state);
 }

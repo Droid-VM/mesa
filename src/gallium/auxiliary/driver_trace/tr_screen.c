@@ -234,7 +234,7 @@ trace_context_replace_buffer_storage(struct pipe_context *_pipe,
                                      struct pipe_resource *dst,
                                      struct pipe_resource *src,
                                      unsigned num_rebinds,
-                                     uint32_t rebind_mask,
+                                     uint64_t rebind_mask,
                                      unsigned delete_buffer_id)
 {
    struct trace_context *tr_ctx = trace_context(_pipe);
@@ -366,7 +366,7 @@ trace_screen_flush_frontbuffer(struct pipe_screen *_screen,
 {
    struct trace_screen *tr_scr = trace_screen(_screen);
    struct pipe_screen *screen = tr_scr->screen;
-   struct pipe_context *pipe = _pipe ? trace_get_possibly_threaded_context(_pipe) : NULL;
+   struct pipe_context *pipe = trace_context_unwrap(_pipe);
 
    trace_dump_call_begin("pipe_screen", "flush_frontbuffer");
 
@@ -751,7 +751,7 @@ trace_screen_resource_get_handle(struct pipe_screen *_screen,
                                  unsigned usage)
 {
    struct trace_screen *tr_screen = trace_screen(_screen);
-   struct pipe_context *pipe = _pipe ? trace_get_possibly_threaded_context(_pipe) : NULL;
+   struct pipe_context *pipe = trace_context_unwrap(_pipe);
    struct pipe_screen *screen = tr_screen->screen;
    bool result;
 
@@ -783,7 +783,7 @@ trace_screen_resource_get_param(struct pipe_screen *_screen,
                                 uint64_t *value)
 {
    struct trace_screen *tr_screen = trace_screen(_screen);
-   struct pipe_context *pipe = _pipe ? trace_get_possibly_threaded_context(_pipe) : NULL;
+   struct pipe_context *pipe = trace_context_unwrap(_pipe);
    struct pipe_screen *screen = tr_screen->screen;
    bool result;
 
@@ -986,7 +986,7 @@ trace_screen_fence_finish(struct pipe_screen *_screen,
 {
    struct trace_screen *tr_scr = trace_screen(_screen);
    struct pipe_screen *screen = tr_scr->screen;
-   struct pipe_context *ctx = _ctx ? trace_get_possibly_threaded_context(_ctx) : NULL;
+   struct pipe_context *ctx = trace_context_unwrap(_ctx);
    int result;
 
    result = screen->fence_finish(screen, ctx, fence, timeout);
@@ -1545,6 +1545,7 @@ trace_screen_create(struct pipe_screen *screen)
    /* copy all caps */
    *(struct pipe_caps *)&tr_scr->base.caps = screen->caps;
    *(struct pipe_compute_caps *)&tr_scr->base.compute_caps = screen->compute_caps;
+   *(struct pipe_video_caps *)&tr_scr->base.video_caps = screen->video_caps;
    memcpy((void *)tr_scr->base.shader_caps, screen->shader_caps, sizeof(screen->shader_caps));
    memcpy((void *)tr_scr->base.nir_options, screen->nir_options, sizeof(screen->nir_options));
 

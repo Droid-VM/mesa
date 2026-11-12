@@ -529,7 +529,7 @@ static bool r600_texture_get_handle(struct pipe_screen* screen,
 	bool update_metadata = false;
 	unsigned stride, offset, slice_size;
 
-	ctx = threaded_context_unwrap_sync(ctx);
+	ctx = pipe_get_driver_context(threaded_context_unwrap_sync(ctx));
 	rctx = (struct r600_common_context*)(ctx ? ctx : rscreen->aux_context);
 
 	if (resource->target != PIPE_BUFFER) {

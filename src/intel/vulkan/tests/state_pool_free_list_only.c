@@ -21,8 +21,6 @@
  * IN THE SOFTWARE.
  */
 
-#include <pthread.h>
-
 #include "anv_private.h"
 #include "test_common.h"
 
@@ -44,7 +42,7 @@ void state_pool_free_list_only_test(void)
    test_device_info_init(&physical_device.info);
    anv_device_set_physical(&device, &physical_device);
    device.kmd_backend = anv_kmd_backend_get(INTEL_KMD_TYPE_STUB);
-   pthread_mutex_init(&device.mutex, NULL);
+   simple_mtx_init(&device.mutex, mtx_plain);
    anv_bo_cache_init(&device.bo_cache, &device);
    anv_state_pool_init(&state_pool, &device,
                        &(struct anv_state_pool_params) {
@@ -76,5 +74,5 @@ void state_pool_free_list_only_test(void)
 
    anv_state_pool_finish(&state_pool);
    anv_bo_cache_finish(&device.bo_cache);
-   pthread_mutex_destroy(&device.mutex);
+   simple_mtx_destroy(&device.mutex);
 }

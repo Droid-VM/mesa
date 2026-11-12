@@ -8,7 +8,7 @@ jobs:
   macOS-CI:
     strategy:
       matrix:
-        glx_option: ['dri', 'xlib']
+        glx_option: ['dri']
     runs-on: macos-11
     env:
       GALLIUM_DUMP_CPU: true

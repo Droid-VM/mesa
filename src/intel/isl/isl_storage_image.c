@@ -22,7 +22,7 @@
  */
 
 #include "isl_priv.h"
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 
 bool
 isl_is_storage_image_format(const struct intel_device_info *devinfo,

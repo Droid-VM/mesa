@@ -8,131 +8,165 @@
 
 namespace {
 
-class nir_opt_varyings_test_prop_uniform : public nir_opt_varyings_test
-{};
+class nir_opt_varyings_test_prop_uniform : public nir_opt_varyings_test {
+ public:
+   nir_intrinsic_instr *store, *store2 = NULL, *store3 = NULL;
+   unsigned bitsize;
+   unsigned pindex, cindex;
+   nir_def *input;
+   unsigned comp;
+   gl_varying_slot slot;
 
-#define SHADER_UNIFORM_OUTPUT(producer_stage, consumer_stage, slot, comp, type, bitsize, index0, index1) \
-   create_shaders(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage); \
-   UNUSED nir_intrinsic_instr *store, *store2 = NULL, *store3 = NULL; \
-   store = \
-      store_output(b1, VARYING_SLOT_##slot, comp, nir_type_float##bitsize, \
-                   load_uniform(b1, bitsize, index0), 0, false); \
-   if (is_per_vertex(b1, VARYING_SLOT_##slot, false) || \
-       MESA_SHADER_##producer_stage == MESA_SHADER_GEOMETRY) { \
-      store2 = store_output(b1, VARYING_SLOT_##slot, comp, nir_type_float##bitsize, \
-                            load_uniform(b1, bitsize, index1), 1, false); \
-      store3 = store_output(b1, VARYING_SLOT_##slot, comp, nir_type_float##bitsize, \
-                            load_uniform(b1, bitsize, index1), 2, false); \
-   } \
-   \
-   UNUSED unsigned pindex = VARYING_SLOT_##slot; \
-   unsigned cindex = VARYING_SLOT_##slot; \
-   if (MESA_SHADER_##consumer_stage == MESA_SHADER_FRAGMENT && \
-       (cindex == VARYING_SLOT_BFC0 || cindex == VARYING_SLOT_BFC1)) \
-      cindex -= VARYING_SLOT_BFC0 - VARYING_SLOT_COL0; \
-   \
-   nir_def *input = load_input(b2, (gl_varying_slot)cindex, comp, nir_type_##type##bitsize, 0, 0); \
-   store_output(b2, VARYING_SLOT_VAR0, 0, nir_type_float##bitsize, input, 0, false); \
-   nir_def *input2 = load_input(b2, (gl_varying_slot)cindex, comp, nir_type_##type##bitsize, 1, 0); \
-   store_output(b2, VARYING_SLOT_VAR1, 0, nir_type_float##bitsize, input2, 0, false); \
-   \
-   if (MESA_SHADER_##consumer_stage == MESA_SHADER_FRAGMENT) { \
-      /* Compaction moves COL1 to COL0. */ \
-      if (cindex == VARYING_SLOT_COL1) { \
-         pindex--; \
-         cindex--; \
-      } \
-      \
-      /* Compaction moves all these to VAR0. */ \
-      if (cindex == VARYING_SLOT_FOGC || cindex == VARYING_SLOT_PRIMITIVE_ID || \
-          cindex == VARYING_SLOT_VAR0_16BIT) \
-         pindex = cindex = VARYING_SLOT_VAR0; \
-   } else { \
-      /* Compaction moves everything else to POS. */ \
-      if (!is_patch((gl_varying_slot)cindex)) { \
-         pindex = cindex = VARYING_SLOT_POS; \
-      } \
+   void setup(
+      mesa_shader_stage producer, mesa_shader_stage consumer,
+      gl_varying_slot in_slot, unsigned in_comp,
+      nir_alu_type ty, unsigned in_bitsize, unsigned index0, unsigned index1)
+   {
+      bitsize = in_bitsize;
+      comp = in_comp;
+      slot = in_slot;
+
+      create_shaders(producer, consumer);
+
+      store =
+         store_output(b1, slot, comp, ty,
+                      load_uniform(b1, bitsize, index0), 0, false);
+      if (is_per_vertex(b1, slot, false) ||
+          producer == MESA_SHADER_GEOMETRY) {
+         store2 = store_output(b1, slot, comp, ty,
+                               load_uniform(b1, bitsize, index1), 1, false);
+         store3 = store_output(b1, slot, comp, ty,
+                               load_uniform(b1, bitsize, index1), 2, false);
+      }
+
+      pindex = slot;
+      cindex = slot;
+      if (consumer == MESA_SHADER_FRAGMENT &&
+          (cindex == VARYING_SLOT_BFC0 || cindex == VARYING_SLOT_BFC1))
+         cindex -= VARYING_SLOT_BFC0 - VARYING_SLOT_COL0;
+
+      input = load_input(b2, (gl_varying_slot)cindex, comp, ty, 0, 0);
+      store_output(b2, VARYING_SLOT_VAR0, 0, ty, input, 0, false);
+      nir_def *input2 = load_input(b2, (gl_varying_slot)cindex, comp, ty, 1, 0);
+      store_output(b2, VARYING_SLOT_VAR1, 0, ty, input2, 0, false);
+
+      if (consumer == MESA_SHADER_FRAGMENT) {
+         /* Compaction moves COL1 to COL0. */
+         if (cindex == VARYING_SLOT_COL1) {
+            pindex--;
+            cindex--;
+         }
+
+         /* Compaction moves all these to VAR0. */
+         if (cindex == VARYING_SLOT_FOGC || cindex == VARYING_SLOT_PRIMITIVE_ID ||
+             cindex == VARYING_SLOT_VAR0_16BIT)
+            pindex = cindex = VARYING_SLOT_VAR0;
+      } else {
+         /* Compaction moves everything else to POS. */
+         if (!is_patch((gl_varying_slot)cindex)) {
+            pindex = cindex = VARYING_SLOT_POS;
+         }
+      }
    }
+
+   void check_uniform_prop()
+   {
+      mesa_shader_stage consumer = b2->shader->info.stage;
+      if (nir_slot_is_sysval_output((gl_varying_slot)pindex, consumer)) {
+         ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer));
+         ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex));
+         ASSERT_TRUE(nir_intrinsic_io_semantics(store).no_varying);
+      } else {
+         ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer));
+         ASSERT_TRUE(b1->shader->info.outputs_written == 0 &&
+                     b1->shader->info.patch_outputs_written == 0 &&
+                     b1->shader->info.outputs_written_16bit == 0);
+         ASSERT_TRUE(!shader_contains_instr(b1, &store->instr));
+         ASSERT_TRUE(!store2 || !shader_contains_instr(b1, &store2->instr));
+         ASSERT_TRUE(!store3 || !shader_contains_instr(b1, &store3->instr));
+      }
+      ASSERT_TRUE(b2->shader->info.inputs_read == 0 &&
+                  b2->shader->info.patch_inputs_read == 0 &&
+                  b2->shader->info.inputs_read_16bit == 0);
+      ASSERT_TRUE(!shader_contains_def(b2, input));
+      ASSERT_TRUE(shader_contains_uniform(b2, bitsize, 1));
+   }
+
+   void check_uniform_prop_xfb()
+   {
+      mesa_shader_stage consumer = b2->shader->info.stage;
+
+      /* XFB-only outputs are moved to VARn. */
+      if (consumer == MESA_SHADER_FRAGMENT &&
+          slot == VARYING_SLOT_TEX0)
+         pindex = VARYING_SLOT_VAR0;
+
+      nir_io_xfb xfb;
+      memset(&xfb, 0, sizeof(xfb));
+      xfb.out[comp].num_components = 1;
+      nir_intrinsic_set_io_xfb(store, xfb);
+      if (store2)
+         nir_intrinsic_set_io_xfb(store2, xfb);
+      if (store3)
+         nir_intrinsic_set_io_xfb(store3, xfb);
+
+      ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer));
+      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex));
+      ASSERT_TRUE(nir_intrinsic_io_semantics(store).no_varying);
+      ASSERT_TRUE(b2->shader->info.inputs_read == 0 &&
+                  b2->shader->info.patch_inputs_read == 0 &&
+                  b2->shader->info.inputs_read_16bit == 0);
+      ASSERT_TRUE(!shader_contains_def(b2, input));
+      ASSERT_TRUE(shader_contains_uniform(b2, bitsize, 1));
+   }
+
+   void check_uniform_kept()
+   {
+      ASSERT_EQ(opt_varyings(), 0);
+      if (pindex >= VARYING_SLOT_VAR0_16BIT) {
+         ASSERT_EQ(b1->shader->info.outputs_written_16bit,
+                   BITFIELD_BIT(pindex - VARYING_SLOT_VAR0_16BIT));
+         ASSERT_EQ(b2->shader->info.inputs_read_16bit,
+                   BITFIELD_BIT(cindex - VARYING_SLOT_VAR0_16BIT));
+      } else if (pindex >= VARYING_SLOT_PATCH0) {
+         ASSERT_EQ(b1->shader->info.patch_outputs_written, BITFIELD_BIT(pindex));
+         ASSERT_EQ(b2->shader->info.patch_inputs_read, BITFIELD_BIT(cindex));
+      } else {
+         ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex));
+         ASSERT_EQ(b2->shader->info.inputs_read, BITFIELD64_BIT(cindex));
+      }
+      ASSERT_TRUE(shader_contains_instr(b1, &store->instr));
+      ASSERT_TRUE(shader_contains_def(b2, input));
+      ASSERT_TRUE(!shader_contains_uniform(b2, bitsize, 0));
+      ASSERT_TRUE(!shader_contains_uniform(b2, bitsize, 1));
+   }
+};
 
 #define TEST_UNIFORM_PROP(producer_stage, consumer_stage, slot, comp, type, bitsize) \
 TEST_F(nir_opt_varyings_test_prop_uniform, \
        prop_##producer_stage##_##consumer_stage##_##slot##_##comp##_##type##bitsize) \
 { \
-   SHADER_UNIFORM_OUTPUT(producer_stage, consumer_stage, slot, comp, type, bitsize, 1, 1) \
-   \
-   if (nir_slot_is_sysval_output((gl_varying_slot)pindex, MESA_SHADER_##consumer_stage)) { \
-      ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer)); \
-      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex)); \
-      ASSERT_TRUE(nir_intrinsic_io_semantics(store).no_varying); \
-   } else { \
-      ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer)); \
-      ASSERT_TRUE(b1->shader->info.outputs_written == 0 && \
-                  b1->shader->info.patch_outputs_written == 0 && \
-                  b1->shader->info.outputs_written_16bit == 0); \
-      ASSERT_TRUE(!shader_contains_instr(b1, &store->instr)); \
-      ASSERT_TRUE(!store2 || !shader_contains_instr(b1, &store2->instr)); \
-      ASSERT_TRUE(!store3 || !shader_contains_instr(b1, &store3->instr)); \
-   } \
-   ASSERT_TRUE(b2->shader->info.inputs_read == 0 && \
-               b2->shader->info.patch_inputs_read == 0 && \
-               b2->shader->info.inputs_read_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_def(b2, input)); \
-   ASSERT_TRUE(shader_contains_uniform(b2, bitsize, 1)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, comp, nir_type_##type##bitsize, bitsize, 1, 1); \
+   check_uniform_prop(); \
 }
 
 #define TEST_UNIFORM_PROP_XFB(producer_stage, consumer_stage, slot, comp, type, bitsize) \
 TEST_F(nir_opt_varyings_test_prop_uniform, \
        xfb_prop_##producer_stage##_##consumer_stage##_##slot##_##comp##_##type##bitsize) \
 { \
-   SHADER_UNIFORM_OUTPUT(producer_stage, consumer_stage, slot, comp, type, bitsize, 1, 1) \
-   \
-   /* XFB-only outputs are moved to VARn. */ \
-   if (MESA_SHADER_##consumer_stage == MESA_SHADER_FRAGMENT &&\
-       VARYING_SLOT_##slot == VARYING_SLOT_TEX0) \
-      pindex = VARYING_SLOT_VAR0; \
-   \
-   nir_io_xfb xfb; \
-   memset(&xfb, 0, sizeof(xfb)); \
-   xfb.out[comp].num_components = 1; \
-   nir_intrinsic_set_io_xfb(store, xfb); \
-   if (store2) \
-      nir_intrinsic_set_io_xfb(store2, xfb); \
-   if (store3) \
-      nir_intrinsic_set_io_xfb(store3, xfb); \
-   \
-   ASSERT_EQ(opt_varyings(), (nir_progress_producer | nir_progress_consumer)); \
-   ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex)); \
-   ASSERT_TRUE(nir_intrinsic_io_semantics(store).no_varying); \
-   ASSERT_TRUE(b2->shader->info.inputs_read == 0 && \
-               b2->shader->info.patch_inputs_read == 0 && \
-               b2->shader->info.inputs_read_16bit == 0); \
-   ASSERT_TRUE(!shader_contains_def(b2, input)); \
-   ASSERT_TRUE(shader_contains_uniform(b2, bitsize, 1)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, comp, nir_type_##type##bitsize, bitsize, 1, 1); \
+   check_uniform_prop_xfb(); \
 }
 
 #define TEST_UNIFORM_KEPT_2VAL(producer_stage, consumer_stage, slot, comp, type, bitsize, index0, index1, suffix) \
 TEST_F(nir_opt_varyings_test_prop_uniform, \
        kept_##suffix##producer_stage##_##consumer_stage##_##slot##_##comp##_##type##bitsize) \
 { \
-   SHADER_UNIFORM_OUTPUT(producer_stage, consumer_stage, slot, comp, type, bitsize, index0, index1) \
-   \
-   ASSERT_EQ(opt_varyings(), 0); \
-   if (pindex >= VARYING_SLOT_VAR0_16BIT) { \
-      ASSERT_EQ(b1->shader->info.outputs_written_16bit, \
-                  BITFIELD_BIT(pindex - VARYING_SLOT_VAR0_16BIT)); \
-      ASSERT_EQ(b2->shader->info.inputs_read_16bit, \
-                  BITFIELD_BIT(cindex - VARYING_SLOT_VAR0_16BIT)); \
-   } else if (pindex >= VARYING_SLOT_PATCH0) { \
-      ASSERT_EQ(b1->shader->info.patch_outputs_written, BITFIELD_BIT(pindex)); \
-      ASSERT_EQ(b2->shader->info.patch_inputs_read, BITFIELD_BIT(cindex)); \
-   } else { \
-      ASSERT_EQ(b1->shader->info.outputs_written, BITFIELD64_BIT(pindex)); \
-      ASSERT_EQ(b2->shader->info.inputs_read, BITFIELD64_BIT(cindex)); \
-   } \
-   ASSERT_TRUE(shader_contains_instr(b1, &store->instr)); \
-   ASSERT_TRUE(shader_contains_def(b2, input)); \
-   ASSERT_TRUE(!shader_contains_uniform(b2, bitsize, 0)); \
-   ASSERT_TRUE(!shader_contains_uniform(b2, bitsize, 1)); \
+   setup(MESA_SHADER_##producer_stage, MESA_SHADER_##consumer_stage, \
+         VARYING_SLOT_##slot, comp, nir_type_##type##bitsize, bitsize, index0, index1); \
+   check_uniform_kept(); \
 }
 
 #define TEST_UNIFORM_KEPT(producer_stage, consumer_stage, slot, comp, type, bitsize) \

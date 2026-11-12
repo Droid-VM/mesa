@@ -792,7 +792,7 @@ impl RegLatencySM75 {
                 RedirectedFP16 => pred(has_pred, 3, 1),
                 Decoupled => 1,
                 _ => {
-                    panic!("Illegal RAW in Predicate");
+                    panic!("Illegal WAW in Predicate");
                 }
             },
             IMADWideUpper | IMADWideLower => match writer1 {
@@ -803,7 +803,7 @@ impl RegLatencySM75 {
                 RedirectedFP16 => pred(has_pred, 3, 3),
                 Decoupled => 1,
                 _ => {
-                    panic!("Illegal RAW in Predicate");
+                    panic!("Illegal WAW in Predicate");
                 }
             },
             RedirectedFP64 => match writer1 {
@@ -813,7 +813,7 @@ impl RegLatencySM75 {
                 RedirectedFP16 => pred(has_pred, 2, 4),
                 Decoupled => 1,
                 _ => {
-                    panic!("Illegal RAW in Predicate");
+                    panic!("Illegal WAW in Predicate");
                 }
             },
             RedirectedFP16 => match writer1 {
@@ -823,7 +823,7 @@ impl RegLatencySM75 {
                 RedirectedFP16 => 1,
                 Decoupled => 1,
                 _ => {
-                    panic!("Illegal RAW in Predicate");
+                    panic!("Illegal WAW in Predicate");
                 }
             },
             Decoupled => match writer1 {
@@ -832,11 +832,11 @@ impl RegLatencySM75 {
                 | RedirectedFP16 => 2,
                 Decoupled => 1,
                 _ => {
-                    panic!("Illegal RAW in Predicate");
+                    panic!("Illegal WAW in Predicate");
                 }
             },
             _ => {
-                panic!("Illegal WAR category in Predicates");
+                panic!("Illegal WAW category in Predicates");
             }
         }
     }

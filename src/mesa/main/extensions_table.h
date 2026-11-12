@@ -216,6 +216,7 @@ EXT(ATI_texture_mirror_once                 , ATI_texture_mirror_once           
 EXT(EXT_EGL_image_storage                   , EXT_EGL_image_storage                  , GLL, GLC , x ,  30, 2018)
 EXT(EXT_EGL_image_storage_compression       , EXT_EGL_image_storage                  , GLL, GLC , x ,  30, 2021)
 EXT(EXT_EGL_sync                            , dummy_true                             , GLL, GLC,  x ,  x , 2019)
+EXT(EXT_YUV_target                          , EXT_YUV_target                         ,  x ,  x ,  x ,  30, 2013)
 EXT(EXT_abgr                                , dummy_true                             , GLL, GLC,  x ,  x , 1995)
 EXT(EXT_base_instance                       , ARB_base_instance                      ,  x ,  x ,  x ,  30, 2014)
 EXT(EXT_bgra                                , dummy_true                             , GLL,  x ,  x ,  x , 1995)
@@ -395,6 +396,7 @@ EXT(KHR_texture_compression_astc_sliced_3d  , KHR_texture_compression_astc_slice
 
 EXT(MESA_bgra                               , dummy_true                             ,  x ,  x ,  x , ES2, 2021)
 EXT(MESA_framebuffer_flip_y                 , MESA_framebuffer_flip_y                ,  43,  43,  x ,  30, 2018)
+EXT(MESA_map_buffer_client_pointer          , MESA_map_buffer_client_pointer         , GLL, GLC,  x ,  x , 2026)
 EXT(MESA_pack_invert                        , MESA_pack_invert                       , GLL, GLC,  x ,  x , 2002)
 EXT(MESA_sampler_objects                    , dummy_true                             ,  x ,  x ,  x , ES2, 2019)
 EXT(MESA_shader_integer_functions           , MESA_shader_integer_functions          , GLL, GLC,  x ,  30, 2016)

@@ -38,23 +38,32 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 #include "util/format/u_format.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_surface.h"
 #include "util/u_transfer.h"
 #include "util/u_transfer_helper.h"
 
+#include "layout/eil_format.h"
 #include "hw/common_3d.xml.h"
 
 #include "drm-uapi/drm_fourcc.h"
 
 #define ETNA_PIPE_MAP_DISCARD_LEVEL   (PIPE_MAP_DRV_PRV << 0)
 
+static inline bool
+etna_buffer_busy(struct etna_context *ctx, struct etna_buffer_resource *rsc)
+{
+   return etna_resource_status(ctx, &rsc->base) || !etna_bo_is_idle(rsc->bo);
+}
+
 static void *
 etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
                 unsigned level, unsigned usage, const struct pipe_box *box,
                 struct pipe_transfer **out_transfer)
 {
+   MESA_TRACE_FUNC();
    struct etna_buffer_resource *rsc = etna_buffer_resource(prsc);
    struct etna_context *ctx = etna_context(pctx);
    struct etna_transfer *trans;
@@ -67,6 +76,15 @@ etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
    if ((usage & PIPE_MAP_WRITE) &&
        !util_ranges_intersect(&rsc->valid_buffer_range,
                               box->x, box->x + box->width))
+      usage |= PIPE_MAP_UNSYNCHRONIZED;
+
+   /* Replace a busy buffer instead of stalling on it when its old content
+    * is no longer needed.
+    */
+   if ((usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+       !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
+       etna_buffer_busy(ctx, rsc) &&
+       etna_buffer_resource_realloc(ctx, rsc))
       usage |= PIPE_MAP_UNSYNCHRONIZED;
 
    pipe_resource_reference(&trans->base.resource, prsc);
@@ -108,6 +126,26 @@ etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
 free_trans:
    slab_free(&ctx->transfer_pool, trans);
    return NULL;
+}
+
+static void
+etna_invalidate_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
+{
+   struct etna_context *ctx = etna_context(pctx);
+   struct etna_buffer_resource *rsc;
+
+   if (prsc->target != PIPE_BUFFER)
+      return;
+
+   rsc = etna_buffer_resource(prsc);
+
+   if (rsc->valid_buffer_range.start > rsc->valid_buffer_range.end)
+      return;
+
+   if (etna_buffer_busy(ctx, rsc))
+      etna_buffer_resource_realloc(ctx, rsc);
+   else
+      util_range_set_empty(&rsc->valid_buffer_range);
 }
 
 static void
@@ -199,6 +237,7 @@ static void etna_unpatch_data(void *buffer, const struct pipe_transfer *ptrans)
 void
 etna_texture_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
 {
+   MESA_TRACE_FUNC();
    struct etna_context *ctx = etna_context(pctx);
    struct etna_transfer *trans = etna_transfer(ptrans);
    struct etna_resource *rsc = etna_resource(ptrans->resource);
@@ -226,15 +265,19 @@ etna_texture_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
          /* We have a temporary resource due to either tile status or
           * tiling format. Write back the updated buffer contents.
           */
+         struct pipe_box staging_box = ptrans->box;
+         staging_box.x = staging_box.y = staging_box.z = 0;
+
          ctx->in_transfer_blit = true;
          etna_copy_resource_box(pctx, ptrans->resource, trans->rsc,
-                                ptrans->level, 0, &ptrans->box, false);
+                                ptrans->level, 0, ptrans->box.x, ptrans->box.y,
+                                ptrans->box.z, &staging_box, false);
          ctx->in_transfer_blit = false;
       } else if (trans->staging) {
          /* map buffer object */
          if (rsc->layout == ETNA_LAYOUT_TILED) {
             for (unsigned z = 0; z < ptrans->box.depth; z++) {
-               if (format_is_128bit(rsc->base.format)) {
+               if (eil_format_is_emulated_128bit(rsc->base.format)) {
                   etna_texture_tile_rgba32f(
                      trans->mapped + (ptrans->box.z + z) * res_level->layer_stride,
                      trans->staging + z * ptrans->layer_stride,
@@ -294,6 +337,7 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
                  unsigned level, unsigned usage, const struct pipe_box *box,
                  struct pipe_transfer **out_transfer)
 {
+   MESA_TRACE_FUNC();
    struct etna_context *ctx = etna_context(pctx);
    struct etna_screen *screen = ctx->screen;
    struct etna_resource *rsc = etna_resource(prsc);
@@ -348,14 +392,14 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
    }
 
    if (rsc->texture && !etna_resource_newer(rsc, etna_resource(rsc->texture)) &&
-       (!translate_pe_format_rb_swap(prsc->format) || rsc->shared)) {
+       (!translate_pe_format_rb_swap(prsc->format, screen) || rsc->shared)) {
       /* We have a texture resource which is the same age or newer than the
        * render resource. Use the texture resource, which avoids bouncing
        * pixels between the two resources, and we can de-tile it in s/w. */
       rsc = etna_resource(rsc->texture);
    } else if (etna_resource_level_ts_valid(res_level) ||
               (rsc->layout != ETNA_LAYOUT_LINEAR &&
-               etna_format_hw_tileable(screen->specs.use_blt, rsc->internal_format) &&
+               etna_format_hw_tileable(VIV_FEATURE(screen, ETNA_FEATURE_BLT_ENGINE), rsc->internal_format) &&
                /* HALIGN 4 resources are incompatible with the resolve engine,
                 * so fall back to using software to detile this resource. */
                rsc->halign != TEXTURE_HALIGN_FOUR)) {
@@ -371,16 +415,33 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
          return NULL;
       }
 
+      if (!VIV_FEATURE(screen, ETNA_FEATURE_BLT_ENGINE)) {
+         /* Need to align the transfer region to satisfy RS restrictions, as we
+          * really want to hit the RS blit path here.
+          */
+         etna_align_box_for_rs(ctx->screen, rsc, &ptrans->box);
+      }
+
       struct pipe_resource templ = *prsc;
       templ.last_level = 0;
-      templ.width0 = res_level->width;
-      templ.height0 = res_level->height;
+      templ.width0 = ptrans->box.width;
+      templ.height0 = ptrans->box.height;
+      if (prsc->target == PIPE_TEXTURE_3D) {
+         templ.depth0 = ptrans->box.depth;
+      } else {
+         templ.array_size = ptrans->box.depth;
+         if (prsc->target == PIPE_TEXTURE_CUBE ||
+             prsc->target == PIPE_TEXTURE_CUBE_ARRAY)
+            templ.target = PIPE_TEXTURE_2D_ARRAY;
+      }
       templ.nr_samples = 0;
       templ.bind = PIPE_BIND_RENDER_TARGET;
       /* Emulated depth32f stores as the internal D24S8, so size the staging by
        * the internal format. The base format is restored below for the
        * same-format resolve blit. */
       templ.format = rsc->internal_format;
+      if (usage & PIPE_MAP_READ)
+         templ.flags |= ETNA_RESOURCE_FLAG_CPU_READ;
 
       trans->rsc = etna_resource_alloc(pctx->screen, ETNA_LAYOUT_LINEAR,
                                        DRM_FORMAT_MOD_LINEAR, &templ);
@@ -390,16 +451,10 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
       }
       trans->rsc->format = rsc->base.format;
 
-      if (!screen->specs.use_blt) {
-         /* Need to align the transfer region to satisfy RS restrictions, as we
-          * really want to hit the RS blit path here.
-          */
-         etna_align_box_for_rs(ctx->screen, rsc, &ptrans->box);
-      }
-
       if ((usage & PIPE_MAP_READ) || !(usage & ETNA_PIPE_MAP_DISCARD_LEVEL)) {
          ctx->in_transfer_blit = true;
-         etna_copy_resource_box(pctx, trans->rsc, &rsc->base, 0, level, &ptrans->box, false);
+         etna_copy_resource_box(pctx, trans->rsc, &rsc->base, 0, level,
+                                0, 0, 0, &ptrans->box, false);
          ctx->in_transfer_blit = false;
       }
 
@@ -457,8 +512,19 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
       ptrans->stride = res_level->stride;
       ptrans->layer_stride = res_level->layer_stride;
 
+      struct pipe_box map_box = *box;
+      if (trans->rsc) {
+         /*
+          * On RS the staging resource is aligned and might therefore be bigger than the requested transfer area.
+          * Move map_box to the offset within the aligned resource to copy the correct box regardless of alignment.
+          */
+         map_box.x -= ptrans->box.x;
+         map_box.y -= ptrans->box.y;
+         map_box.z -= ptrans->box.z;
+      }
+
       trans->mapped += res_level->offset +
-             etna_compute_offset(etna_resource(prsc)->internal_format, box,
+             etna_compute_offset(etna_resource(prsc)->internal_format, &map_box,
                                  res_level->stride, res_level->layer_stride);
 
       /* We need to have the unpatched data ready for the gfx stack. */
@@ -488,7 +554,7 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
       if (usage & PIPE_MAP_READ) {
          if (rsc->layout == ETNA_LAYOUT_TILED) {
             for (unsigned z = 0; z < ptrans->box.depth; z++) {
-               if (format_is_128bit(rsc->base.format)) {
+               if (eil_format_is_emulated_128bit(rsc->base.format)) {
                   etna_texture_untile_rgba32f(trans->staging + z * ptrans->layer_stride,
                                     trans->mapped + (ptrans->box.z + z) * res_level->layer_stride,
                                     ptrans->box.x, ptrans->box.y, res_level->stride,
@@ -535,5 +601,6 @@ etna_transfer_init(struct pipe_context *pctx)
    pctx->buffer_unmap = etna_buffer_unmap;
    pctx->texture_unmap = u_transfer_helper_transfer_unmap;
    pctx->buffer_subdata = u_default_buffer_subdata;
+   pctx->invalidate_resource = etna_invalidate_resource;
    pctx->texture_subdata = u_default_texture_subdata;
 }

@@ -3,6 +3,7 @@
 
 computerator_files = [
   'a4xx.cc',
+  'a5xx.cc',
   'a6xx.cc',
   'ir3_asm.cc',
   'main.cc',

@@ -44,6 +44,8 @@ anv_vk_priority_to_drm_sched_priority(VkQueueGlobalPriority vk_priority)
       return DRM_SCHED_PRIORITY_NORMAL;
    case VK_QUEUE_GLOBAL_PRIORITY_HIGH:
       return DRM_SCHED_PRIORITY_HIGH;
+   case VK_QUEUE_GLOBAL_PRIORITY_REALTIME:
+      return DRM_SCHED_PRIORITY_KERNEL;
    default:
       UNREACHABLE("Invalid priority");
       return DRM_SCHED_PRIORITY_MIN;
@@ -146,7 +148,7 @@ create_engine(struct anv_device *device,
                            DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY,
                            &state_cache_perf_ext.base);
    }
-   if (device->physical->instance->drirc.perf.guc_low_latency &&
+   if (physical->drirc.perf.guc_low_latency &&
        physical->info.supports_low_latency_hint)
       create.flags |= DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT;
 

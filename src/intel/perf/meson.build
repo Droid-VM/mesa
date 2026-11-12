@@ -30,9 +30,10 @@ intel_perf_sources = [
   'intel_perf.c',
   'intel_perf_query.c',
   'intel_perf_mdapi.c',
+  'intel_perf_metrics_library.cpp',
 ]
 
-intel_perf_sources += custom_target(
+intel_perf_gen_sources = custom_target(
   'intel-perf-sources',
   input : intel_hw_metrics_xml_files,
   output : [ 'intel_perf_metrics.c', 'intel_perf_metrics.h' ],
@@ -42,6 +43,7 @@ intel_perf_sources += custom_target(
     '@INPUT@',
   ],
 )
+intel_perf_sources += intel_perf_gen_sources
 
 libintel_perf = static_library(
   'intel_perf',
@@ -58,7 +60,7 @@ libintel_perf = static_library(
 idep_intel_perf = declare_dependency(
   link_with : libintel_perf,
   dependencies : [idep_intel_dev, idep_libintel_common],
-  sources : intel_perf_sources
+  sources : intel_perf_gen_sources[1]
 )
 
 if with_intel_tools

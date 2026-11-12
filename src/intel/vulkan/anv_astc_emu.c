@@ -14,7 +14,7 @@ astc_emu_init_image_view(struct anv_cmd_buffer *cmd_buffer,
                          struct anv_image_view *iview,
                          struct anv_image *image,
                          VkFormat format,
-                         VkImageUsageFlags usage,
+                         VkImageUsageFlags2KHR usage,
                          uint32_t level, uint32_t layer)
 {
    struct anv_device *device = cmd_buffer->device;
@@ -459,12 +459,12 @@ anv_astc_emu_process(struct anv_cmd_buffer *cmd_buffer,
       struct anv_image_view dst_view;
       astc_emu_init_image_view(cmd_buffer, &src_view, image,
                                VK_FORMAT_R32G32B32A32_UINT,
-                               VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,
                                subresource->mipLevel, slice_base + i);
       astc_emu_init_image_view(cmd_buffer, &dst_view, image,
                                flush_denorms ? VK_FORMAT_R32G32B32A32_UINT
                                              : VK_FORMAT_R8G8B8A8_UINT,
-                               VK_IMAGE_USAGE_STORAGE_BIT,
+                               VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,
                                subresource->mipLevel, slice_base + i);
 
       if (flush_denorms) {

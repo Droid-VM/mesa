@@ -176,8 +176,7 @@ write_program_payload(struct gl_context *ctx, struct blob *blob,
    for (unsigned stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
       struct gl_linked_shader *shader = sh_prog->_LinkedShaders[stage];
       if (shader)
-         ctx->Driver.ProgramBinarySerializeDriverBlob(ctx, sh_prog,
-                                                      shader->Program);
+         st_serialise_nir_program(ctx, shader->Program);
    }
 
    blob_write_uint32(blob, sh_prog->SeparateShader);
@@ -210,8 +209,7 @@ read_program_payload(struct gl_context *ctx, struct blob_reader *blob,
       if (!shader)
          continue;
 
-      ctx->Driver.ProgramBinaryDeserializeDriverBlob(ctx, sh_prog,
-                                                     shader->Program);
+      st_deserialise_nir_program(ctx, sh_prog, shader->Program);
    }
 
    return true;

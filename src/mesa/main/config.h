@@ -58,6 +58,8 @@
 
 /** Maximum number of lights */
 #define MAX_LIGHTS 8
+#define MAX_SHININESS 128.0f
+#define MAX_SPOT_EXPONENT 128.0f
 
 /**
  * Maximum number of user-defined clipping planes supported by any driver in

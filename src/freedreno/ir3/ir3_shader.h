@@ -65,6 +65,11 @@ struct ir3_driver_params_vs {
    uint32_t instid_base;
    uint32_t vtxcnt_max;
    uint32_t is_indexed_draw;  /* Note: boolean, ie. 0 or ~0 */
+   /* For software multiview (draw duplication): view index loaded as a
+    * driver param when the hardware does not have native multiview.
+    */
+   uint32_t view_index;
+   uint32_t draw_id_offset;
    /* user-clip-plane components, up to 8x vec4's: */
    struct {
       uint32_t x;
@@ -72,7 +77,7 @@ struct ir3_driver_params_vs {
       uint32_t z;
       uint32_t w;
    } ucp[8];
-   uint32_t __pad_37_39[3];
+   uint32_t __pad;
 };
 #define IR3_DP_VS(name) dword_offsetof(struct ir3_driver_params_vs, name)
 
@@ -165,6 +170,7 @@ struct ir3_ubo_range {
    struct ir3_ubo_info ubo;
    uint32_t offset;     /* start offset to push in the const register file */
    uint32_t start, end; /* range of block that's actually used */
+   bool can_speculate;
 };
 
 struct ir3_ubo_analysis_state {
@@ -426,6 +432,14 @@ struct ir3_shader_key {
           * enabled
           */
          unsigned force_dual_color_blend : 1;
+
+         /* Software multiview (devices without HW multiview support): the
+          * driver emulates multiview by duplicating draws on the CPU and
+          * supplies the current view index as a VS driver param.  When set,
+          * load_view_index reads that driver param instead of the hardware
+          * SYSTEM_VALUE_VIEW_INDEX sysval.
+          */
+         unsigned sw_multiview : 1;
       };
       uint32_t global;
    };
@@ -809,7 +823,17 @@ struct ir3_shader_variant {
       bool rasterflat : 1; /* special handling for emit->rasterflat */
       bool half       : 1;
       bool flat       : 1;
-   } inputs[32 + 2]; /* +POSITION +FACE */
+      /* inputs[] array is sized for 32 FS input varyings plus sysvals.  Vulkan
+       * says that the built-ins (face, coord, etc.) count against the input
+       * components limit, so we shouldn't need to have space for them, but GL
+       * lacks that clarity.  Regardless, the IJs shouldn't count against the
+       * input components limit, which is fine since sysvals don't take up
+       * total_in slots.
+       *
+       * FS sysval list: FRAG_COORD, FACE, SAMPLE_ID, SAMPLE_MASK_IN,
+       * FRAG_SHADING_RATE
+       */
+   } inputs[32 + IJ_COUNT + 5];
    bool reads_primid;
    bool reads_shading_rate;
    bool reads_smask;
@@ -958,6 +982,7 @@ struct ir3_shader_variant {
          bool color_is_dual_source : 1;
          bool uses_fbfetch_output  : 1;
          bool fbfetch_coherent     : 1;
+         bool yuv_color            : 1;
          enum gl_frag_depth_layout depth_layout;
       } fs;
       struct {
@@ -1175,10 +1200,13 @@ ir3_max_const(const struct ir3_shader_variant *v)
    return _ir3_max_const(v, v->key.safe_constlen);
 }
 
+int32_t ir3_evaluate_src_mods(int32_t val, unsigned flags);
 bool ir3_const_ensure_imm_size(struct ir3_shader_variant *v, unsigned size);
 uint16_t ir3_const_imm_index_to_reg(const struct ir3_const_state *const_state,
                                     unsigned i);
-uint16_t ir3_const_find_imm(struct ir3_shader_variant *v, uint32_t imm);
+uint16_t ir3_const_find_imm(struct ir3_shader_variant *v,
+                            struct ir3_instruction *instr, unsigned n,
+                            int32_t iim_val, unsigned *new_flags);
 uint16_t ir3_const_add_imm(struct ir3_shader_variant *v, uint32_t imm);
 
 static inline unsigned

@@ -19,6 +19,7 @@ struct si_video_dec {
    struct pipe_screen *screen;
    struct radeon_winsys *ws;
    struct radeon_cmdbuf cs;
+   struct radeon_cmdbuf *cs_sdma;
    struct pipe_context *ectx;
 
    bool error;
@@ -32,7 +33,6 @@ struct si_video_dec {
    unsigned bs_size;
    unsigned cur_buffer;
    unsigned dpb_size;
-   unsigned dpb_alignment;
 
    struct pipe_resource *dpb[AC_VIDEO_DEC_MAX_REFS];
    struct pipe_video_buffer *render_pic_list[AC_VIDEO_DEC_MAX_REFS];

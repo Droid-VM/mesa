@@ -350,12 +350,16 @@ disasm(struct emu *emu)
 
    /* Figure out if we have BV/LPAC SQE appended: */
    if (gpuver >= 7) {
-      offsets[EMU_PROC_BV] = emu_get_reg64(emu, &BV_INSTR_BASE) -
-         emu_get_reg64(emu, &CP_SQE_INSTR_BASE);
-      offsets[EMU_PROC_BV] /= 4;
-      offsets[EMU_PROC_LPAC] = emu_get_reg64(emu, &LPAC_INSTR_BASE) -
-         emu_get_reg64(emu, &CP_SQE_INSTR_BASE);
-      offsets[EMU_PROC_LPAC] /= 4;
+      if (emu_get_reg64(emu, &BV_INSTR_BASE)) {
+         offsets[EMU_PROC_BV] = emu_get_reg64(emu, &BV_INSTR_BASE) -
+            emu_get_reg64(emu, &CP_SQE_INSTR_BASE);
+         offsets[EMU_PROC_BV] /= 4;
+      }
+      if (emu_get_reg64(emu, &LPAC_INSTR_BASE)) {
+         offsets[EMU_PROC_LPAC] = emu_get_reg64(emu, &LPAC_INSTR_BASE) -
+            emu_get_reg64(emu, &CP_SQE_INSTR_BASE);
+         offsets[EMU_PROC_LPAC] /= 4;
+      }
       if (gpuver >= 8) {
          /* Note: DDE_BR and DDE_BV share the same microcode */
          offsets[EMU_PROC_DDE_BR] = emu_get_reg64(emu, &DDE_BR_INSTR_BASE) -

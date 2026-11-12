@@ -1212,7 +1212,7 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
    if (image->vk.external_handle_types &
        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
       image->from_ahb = true;
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       image->vk.ahb_format = anv_ahb_format_for_vk_format(image->vk.format);
 #endif
       return VK_SUCCESS;
@@ -1389,7 +1389,7 @@ resolve_ahw_image(struct anv_device *device,
                   struct anv_image *image,
                   struct anv_device_memory *mem)
 {
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26
    assert(mem->ahw);
    AHardwareBuffer_Desc desc;
    AHardwareBuffer_describe(mem->ahw, &desc);
@@ -1455,10 +1455,10 @@ anv_image_get_memory_requirements(struct anv_device *device,
     */
    uint32_t memory_types = (1ull << device->physical->memory.type_count) - 1;
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *requirements = (void *)ext;
+         VkMemoryDedicatedRequirements *requirements = ext;
          if (image->vk.wsi_legacy_scanout || image->from_ahb) {
             /* If we need to set the tiling for external consumers, we need a
              * dedicated allocation.
@@ -1475,7 +1475,7 @@ anv_image_get_memory_requirements(struct anv_device *device,
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1517,8 +1517,8 @@ void anv_GetImageMemoryRequirements2(
 
    VkImageAspectFlags aspects = image->vk.aspects;
 
-   vk_foreach_struct_const(ext, pInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO: {
          assert(image->disjoint);
          const VkImagePlaneMemoryRequirementsInfo *plane_reqs =
@@ -1528,7 +1528,7 @@ void anv_GetImageMemoryRequirements2(
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1598,8 +1598,8 @@ anv_bind_image_memory(struct anv_device *device,
    if (mem && mem->ahw)
       resolve_ahw_image(device, image, mem);
 
-   vk_foreach_struct_const(s, bind_info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const(sType, s, bind_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO: {
          const VkBindImagePlaneMemoryInfo *plane_info =
             (const VkBindImagePlaneMemoryInfo *) s;
@@ -1685,7 +1685,7 @@ anv_bind_image_memory(struct anv_device *device,
       }
 #pragma GCC diagnostic pop
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1801,7 +1801,7 @@ anv_get_image_subresource_layout(const struct anv_image *image,
                                           subresource->imageSubresource.mipLevel,
                                           subresource->imageSubresource.arrayLayer,
                                           0 /* logical_z_offset_px */,
-                                          &offset_B, NULL, NULL);
+                                          &offset_B, NULL, NULL, NULL);
 
       layout->subresourceLayout.offset += offset_B;
       layout->subresourceLayout.size =

@@ -92,6 +92,7 @@ struct ac_ib_parser {
    unsigned trace_id_count;
    enum amd_gfx_level gfx_level;
    enum vcn_version vcn_version;
+   enum sdma_version sdma_version;
    enum radeon_family family;
    enum amd_ip_type ip_type;
    ac_debug_addr_callback addr_callback;

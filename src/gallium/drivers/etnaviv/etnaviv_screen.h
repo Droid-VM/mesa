@@ -68,6 +68,8 @@ struct etna_screen {
 
    uint32_t drm_version;
 
+   struct disk_cache *disk_cache;
+
    struct etna_compiler *compiler;
    struct util_queue shader_compiler_queue;
    struct util_shader_variant_cache_options variant_opts;

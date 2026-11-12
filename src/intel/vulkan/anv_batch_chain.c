@@ -27,8 +27,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <xf86drm.h>
-
 #include "anv_private.h"
 #include "anv_measure.h"
 
@@ -38,6 +36,9 @@
 #include "genxml/genX_bits.h"
 
 #include "util/perf/u_trace.h"
+
+#include "perf/intel_perf.h"
+#include "perf/intel_perf_metrics_library.h"
 
 /** \file anv_batch_chain.c
  *
@@ -779,20 +780,6 @@ anv_cmd_buffer_alloc_dynamic_state(struct anv_cmd_buffer *cmd_buffer,
    return state;
 }
 
-struct anv_state
-anv_cmd_buffer_alloc_general_state(struct anv_cmd_buffer *cmd_buffer,
-                                   uint32_t size, uint32_t alignment)
-{
-   if (size == 0)
-      return ANV_STATE_NULL;
-   struct anv_state state =
-      anv_state_stream_alloc(&cmd_buffer->general_state_stream,
-                             size, alignment);
-   if (state.map == NULL)
-      anv_batch_set_error(&cmd_buffer->batch, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-   return state;
-}
-
 /** Allocate space associated with a command buffer
  *
  * Some commands like vkCmdBuildAccelerationStructuresKHR() can end up needing
@@ -1367,9 +1354,27 @@ anv_queue_exec_locked(struct anv_queue *queue,
       }
    }
 
-   if (perf_query_pool && device->perf_queue != queue)
-      debug_warn_once("Mismatch between queue that OA stream was open and "
-                      "queue were query will be executed.");
+   /* Latch resolvable OAG boundary reports before this submission adds
+    * more, so back-to-back perf-query submissions cannot wrap the ring.
+    */
+   if (perf_query_pool && device->physical->perf->oag_global_enable)
+      anv_oag_resolve_all_pools(device);
+
+   /* The OA stream is opened against a single queue, but any queue of a
+    * perf-capable family may legally submit performance queries, so a
+    * mismatch is not a reason to lose an otherwise valid device. With no
+    * stream open at all (INTEL_DEBUG=no-oaconfig) there is nothing to warn
+    * about, and in OAG mode it is not even suspect: the stream is global and
+    * the metric-set reconfiguration targets the submitting queue's exec
+    * queue.
+    */
+   if (perf_query_pool && device->perf_queue &&
+       device->perf_queue != queue &&
+       !device->physical->perf->oag_global_enable) {
+      debug_warn_once("Mismatch between the queue the OA stream was opened "
+                      "against and the queue the performance query is "
+                      "executed on.");
+   }
 
    result =
       device->kmd_backend->queue_exec_locked(
@@ -1632,6 +1637,9 @@ anv_queue_submit(struct vk_queue *vk_queue,
       return VK_SUCCESS;
    }
 
+   /* Assigns queue->ds.submission_id, used by the utrace flush below. */
+   uint64_t start_ts = intel_ds_begin_submit(&queue->ds);
+
    /* Flush the trace points first before taking the lock as the flushing
     * might try to take that same lock.
     */
@@ -1644,17 +1652,22 @@ anv_queue_submit(struct vk_queue *vk_queue,
    if (result != VK_SUCCESS)
       return result;
 
-   uint64_t start_ts = intel_ds_begin_submit(&queue->ds);
+   if (device->physical->perf && device->physical->perf->use_metrics_library && queue->metrics_library_configuration) {
+      if (!intel_perf_metrics_library_activate_configuration(device->physical->perf,
+                                                             queue->metrics_library_configuration)) {
+         return VK_ERROR_UNKNOWN;
+      }
+   }
 
    if (submit->buffer_bind_count ||
        submit->image_opaque_bind_count ||
        submit->image_bind_count) {
       result = anv_queue_submit_sparse_bind(queue, submit);
    } else {
-      pthread_mutex_lock(&device->mutex);
+      simple_mtx_lock(&device->mutex);
       result = anv_queue_submit_cmd_buffers_locked(queue, submit,
                                                    utrace_submit);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
    }
 
    intel_ds_end_submit(&queue->ds, start_ts);

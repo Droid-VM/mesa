@@ -111,7 +111,7 @@ void radv_describe_begin_cmd_buffer(struct radv_cmd_buffer *cmd_buffer);
 
 void radv_describe_end_cmd_buffer(struct radv_cmd_buffer *cmd_buffer);
 
-void radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *draw_info, bool use_gang_cs);
+void radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info draw_info, bool use_gang_cs);
 
 void radv_describe_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_dispatch_info *info);
 

@@ -171,24 +171,27 @@ handle_tex_src(struct v3d_compile *c,
                                         p2_unpacked->offset_r =
                                                 nir_src_comp_as_int(instr->src[src_idx].src, 2);
                         }
-                } else {
-                        struct qreg src_0 =
-                                ntq_get_src(c, instr->src[src_idx].src, 0);
-                        struct qreg src_1 =
-                                ntq_get_src(c, instr->src[src_idx].src, 1);
-                        if (!tmu_writes) {
-                                struct qreg mask = vir_uniform_ui(c, 0xf);
-                                struct qreg x, y, offset;
+                } else if (!tmu_writes) {
+                        struct qreg mask = vir_uniform_ui(c, 0xf);
+                        struct qreg src = ntq_get_src(c, instr->src[src_idx].src, 0);
+                        struct qreg offset = vir_AND(c, src, mask);
 
-                                x = vir_AND(c, src_0, mask);
-                                y = vir_AND(c, src_1, mask);
-                                offset = vir_OR(c, x,
+                        if (non_array_components >= 2) {
+                                src = ntq_get_src(c, instr->src[src_idx].src, 1);
+                                struct qreg y = vir_AND(c, src, mask);
+                                offset = vir_OR(c, offset,
                                                 vir_SHL(c, y, vir_uniform_ui(c, 4)));
-
-                                vir_TMU_WRITE(c, V3D_QPU_WADDR_TMUOFF, offset);
-                        } else {
-                                (*tmu_writes)++;
                         }
+                        if (non_array_components >= 3) {
+                                src = ntq_get_src(c, instr->src[src_idx].src, 2);
+                                struct qreg z = vir_AND(c, src, mask);
+                                offset = vir_OR(c, offset,
+                                                vir_SHL(c, z, vir_uniform_ui(c, 8)));
+                        }
+
+                        vir_TMU_WRITE(c, V3D_QPU_WADDR_TMUOFF, offset);
+                } else {
+                        (*tmu_writes)++;
                 }
                 break;
         }

@@ -19,6 +19,7 @@
 #include "util/u_dynarray.h"
 #include "util/list.h"
 #include "util/simple_mtx.h"
+#include "util/xmlconfig.h"
 #include "pipe/p_defines.h"
 #include "util/pb_slab.h"
 #include "intel/dev/intel_device_info.h"
@@ -72,12 +73,12 @@ enum iris_memory_zone {
 #define IRIS_SCRATCH_ZONE_SIZE (8 * 1024 * 1024)
 #define IRIS_BINDER_ZONE_SIZE ((1ull << 30) - IRIS_SCRATCH_ZONE_SIZE)
 
-#define IRIS_MEMZONE_SHADER_START     (0ull * (1ull << 32))
-#define IRIS_MEMZONE_BINDER_START     (1ull * (1ull << 32))
-#define IRIS_MEMZONE_SCRATCH_START    IRIS_MEMZONE_BINDER_START
-#define IRIS_MEMZONE_SURFACE_START    (IRIS_MEMZONE_BINDER_START + IRIS_BINDER_ZONE_SIZE)
-#define IRIS_MEMZONE_DYNAMIC_START    (2ull * (1ull << 32))
-#define IRIS_MEMZONE_OTHER_START      (3ull * (1ull << 32))
+#define IRIS_MEMZONE_SHADER_START     (0ull * (1ull << 32)) /* 0x000000000 (0 GB) */
+#define IRIS_MEMZONE_BINDER_START     (1ull * (1ull << 32)) /* 0x100000000 (4 GB) */
+#define IRIS_MEMZONE_SCRATCH_START    IRIS_MEMZONE_BINDER_START /* 0x100000000 (4 GB) */
+#define IRIS_MEMZONE_SURFACE_START    (IRIS_MEMZONE_BINDER_START + IRIS_BINDER_ZONE_SIZE) /* 0x100000000 + IRIS_BINDER_ZONE_SIZE (4 GB + 64 MB = 4.0625 GB) */
+#define IRIS_MEMZONE_DYNAMIC_START    (2ull * (1ull << 32)) /* 0x200000000 (8 GB) */
+#define IRIS_MEMZONE_OTHER_START      (3ull * (1ull << 32)) /* 0x300000000 (12 GB) */
 
 #define IRIS_BORDER_COLOR_POOL_ADDRESS IRIS_MEMZONE_DYNAMIC_START
 #define IRIS_BORDER_COLOR_POOL_SIZE (64 * 4096)
@@ -227,6 +228,12 @@ struct iris_bo_screen_deps {
    struct iris_syncobj *read_syncobjs[IRIS_BATCH_COUNT];
 };
 
+enum iris_bo_state {
+   IRIS_BO_STATE_IN_USE = 0,
+   IRIS_BO_STATE_NOT_IN_USE_BUT_ALIVE,
+   IRIS_BO_STATE_NOT_IN_USE_MAYBE_PURGED
+};
+
 struct iris_bo {
    /**
     * Size in bytes of the buffer object.
@@ -357,6 +364,15 @@ struct iris_bo {
 
          /** Boolean of whether this buffer can be scanout to display */
          bool scanout;
+
+         /** State of bo, mainly used to reduce madvise call.
+          * When bo is not needed first for 1sec we put it on bo cache but don't
+          * tell anything to KMD.
+          * Then if after that time it was not used, we tell KMD that it can be
+          * purged.
+          * Then after another second if not used we free it.
+          */
+         enum iris_bo_state bo_state;
       } real;
       struct {
          struct pb_slab_entry entry;
@@ -565,7 +581,9 @@ void iris_bo_mark_exported(struct iris_bo *bo);
  */
 bool iris_bo_busy(struct iris_bo *bo);
 
-struct iris_bufmgr *iris_bufmgr_get_for_fd(int fd, bool bo_reuse);
+bool iris_bufmgr_is_eff_64bit_enabled(const struct iris_bufmgr *bufmgr);
+
+struct iris_bufmgr *iris_bufmgr_get_for_fd(int fd, bool bo_reuse, struct driOptionCache *options);
 int iris_bufmgr_get_fd(struct iris_bufmgr *bufmgr);
 
 struct iris_bo *iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
@@ -595,8 +613,6 @@ int iris_bo_export_gem_handle_for_device(struct iris_bo *bo, int drm_fd,
                                          uint32_t *out_handle);
 
 /**
- * Returns the BO's address relative to the appropriate base address.
- *
  * All of our base addresses are programmed to the start of a 4GB region,
  * so simply returning the bottom 32 bits of the BO address will give us
  * the offset from whatever base address corresponds to that memory region.
@@ -607,8 +623,9 @@ iris_bo_offset_from_base_address(struct iris_bo *bo)
    /* This only works for buffers in the memory zones corresponding to a
     * base address - the top, unbounded memory zone doesn't have a base.
     */
+   assert(!iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr));
    assert(bo->address < IRIS_MEMZONE_OTHER_START);
-   return bo->address;
+   return bo->address & UINT32_MAX;
 }
 
 /**

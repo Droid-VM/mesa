@@ -4,6 +4,7 @@
 #![allow(non_upper_case_globals)]
 
 use crate::api::event::create_and_queue;
+use crate::api::event::create_and_queue_with_cleanup;
 use crate::api::icd::*;
 use crate::api::types::*;
 use crate::api::util::*;
@@ -17,7 +18,12 @@ use crate::core::platform::Platform;
 use crate::core::queue::*;
 use crate::rusticl_warn_once;
 
+use libc_rust_gen::{lseek, SEEK_END};
+use mesa_rust::pipe::fence::FenceFd;
 use mesa_rust_gen::pipe_fd_type;
+use mesa_rust_util::conversion::TryFromWithErr;
+use mesa_rust_util::conversion::TryIntoWithErr;
+use mesa_rust_util::properties::MultiValProperties;
 use mesa_rust_util::properties::Properties;
 use mesa_rust_util::ptr::*;
 use mesa_rust_util::static_assert;
@@ -31,6 +37,17 @@ use std::num::NonZeroU64;
 use std::os::raw::c_void;
 use std::ptr;
 use std::sync::Arc;
+
+pub const SUPPORTED_EXTERNAL_MEMORY_TYPES: &[cl_external_memory_handle_type_khr] = &[
+    CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
+    CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR,
+];
+
+unsafe fn new_multi_var_property(
+    props: *const cl_mem_properties,
+) -> Option<MultiValProperties<cl_mem_properties>> {
+    unsafe { MultiValProperties::new(props, &[CL_MEM_DEVICE_HANDLE_LIST_KHR.into()]) }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MemFlagValidationType {
@@ -152,14 +169,14 @@ fn validate_map_flags(m: &MemBase, map_flags: cl_mem_flags) -> CLResult<()> {
 
     // CL_INVALID_OPERATION if buffer has been created with CL_MEM_HOST_WRITE_ONLY or
     // CL_MEM_HOST_NO_ACCESS and CL_MAP_READ is set in map_flags
-    if bit_check(m.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) &&
-      bit_check(map_flags, CL_MAP_READ) ||
+    if m.flags.are_any_bits_set(CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) &&
+      map_flags.are_any_bits_set(CL_MAP_READ) ||
       // or if buffer has been created with CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS and
       // CL_MAP_WRITE or CL_MAP_WRITE_INVALIDATE_REGION is set in map_flags.
       // CL_INVALID_OPERATION if buffer was created with CL_MEM_IMMUTABLE_EXT in flags and
       // CL_MAP_WRITE or CL_MAP_WRITE_INVALIDATE_REGION is set in map_flags.
-      bit_check(m.flags, CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT) &&
-      bit_check(map_flags, CL_MAP_WRITE | CL_MAP_WRITE_INVALIDATE_REGION)
+      m.flags.are_any_bits_set(CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT) &&
+      map_flags.are_any_bits_set(CL_MAP_WRITE | CL_MAP_WRITE_INVALIDATE_REGION)
     {
         return Err(CL_INVALID_OPERATION);
     }
@@ -263,21 +280,21 @@ fn validate_matching_buffer_flags(mem: &MemBase, flags: cl_mem_flags) -> CLResul
     //
     // 1) mem_object was created with CL_MEM_WRITE_ONLY and
     //    flags specifies CL_MEM_READ_WRITE or CL_MEM_READ_ONLY,
-    if bit_check(mem.flags, CL_MEM_WRITE_ONLY) && bit_check(flags, CL_MEM_READ_WRITE | CL_MEM_READ_ONLY) ||
+    if mem.flags.are_any_bits_set(CL_MEM_WRITE_ONLY) && flags.are_any_bits_set(CL_MEM_READ_WRITE | CL_MEM_READ_ONLY) ||
       // 2) mem_object was created with CL_MEM_READ_ONLY and
       //    flags specifies CL_MEM_READ_WRITE or CL_MEM_WRITE_ONLY,
-      bit_check(mem.flags, CL_MEM_READ_ONLY) && bit_check(flags, CL_MEM_READ_WRITE | CL_MEM_WRITE_ONLY) ||
+      mem.flags.are_any_bits_set(CL_MEM_READ_ONLY) && flags.are_any_bits_set(CL_MEM_READ_WRITE | CL_MEM_WRITE_ONLY) ||
       // 3) flags specifies CL_MEM_USE_HOST_PTR or CL_MEM_ALLOC_HOST_PTR or CL_MEM_COPY_HOST_PTR.
-      bit_check(flags, CL_MEM_USE_HOST_PTR | CL_MEM_ALLOC_HOST_PTR | CL_MEM_COPY_HOST_PTR) ||
+      flags.are_any_bits_set(CL_MEM_USE_HOST_PTR | CL_MEM_ALLOC_HOST_PTR | CL_MEM_COPY_HOST_PTR) ||
       // CL_INVALID_VALUE if an image is being created from another memory object (buffer or image)
       // and mem_object was created with CL_MEM_HOST_WRITE_ONLY and flags specifies CL_MEM_HOST_READ_ONLY
-      bit_check(mem.flags, CL_MEM_HOST_WRITE_ONLY) && bit_check(flags, CL_MEM_HOST_READ_ONLY) ||
+      mem.flags.are_any_bits_set(CL_MEM_HOST_WRITE_ONLY) && flags.are_any_bits_set(CL_MEM_HOST_READ_ONLY) ||
       // or if mem_object was created with CL_MEM_HOST_READ_ONLY and flags specifies CL_MEM_HOST_WRITE_ONLY
-      bit_check(mem.flags, CL_MEM_HOST_READ_ONLY) && bit_check(flags, CL_MEM_HOST_WRITE_ONLY) ||
+      mem.flags.are_any_bits_set(CL_MEM_HOST_READ_ONLY) && flags.are_any_bits_set(CL_MEM_HOST_WRITE_ONLY) ||
       // or if mem_object was created with CL_MEM_HOST_NO_ACCESS and_flags_ specifies CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_WRITE_ONLY.
-      bit_check(mem.flags, CL_MEM_HOST_NO_ACCESS) && bit_check(flags, CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_WRITE_ONLY) ||
+      mem.flags.are_any_bits_set(CL_MEM_HOST_NO_ACCESS) && flags.are_any_bits_set(CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_WRITE_ONLY) ||
       // CL_INVALID_VALUE if buffer was created with CL_MEM_IMMUTABLE_EXT and flags specifies CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY, or CL_MEM_HOST_WRITE_ONLY.
-      bit_check(mem.flags, CL_MEM_IMMUTABLE_EXT) && bit_check(flags, CL_MEM_READ_WRITE | CL_MEM_WRITE_ONLY | CL_MEM_HOST_WRITE_ONLY)
+      mem.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) && flags.are_any_bits_set(CL_MEM_READ_WRITE | CL_MEM_WRITE_ONLY | CL_MEM_HOST_WRITE_ONLY)
     {
         return Err(CL_INVALID_VALUE);
     }
@@ -328,7 +345,7 @@ unsafe impl CLInfo<cl_mem_info> for cl_mem {
             } else {
                 0
             }),
-            CL_MEM_PROPERTIES => v.write::<&Properties<cl_mem_properties>>(&mem.props),
+            CL_MEM_PROPERTIES => v.write::<&MultiValProperties<cl_mem_properties>>(&mem.props),
             CL_MEM_REFERENCE_COUNT => v.write::<cl_uint>(if mem.is_buffer() {
                 Buffer::refcnt(*self)?
             } else {
@@ -345,6 +362,92 @@ unsafe impl CLInfo<cl_mem_info> for cl_mem {
             _ => Err(CL_INVALID_VALUE),
         }
     }
+}
+
+fn parse_mem_properties(
+    properties: *const cl_mem_properties,
+    c: &Context,
+    host_ptr: *mut c_void,
+    flags: cl_mem_flags,
+    image: bool,
+) -> CLResult<(MultiValProperties<cl_mem_properties>, Option<FenceFd>)> {
+    // CL_INVALID_PROPERTY [...] if the same property name is specified more than once.
+    let props = unsafe { new_multi_var_property(properties) }.ok_or(CL_INVALID_PROPERTY)?;
+
+    // CL_INVALID_PROPERTY if a property name in properties is not a supported property name, if
+    // the value specified for a supported property name is not valid, or if the same property name
+    // is specified more than once.
+    let mut handle: Option<FenceFd> = None;
+    let mut devs: Option<Vec<&Device>> = None;
+    for (key, vals) in props.iter() {
+        match u32::try_from_with_err(key, CL_INVALID_PROPERTY)? {
+            CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR | CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR => {
+                // CL_INVALID_PROPERTY [..] if properties includes more than one external memory
+                // handle.
+                if handle.is_some() {
+                    return Err(CL_INVALID_PROPERTY);
+                }
+
+                // CL_INVALID_HOST_PTR if properties includes a supported external memory handle and
+                // host_ptr is not NULL.
+                if !host_ptr.is_null() {
+                    return Err(CL_INVALID_HOST_PTR);
+                }
+
+                // CL_INVALID_VALUE if properties includes a supported external memory handle and
+                // flags includes CL_MEM_USE_HOST_PTR, CL_MEM_ALLOC_HOST_PTR, or
+                // CL_MEM_COPY_HOST_PTR.
+                if flags.are_any_bits_set(
+                    CL_MEM_USE_HOST_PTR | CL_MEM_ALLOC_HOST_PTR | CL_MEM_COPY_HOST_PTR,
+                ) {
+                    return Err(CL_INVALID_VALUE);
+                }
+
+                handle = Some(FenceFd {
+                    fd: vals[0].try_into_with_err(CL_INVALID_VALUE)?,
+                });
+            }
+            CL_MEM_DEVICE_HANDLE_LIST_KHR => {
+                devs = Some(
+                    vals.iter()
+                        .map(|&handle| Device::ref_from_raw(handle as *mut _))
+                        .collect::<CLResult<_>>()?,
+                );
+            }
+            CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT if !image => {
+                // CL_INVALID_OPERATION If properties includes CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT and
+                // there are no devices in the context that support the cl_ext_buffer_device_address
+                // extension.
+                if c.devs.iter().all(|dev| !dev.bda_supported()) {
+                    return Err(CL_INVALID_OPERATION);
+                }
+            }
+            _ => return Err(CL_INVALID_PROPERTY),
+        }
+    }
+
+    if handle.is_some() {
+        if let Some(devs) = devs {
+            for dev in &devs {
+                // CL_INVALID_DEVICE if a device identified by the property
+                // CL_MEM_DEVICE_HANDLE_LIST_KHR [..] is not associated with context, or if a device
+                // identified by property CL_MEM_DEVICE_HANDLE_LIST_KHR cannot import the requested
+                // external memory object type
+                if !c.devs.contains(dev) || !dev.memory_sharing_supported() {
+                    return Err(CL_INVALID_DEVICE);
+                }
+            }
+        } else {
+            // CL_INVALID_DEVICE [..] if CL_MEM_DEVICE_HANDLE_LIST_KHR is not specified as part of
+            // properties and one or more devices in context cannot import the requested external
+            // memory object type.
+            if c.devs.iter().any(|dev| !dev.memory_sharing_supported()) {
+                return Err(CL_INVALID_DEVICE);
+            }
+        }
+    }
+
+    Ok((props, handle))
 }
 
 #[cl_entrypoint(clCreateBufferWithProperties)]
@@ -385,27 +488,8 @@ fn create_buffer_with_properties(
         }
     }
 
-    // CL_INVALID_PROPERTY [...] if the same property name is specified more than once.
-    let props = unsafe { Properties::new(properties) }.ok_or(CL_INVALID_PROPERTY)?;
-
-    // CL_INVALID_PROPERTY if a property name in properties is not a supported property name, if
-    // the value specified for a supported property name is not valid, or if the same property name
-    // is specified more than once.
-    for (&key, _) in props.iter() {
-        match key as u32 {
-            CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT => {
-                // CL_INVALID_OPERATION If properties includes CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT and
-                // there are no devices in the context that support the cl_ext_buffer_device_address
-                // extension.
-                if c.devs.iter().all(|dev| !dev.bda_supported()) {
-                    return Err(CL_INVALID_OPERATION);
-                }
-            }
-            _ => return Err(CL_INVALID_PROPERTY),
-        }
-    }
-
-    Ok(MemBase::new_buffer(c, flags, size, host_ptr, props)?.into_cl())
+    let (props, handle) = parse_mem_properties(properties, &c, host_ptr, flags, false)?;
+    Ok(MemBase::new_buffer(c, flags, size, host_ptr, props, handle)?.into_cl())
 }
 
 #[cl_entrypoint(clCreateBuffer)]
@@ -531,6 +615,7 @@ fn validate_image_desc(
     elem_size: usize,
     flags: cl_mem_flags,
     devs: &[&Device],
+    imported: bool,
 ) -> CLResult<(cl_image_desc, Option<Mem>)> {
     // CL_INVALID_IMAGE_DESCRIPTOR if values specified in image_desc are not valid
     const err: cl_int = CL_INVALID_IMAGE_DESCRIPTOR;
@@ -615,7 +700,9 @@ fn validate_image_desc(
 
         // CL_INVALID_VALUE if CL_MEM_IMMUTABLE_EXT is not set in flags and mem_object was created
         // with CL_MEM_IMMUTABLE_EXT
-        if bit_check(p.flags, CL_MEM_IMMUTABLE_EXT) && !bit_check(flags, CL_MEM_IMMUTABLE_EXT) {
+        if p.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT)
+            && flags.are_no_bits_set(CL_MEM_IMMUTABLE_EXT)
+        {
             return Err(CL_INVALID_VALUE);
         }
 
@@ -624,25 +711,41 @@ fn validate_image_desc(
         None
     };
 
-    // image_row_pitch is the scan-line pitch in bytes. This must be 0 if host_ptr is NULL and can
-    // be either 0 or ≥ image_width × size of element in bytes if host_ptr is not NULL. If host_ptr
-    // is not NULL and image_row_pitch = 0, image_row_pitch is calculated as image_width × size of
-    // element in bytes. If image_row_pitch is not 0, it must be a multiple of the image element
-    // size in bytes. For a 2D image created from a buffer, the pitch specified (or computed if
-    // pitch specified is 0) must be a multiple of the maximum of the
-    // CL_DEVICE_IMAGE_PITCH_ALIGNMENT value for all devices in the context associated with the
-    // buffer specified by mem_object that support images.
+    // image_row_pitch is the scan-line pitch in bytes. The image_row_pitch must be zero if host_ptr
+    // is NULL, the image is not an image created from an external memory handle, and the image is
+    // not a 2D image created from a buffer, If image_row_pitch is zero and host_ptr is not NULL,
+    // then the image row pitch is calculated as image_width × the size of an image element in
+    // bytes. If image_row_pitch is zero and the image is created from an external memory handle,
+    // then the image row pitch is implementation-defined. The image row pitch must be ≥ image_width
+    // × the size of an image element in bytes, and must be a multiple of the size of an image
+    // element in bytes. For an image created from a buffer, the image row pitch must also
     //
-    // image_slice_pitch is the size in bytes of each 2D slice in the 3D image or the size in bytes
-    // of each image in a 1D or 2D image array. This must be 0 if host_ptr is NULL. If host_ptr is
-    // not NULL, image_slice_pitch can be either 0 or ≥ image_row_pitch × image_height for a 2D
-    // image array or 3D image and can be either 0 or ≥ image_row_pitch for a 1D image array. If
-    // host_ptr is not NULL and image_slice_pitch = 0, image_slice_pitch is calculated as
-    // image_row_pitch × image_height for a 2D image array or 3D image and image_row_pitch for a 1D
-    // image array. If image_slice_pitch is not 0, it must be a multiple of the image_row_pitch.
+    //   Be a multiple of the CL_IMAGE_REQUIREMENTS_ROW_PITCH_ALIGNMENT_EXT value for the
+    //   image_format, image_type and flags used to create the image, if the
+    //   cl_ext_image_requirements_info extension is supported, or
+    //
+    //   Be a multiple of the maximum of the CL_DEVICE_IMAGE_PITCH_ALIGNMENT value for all devices
+    //   in the context that support images, otherwise.
+    //
+    //
+    // image_slice_pitch is the size in bytes of each 2D slice in a 3D image, or the size in bytes
+    // of each image in a 1D or 2D image array. The image_slice_pitch must be zero if host_ptr is
+    // NULL and the image is not an image created from an external memory handle, If
+    // image_slice_pitch is zero and host_ptr is not NULL then the image slice pitch is calculated
+    // as the image row pitch × image_height for a 2D image array or a 3D image, and as the image
+    // row pitch for a 1D image array. If image_slice_pitch is zero and the image is created from an
+    // external memory handle, then the image slice pitch is implementation-defined. The image slice
+    // pitch must be ≥ the image row pitch × image_height for a 2D image array or a 3D image, must
+    // be ≥ the image row pitch for a 1D image array, and must be a multiple of the image row pitch.
+    // For an image created from a buffer, the image slice pitch must be a multiple of the
+    // CL_IMAGE_REQUIREMENTS_SLICE_PITCH_ALIGNMENT_EXT value for the image_format, image_type and
+    // flags used to create the image, if the cl_ext_image_from_buffer extension is supported.
     let has_buf_parent = parent.as_ref().is_some_and(|p| p.is_buffer());
     if host_ptr.is_null() {
-        if (desc.image_row_pitch != 0 || desc.image_slice_pitch != 0) && !has_buf_parent {
+        if (desc.image_row_pitch != 0 || desc.image_slice_pitch != 0)
+            && !has_buf_parent
+            && !imported
+        {
             return Err(err);
         }
 
@@ -891,13 +994,20 @@ fn create_image_with_properties(
         .find(|d| d.caps.has_images)
         .ok_or(CL_INVALID_OPERATION)?;
 
+    // CL_INVALID_PROPERTY [...] if the same property name is specified more than once.
+    let (props, handle) = parse_mem_properties(properties, &c, host_ptr, flags, true)?;
     let (format, elem_size) = validate_image_format(image_format)?;
-    let (desc, parent) =
-        validate_image_desc(image_desc, host_ptr, elem_size.into(), flags, &c.devs)?;
+    let (desc, parent) = validate_image_desc(
+        image_desc,
+        host_ptr,
+        elem_size.into(),
+        flags,
+        &c.devs,
+        handle.is_some(),
+    )?;
 
     // validate host_ptr before merging flags
     validate_host_ptr(host_ptr, flags)?;
-
     flags = validate_buffer(&desc, flags, format, host_ptr, elem_size.into())?;
 
     // For all image types except CL_MEM_OBJECT_IMAGE1D_BUFFER, if the value specified for flags is 0, the
@@ -924,18 +1034,10 @@ fn create_image_with_properties(
         .find(|f| *f & filtered_flags == filtered_flags)
         .ok_or(CL_IMAGE_FORMAT_NOT_SUPPORTED)?;
 
-    // CL_INVALID_PROPERTY [...] if the same property name is specified more than once.
-    let props = unsafe { Properties::new(properties) }.ok_or(CL_INVALID_PROPERTY)?;
-
-    // CL_INVALID_PROPERTY if a property name in properties is not a supported property name, if
-    // the value specified for a supported property name is not valid, or if the same property name
-    // is specified more than once.
-    if !props.is_empty() {
-        // we don't support any properties
-        return Err(CL_INVALID_PROPERTY);
-    }
-
-    Ok(MemBase::new_image(c, parent, flags, format, desc, elem_size, host_ptr, props)?.into_cl())
+    Ok(MemBase::new_image(
+        c, parent, flags, format, desc, elem_size, host_ptr, props, handle,
+    )?
+    .into_cl())
 }
 
 #[cl_entrypoint(clCreateImage)]
@@ -1210,7 +1312,9 @@ fn enqueue_read_buffer(
 
     // CL_INVALID_OPERATION if clEnqueueReadBuffer is called on buffer which has been created with
     // CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.
-    if bit_check(b.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
+    if b.flags
+        .are_any_bits_set(CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1222,7 +1326,7 @@ fn enqueue_read_buffer(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| b.read(ctx, offset, ptr, cb)),
+        Some(Box::new(move |_, ctx| b.read(ctx, offset, ptr, cb))),
     )
 
     // TODO
@@ -1261,10 +1365,9 @@ fn enqueue_write_buffer(
     // CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS.
     // CL_INVALID_OPERATION if clEnqueueWriteBuffer is called on buffer which has been created with
     // CL_MEM_IMMUTABLE_EXT.
-    if bit_check(
-        b.flags,
-        CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT,
-    ) {
+    if b.flags
+        .are_any_bits_set(CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1276,7 +1379,7 @@ fn enqueue_write_buffer(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| b.write(ctx, offset, ptr, cb)),
+        Some(Box::new(move |_, ctx| b.write(ctx, offset, ptr, cb))),
     )
 
     // TODO
@@ -1307,7 +1410,7 @@ fn enqueue_copy_buffer(
     }
 
     // CL_INVALID_OPERATION if dst_buffer was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(dst.flags, CL_MEM_IMMUTABLE_EXT) {
+    if dst.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1338,7 +1441,9 @@ fn enqueue_copy_buffer(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| src.copy_to_buffer(ctx, &dst, src_offset, dst_offset, size)),
+        Some(Box::new(move |_, ctx| {
+            src.copy_to_buffer(ctx, &dst, src_offset, dst_offset, size)
+        })),
     )
 
     // TODO
@@ -1371,7 +1476,10 @@ fn enqueue_read_buffer_rect(
 
     // CL_INVALID_OPERATION if clEnqueueReadBufferRect is called on buffer which has been created
     // with CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.
-    if bit_check(buf.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
+    if buf
+        .flags
+        .are_any_bits_set(CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1446,7 +1554,7 @@ fn enqueue_read_buffer_rect(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             buf.read_rect(
                 ptr,
                 ctx,
@@ -1458,7 +1566,7 @@ fn enqueue_read_buffer_rect(
                 host_row_pitch,
                 host_slice_pitch,
             )
-        }),
+        })),
     )
 
     // TODO
@@ -1491,10 +1599,10 @@ fn enqueue_write_buffer_rect(
     // with CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS.
     // CL_INVALID_OPERATION if clEnqueueWriteBufferRect is called on buffer which has been created
     // with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(
-        buf.flags,
-        CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT,
-    ) {
+    if buf
+        .flags
+        .are_any_bits_set(CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1569,7 +1677,7 @@ fn enqueue_write_buffer_rect(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             buf.write_rect(
                 ptr,
                 ctx,
@@ -1581,7 +1689,7 @@ fn enqueue_write_buffer_rect(
                 buffer_row_pitch,
                 buffer_slice_pitch,
             )
-        }),
+        })),
     )
 
     // TODO
@@ -1615,7 +1723,7 @@ fn enqueue_copy_buffer_rect(
     }
 
     // CL_INVALID_OPERATION if dst_buffer was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(dst.flags, CL_MEM_IMMUTABLE_EXT) {
+    if dst.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1712,7 +1820,7 @@ fn enqueue_copy_buffer_rect(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             src.copy_rect(
                 &dst,
                 ctx,
@@ -1724,7 +1832,7 @@ fn enqueue_copy_buffer_rect(
                 dst_row_pitch,
                 dst_slice_pitch,
             )
-        }),
+        })),
     )
 
     // TODO
@@ -1748,7 +1856,7 @@ fn enqueue_fill_buffer(
     let evs = event_list_from_cl(&q, num_events_in_wait_list, event_wait_list)?;
 
     // CL_INVALID_OPERATION if buffer was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(b.flags, CL_MEM_IMMUTABLE_EXT) {
+    if b.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1787,7 +1895,7 @@ fn enqueue_fill_buffer(
         evs,
         event,
         false,
-        b.fill(dev, pattern, offset, size)?,
+        Some(b.fill(dev, pattern, offset, size)?),
     )
 
     // TODO
@@ -1832,13 +1940,13 @@ fn enqueue_map_buffer(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             if map_flags != CL_MAP_WRITE_INVALIDATE_REGION.into() {
                 b.sync_map(ctx, ptr)
             } else {
                 Ok(())
             }
-        }),
+        })),
     )?;
 
     Ok(ptr.as_ptr())
@@ -1876,7 +1984,9 @@ fn enqueue_read_image(
 
     // CL_INVALID_OPERATION if clEnqueueReadImage is called on image which has been created with
     // CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.
-    if bit_check(i.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
+    if i.flags
+        .are_any_bits_set(CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -1925,7 +2035,9 @@ fn enqueue_read_image(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| i.read(ptr, ctx, &r, &o, row_pitch, slice_pitch)),
+        Some(Box::new(move |_, ctx| {
+            i.read(ptr, ctx, &r, &o, row_pitch, slice_pitch)
+        })),
     )
 
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
@@ -1962,10 +2074,9 @@ fn enqueue_write_image(
     // CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS.
     // CL_INVALID_OPERATION if clEnqueueWriteImage is called on image which has been created with
     // CL_MEM_IMMUTABLE_EXT.
-    if bit_check(
-        i.flags,
-        CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT,
-    ) {
+    if i.flags
+        .are_any_bits_set(CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS | CL_MEM_IMMUTABLE_EXT)
+    {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -2014,7 +2125,9 @@ fn enqueue_write_image(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| i.write(ptr, ctx, &r, row_pitch, slice_pitch, &o)),
+        Some(Box::new(move |_, ctx| {
+            i.write(ptr, ctx, &r, row_pitch, slice_pitch, &o)
+        })),
     )
 
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
@@ -2045,7 +2158,7 @@ fn enqueue_copy_image(
     }
 
     // CL_INVALID_OPERATION if dst_image was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(dst_image.flags, CL_MEM_IMMUTABLE_EXT) {
+    if dst_image.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -2086,9 +2199,9 @@ fn enqueue_copy_image(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             src_image.copy_to_image(ctx, &dst_image, src_origin, dst_origin, &region)
-        }),
+        })),
     )
 
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for src_image or dst_image are not supported by device associated with queue.
@@ -2118,7 +2231,7 @@ fn enqueue_fill_image(
     }
 
     // CL_INVALID_OPERATION if image was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(i.flags, CL_MEM_IMMUTABLE_EXT) {
+    if i.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -2161,7 +2274,7 @@ fn enqueue_fill_image(
         evs,
         event,
         false,
-        i.fill(dev, fill_color, origin, region)?,
+        Some(i.fill(dev, fill_color, origin, region)?),
     )
 
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
@@ -2193,7 +2306,7 @@ fn enqueue_copy_buffer_to_image(
     }
 
     // CL_INVALID_OPERATION if dst_image was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(dst.flags, CL_MEM_IMMUTABLE_EXT) {
+    if dst.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -2222,7 +2335,9 @@ fn enqueue_copy_buffer_to_image(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| src.copy_to_image(ctx, &dst, src_offset, dst_origin, &region)),
+        Some(Box::new(move |_, ctx| {
+            src.copy_to_image(ctx, &dst, src_offset, dst_origin, &region)
+        })),
     )
 
     //• CL_INVALID_MEM_OBJECT if src_buffer is not a valid buffer object or dst_image is not a valid image object or if dst_image is a 1D image buffer object created from src_buffer.
@@ -2258,7 +2373,7 @@ fn enqueue_copy_image_to_buffer(
     }
 
     // CL_INVALID_OPERATION if dst_buffer was created with CL_MEM_IMMUTABLE_EXT.
-    if bit_check(dst.flags, CL_MEM_IMMUTABLE_EXT) {
+    if dst.flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_OPERATION);
     }
 
@@ -2288,7 +2403,9 @@ fn enqueue_copy_image_to_buffer(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| src.copy_to_buffer(ctx, &dst, src_origin, dst_offset, &region)),
+        Some(Box::new(move |_, ctx| {
+            src.copy_to_buffer(ctx, &dst, src_origin, dst_offset, &region)
+        })),
     )
 
     //• CL_INVALID_MEM_OBJECT if src_image is not a valid image object or dst_buffer is not a valid buffer object or if src_image is a 1D image buffer object created from dst_buffer.
@@ -2372,13 +2489,13 @@ fn enqueue_map_image(
         evs,
         event,
         block,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             if map_flags != CL_MAP_WRITE_INVALIDATE_REGION.into() {
                 i.sync_map(ctx, ptr)
             } else {
                 Ok(())
             }
-        }),
+        })),
     )?;
 
     Ok(ptr.as_ptr())
@@ -2443,13 +2560,13 @@ fn enqueue_unmap_mem_object(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             if needs_sync {
                 m.sync_unmap(ctx, mapped_ptr)
             } else {
                 Ok(())
             }
-        }),
+        })),
     )
 }
 
@@ -2480,23 +2597,15 @@ fn enqueue_migrate_mem_objects(
 
     // CL_INVALID_VALUE if flags is not 0 or is not any of the values described in the table above.
     if flags != 0
-        && bit_check(
-            flags,
-            !(CL_MIGRATE_MEM_OBJECT_HOST | CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED),
+        && flags.are_other_bits_set(
+            CL_MIGRATE_MEM_OBJECT_HOST | CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED,
         )
     {
         return Err(CL_INVALID_VALUE);
     }
 
     // we should do something, but it's legal to not do anything at all
-    create_and_queue(
-        q,
-        CL_COMMAND_MIGRATE_MEM_OBJECTS,
-        evs,
-        event,
-        false,
-        Box::new(|_, _| Ok(())),
-    )
+    create_and_queue(q, CL_COMMAND_MIGRATE_MEM_OBJECTS, evs, event, false, None)
 
     //• CL_MEM_OBJECT_ALLOCATION_FAILURE if there is a failure to allocate memory for the specified set of memory objects in mem_objects.
 }
@@ -2526,12 +2635,14 @@ pub fn svm_alloc(
     }
 
     // flags does not contain CL_MEM_SVM_FINE_GRAIN_BUFFER but does contain CL_MEM_SVM_ATOMICS.
-    if !bit_check(flags, CL_MEM_SVM_FINE_GRAIN_BUFFER) && bit_check(flags, CL_MEM_SVM_ATOMICS) {
+    if flags.are_no_bits_set(CL_MEM_SVM_FINE_GRAIN_BUFFER)
+        && flags.are_any_bits_set(CL_MEM_SVM_ATOMICS)
+    {
         return Err(CL_INVALID_VALUE);
     }
 
     // flags contains CL_MEM_IMMUTABLE_EXT.
-    if bit_check(flags, CL_MEM_IMMUTABLE_EXT) {
+    if flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
         return Err(CL_INVALID_VALUE);
     }
 
@@ -2607,13 +2718,14 @@ fn enqueue_svm_free_impl(
     // imposed by the OpenCL specification. It is the caller's duty to uphold them.
     let cb_opt = unsafe { SVMFreeCb::new(pfn_free_func, user_data) }.ok();
 
-    create_and_queue(
+    create_and_queue_with_cleanup(
         Arc::clone(&q),
         cmd_type,
         evs,
         event,
         false,
-        Box::new(move |cl_ctx, _| {
+        None,
+        Some(Box::new(move |cl_ctx| {
             if let Some(cb) = cb_opt {
                 cb.call(&q, &mut svm_pointers);
             } else {
@@ -2621,9 +2733,7 @@ fn enqueue_svm_free_impl(
                     cl_ctx.remove_svm_ptr(ptr);
                 }
             }
-
-            Ok(())
-        }),
+        })),
     )
 }
 
@@ -2717,7 +2827,9 @@ fn enqueue_svm_memcpy_impl(
         evs,
         event,
         block,
-        Box::new(move |cl_ctx, ctx| cl_ctx.copy_svm(ctx, src_ptr, dst_ptr, size)),
+        Some(Box::new(move |cl_ctx, ctx| {
+            cl_ctx.copy_svm(ctx, src_ptr, dst_ptr, size)
+        })),
     )
 }
 
@@ -2882,7 +2994,7 @@ fn enqueue_svm_mem_fill_impl(
         }
     };
 
-    create_and_queue(q, cmd_type, evs, event, false, work)
+    create_and_queue(q, cmd_type, evs, event, false, Some(work))
 }
 
 #[cl_entrypoint(clEnqueueSVMMemFill)]
@@ -2973,7 +3085,9 @@ fn enqueue_svm_map_impl(
         evs,
         event,
         block,
-        Box::new(move |cl_ctx, ctx| cl_ctx.copy_svm_to_host(ctx, svm_ptr, flags)),
+        Some(Box::new(move |cl_ctx, ctx| {
+            cl_ctx.copy_svm_to_host(ctx, svm_ptr, flags)
+        })),
     )
 }
 
@@ -3047,13 +3161,9 @@ fn enqueue_svm_unmap_impl(
     }
 
     create_and_queue(
-        q,
-        cmd_type,
-        evs,
-        event,
-        false,
+        q, cmd_type, evs, event, false,
         // TODO: we _could_ migrate the content somewhere, but it's really pointless to do
-        Box::new(move |_, _| Ok(())),
+        None,
     )
 }
 
@@ -3149,8 +3259,8 @@ fn enqueue_svm_migrate_mem(
         return Err(CL_INVALID_VALUE);
     }
 
-    let to_device = !bit_check(flags, CL_MIGRATE_MEM_OBJECT_HOST);
-    let content_undefined = bit_check(flags, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED);
+    let to_device = flags.are_no_bits_set(CL_MIGRATE_MEM_OBJECT_HOST);
+    let content_undefined = flags.are_any_bits_set(CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED);
 
     create_and_queue(
         q,
@@ -3158,9 +3268,9 @@ fn enqueue_svm_migrate_mem(
         evs,
         event,
         false,
-        Box::new(move |cl_ctx, ctx| {
+        Some(Box::new(move |cl_ctx, ctx| {
             cl_ctx.migrate_svm(ctx, svm_pointers, sizes, to_device, content_undefined)
-        }),
+        })),
     )
 }
 
@@ -3359,14 +3469,14 @@ fn enqueue_acquire_gl_objects(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| {
+        Some(Box::new(move |_, ctx| {
             if let Some(fence_fd) = fence_fd {
                 ctx.import_fence(&fence_fd, pipe_fd_type::PIPE_FD_TYPE_NATIVE_SYNC)
                     .ok_or(CL_OUT_OF_RESOURCES)?
                     .gpu_wait(ctx)
             }
             copy_cube_to_slice(ctx, &objs)
-        }),
+        })),
     )
 }
 
@@ -3400,30 +3510,195 @@ fn enqueue_release_gl_objects(
         evs,
         event,
         false,
-        Box::new(move |_, ctx| copy_slice_to_cube(ctx, &objs)),
+        Some(Box::new(move |_, ctx| copy_slice_to_cube(ctx, &objs))),
     )
 }
 
 #[cl_entrypoint(clEnqueueAcquireExternalMemObjectsKHR)]
 fn enqueue_acquire_external_mem_objects(
-    _command_queue: cl_command_queue,
-    _num_mem_objects: cl_uint,
-    _mem_objects: *const cl_mem,
-    _num_events_in_wait_list: cl_uint,
-    _event_wait_list: *const cl_event,
-    _event: *mut cl_event,
+    command_queue: cl_command_queue,
+    num_mem_objects: cl_uint,
+    mem_objects: *const cl_mem,
+    num_events_in_wait_list: cl_uint,
+    event_wait_list: *const cl_event,
+    event: *mut cl_event,
 ) -> CLResult<()> {
-    Err(CL_INVALID_OPERATION)
+    let q = Queue::arc_from_raw(command_queue)?;
+    let evs = event_list_from_cl(&q, num_events_in_wait_list, event_wait_list)?;
+    let mem_objects = MemBase::refs_from_arr(mem_objects, num_mem_objects)?;
+
+    // CL_INVALID_MEM_OBJECT if any of the memory objects in mem_objects is not a valid OpenCL
+    // memory object created using an external memory handle.
+    if mem_objects.into_iter().any(|mem| !mem.imported) {
+        return Err(CL_INVALID_MEM_OBJECT);
+    }
+
+    create_and_queue(
+        q,
+        CL_COMMAND_ACQUIRE_EXTERNAL_MEM_OBJECTS_KHR,
+        evs,
+        event,
+        false,
+        None,
+    )
 }
 
 #[cl_entrypoint(clEnqueueReleaseExternalMemObjectsKHR)]
 fn enqueue_release_external_mem_objects(
-    _command_queue: cl_command_queue,
-    _num_mem_objects: cl_uint,
-    _mem_objects: *const cl_mem,
-    _num_events_in_wait_list: cl_uint,
-    _event_wait_list: *const cl_event,
-    _event: *mut cl_event,
+    command_queue: cl_command_queue,
+    num_mem_objects: cl_uint,
+    mem_objects: *const cl_mem,
+    num_events_in_wait_list: cl_uint,
+    event_wait_list: *const cl_event,
+    event: *mut cl_event,
 ) -> CLResult<()> {
-    Err(CL_INVALID_OPERATION)
+    let q = Queue::arc_from_raw(command_queue)?;
+    let evs = event_list_from_cl(&q, num_events_in_wait_list, event_wait_list)?;
+    let mem_objects = MemBase::refs_from_arr(mem_objects, num_mem_objects)?;
+
+    // CL_INVALID_MEM_OBJECT if any of the memory objects in mem_objects is not a valid OpenCL
+    // memory object created using an external memory handle.
+    if mem_objects.into_iter().any(|mem| !mem.imported) {
+        return Err(CL_INVALID_MEM_OBJECT);
+    }
+
+    create_and_queue(
+        q,
+        CL_COMMAND_RELEASE_EXTERNAL_MEM_OBJECTS_KHR,
+        evs,
+        event,
+        false,
+        None,
+    )
+}
+
+#[cl_entrypoint(clImportMemoryARM)]
+pub unsafe fn import_memory_arm(
+    context: cl_context,
+    mut flags: cl_mem_flags,
+    properties: *const cl_import_properties_arm,
+    memory: *mut ::std::os::raw::c_void,
+    size: usize,
+) -> CLResult<cl_mem> {
+    let c = Context::arc_from_raw(context)?;
+
+    // CL_INVALID_BUFFER_SIZE when size is 0.
+    if size == 0 {
+        return Err(CL_INVALID_BUFFER_SIZE);
+    }
+    // CL_INVALID_VALUE if memory is NULL.
+    if memory.is_null() {
+        return Err(CL_INVALID_VALUE);
+    }
+
+    // The subset of flags accepted by clImportMemoryARM
+    let valid_flags = cl_bitfield::from(
+        CL_MEM_READ_WRITE
+            | CL_MEM_WRITE_ONLY
+            | CL_MEM_READ_ONLY
+            | CL_MEM_HOST_WRITE_ONLY
+            | CL_MEM_HOST_READ_ONLY
+            | CL_MEM_HOST_NO_ACCESS
+            | CL_MEM_USE_HOST_PTR,
+    );
+    if flags & !valid_flags != 0 {
+        return Err(CL_INVALID_VALUE);
+    }
+    validate_mem_flags_create(flags, MemFlagValidationType::Plain)?;
+
+    // properties can be NULL or point to a single zero value if the default
+    // behaviour is desired.
+    let mut import_type = CL_IMPORT_TYPE_HOST_ARM;
+    // CL_IMPORT_DMA_BUF_DATA_CONSISTENCY_WITH_HOST_ARM is ensured with
+    // p_screen$resource_from_handle
+    let mut _import_consistency = false;
+
+    // NOTE: The spec does not say what to do on multiple of the same arguments
+    // SAFETY: properties is a 0 terminated array by spec.
+    let props = unsafe { Properties::new(properties) }.ok_or(CL_INVALID_PROPERTY)?;
+    for (&key, &val) in props.iter() {
+        let key = u32::try_from(key).or(Err(CL_INVALID_PROPERTY))?;
+        let val = u32::try_from(val).or(Err(CL_INVALID_PROPERTY))?;
+        match key {
+            CL_IMPORT_TYPE_ARM => {
+                if !matches!(
+                    val,
+                    CL_IMPORT_TYPE_HOST_ARM
+                        | CL_IMPORT_TYPE_DMA_BUF_ARM
+                        | CL_IMPORT_TYPE_ANDROID_HARDWARE_BUFFER_ARM
+                ) {
+                    return Err(CL_INVALID_PROPERTY);
+                }
+
+                import_type = val;
+            }
+            CL_IMPORT_DMA_BUF_DATA_CONSISTENCY_WITH_HOST_ARM => {
+                _import_consistency = check_cl_bool(val).ok_or(CL_INVALID_PROPERTY)?;
+            }
+
+            // cl_arm_import_memory_protected is currently unimplemented
+            CL_IMPORT_TYPE_PROTECTED_ARM => return Err(CL_INVALID_PROPERTY),
+
+            // Android is currently unsupported
+            CL_IMPORT_ANDROID_HARDWARE_BUFFER_PLANE_INDEX_ARM => return Err(CL_INVALID_PROPERTY),
+            CL_IMPORT_ANDROID_HARDWARE_BUFFER_LAYER_INDEX_ARM => return Err(CL_INVALID_PROPERTY),
+
+            // CL_INVALID_PROPERTY when invalid properties [...] are passed.
+            _ => return Err(CL_INVALID_PROPERTY),
+        }
+    }
+
+    // CL_MEM_USE_HOST_PTR is ignored by spec.
+    flags &= !cl_bitfield::from(CL_MEM_USE_HOST_PTR);
+
+    match import_type {
+        CL_IMPORT_TYPE_DMA_BUF_ARM => {
+            for dev in &c.devs {
+                // While not stated in the spec, all devices need to be checked
+                // to ensure they support importing external memory objects.
+                // The cl_khr_external_memory spec is followed instead to return
+                // CL_INVALID_DEVICE if a device cannot import the requested
+                // external memory object type.
+                if !dev.memory_sharing_supported() {
+                    return Err(CL_INVALID_DEVICE);
+                }
+            }
+
+            // SAFETY: Pointer is non-null by spec.
+            // The spec leaves the type ambigous, however it should point to a
+            // dma_buf hadle, which is a c_int on UNIX platforms.
+            let fd_raw = unsafe { *(memory as *mut _) };
+            let fd = FenceFd { fd: fd_raw };
+
+            // Get a rough upper-bound for the size of the DMA buffer.
+            // SAFETY: Always safe as long as the underlying C API is safe.
+            let fd_size = unsafe { lseek(fd.fd, 0, SEEK_END.try_into().unwrap()) };
+            // When lseek fails and returns a -1, the fd is assumed invalid.
+            if fd_size == -1 {
+                return Err(CL_INVALID_OPERATION);
+            }
+
+            // CL_INVALID_BUFFER_SIZE when size is greater than the size of the
+            // allocation being imported.
+            if i64::try_from_with_err(size, CL_INVALID_BUFFER_SIZE)? > fd_size {
+                return Err(CL_INVALID_BUFFER_SIZE);
+            }
+
+            let mem = MemBase::new_buffer(
+                c,
+                flags,
+                size,
+                ptr::null_mut(),
+                MultiValProperties::default(),
+                Some(fd),
+            )?;
+
+            Ok(mem.into_cl())
+        }
+        // cl_arm_import_memory_host is currently unimplemented
+        CL_IMPORT_TYPE_HOST_ARM => Err(CL_INVALID_PROPERTY),
+        // Android is currently unsupported
+        CL_IMPORT_TYPE_ANDROID_HARDWARE_BUFFER_ARM => Err(CL_INVALID_PROPERTY),
+        _ => unreachable!(),
+    }
 }

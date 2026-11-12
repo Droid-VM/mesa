@@ -122,7 +122,9 @@ genX_bits_included_symbols = [
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Base Address',
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Pitch',
   'COMPUTE_WALKER::body',
+  'COMPUTE_WALKER_2::body',
   'EXECUTE_INDIRECT_DISPATCH::body',
+  'EXECUTE_INDIRECT_DISPATCH_2::body',
   # structures
   '3DSTATE_CONSTANT_ALL_DATA',
   'RENDER_SURFACE_STATE::Surface Base Address',
@@ -176,7 +178,7 @@ foreach f : gen_xml_files + gen_xml_rt_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute'],
+    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute', '--pack'],
     capture : true,
     depend_files: gen_pack_header_deps
   )
@@ -189,13 +191,13 @@ foreach f : gen_xml_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=video'],
+    command : [prog_python, '@INPUT@', '--engines=video', '--pack'],
     capture : true,
     depend_files: gen_pack_header_deps
   )
 endforeach
 
-genX_cl_included_symbols = [
+genX_cl_pack_symbols = [
   # instructions
   '3DMESH_3D',
   '3DSTATE_CLIP',
@@ -224,6 +226,7 @@ genX_cl_included_symbols = [
   '3DPRIMITIVE',
   '3DPRIMITIVE_EXTENDED',
   'COMPUTE_WALKER',
+  'COMPUTE_WALKER_2',
   'GPGPU_WALKER',
   'MEDIA_CURBE_LOAD',
   'MEDIA_INTERFACE_DESCRIPTOR_LOAD',
@@ -238,8 +241,12 @@ genX_cl_included_symbols = [
   'BINDLESS_SHADER_RECORD',
   'CALL_STACK_HANDLER',
   'COMPUTE_WALKER_BODY',
+  'COMPUTE_WALKER_BODY_2',
   'INTERFACE_DESCRIPTOR_DATA',
+  'INTERFACE_DESCRIPTOR_DATA_2',
   'POSTSYNC_DATA',
+  'POSTSYNC_DATA_2',
+  'RENDER_SURFACE_STATE',
   'RT_DISPATCH_GLOBALS',
   'RT_SHADER_TABLE',
   'VERTEX_BUFFER_STATE',
@@ -253,8 +260,8 @@ foreach f : gen_xml_files + gen_xml_rt_files
     input : ['gen_pack_header.py', f],
     output : _name,
     command : [prog_python, '@INPUT@', '--engines=render,blitter,compute',
-               '--opencl', '--repack',
-               '--include-symbols', ','.join(genX_cl_included_symbols)],
+               '--opencl', '--pack', '--repack', '--unpack',
+               '--include-symbols', ','.join(genX_cl_pack_symbols)],
     capture : true,
     depend_files: gen_pack_header_deps
   )

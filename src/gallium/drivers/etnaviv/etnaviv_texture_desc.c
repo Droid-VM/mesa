@@ -27,6 +27,7 @@
 
 #include "etnaviv_texture_desc.h"
 
+#include "layout/eil_format.h"
 #include "hw/common.xml.h"
 #include "hw/texdesc_3d.xml.h"
 
@@ -176,6 +177,14 @@ etna_texture_desc_fill(struct etna_context *ctx,
       break;
    }
 
+   int msaa_xscale = 1, msaa_yscale = 1;
+   assert(res->base.nr_samples <= 1 ||
+          res->base.nr_samples == ETNA_MAX_SAMPLES);
+   translate_samples_to_xyscale(res->base.nr_samples, &msaa_xscale,
+                                &msaa_yscale);
+   base_width *= msaa_xscale;
+   base_height *= msaa_yscale;
+
 #define DESC_SET(x, y) buf[(TEXDESC_##x)>>2] = (y)
    DESC_SET(CONFIG0, COND(!ext && !astc, VIVS_TE_SAMPLER_CONFIG0_FORMAT(format))
                    | VIVS_TE_SAMPLER_CONFIG0_TYPE(target_hw) |
@@ -191,6 +200,7 @@ etna_texture_desc_fill(struct etna_context *ctx,
    DESC_SET(LINEAR_STRIDE, res->levels[0].stride);
    DESC_SET(VOLUME, etna_log2_fixp88(base_depth));
    DESC_SET(SLICE, res->levels[0].layer_stride);
+   DESC_SET(CONFIG3, COND(res->base.nr_samples > 1, TE_SAMPLER_CONFIG3_MSAA));
    DESC_SET(3D_CONFIG, VIVS_TE_SAMPLER_3D_CONFIG_DEPTH(base_depth));
    DESC_SET(ASTC0, COND(astc, VIVS_NTE_SAMPLER_ASTC0_ASTC_FORMAT(format)) |
                    COND(astc && util_format_is_srgb(sv->base.format),
@@ -204,8 +214,6 @@ etna_texture_desc_fill(struct etna_context *ctx,
                           TEXDESC_LOG_SIZE_EXT_HEIGHT(etna_log2_fixp88(base_height)));
    DESC_SET(SIZE, VIVS_TE_SAMPLER_SIZE_WIDTH(base_width) |
                   VIVS_TE_SAMPLER_SIZE_HEIGHT(base_height));
-   for (int lod = 0; lod <= res->base.last_level; ++lod)
-      DESC_SET(LOD_ADDR(lod), etna_bo_gpu_va(res->bo) + res->levels[lod].offset);
 #undef DESC_SET
 }
 
@@ -240,7 +248,7 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
    /* For RB_SWAP formats, pre-compute the alternative texture format for when
     * shared resources hold data in native byte order (RGBA).
     */
-   if (translate_pe_format_rb_swap(so->format)) {
+   if (translate_pe_format_rb_swap(so->format, ctx->screen)) {
       uint32_t format = translate_texture_format(so->format, ctx->screen);
       sv->native_format = remap_texture_format_rb_swap(format);
    }
@@ -273,13 +281,10 @@ error:
 static void
 etna_sampler_view_desc_ref_bo(struct etna_context *ctx,
                               struct etna_cmd_stream *stream,
-                              struct etna_sampler_view_desc *sv)
+                              struct etna_sampler_view_desc *sv,
+                              unsigned num)
 {
-   struct etna_resource *res = etna_resource(sv->base.texture);
-
-   if (res->texture) {
-      res = etna_resource(res->texture);
-   }
+   struct etna_resource *res = etna_sampler_view_resource(ctx, &sv->base, num);
 
    /* No need to ref LOD levels individually as they'll always come from the same bo */
    etna_cmd_stream_ref_bo(stream, res->bo, ETNA_RELOC_READ);
@@ -345,9 +350,10 @@ etna_sampler_hw_slot(struct etna_context *ctx, unsigned idx)
    return idx - vs_off + etna_vs_sampler_base(ctx);
 }
 
-#define ETNA_DESC_KEY_SEAMLESS     (1 << 0)
-#define ETNA_DESC_KEY_NATIVE_ORDER (1 << 1)
-#define ETNA_DESC_KEY_BORDER       (1 << 2)
+#define ETNA_DESC_KEY_SEAMLESS      (1 << 0)
+#define ETNA_DESC_KEY_NATIVE_ORDER  (1 << 1)
+#define ETNA_DESC_KEY_BORDER        (1 << 2)
+#define ETNA_DESC_KEY_BORDER_SHADOW (1 << 3)
 
 /* Compose the final descriptor(s) from the template and the current
  * dynamic state. Returns true if the descriptor address changed.
@@ -355,7 +361,8 @@ etna_sampler_hw_slot(struct etna_context *ctx, unsigned idx)
 static bool
 etna_sampler_view_desc_compose(struct etna_context *ctx,
                                struct etna_sampler_view_desc *sv,
-                               const struct etna_sampler_state_desc *ss)
+                               const struct etna_sampler_state_desc *ss,
+                               unsigned num)
 {
    struct etna_resource *res = etna_resource(sv->base.texture);
    uint32_t key = 0;
@@ -365,13 +372,12 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
    if (sv->native_format && res->shared && res->shared_native_order)
       key |= ETNA_DESC_KEY_NATIVE_ORDER;
 
-   const bool use_border =
-      ss->base.wrap_s == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
-      ss->base.wrap_t == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
-      ss->base.wrap_r == PIPE_TEX_WRAP_CLAMP_TO_BORDER;
+   const bool use_border = etna_sampler_uses_border(&ss->base);
 
    if (use_border)
       key |= ETNA_DESC_KEY_BORDER;
+   if (etna_sampler_view_uses_border_shadow(ctx, num))
+      key |= ETNA_DESC_KEY_BORDER_SHADOW;
 
    if (key == sv->composed_key &&
        (!use_border ||
@@ -382,10 +388,9 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
       perf_debug_ctx(ctx, "Recomposing texture descriptor (key %x -> %x)",
                      sv->composed_key, key);
 
-   if (res->texture)
-      res = etna_resource(res->texture);
+   res = etna_sampler_view_resource(ctx, &sv->base, num);
 
-   const bool is_128bit = format_is_128bit(sv->base.format);
+   const bool is_128bit = eil_format_is_emulated_128bit(sv->base.format);
    const unsigned num_descs = is_128bit ? 2 : 1;
    unsigned offset;
 
@@ -402,6 +407,9 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
 
    memcpy(buf, sv->templ, TEXTURE_DESC_SIZE);
 
+   for (int lod = 0; lod <= res->base.last_level; ++lod)
+      buf[TEXDESC_LOD_ADDR(lod) >> 2] = etna_bo_gpu_va(res->bo) + res->levels[lod].offset;
+
    if (key & ETNA_DESC_KEY_SEAMLESS)
       buf[TEXDESC_CONFIG1 >> 2] |= VIVS_TE_SAMPLER_CONFIG1_SEAMLESS_CUBE_MAP;
 
@@ -416,21 +424,21 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
 
    if (util_format_is_depth_or_stencil(sv->base.format)) {
       /* A depth texture stores the border depth quantized to the
-       * D16 or D24 storage precision as an integer in the B slot.
+       * D16 or D24 storage precision as an integer in the red channel.
        * Everything but Z16 is stored as D24 (depth in the low bits).
        */
       const enum pipe_format zfmt =
          sv->base.format == PIPE_FORMAT_Z16_UNORM ? PIPE_FORMAT_Z16_UNORM
                                                  : PIPE_FORMAT_Z24X8_UNORM;
       packed = 0x01000000;
-      r = g = a = 0;
-      b = util_pack_z(zfmt, bc[0]);
+      r = util_pack_z(zfmt, bc[0]);
+      g = b = a = 0;
    } else {
       packed = (float_to_ubyte(bc[3]) << 24) | (float_to_ubyte(bc[0]) << 16) |
                (float_to_ubyte(bc[1]) << 8) | float_to_ubyte(bc[2]);
-      r = fui(bc[2]);
+      r = fui(bc[0]);
       g = fui(bc[1]);
-      b = fui(bc[0]);
+      b = fui(bc[2]);
       a = fui(bc[3]);
    }
 
@@ -451,6 +459,10 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
       for (int lod = 0; lod <= res->base.last_level; ++lod)
          companion[TEXDESC_LOD_ADDR(lod) >> 2] +=
             etna_resource_level_second_plane_offset(&res->levels[lod]);
+
+      /* The companion samples the B,A half through its R,G channels. */
+      companion[TEXDESC_BORDER_COLOR_R >> 2] = b;
+      companion[TEXDESC_BORDER_COLOR_G >> 2] = a;
 
       sv->DESC_ADDR_COMPANION.bo = sv->DESC_ADDR.bo;
       sv->DESC_ADDR_COMPANION.offset = offset + TEXTURE_DESC_SIZE;
@@ -512,36 +524,45 @@ etna_emit_texture_desc(struct etna_context *ctx)
     * etna_sampler_hw_slot() is the identity for the legacy fixed split, so
     * the body below serves both.
     *
-    * The vertex base shifts with the fragment sampler count, so a slot can
-    * move between draws even when its own view did not change. The loops
-    * below therefore refresh the whole array under unified, not just the
-    * dirty slots.
+    * The vertex base shifts with the fragment sampler count, so all slots
+    * move when it changes and the whole array needs a refresh. As long as
+    * the base is stable only the dirty slots need to be re-emitted.
     */
-   if (unified)
-      etna_set_state(stream, VIVS_VS_SAMPLER_BASE, etna_vs_sampler_base(ctx));
+   const unsigned vs_base = etna_vs_sampler_base(ctx);
+   const bool remap = unified && vs_base != ctx->prev_vs_sampler_base;
+
+   if (remap) {
+      etna_set_state(stream, VIVS_VS_SAMPLER_BASE, vs_base);
+      ctx->prev_vs_sampler_base = vs_base;
+   }
 
    for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
       if (!((1 << x) & active_samplers))
          continue;
 
-      const unsigned hw = etna_sampler_hw_slot(ctx, x);
       struct etna_sampler_state_desc *ss = etna_sampler_state_desc(ctx->sampler[x]);
       struct etna_sampler_view_desc *sv = etna_sampler_view_desc(ctx->sampler_view[x]);
-      uint32_t SAMP_CTRL0 = emit_desc_sampler_ctrl0(ss, sv);
 
-      const bool updated = etna_sampler_view_desc_compose(ctx, sv, ss);
-      const bool emit_addr = unified || updated || ((1 << x) & ctx->dirty_sampler_views);
+      const uint32_t bit = 1u << x;
+      const bool updated = etna_sampler_view_desc_compose(ctx, sv, ss, x);
+      const bool emit_addr = remap || updated || (bit & ctx->dirty_sampler_views);
+
+      if (!emit_addr && !(bit & ctx->dirty_samplers))
+         continue;
+
+      const unsigned hw = etna_sampler_hw_slot(ctx, x);
+      uint32_t SAMP_CTRL0 = emit_desc_sampler_ctrl0(ss, sv);
 
       emit_desc_sampler_state(stream, hw, SAMP_CTRL0, ss, sv);
       if (emit_addr) {
-         etna_sampler_view_desc_ref_bo(ctx, stream, sv);
+         etna_sampler_view_desc_ref_bo(ctx, stream, sv, x);
          etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(hw), &sv->DESC_ADDR);
          updated_mask |= 1u << hw;
       }
       used_hw |= 1u << hw;
 
       /* Apply same configuration to the 128-bit companion sampler. */
-      if (format_is_128bit(sv->base.format)) {
+      if (eil_format_is_emulated_128bit(sv->base.format)) {
          const unsigned y = companion_slot(ctx, x);
 
          assert(!sv->ts.enable);
@@ -557,25 +578,34 @@ etna_emit_texture_desc(struct etna_context *ctx)
       }
    }
 
-   /* Dummy descriptors for the dirty slots not backed by a sampler/companion. */
-   for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
-      if (used_hw & (1u << x))
-         continue;
-      if (unified || ((1 << x) & ctx->dirty_sampler_views))
-         etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(x),
+   /* Dummy descriptors for the dirty slots not backed by a sampler/companion.
+    * On a remap every unused slot gets one. Otherwise map the dirty view
+    * index to its HW slot, the two only match on the legacy fixed split.
+    */
+   if (remap) {
+      u_foreach_bit(hw, ~used_hw) {
+         etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(hw),
                               &ctx->screen->dummy_desc_reloc);
+         updated_mask |= 1u << hw;
+      }
+   } else {
+      u_foreach_bit(x, ctx->dirty_sampler_views) {
+         const unsigned hw = etna_sampler_hw_slot(ctx, x);
+
+         if ((used_hw | updated_mask) & (1u << hw))
+            continue;
+
+         etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(hw),
+                              &ctx->screen->dummy_desc_reloc);
+         updated_mask |= 1u << hw;
+      }
    }
 
-   if (unlikely(dirty & ETNA_DIRTY_SAMPLER_VIEWS) || updated_mask) {
-      /* Invalidate all dirty and re-addressed sampler views. */
-      for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
-         if (unified || ((1 << x) & ctx->dirty_sampler_views) ||
-             ((1u << x) & updated_mask)) {
-            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_INVALIDATE,
-                  VIVS_NTE_DESCRIPTOR_INVALIDATE_UNK29 |
-                  VIVS_NTE_DESCRIPTOR_INVALIDATE_IDX(x));
-         }
-      }
+   /* Invalidate every slot whose DESC_ADDR was written. */
+   u_foreach_bit(x, updated_mask) {
+      etna_set_state(stream, VIVS_NTE_DESCRIPTOR_INVALIDATE,
+            VIVS_NTE_DESCRIPTOR_INVALIDATE_UNK29 |
+            VIVS_NTE_DESCRIPTOR_INVALIDATE_IDX(x));
    }
 
    ctx->prev_active_samplers = active_samplers;

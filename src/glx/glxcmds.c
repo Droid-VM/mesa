@@ -233,6 +233,8 @@ Bool
 glx_context_init(struct glx_context *gc,
        struct glx_screen *psc, struct glx_config *config)
 {
+   gc->in_display_list = false;
+
    gc->majorOpcode = __glXSetupForCommand(psc->display->dpy);
    if (!gc->majorOpcode)
       return False;
@@ -246,6 +248,31 @@ glx_context_init(struct glx_context *gc,
       gc->renderType = GLX_DONT_CARE;
 
    return True;
+}
+
+void
+glx_display_add_context(struct glx_context *gc)
+{
+   struct glx_display *priv = gc->psc->display;
+
+   simple_mtx_lock(&priv->contexts_lock);
+   list_addtail(&gc->link, &priv->contexts);
+   gc->in_display_list = true;
+   simple_mtx_unlock(&priv->contexts_lock);
+}
+
+void
+glx_display_remove_context(struct glx_context *gc)
+{
+   /* never added, or left behind by a closed display */
+   if (!gc->in_display_list)
+      return;
+
+   struct glx_display *priv = gc->psc->display;
+
+   simple_mtx_lock(&priv->contexts_lock);
+   list_del(&gc->link);
+   simple_mtx_unlock(&priv->contexts_lock);
 }
 
 /**
@@ -382,10 +409,11 @@ CreateContext(Display *dpy, int generic_id, struct glx_config *config,
 
       if (error != False || isDirect != gc->isDirect) {
          gc->vtable->destroy(gc);
-         gc = NULL;
+         return NULL;
       }
    }
 
+   glx_display_add_context(gc);
    return (GLXContext) gc;
 }
 
@@ -1331,6 +1359,7 @@ glXImportContextEXT(Display *dpy, GLXContextID contextID)
    ctx->xid = contextID;
    ctx->imported = GL_TRUE;
    ctx->share_xid = share;
+   glx_display_add_context(ctx);
 
    return (GLXContext) ctx;
 }

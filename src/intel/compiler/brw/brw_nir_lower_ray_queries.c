@@ -15,6 +15,8 @@
 struct lowering_state {
    const struct intel_device_info *devinfo;
 
+   const struct brw_base_prog_key *key;
+
    nir_function_impl *impl;
 
    struct hash_table *queries;
@@ -161,32 +163,44 @@ get_ray_query_shadow_addr(nir_builder *b,
 static void
 update_trace_ctrl_level(nir_builder *b,
                         nir_deref_instr *state_deref,
+                        nir_def **out_old_done,
                         nir_def **out_old_ctrl,
                         nir_def **out_old_level,
+                        nir_def *new_done,
                         nir_def *new_ctrl,
                         nir_def *new_level)
 {
    nir_def *old_value = nir_load_deref(b, state_deref);
-   nir_def *old_ctrl = nir_ishr_imm(b, old_value, 2);
-   nir_def *old_level = nir_iand_imm(b, old_value, 0x3);
+   nir_def *old_done = nir_ubitfield_extract_imm(b, old_value, 5, 5);
+   nir_def *old_ctrl = nir_ubitfield_extract_imm(b, old_value, 2, 4);
+   nir_def *old_level = nir_ubitfield_extract_imm(b, old_value, 0, 1);
 
    if (out_old_ctrl)
       *out_old_ctrl = old_ctrl;
    if (out_old_level)
       *out_old_level = old_level;
+   if (out_old_done)
+      *out_old_done = nir_i2b(b, old_done);
 
    if (new_ctrl)
       new_ctrl = nir_i2i16(b, new_ctrl);
    if (new_level)
       new_level = nir_i2i16(b, new_level);
+   if (new_done)
+      new_done = nir_b2i16(b, new_done);
 
-   if (new_ctrl || new_level) {
+   if (new_ctrl || new_level || new_done) {
       if (!new_ctrl)
          new_ctrl = old_ctrl;
       if (!new_level)
          new_level = old_level;
+      if (!new_done)
+         new_done = old_done;
 
-      nir_def *new_value = nir_ior(b, nir_ishl_imm(b, new_ctrl, 2), new_level);
+      nir_def *new_value = nir_ior(
+         b,
+         nir_ishl_imm(b, new_done, 5),
+         nir_ior(b, nir_ishl_imm(b, new_ctrl, 2), new_level));
       nir_store_deref(b, state_deref, new_value, 0x1);
    }
 }
@@ -213,6 +227,8 @@ spill_query(nir_builder *b,
 
 static void
 handle_terminate_on_first_hit(nir_builder *b, nir_def *stack_addr,
+                              nir_deref_instr *ctrl_level_deref,
+                              nir_def *ctrl, nir_def *level,
                               struct lowering_state *state)
 {
    struct brw_nir_rt_mem_ray_defs world_ray_in = {};
@@ -224,7 +240,9 @@ handle_terminate_on_first_hit(nir_builder *b, nir_def *stack_addr,
                     BRW_RT_RAY_FLAG_TERMINATE_ON_FIRST_HIT);
    nir_push_if(b, terminate);
    {
-      brw_nir_rt_query_mark_done(b, stack_addr);
+      update_trace_ctrl_level(b, ctrl_level_deref,
+                              NULL, NULL, NULL,
+                              nir_imm_true(b), ctrl, level);
    }
    nir_pop_if(b, NULL);
 }
@@ -287,32 +305,30 @@ lower_ray_query_intrinsic(nir_builder *b,
                                              state->devinfo);
 
       update_trace_ctrl_level(b, ctrl_level_deref,
-                              NULL, NULL,
+                              NULL, NULL, NULL,
+                              nir_imm_false(b),
                               nir_imm_int(b, GEN_RT_TRACE_RAY_INITIAL),
                               nir_imm_int(b, BRW_RT_BVH_LEVEL_WORLD));
       break;
    }
 
    case nir_intrinsic_rq_proceed: {
-      nir_def *not_done =
-         nir_inot(b, brw_nir_rt_query_done(b, stack_addr, state->devinfo));
-      nir_def *not_done_then, *not_done_else;
+      nir_def *ctrl, *level, *done;
+      update_trace_ctrl_level(b, ctrl_level_deref,
+                              &done, &ctrl, &level,
+                              NULL, NULL, NULL);
+      nir_def *done_then, *done_else;
 
-      nir_push_if(b, not_done);
+      nir_push_if(b, nir_inot(b, done));
       {
-         nir_def *ctrl, *level;
-         update_trace_ctrl_level(b, ctrl_level_deref,
-                                 &ctrl, &level,
-                                 NULL,
-                                 NULL);
-
          /* Mark the query as done because handing it over to the HW for
           * processing. If the HW make any progress, it will write back some
           * data and as a side effect, clear the "done" bit. If no progress is
           * made, HW does not write anything back and we can use this bit to
           * detect that.
           */
-         brw_nir_rt_query_mark_done(b, stack_addr);
+         if (state->devinfo->ver < 20)
+            brw_nir_rt_query_mark_done(b, stack_addr);
 
          if (shadow_stack_addr)
             fill_query(b, hw_stack_addr, shadow_stack_addr, ctrl);
@@ -320,30 +336,51 @@ lower_ray_query_intrinsic(nir_builder *b,
          /* Do not use state->rq_globals, we want a uniform value for the
           * tracing call.
           */
-         brw_nir_trace_ray(b, nir_load_ray_query_global_intel(b),
-                           level, ctrl, true);
+         nir_def *return_status =
+            brw_nir_trace_ray(b, nir_load_ray_query_global_intel(b),
+                              level, ctrl, true,
+                              state->key->use_efficient_64bit, state->devinfo);
 
-         struct brw_nir_rt_mem_hit_defs hit_in = {};
-         brw_nir_rt_load_mem_hit_from_addr(b, &hit_in, hw_stack_addr, false,
-                                           state->devinfo);
+         if (state->devinfo->ver >= 20) {
+            /* On Xe2+ we get a return value from the trace message, the
+             * format is :
+             *   bit[0]  : ProceedFurhter
+             *   bit[1,2]: CommittedStatus
+             *   bit[3]  : CandidateStatus
+             *
+             */
+            done_then = nir_inot(b, nir_test_mask(b, return_status, 0x1));
+
+            update_trace_ctrl_level(b, ctrl_level_deref,
+                                    NULL, NULL, NULL,
+                                    done_then,
+                                    nir_imm_int(b, GEN_RT_TRACE_RAY_CONTINUE),
+                                    nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
+         } else {
+            struct brw_nir_rt_mem_hit_defs hit_in = {};
+            brw_nir_rt_load_mem_hit_from_addr(b, &hit_in, hw_stack_addr, false,
+                                              state->devinfo);
+
+            done_then = hit_in.done;
+
+            update_trace_ctrl_level(b, ctrl_level_deref,
+                                    NULL, NULL, NULL,
+                                    done_then,
+                                    nir_imm_int(b, GEN_RT_TRACE_RAY_CONTINUE),
+                                    nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
+         }
 
          if (shadow_stack_addr)
             spill_query(b, hw_stack_addr, shadow_stack_addr);
-
-         update_trace_ctrl_level(b, ctrl_level_deref,
-                                 NULL, NULL,
-                                 nir_imm_int(b, GEN_RT_TRACE_RAY_CONTINUE),
-                                 hit_in.bvh_level);
-
-         not_done_then = nir_inot(b, hit_in.done);
       }
       nir_push_else(b, NULL);
       {
-         not_done_else = nir_imm_false(b);
+         done_else = nir_imm_true(b);
       }
       nir_pop_if(b, NULL);
-      not_done = nir_if_phi(b, not_done_then, not_done_else);
-      nir_def_rewrite_uses(&intrin->def, not_done);
+      done = nir_if_phi(b, done_then, done_else);
+
+      nir_def_rewrite_uses(&intrin->def, nir_inot(b, done));
       break;
    }
 
@@ -352,26 +389,26 @@ lower_ray_query_intrinsic(nir_builder *b,
                             brw_nir_rt_mem_hit_addr_from_addr(b, stack_addr, true), 16,
                             brw_nir_rt_mem_hit_addr_from_addr(b, stack_addr, false), 16,
                             BRW_RT_SIZEOF_HIT_INFO);
-      update_trace_ctrl_level(b, ctrl_level_deref,
-                              NULL, NULL,
-                              nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
-                              nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
-      handle_terminate_on_first_hit(b, stack_addr, state);
+      handle_terminate_on_first_hit(b, stack_addr, ctrl_level_deref,
+                                    nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
+                                    nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT),
+                                    state);
       break;
    }
 
    case nir_intrinsic_rq_generate_intersection: {
       brw_nir_rt_generate_hit_addr(b, stack_addr, intrin->src[1].ssa);
-      update_trace_ctrl_level(b, ctrl_level_deref,
-                              NULL, NULL,
-                              nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
-                              nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
-      handle_terminate_on_first_hit(b, stack_addr, state);
+      handle_terminate_on_first_hit(b, stack_addr, ctrl_level_deref,
+                                    nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
+                                    nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT),
+                                    state);
       break;
    }
 
    case nir_intrinsic_rq_terminate: {
-      brw_nir_rt_query_mark_done(b, stack_addr);
+      update_trace_ctrl_level(b, ctrl_level_deref,
+                              NULL, NULL, NULL,
+                              nir_imm_true(b), NULL, NULL);
       break;
    }
 
@@ -596,12 +633,14 @@ lower_ray_query_impl(nir_function_impl *impl, struct lowering_state *state)
 
 bool
 brw_nir_lower_ray_queries(nir_shader *shader,
-                          const struct intel_device_info *devinfo)
+                          const struct intel_device_info *devinfo,
+                          struct brw_base_prog_key *key)
 {
    assert(exec_list_length(&shader->functions) == 1);
 
    struct lowering_state state = {
       .devinfo = devinfo,
+      .key = key,
       .impl = nir_shader_get_entrypoint(shader),
       .queries = _mesa_pointer_hash_table_create(NULL),
    };

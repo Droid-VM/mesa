@@ -215,4 +215,20 @@ pan_shader_prepare_rsd(const struct pan_shader_info *shader_info,
 #endif /* PAN_ARCH */
 #endif
 
+#if PAN_ARCH >= 10
+static inline uint64_t
+pan_shader_get_spd_addr(const struct pan_shader_info *shader_info,
+                        uint64_t spd_ptr)
+{
+   uint64_t ret = spd_ptr;
+
+#if PAN_ARCH >= 14
+   if (shader_info->stage == MESA_SHADER_COMPUTE)
+      ret |= pan_register_allocation(shader_info->work_reg_count);
+#endif
+
+   return ret;
+}
+#endif /* PAN_ARCH */
+
 #endif

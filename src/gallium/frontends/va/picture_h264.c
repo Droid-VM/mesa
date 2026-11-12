@@ -42,6 +42,7 @@ static void resetReferencePictureDesc(struct pipe_h264_picture_desc *h264,
    h264->is_long_term[i] = 0;
    h264->top_is_reference[i] = 0;
    h264->bottom_is_reference[i] = 0;
+   h264->is_field[i] = 0;
    h264->field_order_cnt_list[i][0] = 0;
    h264->field_order_cnt_list[i][1] = 0;
 }
@@ -121,10 +122,7 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
 
    if (context->decoder && (context->templat.max_references != context->desc.h264.num_ref_frames)) {
       context->templat.max_references = MIN2(context->desc.h264.num_ref_frames, 16);
-      mtx_lock(&context->mutex);
-      context->decoder->destroy(context->decoder);
-      context->decoder = NULL;
-      mtx_unlock(&context->mutex);
+      pipe_video_codec_reference(&context->decoder, NULL);
    } else if (!context->decoder && context->desc.h264.num_ref_frames > 0)
       context->templat.max_references = MIN2(context->desc.h264.num_ref_frames, 16);
 
@@ -136,6 +134,9 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
       }
 
       vlVaGetReferenceFrame(drv, h264->ReferenceFrames[i].picture_id, &context->desc.h264.ref[i]);
+      /* VA only flags a field when the other one isn't referenced, so frames and field pairs look the same */
+      vlVaSurface *ref_surf = handle_table_get(drv->htab, h264->ReferenceFrames[i].picture_id);
+      context->desc.h264.is_field[i] = ref_surf && ref_surf->field_pic;
       context->desc.h264.frame_num_list[i] = h264->ReferenceFrames[i].frame_idx;
 
       top_or_bottom_field = h264->ReferenceFrames[i].flags &
@@ -159,6 +160,10 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
    /* Make sure remaining elements are clean */
    for (; i < 16; ++i)
       resetReferencePictureDesc(&context->desc.h264, i);
+
+   vlVaSurface *surf = handle_table_get(drv->htab, context->target_id);
+   if (surf)
+      surf->field_pic = context->desc.h264.field_pic_flag;
 
    context->desc.h264.slice_parameter.slice_info_present = false;
    memset(context->desc.h264.slice_parameter.slice_data_flag, 0, sizeof(context->desc.h264.slice_parameter.slice_data_flag));

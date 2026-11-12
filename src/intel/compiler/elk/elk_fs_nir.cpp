@@ -1292,12 +1292,6 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
       bld.emit(ELK_SHADER_OPCODE_INT_QUOTIENT, result, op[0], op[1]);
       break;
 
-   case nir_op_uadd_carry:
-      UNREACHABLE("Should have been lowered by carry_to_arith().");
-
-   case nir_op_usub_borrow:
-      UNREACHABLE("Should have been lowered by borrow_to_arith().");
-
    case nir_op_umod:
    case nir_op_irem:
       /* According to the sign table for INT DIV in the Ivy Bridge PRM, it

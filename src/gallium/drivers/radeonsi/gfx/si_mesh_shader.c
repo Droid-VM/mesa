@@ -10,6 +10,8 @@
 #include "si_gfx.h"
 #include "util/u_upload_mgr.h"
 
+#include "ac_cmdbuf_cp.h"
+
 #define SI_MESH_PIPELINE_STATE_DIRTY_MASK \
    (BITFIELD_BIT(MESA_SHADER_TASK) | \
     BITFIELD_BIT(MESA_SHADER_MESH) | \
@@ -771,7 +773,7 @@ static void handle_indirect_resource(struct si_context *sctx, struct si_resource
 
    /* Indirect buffers are read through L2 on GFX9-GFX11, but not other hw. */
    if (sscreen->info.cp_sdma_ge_use_system_memory_scope && res->L2_cache_dirty) {
-      si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+      si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
       res->L2_cache_dirty = false;
    }
 
@@ -787,8 +789,8 @@ static void si_emit_task_wait_packets(struct si_context *sctx)
    si_cp_write_data(sctx, sctx->task_wait_buf, 0, 4, V_371_MEMORY, V_371_MICRO_ENGINE,
                     &sctx->task_wait_count);
 
-   si_cp_wait_mem(sctx, sctx->gfx_cs.gang_cs, sctx->task_wait_buf->gpu_address,
-                  sctx->task_wait_count, 0xffffffff, WAIT_REG_MEM_EQUAL);
+   ac_emit_cp_wait_mem(&sctx->gfx_cs.gang_cs->current, sctx->task_wait_buf->gpu_address,
+                       sctx->task_wait_count, 0xffffffff, WAIT_REG_MEM_EQUAL);
 
    sctx->last_task_wait_count = sctx->task_wait_count;
 }
@@ -864,7 +866,7 @@ static void si_draw_mesh_tasks(struct pipe_context *ctx,
    if (sctx->bo_list_add_all_mesh_resources)
       si_mesh_resources_add_all_to_bo_list(sctx);
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       enum rgp_sqtt_marker_event_type event;
       if (info->indirect) {
          if (info->indirect_draw_count) {
@@ -887,7 +889,7 @@ static void si_draw_mesh_tasks(struct pipe_context *ctx,
       si_emit_draw_mesh_shader_only_packets(sctx, info);
    }
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       radeon_begin(&sctx->gfx_cs);
       radeon_event_write(V_028A90_THREAD_TRACE_MARKER);
       radeon_end();

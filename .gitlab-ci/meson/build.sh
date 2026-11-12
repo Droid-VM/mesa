@@ -205,7 +205,7 @@ meson setup _build \
       ${GALLIUM_ST} \
       -D gallium-drivers=${GALLIUM_DRIVERS:-[]} \
       -D vulkan-drivers=${VULKAN_DRIVERS:-[]} \
-      -D video-codecs=all \
+      -D video-codecs=${VIDEO_CODECS:-all} \
       -D werror=true \
       -D b_lto=${LTO} \
       -D backend_max_links=${MAX_LD} \
@@ -232,6 +232,9 @@ if ! missingdeps=$(ninja -t missingdeps); then
     exit 1
   fi
 fi
+
+section_switch ninja-build-times "ninja: longest build times"
+../bin/ninja_build_stats.py -n 100 .ninja_log
 
 section_switch meson-install "meson: install"
 ninja install

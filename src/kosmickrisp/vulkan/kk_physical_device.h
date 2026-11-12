@@ -40,16 +40,20 @@ struct kk_device_info {
    uint32_t max_workgroup_invocations;
    uint32_t max_compute_shared_memory_size;
    uint32_t gpu_apple_family;
+   enum mtl_language_version msl_version;
    uint64_t max_buffer_size;
    uint32_t max_sampler_count;
    uint32_t rendering_tile_width;
    uint32_t rendering_tile_height;
    VkSampleCountFlags supported_sample_counts;
+   bool supports_bc_texture_compression;
+   bool supports_32_bit_float_filtering;
 };
 
 struct kk_env_settings {
    bool experimental_enabled;
    bool gpu_capture_enabled;
+   bool gpu_capture_immediately;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };
@@ -96,6 +100,12 @@ kk_physical_device_instance(struct kk_physical_device *pdev)
 
 VkResult kk_enumerate_physical_devices(struct vk_instance *_instance);
 void kk_physical_device_destroy(struct vk_physical_device *vk_device);
+
+static inline bool
+kk_gpu_supports_depth_bounds(const struct kk_device_info *info)
+{
+   return info->gpu_apple_family >= 10;
+}
 
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR) ||                                    \
    defined(VK_USE_PLATFORM_XCB_KHR) || defined(VK_USE_PLATFORM_XLIB_KHR) ||    \

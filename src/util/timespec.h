@@ -39,6 +39,7 @@
 #include "c11/time.h"
 #include "macros.h"
 
+#undef NSEC_PER_SEC
 #define NSEC_PER_SEC 1000000000
 
 /**

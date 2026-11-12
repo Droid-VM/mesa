@@ -56,27 +56,33 @@ usclib_emu_global_atomic_comp_swap(uint2 addr, uint compare, uint data)
 }
 
 void
-usclib_barrier(uint num_slots, uint counter_offset)
+usclib_barrier(uint num_slots, uint counter_offset, uint sequence_offset)
 {
    #define load_barrier_counter() nir_load_shared(counter_offset, 0, 0, 4, 0)
    #define store_barrier_counter(value) nir_store_shared(value, counter_offset, 0, 0, 0x1, 4, 0)
+   #define load_barrier_sequence() nir_load_shared(sequence_offset, 0, 0, 4, 0)
+   #define store_barrier_sequence(value) nir_store_shared(value, sequence_offset, 0, 0, 0x1, 4, 0)
 
    bool is_inst_zero = !nir_load_instance_num_pco();
 
    nir_mutex_pco(PCO_MUTEX_ID_BARRIER, PCO_MUTEX_OP_LOCK);
+
+   uint sequence = load_barrier_sequence();
 
    if (is_inst_zero)
       store_barrier_counter(load_barrier_counter() + 1);
 
    bool all_slots_done = load_barrier_counter() == num_slots;
    if (all_slots_done) {
-      if (is_inst_zero)
+      if (is_inst_zero) {
          store_barrier_counter(0);
+         store_barrier_sequence(sequence + 1);
+      }
    } else {
       do {
          nir_mutex_pco(PCO_MUTEX_ID_BARRIER, PCO_MUTEX_OP_RELEASE_SLEEP);
          nir_mutex_pco(PCO_MUTEX_ID_BARRIER, PCO_MUTEX_OP_LOCK);
-      } while (load_barrier_counter() != 0);
+      } while (load_barrier_sequence() == sequence);
    }
 
    nir_mutex_pco(PCO_MUTEX_ID_BARRIER, PCO_MUTEX_OP_RELEASE_WAKEUP);

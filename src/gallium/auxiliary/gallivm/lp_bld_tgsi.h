@@ -261,6 +261,7 @@ lp_build_tgsi_info(const struct tgsi_token *tokens,
 struct lp_build_tgsi_params {
    struct lp_type type;
    struct lp_build_mask_context *mask;
+   bool mask_may_be_zero;
    LLVMValueRef consts_ptr;
    LLVMValueRef const_sizes_ptr;
    const struct lp_bld_tgsi_system_values *system_values;

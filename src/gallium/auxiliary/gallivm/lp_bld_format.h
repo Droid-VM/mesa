@@ -142,6 +142,12 @@ lp_build_rgba8_to_fi32_soa(struct gallivm_state *gallivm,
                           LLVMValueRef packed,
                           LLVMValueRef *rgba);
 
+LLVMValueRef
+lp_build_bswap_packed(struct gallivm_state *gallivm,
+                      struct lp_type type,
+                      unsigned bits,
+                      LLVMValueRef packed);
+
 void
 lp_build_fetch_rgba_soa(struct gallivm_state *gallivm,
                         const struct util_format_description *format_desc,

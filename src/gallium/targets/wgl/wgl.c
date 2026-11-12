@@ -37,6 +37,7 @@
 #include <windows.h>
 
 #include "util/u_debug.h"
+#include "util/driconf.h"
 #include "stw_winsys.h"
 #include "stw_device.h"
 #include "gdi/gdi_sw_winsys.h"
@@ -74,6 +75,9 @@ static bool use_zink = false;
 #endif
 
 static const char *created_driver_name = NULL;
+
+/* this must outlive later option lookups, which reuse the getenv buffer on windows */
+DEBUG_GET_ONCE_OPTION(gallium_driver, "GALLIUM_DRIVER", "")
 
 static struct pipe_screen *
 wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
@@ -121,7 +125,7 @@ wgl_screen_create(HDC hDC)
       return NULL;
 
    const char *const drivers[] = {
-      debug_get_option("GALLIUM_DRIVER", ""),
+      debug_get_option_gallium_driver(),
 #ifdef GALLIUM_D3D12
       sw_only ? "" : "d3d12",
 #endif
@@ -239,6 +243,23 @@ wgl_get_name(void)
    return created_driver_name;
 }
 
+static const driOptionDescription *
+wgl_get_driconf(unsigned *count)
+{
+#ifdef GALLIUM_ZINK
+   static const driOptionDescription zink_driconf[] = {
+      #include "zink/driinfo_zink.h"
+   };
+
+   if (use_zink) {
+      *count = ARRAY_SIZE(zink_driconf);
+      return zink_driconf;
+   }
+#endif
+   *count = 0;
+   return NULL;
+}
+
 
 static const struct stw_winsys stw_winsys = {
    &wgl_screen_create,
@@ -253,6 +274,7 @@ static const struct stw_winsys stw_winsys = {
    NULL, /* compose */
    &wgl_create_framebuffer,
    &wgl_get_name,
+   &wgl_get_driconf,
 };
 
 

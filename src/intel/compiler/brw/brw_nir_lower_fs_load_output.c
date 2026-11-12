@@ -10,6 +10,11 @@
  * Lower fragment shader output reads into sampler operations.
  */
 
+struct lower_fs_load_output_data {
+   const struct brw_fs_prog_key *key;
+   unsigned texture_base;
+};
+
 static bool
 brw_nir_lower_fs_load_output_instr(nir_builder *b,
                                    nir_intrinsic_instr *intrin,
@@ -18,7 +23,8 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
    if (intrin->intrinsic != nir_intrinsic_load_output)
       return false;
 
-   const struct brw_fs_prog_key *key = data;
+   const struct lower_fs_load_output_data *opts = data;
+   const struct brw_fs_prog_key *key = opts->key;
 
    const nir_io_semantics sem = nir_intrinsic_io_semantics(intrin);
    assert(sem.location >= FRAG_RESULT_DATA0);
@@ -33,7 +39,10 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
     * in the coordinates. RESINFO returns 0 in the 3rd component for 1D
     * images.
     */
-   nir_def *size = nir_txs(b, .dim = GLSL_SAMPLER_DIM_3D, .texture_index = target);
+   nir_def *size = nir_txs(b,
+      .dim = GLSL_SAMPLER_DIM_3D,
+      .texture_index = opts->texture_base + target,
+      .texture_offset = intrin->src[0].ssa);
    nir_def *pixel_coords = nir_load_pixel_coord(b);
 
    nir_def *coords[3] = {
@@ -50,11 +59,12 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
 
    bool msaa = key->multisample_fbo != INTEL_NEVER;
    nir_def *tex = nir_txf(b, coord,
-                          .texture_index = target,
-                          .ms_index = msaa ? nir_load_sample_id(b) : NULL,
-                          .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
-                          .is_array = true,
-                          .dest_type = nir_type_uint32);
+      .texture_index = opts->texture_base + target,
+      .ms_index = msaa ? nir_load_sample_id(b) : NULL,
+      .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+      .is_array = true,
+      .dest_type = nir_type_uint32,
+      .texture_offset = intrin->src[0].ssa);
 
    nir_def_replace(&intrin->def, tex);
    return true;
@@ -62,10 +72,12 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
 
 bool
 brw_nir_lower_fs_load_output(nir_shader *shader,
-                             const struct brw_fs_prog_key *key)
+                             const struct brw_fs_prog_key *key,
+                             unsigned texture_base)
 {
+   const struct lower_fs_load_output_data opts = { key, texture_base };
    return nir_shader_intrinsics_pass(shader,
                                      brw_nir_lower_fs_load_output_instr,
                                      nir_metadata_control_flow,
-                                     (void *) key);
+                                     (void *)&opts);
 }

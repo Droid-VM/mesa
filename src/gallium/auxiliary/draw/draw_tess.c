@@ -328,6 +328,7 @@ int draw_tess_eval_shader_run(struct draw_context *draw,
                               const struct draw_vertex_info *input_verts,
                               const struct draw_prim_info *input_prims,
                               const struct tgsi_shader_info *input_info,
+                              const struct draw_tess_info *tess_info,
                               struct draw_vertex_info *output_verts,
                               struct draw_prim_info *output_prims,
                               uint32_t **patch_lengths,
@@ -345,7 +346,7 @@ int draw_tess_eval_shader_run(struct draw_context *draw,
    output_prims->start = 0;
    output_prims->elts = NULL;
    output_prims->count = 0;
-   output_prims->prim = get_tes_output_prim(shader);
+   output_prims->prim = get_tes_output_prim(tess_info);
    output_prims->flags = 0;
    output_prims->primitive_lengths = NULL;
    output_prims->primitive_count = 0;
@@ -360,10 +361,10 @@ int draw_tess_eval_shader_run(struct draw_context *draw,
 
    struct pipe_tessellation_factors factors;
    struct pipe_tessellator_data data = { 0 };
-   struct pipe_tessellator *ptess = p_tess_init(shader->prim_mode,
-                                                shader->spacing,
-                                                !shader->vertex_order_cw,
-                                                shader->point_mode);
+   struct pipe_tessellator *ptess = p_tess_init(tess_info->prim_mode,
+                                                tess_info->spacing,
+                                                draw->tess_ccw_flip ? !tess_info->vertex_order_ccw : tess_info->vertex_order_ccw,
+                                                tess_info->point_mode);
    unsigned first_patch = input_prims->start / draw->pt.vertices_per_patch;
    for (unsigned i = 0; i < input_prims->primitive_count; i++) {
       uint32_t vert_start = output_verts->count;
@@ -466,6 +467,24 @@ draw_create_tess_ctrl_shader(struct draw_context *draw,
 
    nir_tgsi_scan_shader(state->ir.nir, &tcs->info, true);
 
+   tcs->tess_info.prim_mode = u_tess_prim_from_shader(state->ir.nir->info.tess._primitive_mode);
+   /* pipe_tess_spacing needs to die. */
+   switch (state->ir.nir->info.tess.spacing) {
+   case TESS_SPACING_EQUAL:
+      tcs->tess_info.spacing = PIPE_TESS_SPACING_EQUAL;
+      break;
+   case TESS_SPACING_FRACTIONAL_ODD:
+      tcs->tess_info.spacing = PIPE_TESS_SPACING_FRACTIONAL_ODD;
+      break;
+   case TESS_SPACING_FRACTIONAL_EVEN:
+      tcs->tess_info.spacing = PIPE_TESS_SPACING_FRACTIONAL_EVEN;
+      break;
+   case TESS_SPACING_UNSPECIFIED:
+      break;
+   }
+   tcs->tess_info.vertex_order_ccw = state->ir.nir->info.tess.ccw;
+   tcs->tess_info.point_mode = state->ir.nir->info.tess.point_mode;
+
    tcs->vector_length = 4;
    tcs->vertices_out = tcs->info.properties[TGSI_PROPERTY_TCS_VERTICES_OUT];
 #if DRAW_LLVM_AVAILABLE
@@ -543,10 +562,23 @@ draw_create_tess_eval_shader(struct draw_context *draw,
 
    nir_tgsi_scan_shader(state->ir.nir, &tes->info, true);
 
-   tes->prim_mode = tes->info.properties[TGSI_PROPERTY_TES_PRIM_MODE];
-   tes->spacing = tes->info.properties[TGSI_PROPERTY_TES_SPACING];
-   tes->vertex_order_cw = tes->info.properties[TGSI_PROPERTY_TES_VERTEX_ORDER_CW];
-   tes->point_mode = tes->info.properties[TGSI_PROPERTY_TES_POINT_MODE];
+   tes->tess_info.prim_mode = u_tess_prim_from_shader(state->ir.nir->info.tess._primitive_mode);
+   /* pipe_tess_spacing needs to die. */
+   switch (state->ir.nir->info.tess.spacing) {
+   case TESS_SPACING_EQUAL:
+      tes->tess_info.spacing = PIPE_TESS_SPACING_EQUAL;
+      break;
+   case TESS_SPACING_FRACTIONAL_ODD:
+      tes->tess_info.spacing = PIPE_TESS_SPACING_FRACTIONAL_ODD;
+      break;
+   case TESS_SPACING_FRACTIONAL_EVEN:
+      tes->tess_info.spacing = PIPE_TESS_SPACING_FRACTIONAL_EVEN;
+      break;
+   case TESS_SPACING_UNSPECIFIED:
+      break;
+   }
+   tes->tess_info.vertex_order_ccw = state->ir.nir->info.tess.ccw;
+   tes->tess_info.point_mode = state->ir.nir->info.tess.point_mode;
 
    tes->vector_length = 4;
 
@@ -617,11 +649,11 @@ void draw_delete_tess_eval_shader(struct draw_context *draw,
    FREE(dtes);
 }
 
-enum mesa_prim get_tes_output_prim(const struct draw_tess_eval_shader *shader)
+enum mesa_prim get_tes_output_prim(const struct draw_tess_info *tess_info)
 {
-   if (shader->point_mode)
+   if (tess_info->point_mode)
       return MESA_PRIM_POINTS;
-   else if (shader->prim_mode == MESA_PRIM_LINES)
+   else if (tess_info->prim_mode == MESA_PRIM_LINES)
       return MESA_PRIM_LINES;
    else
       return MESA_PRIM_TRIANGLES;

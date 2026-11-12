@@ -258,6 +258,9 @@ main(int argc, char **argv)
    case 4:
       backend = a4xx_init(dev, dev_id);
       break;
+   case 5:
+      backend = a5xx_init(dev, dev_id);
+      break;
    case 6:
       backend = a6xx_init<A6XX>(dev, dev_id);
       break;

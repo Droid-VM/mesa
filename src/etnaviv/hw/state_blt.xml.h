@@ -8,14 +8,14 @@ http://0x04.net/cgit/index.cgi/rules-ng-ng
 git clone git://0x04.net/rules-ng-ng
 
 The rules-ng-ng source files this header was generated from are:
-- state.xml     (  30841 bytes, from 2026-08-04 21:35:23)
-- common.xml    (  35664 bytes, from 2026-07-29 06:39:05)
-- common_3d.xml (  15069 bytes, from 2026-07-29 06:39:05)
-- state_hi.xml  (  35909 bytes, from 2026-07-29 06:39:05)
+- state.xml     (  30841 bytes, from 2026-09-24 21:26:54)
+- common.xml    (  35664 bytes, from 2026-09-14 08:57:29)
+- common_3d.xml (  15069 bytes, from 2026-09-24 21:26:54)
+- state_hi.xml  (  35909 bytes, from 2026-09-14 08:57:29)
 - copyright.xml (   1597 bytes, from 2026-03-02 22:49:28)
-- state_2d.xml  (  52271 bytes, from 2026-03-02 22:49:28)
-- state_3d.xml  (  92718 bytes, from 2026-08-04 19:09:21)
-- state_blt.xml (  15932 bytes, from 2026-08-04 21:35:07)
+- state_2d.xml  (  52271 bytes, from 2026-09-02 08:26:36)
+- state_3d.xml  (  94405 bytes, from 2026-09-25 18:16:44)
+- state_blt.xml (  15758 bytes, from 2026-09-27 17:28:31)
 - state_vg.xml  (   5975 bytes, from 2026-03-02 22:49:28)
 
 Copyright (C) 2012-2026 by the following authors:
@@ -46,6 +46,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 #define BLT_TILING_LINEAR					0x00000000
+#define BLT_TILING_TILED					0x00000001
 #define BLT_TILING_SUPER_TILED					0x00000003
 #define BLT_FORMAT_X4R4G4B4					0x00000000
 #define BLT_FORMAT_A4R4G4B4					0x00000001

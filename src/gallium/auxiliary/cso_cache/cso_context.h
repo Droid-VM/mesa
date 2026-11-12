@@ -33,6 +33,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_defines.h"
 #include "cso_cache.h"
+#include "util/u_prim_restart.h"
 
 
 #ifdef __cplusplus
@@ -44,6 +45,22 @@ struct cso_context {
 
    /* This is equal to either pipe_context::draw_vbo or u_vbuf_draw_vbo. */
    pipe_draw_func draw_vbo;
+
+   /* Whether cso_draw_vbo must check each draw against the fields below
+    * because u_vbuf is not always in the draw path to handle them.
+    */
+   bool check_draw_modes;
+   /* Primitive modes that the driver can draw without primitive restart. */
+   uint32_t supported_prim_modes;
+   /* Primitive modes that the driver can draw with primitive restart. */
+   uint32_t supported_restart_modes;
+   /* Whether only the fixed restart index for the index size is supported. */
+   bool rewrite_restart_index;
+   /* Whether u_vbuf is not always in the draw path and the caller must
+    * request it (uses_user_vertex_buffers) for vertex elements whose format
+    * needs translation, see cso_vertex_format_needs_vbuf.
+    */
+   bool vertex_format_fallbacks;
 };
 
 #define CSO_NO_USER_VERTEX_BUFFERS (1 << 0)
@@ -151,6 +168,9 @@ void
 cso_set_min_samples(struct cso_context *cso, unsigned min_samples);
 
 void
+cso_set_sample_coverage(struct cso_context *cso, float value, bool invert);
+
+void
 cso_set_stencil_ref(struct cso_context *cso,
                     const struct pipe_stencil_ref sr);
 
@@ -229,6 +249,40 @@ cso_draw_arrays(struct cso_context *cso, unsigned mode, unsigned start, unsigned
 
 /* Inline functions. */
 
+bool
+cso_vertex_format_needs_vbuf(const struct cso_context *cso,
+                             enum pipe_format format);
+
+void
+cso_draw_vbo_unsupported_mode(struct cso_context *cso,
+                              const struct pipe_draw_info *info,
+                              unsigned drawid_offset,
+                              const struct pipe_draw_indirect_info *indirect,
+                              const struct pipe_draw_start_count_bias *draws,
+                              unsigned num_draws);
+
+static ALWAYS_INLINE bool
+cso_draw_mode_supported(const struct cso_context *cso, unsigned mode,
+                        unsigned index_size, bool primitive_restart,
+                        unsigned restart_index)
+{
+   if (likely(!cso->check_draw_modes))
+      return true;
+
+   if (!primitive_restart)
+      return (cso->supported_prim_modes >> mode) & 1;
+
+   if (cso->rewrite_restart_index) {
+      const unsigned fixed_restart_index =
+         index_size ? util_prim_restart_index_from_size(index_size) : 0;
+
+      if (restart_index != fixed_restart_index)
+         return false;
+   }
+
+   return (cso->supported_restart_modes >> mode) & 1;
+}
+
 static ALWAYS_INLINE void
 cso_draw_vbo(struct cso_context *cso,
              const struct pipe_draw_info *info,
@@ -249,6 +303,13 @@ cso_draw_vbo(struct cso_context *cso,
 
    /* Indirect only uses indirect->draw_count, not num_draws. */
    assert(!indirect || num_draws == 1);
+
+   if (unlikely(!cso_draw_mode_supported(cso, info->mode, info->index_size,
+                                         info->primitive_restart,
+                                         info->restart_index))) {
+      cso_draw_vbo_unsupported_mode(cso, info, drawid_offset, indirect, draws, num_draws);
+      return;
+   }
 
    cso->draw_vbo(cso->pipe, info, drawid_offset, indirect, draws, num_draws);
 }

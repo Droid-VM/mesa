@@ -6,6 +6,8 @@
 
 #include "wsi_common_metal_layer.h"
 
+#include "vk_format.h"
+
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 
@@ -86,7 +88,7 @@ get_color_space_info(VkColorSpaceKHR color_space, CGColorSpaceRef *cg_color_spac
          break;
       case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT:
          color_space_name = kCGColorSpaceLinearDisplayP3;
-         *wants_edr = false;
+         *wants_edr = true;
          break;
       case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT:
          color_space_name = kCGColorSpaceDCIP3;
@@ -172,7 +174,7 @@ wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
       metal_layer.pixelFormat = metal_format;
 
       metal_layer.colorspace = cg_color_space;
-      metal_layer.wantsExtendedDynamicRangeContent = wants_edr;
+      metal_layer.wantsExtendedDynamicRangeContent = wants_edr && vk_format_is_float(format);
       /* Needs release: https://github.com/KhronosGroup/MoltenVK/issues/940 */
       CGColorSpaceRelease(cg_color_space);
    }

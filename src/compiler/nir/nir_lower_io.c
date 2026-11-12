@@ -406,8 +406,7 @@ emit_load(struct lower_io_state *state,
    case nir_var_uniform:
       op = nir_intrinsic_load_uniform;
       break;
-   case nir_var_mem_pixel_local_in:
-   case nir_var_mem_pixel_local_inout:
+   case nir_var_mem_pixel_local:
       assert(!array_index);
       op = nir_intrinsic_load_pixel_local;
       break;
@@ -521,6 +520,7 @@ lower_load(nir_intrinsic_instr *intrin, struct lower_io_state *state,
          nir_def *data32 =
             emit_load(state, array_index, var, offset, component,
                       num_comps * 2, 32, nir_type_uint32, high_dvec2);
+         data32 = nir_64_2x32_memory_order(b, data32);
          for (unsigned i = 0; i < num_comps; i++) {
             comp64[dest_comp + i] =
                nir_pack_64_2x32(b, nir_channels(b, data32, 3 << (i * 2)));
@@ -565,8 +565,7 @@ emit_store(struct lower_io_state *state, nir_def *data,
    nir_builder *b = &state->builder;
 
    nir_intrinsic_op op;
-   if (var->data.mode == nir_var_mem_pixel_local_out ||
-       var->data.mode == nir_var_mem_pixel_local_inout)
+   if (var->data.mode == nir_var_mem_pixel_local)
       op = nir_intrinsic_store_pixel_local;
    else if (!array_index)
       op = nir_intrinsic_store_output;
@@ -677,7 +676,8 @@ lower_store(nir_intrinsic_instr *intrin, struct lower_io_state *state,
             nir_def *data =
                nir_channels(b, intrin->src[1].ssa,
                             BITFIELD_RANGE(src_comp, num_comps));
-            nir_def *data32 = nir_bitcast_vector(b, data, 32);
+            nir_def *data32 =
+               nir_64_2x32_memory_order(b, nir_bitcast_vector(b, data, 32));
 
             uint32_t write_mask32 = 0;
             for (unsigned i = 0; i < num_comps; i++) {
@@ -951,7 +951,7 @@ nir_lower_io_impl(nir_function_impl *impl,
 
    ASSERTED nir_variable_mode supported_modes =
       nir_var_shader_in | nir_var_shader_out | nir_var_uniform |
-      nir_var_any_pixel_local;
+      nir_var_mem_pixel_local;
    assert(!(modes & ~supported_modes));
 
    nir_foreach_block(block, impl) {
@@ -1475,7 +1475,7 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
    /* This must be called after folding constant offset srcs. */
    if (nir->info.stage != MESA_SHADER_MESH &&
        !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage)))
-      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in, false);
+      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in, 0);
 
    /* Lower and remove dead derefs and variables to clean up the IR. */
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

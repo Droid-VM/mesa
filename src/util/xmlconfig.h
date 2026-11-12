@@ -68,7 +68,8 @@ typedef struct driOptionRange {
 typedef struct driOptionInfo {
    char *name;             /**< \brief Name */
    driOptionType type;     /**< \brief Type */
-   driOptionRange range;   /**< \brief Valid range of the option (or 0:0) */
+   bool has_range;
+   driOptionRange range;   /**< \brief Valid range of the option */
 } driOptionInfo;
 
 /** \brief Option cache
@@ -140,10 +141,13 @@ typedef struct {
    const char *driverName;
    const char *kernelDriverName;
    const char *deviceName;
+   uint32_t deviceVersion;
    const char *applicationName;
    uint32_t applicationVersion;
    const char *engineName;
    uint32_t engineVersion;
+
+   bool logNonDefaultOptions;
 
    driShaderOptionCallback shaderOptionCallback;
    void *shaderOptionCallbackData;

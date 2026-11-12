@@ -64,20 +64,7 @@ struct dri_screen
 
    enum dri_screen_type type;
 
-   const __DRIswrastLoaderExtension *swrast_loader;
-   const __DRIkopperLoaderExtension *kopper_loader;
-
-   struct {
-       const __DRIimageLookupExtension *image;
-   } dri2;
-
-   struct {
-       const __DRIimageLoaderExtension *loader;
-   } image;
-
-   struct {
-      const __DRImutableRenderBufferLoaderExtension *loader;
-   } mutableRenderBuffer;
+   struct dri_loader_funcs loader;
 
    driOptionCache optionInfo;
    driOptionCache optionCache;
@@ -103,9 +90,6 @@ struct dri_screen
 
    bool swrast_no_present;
 
-   /* DRI exts on this screen. Populated at init time based on device caps. */
-   const __DRIextension *screen_extensions[14];
-
    /* OpenCL interop */
    mtx_t opencl_func_mutex;
    opencl_dri_event_add_ref_t opencl_dri_event_add_ref;
@@ -117,12 +101,6 @@ struct dri_screen
    bool has_dmabuf;
    bool is_sw;
 };
-
-static inline const __DRIkopperLoaderExtension *
-dri_screen_get_kopper(struct dri_screen *screen)
-{
-   return screen->kopper_loader;
-}
 
 struct dri_image {
    struct pipe_resource *texture;
@@ -153,6 +131,9 @@ struct dri_image {
    struct dri_screen *screen;
 };
 
+PUBLIC void
+driDestroyConfigs(const struct dri_config **configs);
+
 void
 dri_fill_st_visual(struct st_visual *stvis,
                    const struct dri_screen *screen,
@@ -180,16 +161,6 @@ struct pipe_screen *
 kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred);
 struct pipe_screen *
 drisw_init_screen(struct dri_screen *screen, bool driver_name_is_inferred);
-
-extern const struct __DriverAPIRec dri_swrast_kms_driver_api;
-extern const __DRIextension *dri_swrast_kms_driver_extensions[];
-extern const struct __DriverAPIRec galliumdrm_driver_api;
-extern const __DRIextension *galliumdrm_driver_extensions[];
-extern const struct __DriverAPIRec galliumsw_driver_api;
-extern const __DRIextension *galliumsw_driver_extensions[];
-extern const struct __DriverAPIRec galliumvk_driver_api;
-extern const __DRIextension *galliumvk_driver_extensions[];
-extern const __DRIconfigOptionsExtension gallium_config_options;
 
 #endif
 

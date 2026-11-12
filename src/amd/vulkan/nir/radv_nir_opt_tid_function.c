@@ -19,9 +19,9 @@
  * fields are not used. This is also the main reason why this pass is currently radv specific.
  */
 
-#define NIR_MAX_SUBGROUP_SIZE     128
+#define NIR_MAX_SUBGROUP_SIZE         128
 #define NIR_MAX_SUBGROUP_BITSET_WORDS BITSET_WORDS(NIR_MAX_SUBGROUP_SIZE)
-#define FOTID_MAX_RECURSION_DEPTH 16 /* totally arbitrary */
+#define FOTID_MAX_RECURSION_DEPTH     16 /* totally arbitrary */
 
 static inline unsigned
 src_get_fotid_mask(nir_src src)

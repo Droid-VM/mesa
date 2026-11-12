@@ -144,19 +144,14 @@ CheckGeometricAperture( MFVideoArea *pArea, DWORD Width, DWORD Height )
 // Internal Functions
 //
 
-// internal function to check if the media type is valid.
-// CheckMediaType is used for both input types and output types
+// internal function to check if the input media type is valid.
 HRESULT
-CDX12EncHMFT::CheckMediaType( IMFMediaType *pmt, bool bInputType )
+CDX12EncHMFT::CheckInputMediaType( IMFMediaType *pmt )
 {
    HRESULT hr;
    UINT32 Width, Height;
-   GUID subType;
    MFVideoArea VideoArea;
-   UINT32 uiProfile;
-   enum pipe_video_profile videoProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
 
-   CHECKHR_GOTO( pmt->GetGUID( MF_MT_SUBTYPE, &subType ), done );
    CHECKHR_GOTO( MFGetAttributeSize( pmt, MF_MT_FRAME_SIZE, &Width, &Height ), done );
    hr = pmt->GetBlob( MF_MT_MINIMUM_DISPLAY_APERTURE, (UINT8 *) &VideoArea, sizeof( MFVideoArea ), NULL );
    if( SUCCEEDED( hr ) )
@@ -174,74 +169,8 @@ CDX12EncHMFT::CheckMediaType( IMFMediaType *pmt, bool bInputType )
       }
    }
 
-   hr = MF_E_INVALIDMEDIATYPE;
-   switch( subType.Data1 )
-   {
-      case FOURCC_H264:
-      {
-         // This subtype is only valid when checking Output Type
-         CHECKBOOL_GOTO( bInputType == false, MF_E_INVALIDMEDIATYPE, done );
+   CHECKHR_GOTO( CheckInputMediaSubType( pmt ), done );
 
-         enum eAVEncH264VProfile AVEncProfile = eAVEncH264VProfile_Main;
-         (void) pmt->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &AVEncProfile );
-         CHECKBOOL_GOTO( ( AVEncProfile == eAVEncH264VProfile_Base ) || ( AVEncProfile == eAVEncH264VProfile_ConstrainedBase ) ||
-                            ( AVEncProfile == eAVEncH264VProfile_Main ) || ( AVEncProfile == eAVEncH264VProfile_High ) ||
-                            ( AVEncProfile == eAVEncH264VProfile_High10 ) || ( AVEncProfile == eAVEncH264VProfile_ConstrainedHigh ),
-                         MF_E_INVALIDMEDIATYPE,
-                         done );
-         uiProfile = (UINT32) AVEncProfile;
-         hr = S_OK;
-      }
-      break;
-      case FOURCC_HEVC:
-      {
-         // This subtype is only valid when checking Output Type
-         CHECKBOOL_GOTO( bInputType == false, MF_E_INVALIDMEDIATYPE, done );
-
-         enum eAVEncH265VProfile AVEncProfile = eAVEncH265VProfile_Main_420_8;
-         (void) pmt->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &AVEncProfile );
-         CHECKBOOL_GOTO( ( AVEncProfile == eAVEncH265VProfile_Main_420_8 ) || ( AVEncProfile == eAVEncH265VProfile_Main_420_10 ) ||
-                            ( AVEncProfile == eAVEncH265VProfile_Main_422_8 ) ||
-                            ( AVEncProfile == eAVEncH265VProfile_Main_422_10 ) ||
-                            ( AVEncProfile == eAVEncH265VProfile_Main_444_8 ) || ( AVEncProfile == eAVEncH265VProfile_Main_444_10 ),
-                         MF_E_INVALIDMEDIATYPE,
-                         done );
-         uiProfile = (UINT32) AVEncProfile;
-         hr = S_OK;
-      }
-      break;
-      case FOURCC_AV01:
-      {
-         // This subtype is only valid when checking Output Type
-         CHECKBOOL_GOTO( bInputType == false, MF_E_INVALIDMEDIATYPE, done );
-
-         enum eAVEncAV1VProfile AVEncProfile = eAVEncAV1VProfile_Main_420_8;
-         (void) pmt->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &AVEncProfile );
-         CHECKBOOL_GOTO( ( AVEncProfile == eAVEncAV1VProfile_Main_420_8 ) || ( AVEncProfile == eAVEncAV1VProfile_Main_420_10 ),
-                         MF_E_INVALIDMEDIATYPE,
-                         done );
-         uiProfile = (UINT32) AVEncProfile;
-         hr = S_OK;
-      }
-      break;
-      case FOURCC_NV12:
-      case FOURCC_P010:
-      case FOURCC_AYUV:
-      case FOURCC_Y210:
-      case FOURCC_Y410:
-      case FOURCC_YUY2:
-      {
-         // These subtypes are only valid when checking Input Type
-         CHECKBOOL_GOTO( bInputType == true, MF_E_INVALIDMEDIATYPE, done );
-         hr = S_OK;
-      }
-      break;
-      default:
-         MFE_ERROR( "[dx12 hmft 0x%p] Invalid media subtype", this );
-         CHECKHR_GOTO( MF_E_INVALIDMEDIATYPE, done );
-   }
-
-   if( bInputType )
    {   // Input Type checking
       if( m_uiOutputWidth != Width || m_uiOutputHeight != Height )
       {
@@ -306,14 +235,42 @@ CDX12EncHMFT::CheckMediaType( IMFMediaType *pmt, bool bInputType )
          }
       }
    }
-   else
-   {   // Output Type checking
-      UINT32 uiInterlaceMode, uiNominalRange;
-      if( m_pVlScreen )
+
+done:
+   return hr;
+}
+
+// internal function to check if the output media type is valid.
+HRESULT
+CDX12EncHMFT::CheckOutputMediaType( IMFMediaType *pmt )
+{
+   HRESULT hr;
+   UINT32 Width, Height;
+   MFVideoArea VideoArea;
+   enum pipe_video_profile videoProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
+
+   CHECKHR_GOTO( MFGetAttributeSize( pmt, MF_MT_FRAME_SIZE, &Width, &Height ), done );
+   hr = pmt->GetBlob( MF_MT_MINIMUM_DISPLAY_APERTURE, (UINT8 *) &VideoArea, sizeof( MFVideoArea ), NULL );
+   if( SUCCEEDED( hr ) )
+   {
+      if( TRUE == CheckGeometricAperture( &VideoArea, Width, Height ) )
       {
-         videoProfile = ConvertAVEncVProfileToPipeVideoProfile( m_pVlScreen, uiProfile, m_Codec );
+         Width = VideoArea.Area.cx;
+         Height = VideoArea.Area.cy;
       }
-      CHECKBOOL_GOTO( videoProfile != PIPE_VIDEO_PROFILE_UNKNOWN, MF_E_INVALIDMEDIATYPE, done );
+      else
+      {
+         hr = MF_E_INVALIDMEDIATYPE;
+         MFE_ERROR( "[dx12 hmft 0x%p] Geometric aperture error (MF_MT_MINIMUM_DISPLAY_APERTURE)", this );
+         goto done;
+      }
+   }
+
+   CHECKHR_GOTO( CheckOutputMediaSubType( pmt, videoProfile ), done );
+   CHECKBOOL_GOTO( videoProfile != PIPE_VIDEO_PROFILE_UNKNOWN, MF_E_INVALIDMEDIATYPE, done );
+
+   {  // Output Type checking
+      UINT32 uiInterlaceMode, uiNominalRange;
 
       // Fetch the capabilities of this encoder
       encoder_capabilities encoderCapabilities( this );
@@ -359,7 +316,7 @@ CDX12EncHMFT::InternalCheckInputType( IMFMediaType *pType )
    CHECKHR_GOTO( pType->IsEqual( m_spAvailableInputType.Get(), &dwIsEqualFlags ), done );
    if( ( dwIsEqualFlags & MF_MEDIATYPE_EQUAL_MAJOR_TYPES ) && ( dwIsEqualFlags & MF_MEDIATYPE_EQUAL_FORMAT_TYPES ) )
    {
-      CHECKHR_GOTO( CheckMediaType( pType, true ), done );
+      CHECKHR_GOTO( CheckInputMediaType( pType ), done );
       bSuccess = TRUE;
    }
 
@@ -382,7 +339,7 @@ CDX12EncHMFT::InternalCheckOutputType( IMFMediaType *pType )
    CHECKHR_GOTO( pType->IsEqual( m_spAvailableOutputType.Get(), &dwIsEqualFlags ), done );
    if( ( dwIsEqualFlags & MF_MEDIATYPE_EQUAL_MAJOR_TYPES ) && ( dwIsEqualFlags & MF_MEDIATYPE_EQUAL_FORMAT_TYPES ) )
    {
-      CHECKHR_GOTO( CheckMediaType( pType, false ), done );
+      CHECKHR_GOTO( CheckOutputMediaType( pType ), done );
       bSuccess = TRUE;
    }
    if( !bSuccess )
@@ -515,7 +472,7 @@ CDX12EncHMFT::OnOutputTypeChanged()
 
    // correct basic settings based on profile
    (void) m_spOutputType->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &m_uiProfile );
-   m_outputPipeProfile = ConvertAVEncVProfileToPipeVideoProfile( m_pVlScreen, m_uiProfile, m_Codec );
+   m_outputPipeProfile = ConvertAVEncVProfileToPipeVideoProfile( m_pVlScreen, m_uiProfile );
 
    // Fetch the capabilities of this encoder
    CHECKHR_GOTO( m_EncoderCapabilities.initialize( m_pPipeContext->screen, m_outputPipeProfile ), done );
@@ -601,7 +558,7 @@ CDX12EncHMFT::UpdateAvailableInputType()
    if( m_spOutputType )
    {
       // Update the encoder's input available media type by the changed output type
-      CHECKHR_GOTO( m_spAvailableInputType.Get()->SetGUID( MF_MT_SUBTYPE, ConvertProfileToSubtype( m_outputPipeProfile ) ), done );
+      CHECKHR_GOTO( m_spAvailableInputType.Get()->SetGUID( MF_MT_SUBTYPE, ConvertAVEncVProfileToSubtype( m_uiProfile ) ), done );
 
       CHECKHR_GOTO( MFSetAttributeSize( m_spAvailableInputType.Get(), MF_MT_FRAME_SIZE, m_uiOutputWidth, m_uiOutputHeight ), done );
       CHECKHR_GOTO(
@@ -943,7 +900,7 @@ CDX12EncHMFT::InitializeEncoder( pipe_video_profile videoProfile, UINT32 Width, 
       // Calculate and cache the expected output buffer max bitstream size for a single frame
       m_uiMaxOutputBitstreamSize = CalculateMaxOutputBitstreamSize( encoderSettings.width,
                                                                     encoderSettings.height,
-                                                                    ConvertProfileToFormat( encoderSettings.profile ) );
+                                                                    ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
       debug_printf( "[dx12 hmft 0x%p] Calculated max output bitstream size: %u bytes (%u Kb, %u Mb) for %ux%u pipe_format %u\n",
                     this,
@@ -952,7 +909,7 @@ CDX12EncHMFT::InitializeEncoder( pipe_video_profile videoProfile, UINT32 Width, 
                     m_uiMaxOutputBitstreamSize / ( 1024 * 1024 ),
                     encoderSettings.width,
                     encoderSettings.height,
-                    ConvertProfileToFormat( encoderSettings.profile ) );
+                    ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
       // Create DX12 fence and share it as handle for using it with DX11/create_fence_win32
       CHECKHR_GOTO( m_spDevice->CreateFence( 0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS( &m_spStagingFence12 ) ), done );
@@ -1105,9 +1062,7 @@ CDX12EncHMFT::ConfigureBitstreamOutputSampleAttributes( IMFSample *pSample,
 
    // Set video format attributes
    CHECKHR_GOTO( pSample->SetUINT32( MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive ), done );
-   CHECKHR_GOTO(
-      pSample->SetUINT32( MF_MT_VIDEO_PROFILE, ConvertPipeProfileToSpecProfile( pDX12EncodeContext->encoderPicInfo.base.profile ) ),
-      done );
+   CHECKHR_GOTO( pSample->SetUINT32( MF_MT_VIDEO_PROFILE, m_uiProfile ), done );
    CHECKHR_GOTO( pSample->SetUINT32( MF_MT_VIDEO_LEVEL, m_pPipeVideoCodec->level ), done );
 
    // Set last slice flag

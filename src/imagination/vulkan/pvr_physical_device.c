@@ -23,6 +23,7 @@
 #include "vk_util.h"
 #include "vk_log.h"
 
+#include "hwdef/pvr_hw_utils.h"
 #include "hwdef/rogue_hw_utils.h"
 
 #include "pco/pco.h"
@@ -142,11 +143,13 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_format_feature_flags2 = true,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
-      .KHR_incremental_present = PVR_USE_WSI_PLATFORM,
       .KHR_image_format_list = true,
       .KHR_imageless_framebuffer = true,
+      .KHR_incremental_present = PVR_USE_WSI_PLATFORM,
       .KHR_index_type_uint8 = true,
+      .KHR_internally_synchronized_queues = true,
       .KHR_line_rasterization = true,
+      .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
@@ -160,6 +163,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_present_id2 = PVR_USE_WSI_PLATFORM,
       .KHR_present_wait = PVR_USE_WSI_PLATFORM,
       .KHR_present_wait2 = PVR_USE_WSI_PLATFORM,
+      .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
       .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
@@ -168,6 +172,8 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
+      .KHR_shader_float_controls2 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_relaxed_extended_instruction = true,
@@ -194,20 +200,24 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_depth_clip_enable = true,
       .EXT_device_memory_report = true,
       .EXT_display_control = PVR_USE_WSI_PLATFORM_DISPLAY,
-      .EXT_global_priority = true,
-      .EXT_global_priority_query = true,
-      .EXT_image_drm_format_modifier = true,
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_global_priority = true,
+      .EXT_global_priority_query = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
+      .EXT_image_drm_format_modifier = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_index_type_uint8 = true,
+      .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
+      .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_physical_device_drm = true,
+      .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
@@ -221,10 +231,13 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_subgroup_size_control = true,
       .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
+      .EXT_transform_feedback = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_zero_initialize_device_memory = true,
 #ifdef PVR_USE_WSI_PLATFORM
-      .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(&instance->vk, &instance->drirc.options),
+      .GOOGLE_display_timing =
+         wsi_instance_supports_google_display_timing(&instance->vk,
+                                                     &instance->drirc.options),
 #endif
       .IMG_filter_linear_2d = true,
    };
@@ -259,10 +272,10 @@ static void pvr_physical_device_get_supported_features(
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = false,
       .textureCompressionBC = false,
-      .occlusionQueryPrecise = false,
+      .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = false,
       .vertexPipelineStoresAndAtomics = false,
-      .fragmentStoresAndAtomics = false,
+      .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = false,
       .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = true,
@@ -366,6 +379,11 @@ static void pvr_physical_device_get_supported_features(
       /* Vulkan 1.1 / VK_KHR_shader_draw_parameters */
       .shaderDrawParameters = true,
 
+      /* VK_KHR_shader_fma */
+      .shaderFmaFloat16 = false,
+      .shaderFmaFloat32 = true,
+      .shaderFmaFloat64 = false,
+
       /* Vulkan 1.3 / VK_KHR_shader_integer_dot_product */
       .shaderIntegerDotProduct = true,
 
@@ -374,6 +392,9 @@ static void pvr_physical_device_get_supported_features(
 
       /* Vulkan 1.2 / VK_KHR_separate_depth_stencil_layouts */
       .separateDepthStencilLayouts = true,
+
+      /* Vulkan 1.4 / VK_KHR_shader_float_controls2 */
+      .shaderFloatControls2 = true,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
@@ -446,9 +467,16 @@ static void pvr_physical_device_get_supported_features(
       /* Vulkan 1.2 / VK_EXT_host_query_reset */
       .hostQueryReset = true,
 
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .inlineUniformBlock = true,
+      .descriptorBindingInlineUniformBlockUpdateAfterBind = true,
+
       /* VK_EXT_image_2d_view_of_3d */
       .image2DViewOf3D = true,
       .sampler2DViewOf3D = true,
+
+      /* VK_EXT_image_sliced_view_of_3d */
+      .imageSlicedViewOf3D = true,
 
       /* VK_EXT_map_memory_placed */
       .memoryMapPlaced = true,
@@ -465,11 +493,17 @@ static void pvr_physical_device_get_supported_features(
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = false,
 
+      /* Vulkan 1.4 / VK_KHR_push_descriptor */
+      .pushDescriptor = true,
+
       /* Vulkan 1.2 / VK_EXT_scalar_block_layout */
       .scalarBlockLayout = true,
 
       /* Vulkan 1.3 / VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
+
+      /* VK_EXT_transform_feedback */
+      .transformFeedback = true,
 
       /* Vulkan 1.2 / VK_KHR_buffer_device_address */
       .bufferDeviceAddress = false,
@@ -525,6 +559,9 @@ static void pvr_physical_device_get_supported_features(
       .borderColorSwizzle = true,
       .borderColorSwizzleFromImage = true,
 
+      /* VK_EXT_primitive_topology_list_restart */
+      .primitiveTopologyListRestart = true,
+
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
 
@@ -550,7 +587,10 @@ static void pvr_physical_device_get_supported_features(
       .swapchainMaintenance1 = PVR_USE_WSI_PLATFORM,
 
       /* KHR_unifiedImageLayouts */
-      .unifiedImageLayouts = true
+      .unifiedImageLayouts = true,
+
+      /* VK_KHR_internally_synchronized_queues */
+      .internallySynchronizedQueues = true,
    };
 }
 
@@ -581,9 +621,9 @@ static bool pvr_physical_device_get_properties(
    UNUSED const uint32_t sub_pixel_precision =
       PVR_HAS_FEATURE(dev_info, simple_internal_parameter_format) ? 4U : 8U;
 
-   UNUSED const uint32_t max_render_size = rogue_get_render_size_max(dev_info);
+   const uint32_t max_render_size = rogue_get_render_size_max(dev_info);
 
-   UNUSED const uint32_t max_sample_bits = ((max_multisample << 1) - 1);
+   const uint32_t max_sample_bits = ((max_multisample << 1) - 1);
 
    UNUSED const uint32_t max_user_vertex_components =
       pvr_get_max_user_vertex_output_components(dev_info);
@@ -632,10 +672,10 @@ static bool pvr_physical_device_get_properties(
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
       /* deviceName and pipelineCacheUUID are filled below .*/
 
-      .maxImageDimension1D = 4096U,
-      .maxImageDimension2D = 4096U,
-      .maxImageDimension3D = 256U,
-      .maxImageDimensionCube = 4096U,
+      .maxImageDimension1D = max_render_size,
+      .maxImageDimension2D = max_render_size,
+      .maxImageDimension3D = pvr_get_texture_extent_max_z(dev_info),
+      .maxImageDimensionCube = max_render_size,
       .maxImageArrayLayers = rogue_get_render_size_max_z(dev_info),
       .maxTexelBufferElements = 64U * 1024U,
       .maxUniformBufferRange = 16U * 1024U,
@@ -719,10 +759,10 @@ static bool pvr_physical_device_get_properties(
       .maxSamplerAnisotropy = 16.0f, /* Requires samplerAnisotropy */
       .maxViewports = 1U, /* Requires multiViewport */
 
-      .maxViewportDimensions[0] = 4096U,
-      .maxViewportDimensions[1] = 4096U,
-      .viewportBoundsRange[0] = -8192.0f,
-      .viewportBoundsRange[1] = 8191.0f,
+      .maxViewportDimensions[0] = max_render_size,
+      .maxViewportDimensions[1] = max_render_size,
+      .viewportBoundsRange[0] = -(int32_t)(2U * max_render_size),
+      .viewportBoundsRange[1] = 2U * max_render_size,
 
       .viewportSubPixelBits = 0U,
       .minMemoryMapAlignment = pdevice->ws->page_size,
@@ -742,20 +782,20 @@ static bool pvr_physical_device_get_properties(
       .maxInterpolationOffset = 0.5f,
       .subPixelInterpolationOffsetBits = 4U,
 
-      .maxFramebufferWidth = 4096U,
-      .maxFramebufferHeight = 4096U,
+      .maxFramebufferWidth = max_render_size,
+      .maxFramebufferHeight = max_render_size,
       .maxFramebufferLayers = 256U,
 
       /* Note: update nir_shader_compiler_options.max_samples when changing this. */
-      .framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferColorSampleCounts = max_sample_bits,
+      .framebufferDepthSampleCounts = max_sample_bits,
+      .framebufferStencilSampleCounts = max_sample_bits,
+      .framebufferNoAttachmentsSampleCounts = max_sample_bits,
       .maxColorAttachments = 4U,
-      .sampledImageColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .sampledImageColorSampleCounts = max_sample_bits,
+      .sampledImageIntegerSampleCounts = max_sample_bits,
+      .sampledImageDepthSampleCounts = max_sample_bits,
+      .sampledImageStencilSampleCounts = max_sample_bits,
       .storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT, /* Requires shaderStorageImageMultisample */
       .maxSampleMaskWords = 1U,
       .timestampComputeAndGraphics = false,
@@ -822,8 +862,7 @@ static bool pvr_physical_device_get_properties(
       .maxDescriptorSetUpdateAfterBindInputAttachments = 0,
       .filterMinmaxSingleComponentFormats = false,
       .filterMinmaxImageComponentMapping = false,
-      .framebufferIntegerColorSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferIntegerColorSampleCounts = max_sample_bits,
 
       /* Vulkan 1.0 / VK_KHR_maintenance2 */
       .pointClippingBehavior =
@@ -850,6 +889,13 @@ static bool pvr_physical_device_get_properties(
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,
+
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .maxInlineUniformBlockSize = 256U,
+      .maxPerStageDescriptorInlineUniformBlocks = 4U,
+      .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 4U,
+      .maxDescriptorSetInlineUniformBlocks = 4U,
+      .maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 4U,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = pdevice->ws->page_size,
@@ -948,6 +994,18 @@ static bool pvr_physical_device_get_properties(
       .maxCustomBorderColorSamplers =
          get_custom_border_color_samplers(&pdevice->dev_info),
 
+      /* EXT_transform_feedback */
+      .maxTransformFeedbackStreams = PVR_XFB_MAX_STREAMS,
+      .maxTransformFeedbackBuffers = PVR_XFB_MAX_BUFFERS,
+      .maxTransformFeedbackBufferSize = UINT32_MAX,
+      .maxTransformFeedbackStreamDataSize = PVR_XFB_MAX_DATA_SIZE,
+      .maxTransformFeedbackBufferDataSize = PVR_XFB_MAX_DATA_SIZE,
+      .maxTransformFeedbackBufferDataStride = PVR_XFB_MAX_DATA_STRIDE,
+      .transformFeedbackQueries = false,
+      .transformFeedbackStreamsLinesTriangles = false,
+      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackDraw = true,
+
       /* VK_EXT_physical_device_drm */
       .drmHasPrimary = pdevice->has_primary,
       .drmPrimaryMajor = (int64_t) major(pdevice->primary_devid),
@@ -963,6 +1021,9 @@ static bool pvr_physical_device_get_properties(
          VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .independentResolveNone = true,
       .independentResolve = true,
+
+      /* VK_KHR_push_descriptor */
+      .maxPushDescriptors = PVR_MAX_PUSH_DESCRIPTORS,
 
       /* VK_KHR_line_rasterization */
       .lineSubPixelPrecisionBits = line_sub_pixel_precision_bits,
@@ -1081,6 +1142,7 @@ static bool pvr_device_is_conformant(const struct pvr_device_info *info)
 {
    const uint64_t bvnc = pvr_get_packed_bvnc(info);
    switch (bvnc) {
+   case PVR_BVNC_PACK(36, 52, 104, 182):
    case PVR_BVNC_PACK(36, 53, 104, 796):
       return true;
 
@@ -1306,8 +1368,8 @@ void pvr_GetPhysicalDeviceQueueFamilyProperties2(
    vk_outarray_append_typed (VkQueueFamilyProperties2, &out, p) {
       p->queueFamilyProperties = pvr_queue_family_properties;
 
-      vk_foreach_struct (ext, p->pNext) {
-         switch (ext->sType) {
+      vk_foreach_struct (sType, ext, p->pNext) {
+         switch (sType) {
          case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
             VkQueueFamilyGlobalPriorityProperties
                *pvr_queue_global_family_properties =
@@ -1322,7 +1384,7 @@ void pvr_GetPhysicalDeviceQueueFamilyProperties2(
             break;
          }
          default:
-            vk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(sType);
             break;
          }
       }
@@ -1337,8 +1399,8 @@ void pvr_GetPhysicalDeviceMemoryProperties2(
 
    pMemoryProperties->memoryProperties = pdevice->memory;
 
-   vk_foreach_struct (ext, pMemoryProperties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct (sType, ext, pMemoryProperties->pNext) {
+      vk_debug_ignored_stype(sType);
    }
 }
 

@@ -102,6 +102,28 @@ is_inverse_factor(unsigned factor)
 
 
 /**
+ * For AoS blending of a combined RGBA vector, whether the alpha channel
+ * needs to be blended as a separate pass instead of together with rgb.
+ *
+ * Inverse snorm blend factors are unpacked as unsigned (see lp_build_blend
+ * below), so mixing an inverse alpha factor with a non-inverse rgb factor
+ * (or vice versa) in the same vector would unpack some lanes with the
+ * wrong signedness.
+ */
+bool
+lp_build_blend_snorm_needs_alpha_split(struct lp_type type,
+                                       unsigned rgb_src_factor,
+                                       unsigned rgb_dst_factor,
+                                       unsigned alpha_src_factor,
+                                       unsigned alpha_dst_factor)
+{
+   return type.norm && type.sign &&
+          (is_inverse_factor(rgb_src_factor) != is_inverse_factor(alpha_src_factor) ||
+           is_inverse_factor(rgb_dst_factor) != is_inverse_factor(alpha_dst_factor));
+}
+
+
+/**
  * Calculates the (expanded to wider type) multiplication
  * of 2 normalized numbers.
  */

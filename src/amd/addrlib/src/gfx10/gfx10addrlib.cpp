@@ -1502,8 +1502,8 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
         Dim3d dim;
         ComputeThinBlockDimension(&dim.w, &dim.h, &dim.d, 8u << elemLog2, 0, rsrcType, swMode);
 
-        const UINT_32 blkXLog2 = Log2(dim.w);
-        const UINT_32 blkYLog2 = Log2(dim.h);
+        [[maybe_unused]] const UINT_32 blkXLog2 = Log2(dim.w);
+        [[maybe_unused]] const UINT_32 blkYLog2 = Log2(dim.h);
         const UINT_32 blkXMask = dim.w - 1;
         const UINT_32 blkYMask = dim.h - 1;
 
@@ -1607,7 +1607,7 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
             }
         }
 
-        const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
+        [[maybe_unused]] const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
         const UINT_32 blockMask   = (1 << blockSizeLog2) - 1;
 
         ADDR_ASSERT((bMask & pipeIntMask) == pipeIntMask);
@@ -1836,7 +1836,7 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
             }
         }
 
-        const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
+        [[maybe_unused]] const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
         const UINT_32 blockMask   = (1 << blockSizeLog2) - 1;
 
         ADDR_ASSERT((bMask & pipeIntMask) == pipeIntMask);
@@ -2586,7 +2586,6 @@ BOOL_32 Gfx10Lib::ValidateSwModeParams(
     const BOOL_32             linear      = IsLinear(swizzle);
     const BOOL_32             blk256B     = IsBlock256b(swizzle);
     const BOOL_32             blkVar      = IsBlockVariable(swizzle);
-    const BOOL_32             isNonPrtXor = IsNonPrtXor(swizzle);
     const BOOL_32             prt         = flags.prt;
     const BOOL_32             fmask       = flags.fmask;
 
@@ -3039,7 +3038,7 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                     else
                     {
                         // We should still be able to use VAR for non power of 2 memory configs with MSAA z/stencil.
-                        // But we have to suffer from low performance because there is no other choice...
+                        // But we have to suffer from low performance because there is no other choice.
                         ADDR_ASSERT_ALWAYS();
                     }
                 }
@@ -3103,7 +3102,6 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                         UINT_32 ratioHi;
                         GetSwizzleModePreferenceRatio(pIn, &ratioLow, &ratioHi);
 
-                        const UINT_64 sizeAlignInElement = Max(NextPow2(pIn->minSizeAlign) / (bpp >> 3), 1u);
                         UINT_32       minSizeBlk         = AddrBlockMicro; // Tracks the most optimal block to use
                         UINT_64       minSize            = 0;              // Tracks the minimum acceptable block type
 
@@ -3822,7 +3820,7 @@ ADDR_E_RETURNCODE Gfx10Lib::ComputeSurfaceInfoMicroTiled(
                     pOut->pMipInfo[i].macroBlockOffset = mipSliceSize;
                 }
 
-                mipSliceSize += mipActualWidth * mipActualHeight * (pIn->bpp >> 3);
+                mipSliceSize += static_cast<UINT_64>(mipActualWidth) * mipActualHeight * (pIn->bpp >> 3);
             }
 
             pOut->sliceSize = mipSliceSize;
@@ -4001,7 +3999,7 @@ ADDR_E_RETURNCODE Gfx10Lib::ComputeSurfaceInfoMacroTiled(
                         const UINT_32 m         = maxMipsInTail - 1 - (i - firstMipInTail);
                         const UINT_32 mipOffset = (m > 6) ? (16 << m) : (m << 8);
 
-                        pOut->pMipInfo[i].offset           = mipOffset * tailMaxDepth;
+                        pOut->pMipInfo[i].offset           = static_cast<UINT_64>(mipOffset) * tailMaxDepth;
                         pOut->pMipInfo[i].mipTailOffset    = mipOffset;
                         pOut->pMipInfo[i].macroBlockOffset = 0;
 
@@ -4137,12 +4135,10 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlCopyMemToSurface(
 
     if (pIn->numSamples > 1)
     {
-        // TODO: MSAA
         returnCode = ADDR_NOTIMPLEMENTED;
     }
     if (IsBlockVariable(pIn->swizzleMode))
     {
-        // TODO: larger LUTs for worst-case var swizzle.
         returnCode = ADDR_NOTIMPLEMENTED;
     }
 
@@ -4196,7 +4192,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlCopyMemToSurface(
             const ADDR2_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
             UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
             UINT_32 yBlks = pMipInfo->pitch / localOut.blockWidth;
-            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+            UINT_32 zBlks = static_cast<UINT_32>(localOut.sliceSize >>
+                                                 (addresser.GetBlockBits() - addresser.GetBlockZBits()));
 
             ADDR_COORD3D rawOrigin = {
                 pCurRegion->x + pMipInfo->mipTailCoordX,
@@ -4248,12 +4245,10 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlCopySurfaceToMem(
 
     if (pIn->numSamples > 1)
     {
-        // TODO: MSAA
         returnCode = ADDR_NOTIMPLEMENTED;
     }
     if (IsBlockVariable(pIn->swizzleMode))
     {
-        // TODO: larger LUTs for worst-case var swizzle.
         returnCode = ADDR_NOTIMPLEMENTED;
     }
 
@@ -4308,7 +4303,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlCopySurfaceToMem(
             const ADDR2_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
             UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
             UINT_32 yBlks = pMipInfo->pitch / localOut.blockWidth;
-            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+            UINT_32 zBlks = static_cast<UINT_32>(localOut.sliceSize >>
+                                                 (addresser.GetBlockBits() - addresser.GetBlockZBits()));
 
             ADDR_COORD3D rawOrigin = {
                 pCurRegion->x + pMipInfo->mipTailCoordX,

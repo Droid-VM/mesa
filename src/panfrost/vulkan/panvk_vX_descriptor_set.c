@@ -142,7 +142,7 @@ write_image_view_desc(struct panvk_descriptor_set *set,
       for (uint8_t plane = 0; plane < binding_layout->textures_per_desc;
            plane++)
          write_nulldesc(set, binding, elem,
-                        get_sampler_subdesc_info(binding_layout->type, plane));
+                        get_tex_subdesc_info(binding_layout->type, plane));
       return;
    }
 
@@ -340,7 +340,7 @@ panvk_init_pool_memory(struct panvk_device *device,
          panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP);
       VkResult result = panvk_priv_bo_create(device, pool_size, bo_flags,
                                              VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
-                                             &pool->desc_bo);
+                                             "Descriptor pool", &pool->desc_bo);
       if (result != VK_SUCCESS)
          return result;
 

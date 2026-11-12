@@ -461,6 +461,8 @@ ir3_emit_driver_params(const struct ir3_shader_variant *v,
                        const struct ir3_driver_params_vs *vertex_params)
    assert_dt
 {
+   STATIC_ASSERT(sizeof(*vertex_params) % 16 == 0);
+   STATIC_ASSERT(sizeof(*vertex_params) == 40 * sizeof(uint32_t));
    assert(v->need_driver_params);
 
    const struct ir3_const_state *const_state = ir3_const_state(v);
@@ -580,7 +582,7 @@ ir3_build_driver_params_cs(const struct ir3_shader_variant *v,
 static inline void
 ir3_emit_cs_driver_params(const struct ir3_shader_variant *v,
                           struct fd_ringbuffer *ring, struct fd_context *ctx,
-                          const struct pipe_grid_info *info)
+                          const struct pipe_grid_info *info, bool flush_writes)
    assert_dt
 {
    /* a3xx/a4xx can inject these directly */
@@ -619,6 +621,9 @@ ir3_emit_cs_driver_params(const struct ir3_shader_variant *v,
          ctx->screen->mem_to_mem(ring, buffer, buffer_offset, info->indirect,
                                  info->indirect_offset, 3);
 
+         if (flush_writes)
+            OUT_PKT7(ring, CP_WAIT_MEM_WRITES, 0);
+
          emit_const_prsc(ring, v, offset * 4, buffer_offset, size, buffer);
 
          pipe_resource_reference(&buffer, NULL);
@@ -638,5 +643,5 @@ ir3_emit_cs_consts(const struct ir3_shader_variant *v,
 
    emit_common_consts(v, ring, ctx, MESA_SHADER_COMPUTE);
 
-   ir3_emit_cs_driver_params(v, ring, ctx, info);
+   ir3_emit_cs_driver_params(v, ring, ctx, info, true);
 }

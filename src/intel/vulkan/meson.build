@@ -129,12 +129,12 @@ anv_per_hw_ver_files = files(
   'genX_cmd_draw.c',
   'genX_cmd_draw_generated_flush.h',
   'genX_cmd_draw_generated_indirect.h',
+  'genX_huc.h',
   'genX_cmd_video.c',
   'genX_cmd_video_enc.c',
   'genX_gfx_state.c',
   'genX_gpu_memcpy.c',
   'genX_init_state.c',
-  'genX_internal_kernels.c',
   'genX_query.c',
   'genX_simple_shader.c',
   'genX_shader.c',
@@ -246,12 +246,14 @@ libanv_files = files(
   'anv_utrace.c',
   'anv_va.c',
   'anv_video.c',
+  'anv_video_brc_tables.c',
   'anv_wsi.c',
   'bvh/anv_bvh_defines.h',
 )
 
 anv_deps = [
   dep_libdrm,
+  dep_regex,
   dep_valgrind,
   idep_genxml,
   idep_mesautil,
@@ -263,6 +265,7 @@ anv_deps = [
   idep_intel_blorp,
   idep_mda,
   idep_anv_drirc,
+  idep_metrics_library_intel,
 ]
 
 if with_platform_x11

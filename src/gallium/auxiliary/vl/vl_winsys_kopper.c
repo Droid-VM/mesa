@@ -129,7 +129,7 @@ vl_kopper_texture_from_drawable(struct vl_screen *vscreen, void *d)
    }
 
    if (needs_new_back_buffer_allocation) {
-      struct kopper_loader_info info;
+      struct kopper_loader_info info = {0};
       VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info.bos;
       xcb->sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
       xcb->pNext = NULL;
@@ -154,12 +154,11 @@ vl_kopper_texture_from_drawable(struct vl_screen *vscreen, void *d)
 
       scrn->drawable_texture = vscreen->pscreen->resource_create_drawable(vscreen->pscreen, &templat, &info);
       vl_compositor_reset_dirty_area(&scrn->dirty_area);
-   } else {
-      struct pipe_resource *drawable_texture = NULL;
-      pipe_resource_reference(&drawable_texture, scrn->drawable_texture);
    }
 
-   return scrn->drawable_texture;
+   struct pipe_resource *drawable_texture = NULL;
+   pipe_resource_reference(&drawable_texture, scrn->drawable_texture);
+   return drawable_texture;
 }
 
 struct vl_screen *
@@ -210,7 +209,7 @@ vl_kopper_screen_create_x11(Display *display, int screen)
       success = pipe_loader_vk_probe_dri(&scrn->base.dev);
 
    if (success)
-      pipe_loader_create_screen_vk(scrn->base.dev, false, false);
+      scrn->base.pscreen = pipe_loader_create_screen_vk(scrn->base.dev, false, false);
    if (!scrn->base.pscreen)
       goto error;
 
@@ -218,7 +217,7 @@ vl_kopper_screen_create_x11(Display *display, int screen)
    scrn->base.texture_from_drawable = vl_kopper_texture_from_drawable;
    scrn->base.get_dirty_area = vl_kopper_get_dirty_area;
    scrn->base.destroy = vl_kopper_screen_destroy;
-   scrn->pipe = scrn->base.pscreen->context_create(scrn->base.pscreen, NULL, 0);
+   scrn->pipe = pipe_create_multimedia_context(scrn->base.pscreen, false);
 
    vl_compositor_reset_dirty_area(&scrn->dirty_area);
 
@@ -246,7 +245,7 @@ vl_kopper_screen_create_win32(LUID *luid)
 
    scrn->base.destroy = vl_kopper_screen_destroy;
 
-   scrn->pipe = scrn->base.pscreen->context_create(scrn->base.pscreen, NULL, 0);
+   scrn->pipe = pipe_create_multimedia_context(scrn->base.pscreen, false);
 
    return &scrn->base;
 

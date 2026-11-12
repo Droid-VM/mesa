@@ -171,21 +171,23 @@ get_sampler_lowered_simd_width(const struct intel_device_info *devinfo,
        tex->sampler_opcode == BRW_SAMPLER_OPCODE_SAMPLE_D_C_PACKED)
       return devinfo->ver < 20 ? 8 : 16;
 
-   const unsigned max_payload_size =
-      MAX_SAMPLER_MESSAGE_SIZE *
-      (reg_unit(devinfo) * 8) /* min SIMD */ *
-      4 /* dword */;
-   const unsigned payload_param_size =
-      brw_type_size_bytes(tex->src[TEX_LOGICAL_SRC_PAYLOAD0].type);
-   unsigned payload_size =
-      (tex->sources - TEX_LOGICAL_SRC_PAYLOAD0) *
-      tex->exec_size *
-      payload_param_size;
-
    unsigned simd_width = tex->exec_size;
-   while (payload_size > max_payload_size) {
-      payload_size /= 2;
-      simd_width /= 2;
+   if (tex->sources > TEX_LOGICAL_SRC_PAYLOAD0) {
+      const unsigned max_payload_size =
+         MAX_SAMPLER_MESSAGE_SIZE *
+         (reg_unit(devinfo) * 8) /* min SIMD */ *
+         4 /* dword */;
+      const unsigned payload_param_size =
+         brw_type_size_bytes(tex->src[TEX_LOGICAL_SRC_PAYLOAD0].type);
+      unsigned payload_size =
+         (tex->sources - TEX_LOGICAL_SRC_PAYLOAD0) *
+         tex->exec_size *
+         payload_param_size;
+
+      while (payload_size > max_payload_size) {
+         payload_size /= 2;
+         simd_width /= 2;
+      }
    }
 
    const unsigned max_hw_simd = devinfo->ver < 20 ? 16 : 32;
@@ -293,7 +295,8 @@ brw_get_lowered_simd_width(const brw_shader *shader, const brw_inst *inst)
    case SHADER_OPCODE_EXP2:
    case SHADER_OPCODE_LOG2:
    case SHADER_OPCODE_SIN:
-   case SHADER_OPCODE_COS: {
+   case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH: {
       /* Xe2+: BSpec 56797
        *
        * Math operation rules when half-floats are used on both source and
@@ -408,7 +411,8 @@ brw_get_lowered_simd_width(const brw_shader *shader, const brw_inst *inst)
       return MIN2(devinfo->ver < 20 ? 8 : 16, inst->exec_size);
 
    case RT_OPCODE_TRACE_RAY_LOGICAL:
-      return MIN2(16, inst->exec_size);
+      /* Gfx35 changes the message return format from u32 to u16 to allow SIMD32 */
+      return MIN2(devinfo->ver < 35 ? 16 : 32, inst->exec_size);
 
    case SHADER_OPCODE_QUAD_SWIZZLE: {
       const unsigned swiz = inst->src[1].ud;

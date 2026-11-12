@@ -9,12 +9,104 @@
 
 #include "pan_kmod.h"
 
-static inline void
+#ifdef HAVE_PANFROST_VDRM
+#include "util/macros.h"
+#include "vdrm.h"
+
+#define backend_dev_to_backend_vdrm_dev(backend, dev_ptr)                    \
+      container_of(dev_ptr, struct backend ## _vdrm_device, backend ## _dev)
+
+#define backend_bo_to_backend_vdrm_bo(backend, bo_ptr)                       \
+      container_of(bo_ptr, struct backend ## _vdrm_bo, backend ## _bo)
+
+#define pan_dev_to_backend_vdrm_dev(backend, dev)                            \
+   ({                                                                        \
+      struct backend ## _kmod_dev *__pan_dev =                               \
+          container_of(dev, struct backend ## _kmod_dev, base);              \
+      backend_dev_to_backend_vdrm_dev(backend, __pan_dev);                   \
+   })
+
+#define pan_bo_to_backend_vdrm_bo(backend, bo)                               \
+   ({                                                                        \
+      struct backend ## _kmod_bo *__pan_bo =                                 \
+          container_of(bo, struct backend ## _kmod_bo, base);                \
+      backend_bo_to_backend_vdrm_bo(backend, __pan_bo);                      \
+   })
+
+#define PAN_CCMD(BACKEND, _cmd, _len) (struct vdrm_ccmd_req) {               \
+       .cmd = CONCAT3(BACKEND, _CCMD_, _cmd),                                \
+       .len = (_len),                                                        \
+   }
+
+#define PAN_CCMD_STRUCT(backend, cmd, suffix)                                \
+   CONCAT4(struct backend, _ccmd_, cmd, suffix)
+
+#define PAN_KMOD_VDRM_SEND_REQ(BACKEND, backend, dev, CMD, cmd, rsp, ...)    \
+   ({                                                                        \
+      MESA_TRACE_FUNC();                                                     \
+      struct CONCAT2(backend, _vdrm_device) *__vdrm_dev =                    \
+         pan_dev_to_backend_vdrm_dev(backend, dev);                          \
+      unsigned __req_len = sizeof(PAN_CCMD_STRUCT(backend, cmd, _req));      \
+      unsigned __rsp_len = sizeof(PAN_CCMD_STRUCT(backend, cmd, _rsp));      \
+      PAN_CCMD_STRUCT(backend, cmd, _req) __req = {                          \
+         .hdr = PAN_CCMD(BACKEND, CMD, __req_len),                           \
+         __VA_ARGS__                                                         \
+      };                                                                     \
+                                                                             \
+      rsp = vdrm_alloc_rsp(__vdrm_dev->vdrm, &__req.hdr, __rsp_len);         \
+      vdrm_send_req(__vdrm_dev->vdrm, &__req.hdr, true);                     \
+   })
+
+static struct vdrm_device *
+pan_kmod_vdrm_virtio_gpu_connect(int fd, uint32_t context_type)
+{
+   drmVersionPtr version = drmGetVersion(fd);
+   if (!version)
+      return NULL;
+
+   bool is_vdrm = !strcmp(version->name, "virtio_gpu");
+   drmFreeVersion(version);
+
+   if (!is_vdrm)
+      return NULL;
+
+   return vdrm_device_connect(fd, context_type);
+}
+#endif /* HAVE_PANFROST_VDRM */
+
+static inline bool
+pan_kmod_drm_drv_match(int fd, char *drv_name, struct pan_kmod_driver *drv_info)
+{
+   drmVersionPtr version = drmGetVersion(fd);
+   bool ret = true;
+
+   if (!version)
+      return false;
+
+   *drv_info = (struct pan_kmod_driver) {
+      .version = {
+         .major = version->version_major,
+         .minor = version->version_minor,
+      },
+   };
+
+   if (strcmp(drv_name, version->name))
+      ret = false;
+
+   drmFreeVersion(version);
+   return ret;
+}
+
+static inline int
 pan_kmod_dev_init(struct pan_kmod_dev *dev, int fd, uint32_t flags,
                   const struct pan_kmod_driver *drv_info,
+                  const struct pan_kmod_allocator *allocator,
                   const struct pan_kmod_ops *ops,
-                  const struct pan_kmod_allocator *allocator)
+                  struct util_sync_provider *sync_ops)
 {
+   if (!sync_ops)
+      return -1;
+
    simple_mtx_init(&dev->handle_to_bo.lock, mtx_plain);
    util_sparse_array_init(&dev->handle_to_bo.array,
                           sizeof(struct pan_kmod_bo *), 512);
@@ -25,6 +117,9 @@ pan_kmod_dev_init(struct pan_kmod_dev *dev, int fd, uint32_t flags,
    dev->flags = flags;
    dev->ops = ops;
    dev->allocator = allocator;
+   dev->sync_ops = sync_ops;
+
+   return 0;
 }
 
 static inline void
@@ -37,6 +132,7 @@ pan_kmod_dev_cleanup(struct pan_kmod_dev *dev)
    util_sparse_array_finish(&dev->handle_to_bo.array);
    simple_mtx_destroy(&dev->handle_to_bo.lock);
    simple_mtx_destroy(&dev->pending_bo_syncs.lock);
+   dev->sync_ops->finalize(dev->sync_ops);
 }
 
 static inline void *

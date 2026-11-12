@@ -71,6 +71,7 @@ Linux, FreeBSD, and other operating systems.
    application-issues
    viewperf
    teflon
+   torx
 
 .. toctree::
    :maxdepth: 1
@@ -94,7 +95,6 @@ Linux, FreeBSD, and other operating systems.
    drivers/venus
    drivers/virgl
    drivers/zink
-   xlibdriver
 
 .. toctree::
    :maxdepth: 1

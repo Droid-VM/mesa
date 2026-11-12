@@ -285,6 +285,10 @@ static bool r300_is_format_supported(struct pipe_screen* screen,
                          format == PIPE_FORMAT_R16G16B16X16_FLOAT;
     const struct util_format_description *desc;
 
+    /* The byte swap is set up for host-endian formats only. */
+    if (util_format_description(format)->is_byte_swapped)
+        return false;
+
     if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
         return false;
 
@@ -476,7 +480,7 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    bool is_r500 = r300screen->caps.is_r500;
 
    /* Supported features (boolean caps). */
-   caps->npot_textures = true;
+   caps->npot_textures = false;
    caps->mixed_framebuffer_sizes = true;
    caps->mixed_color_depth_bits = true;
    caps->anisotropic_filter = true;
@@ -543,7 +547,6 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
 
    /* Render targets. */
    caps->max_render_targets = 4;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
 
    caps->max_viewports = 1;
 
@@ -658,7 +661,8 @@ static void r300_query_memory_info(struct pipe_screen *pscreen,
 }
 
 struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
-                                       const struct pipe_screen_config *config)
+                                       const struct pipe_screen_config *config,
+                                       UNUSED uint64_t debug_flags)
 {
     struct r300_screen *r300screen = CALLOC_STRUCT(r300_screen);
 

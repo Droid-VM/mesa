@@ -82,3 +82,15 @@ glx@glx_arb_create_context@null attribute list
 
 # New flakes with GL CTS 4.6.7.0
 KHR-GL46.transform_feedback2.transform_feedback2_states
+
+# occlusion query results not consistent on ANV
+dEQP-GLES3.functional.occlusion_query.scissor_stencil_write
+dEQP-GLES3.functional.occlusion_query.depth_clear_stencil_write_stencil_clear
+
+GStreamer-H.264-VAAPI@Hi422FR15_SONY_A
+GStreamer-H.264-VAAPI@Hi422FREXT19_SONY_A
+GStreamer-H.264-VAAPI@MVCNV-2
+GStreamer-H.264-VAAPI@SVCBM-2-L0
+
+# sparse commitment sometimes hangs until the 180s timeout
+KHR-GL46.sparse_texture_tests.SparseTextureCommitment_texture_rectangle_rg8

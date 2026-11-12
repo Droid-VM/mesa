@@ -239,13 +239,36 @@ nir_format_unorm_to_float(nir_builder *b, nir_def *u, const unsigned *bits)
    return nir_fdiv(b, nir_u2f32(b, u), factor);
 }
 
+/*
+ * Exact unorm24 to float conversion
+ *
+ * Since float has 24 bits of mantissa (23 real, 1 implied) we can just barely
+ * represent 24-bit unorm exactly as long as we're careful with the conversion.
+ */
 nir_def *
-nir_format_unorm_to_float_precise(nir_builder *b, nir_def *u, const unsigned *bits)
+nir_format_unorm24_to_float(nir_builder *b, nir_def *u)
 {
-   nir_def *factor =
-      _nir_format_norm_factor(b, bits, u->num_components, 64, false);
+   ASSERTED double factor = 1.0 / ((1 << 24) - 1);
+   float factor_a = 0x1p-24;
+   float factor_b = 0x1p-48;
+   ASSERTED float factor_c = 0x1p-72;
+   assert(factor == (double)factor_a + factor_b + factor_c);
 
-   return nir_f2f32(b, nir_fdiv(b, nir_u2f64(b, u), factor));
+   unsigned old_fp_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_no_reassoc | nir_fp_no_transform;
+
+   nir_def *f = nir_u2f32(b, u);
+   /* f * factor = f * (factor_a + factor_b + factor_c)
+    *            = f * factor_a + f * factor_b + f * factor_c
+    * factor_c is small enough that it will not affect the result.
+    * factor_b does affect the rounding though, so we must include it.
+    */
+   nir_def *res = nir_ffma_weak_imm1(b, f, factor_a,
+                                     nir_fmul_imm(b, f, factor_b));
+
+   b->fp_math_ctrl = old_fp_math_ctrl;
+
+   return res;
 }
 
 nir_def *

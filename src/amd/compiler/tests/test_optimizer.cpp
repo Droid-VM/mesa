@@ -177,8 +177,6 @@ BEGIN_TEST(optimize.output_modifiers)
    program->next_fp_mode.denorm32 = fp_denorm_keep;
    program->next_fp_mode.denorm16_64 = fp_denorm_flush;
    bld.reset(program->create_and_insert_block());
-   program->blocks[0].linear_succs.push_back(1);
-   program->blocks[0].logical_succs.push_back(1);
    program->blocks[1].linear_preds.push_back(0);
    program->blocks[1].logical_preds.push_back(0);
 
@@ -199,8 +197,6 @@ BEGIN_TEST(optimize.output_modifiers)
    program->next_fp_mode.denorm32 = fp_denorm_flush;
    program->next_fp_mode.denorm16_64 = fp_denorm_keep;
    bld.reset(program->create_and_insert_block());
-   program->blocks[1].linear_succs.push_back(2);
-   program->blocks[1].logical_succs.push_back(2);
    program->blocks[2].linear_preds.push_back(1);
    program->blocks[2].logical_preds.push_back(1);
 
@@ -224,8 +220,6 @@ BEGIN_TEST(optimize.output_modifiers)
    program->next_fp_mode.denorm16_64 = fp_denorm_flush;
    bld.reset(program->create_and_insert_block());
    bld.is_sz_preserve = true;
-   program->blocks[2].linear_succs.push_back(3);
-   program->blocks[2].logical_succs.push_back(3);
    program->blocks[3].linear_preds.push_back(2);
    program->blocks[3].logical_preds.push_back(2);
 
@@ -1727,8 +1721,6 @@ BEGIN_TEST(optimize.fmamix_two_literals)
       //! /* logical preds: BB0, / linear preds: BB0, / kind: uniform, */
       program->next_fp_mode.denorm16_64 = fp_denorm_flush;
       bld.reset(program->create_and_insert_block());
-      program->blocks[0].linear_succs.push_back(1);
-      program->blocks[0].logical_succs.push_back(1);
       program->blocks[1].linear_preds.push_back(0);
       program->blocks[1].logical_preds.push_back(0);
 
@@ -2036,37 +2028,45 @@ BEGIN_TEST(optimizer.trans_inline_constant)
 
    //>> s1: %res0 = v_s_rcp_f32 1.0
    //! p_unit_test 0, %res0
-   writeout(0, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+   writeout(0, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1),
+                        bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
 
    //! s1: %res1 = v_s_rcp_f32 0x3c00
    //! p_unit_test 1, %res1
-   writeout(1, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+   writeout(1, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1),
+                        bld.copy(bld.def(s1), Operand::c32(0x3c00))));
 
    //! s1: %tmp2 = p_parallelcopy 1.0
    //! s1: %res2 = v_s_rcp_f16 %tmp2
    //! p_unit_test 2, %res2
-   writeout(2, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+   writeout(2, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1),
+                        bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
 
    //! s1: %tmp3 = p_parallelcopy 0x3c00
    //! s1: %res3 = v_s_rcp_f16 %tmp3
    //! p_unit_test 3, %res3
-   writeout(3, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+   writeout(3, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1),
+                        bld.copy(bld.def(s1), Operand::c32(0x3c00))));
 
    //! v1: %res4 = v_rcp_f32 1.0
    //! p_unit_test 4, %res4
-   writeout(4, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+   writeout(4, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1),
+                        bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
 
    //! v1: %res5 = v_rcp_f32 0x3c00
    //! p_unit_test 5, %res5
-   writeout(5, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+   writeout(
+      5, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
 
    //! v2b: %res6 = v_rcp_f16 0
    //! p_unit_test 6, %res6
-   writeout(6, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+   writeout(6, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b),
+                        bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
 
    //! v2b: %res7 = v_rcp_f16 1.0
    //! p_unit_test 7, %res7
-   writeout(7, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+   writeout(7, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b),
+                        bld.copy(bld.def(s1), Operand::c32(0x3c00))));
 
    finish_opt_test();
 END_TEST
@@ -2455,6 +2455,58 @@ BEGIN_TEST(optimizer.smem_buffer_align)
       bld.sop2(aco_opcode::s_and_b32, bld.def(s1), bld.def(s1, scc), b, Operand::c32(-8));
    Temp load1 = bld.smem(aco_opcode::s_buffer_load_dword, bld.def(s1), a, address1);
    writeout(1, load1);
+
+   finish_opt_test();
+END_TEST
+
+BEGIN_TEST(optimizer.cndmask_invert_cond)
+   //>>  v1: %a:v[0],  v1: %b:v[1],  v1: %c:v[2],  v1: %d:v[3] = p_startpgm
+   if (!setup_cs("v1 v1 v1 v1", GFX10_3))
+      return;
+
+   Temp a = inputs[0];
+   Temp b = inputs[1];
+   Temp c = inputs[2];
+   Temp d = inputs[3];
+
+   //! s2: %cond0 = v_cmp_lg_i32 %a, %b
+   //! v1: %bcsel0 = v_cndmask_b32 %d, %c, %cond0:vcc row_mirror bound_ctrl:1 fi
+   //! v1: %bcsel1 = v_cndmask_b32 %d, 0, %cond0
+   //! p_unit_test 0, %bcsel0
+   //! p_unit_test 1, %bcsel1
+   Temp cond0 = bld.vopc(aco_opcode::v_cmp_eq_i32, bld.def(bld.lm), a, b);
+   Temp dpp0 = bld.vop1_dpp(aco_opcode::v_mov_b32, bld.def(v1), d, dpp_row_mirror);
+   Temp bcsel0 = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), c, dpp0, cond0);
+   Temp bcsel1 = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0), d, cond0);
+   writeout(0, bcsel0);
+   writeout(1, bcsel1);
+
+   //! s2: %cond1 = v_cmp_lt_i32 %a, %b
+   //! v1: %bcsel2 = v_cndmask_b32 %d, %c, %cond1:vcc row_mirror bound_ctrl:1 fi
+   //! v1: %bcsel3 = v_cndmask_b32 %d, 0, %cond1
+   //! p_unit_test 2, %bcsel2
+   //! p_unit_test 3, %bcsel3
+   Temp cond1 = bld.vopc(aco_opcode::v_cmp_lt_i32, bld.def(bld.lm), a, b);
+   Temp dpp1 = bld.vop1_dpp(aco_opcode::v_mov_b32, bld.def(v1), d, dpp_row_mirror);
+   Temp bcsel2 = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), dpp1, c, cond1);
+   Temp bcsel3 = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), d, Operand::c32(0), cond1);
+   writeout(2, bcsel2);
+   writeout(3, bcsel3);
+
+   //! s2: %cond2 = v_cmp_neq_f32 %a, %b
+   //! v1: %bcsel4 = v_cndmask_b32 0, %d, %cond2
+   //! p_unit_test 4, %bcsel4
+   Temp cond2 = bld.vopc(aco_opcode::v_cmp_eq_f32, bld.def(bld.lm), a, b);
+   Temp bcsel4 = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), d, Operand::c32(0), cond2);
+   writeout(4, bcsel4);
+
+   //! s2: %cond3 = v_cmp_neq_f16 %a, %b
+   //! v1: %bcsel5 = v_cndmask_b32 0x70ad, %d, %cond3
+   //! p_unit_test 5, %bcsel5
+   Temp cond3 = bld.vopc(aco_opcode::v_cmp_eq_f16, bld.def(bld.lm), a, b);
+   Temp literal = bld.copy(bld.def(v1), Operand::c32(0x70AD));
+   Temp bcsel5 = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), d, literal, cond3);
+   writeout(5, bcsel5);
 
    finish_opt_test();
 END_TEST

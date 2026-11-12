@@ -259,13 +259,13 @@ vn_wsi_memory_info_init(struct vn_device_memory *mem,
    const VkMemoryDedicatedAllocateInfo *dedicated_info = NULL;
    const struct wsi_memory_allocate_info *wsi_info = NULL;
 
-   vk_foreach_struct_const(pnext, alloc_info->pNext) {
-      switch ((uint32_t)pnext->sType) {
+   vk_foreach_struct_const(sType, pnext, alloc_info->pNext) {
+      switch ((uint32_t)sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
-         dedicated_info = (const void *)pnext;
+         dedicated_info = pnext;
          break;
       case VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA:
-         wsi_info = (const void *)pnext;
+         wsi_info = pnext;
          break;
       default:
          break;
@@ -507,8 +507,8 @@ vn_wsi_clone_present_info(struct vn_device *dev, const VkPresentInfoKHR *pi)
    VkSwapchainPresentModeInfoKHR *spmi = NULL;
    VkPresentTimingsInfoEXT *pti = NULL;
 
-   vk_foreach_struct_const(pnext, pi->pNext) {
-      switch (pnext->sType) {
+   vk_foreach_struct_const(sType, pnext, pi->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR:
          dgpi = (void *)pnext;
          break;
@@ -520,9 +520,13 @@ vn_wsi_clone_present_info(struct vn_device *dev, const VkPresentInfoKHR *pi)
          break;
       case VK_STRUCTURE_TYPE_PRESENT_ID_KHR:
          id = (void *)pnext;
+         if (!id->pPresentIds)
+            id = NULL;
          break;
       case VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR:
          id2 = (void *)pnext;
+         if (!id2->pPresentIds)
+            id2 = NULL;
          break;
       case VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR:
          spfi = (void *)pnext;
@@ -532,6 +536,8 @@ vn_wsi_clone_present_info(struct vn_device *dev, const VkPresentInfoKHR *pi)
          break;
       case VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT:
          pti = (void *)pnext;
+         if (!pti->pTimingInfos)
+            pti = NULL;
          break;
       default:
          break;
@@ -792,8 +798,12 @@ vn_wsi_present_async(struct vn_device *dev,
       cnd_init(&queue->async_present.cond);
 
       if (u_thread_create(&queue->async_present.thread, vn_wsi_present_thread,
-                          queue) != thrd_success)
+                          queue) != thrd_success) {
+         cnd_destroy(&queue->async_present.cond);
+         mtx_destroy(&queue->async_present.mutex);
+         simple_mtx_destroy(&queue->async_present.queue_mutex);
          return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
    }
 
    mtx_lock(&queue->async_present.mutex);
@@ -802,8 +812,12 @@ vn_wsi_present_async(struct vn_device *dev,
    result = queue->async_present.result;
    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
       queue->async_present.info = vn_wsi_clone_present_info(dev, pi);
-      queue->async_present.pending = true;
-      cnd_signal(&queue->async_present.cond);
+      if (queue->async_present.info) {
+         queue->async_present.pending = true;
+         cnd_signal(&queue->async_present.cond);
+      } else {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
    }
    queue->async_present.result = VK_SUCCESS;
    mtx_unlock(&queue->async_present.mutex);

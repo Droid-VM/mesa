@@ -57,7 +57,7 @@ piglit_folder = "/piglit"
 profile = "gpu"
 process_isolation = true
 timeout = 180.0
-  [piglit.env]
+[piglit.env]
   PIGLIT_NO_WINDOW = "1"
   PIGLIT_PLATFORM = "gbm"
   WAFFLE_PLATFORM = "gbm"

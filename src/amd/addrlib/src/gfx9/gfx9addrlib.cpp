@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -18,13 +18,13 @@
 #include "gfx9_gb_reg.h"
 
 #include "amdgpu_asic_addr.h"
+#include "addrswizzler.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace Addr
 {
-
 /**
 ************************************************************************************************************************
 *   Gfx9HwlInit
@@ -2117,11 +2117,11 @@ VOID Gfx9Lib::GenMetaEquation(
 
             if (m_settings.applyAliasFix)
             {
-                isRbEqAppended = (rbEquation[i].getsize() > (rbAppendedWithPipeBits[i] ? 1 : 0));
+                isRbEqAppended = (rbEquation[i].getsize() > (rbAppendedWithPipeBits[i] ? 1u : 0u));
             }
             else
             {
-                isRbEqAppended = (rbEquation[i].getsize() > 0);
+                isRbEqAppended = (rbEquation[i].getsize() > 0u);
             }
 
             if (isRbEqAppended)
@@ -2196,11 +2196,11 @@ VOID Gfx9Lib::GenMetaEquation(
 
             if (m_settings.applyAliasFix)
             {
-                isRbEqAppended = (rbEquation[i].getsize() > (rbAppendedWithPipeBits[i] ? 1 : 0));
+                isRbEqAppended = (rbEquation[i].getsize() > (rbAppendedWithPipeBits[i] ? 1u : 0u));
             }
             else
             {
-                isRbEqAppended = (rbEquation[i].getsize() > 0);
+                isRbEqAppended = (rbEquation[i].getsize() > 0u);
             }
 
             if (isRbEqAppended)
@@ -3750,7 +3750,6 @@ ADDR_E_RETURNCODE Gfx9Lib::HwlGetPreferredSurfaceSetting(
 
                     const UINT_32 ratioLow           = computeMinSize ? 1 : (pIn->flags.opt4space ? 3 : 2);
                     const UINT_32 ratioHi            = computeMinSize ? 1 : (pIn->flags.opt4space ? 2 : 1);
-                    const UINT_64 sizeAlignInElement = Max(NextPow2(pIn->minSizeAlign) / (bpp >> 3), 1u);
                     UINT_32       minSizeBlk         = AddrBlockMicro;
                     UINT_64       minSize            = 0;
 
@@ -4006,12 +4005,12 @@ ADDR_E_RETURNCODE Gfx9Lib::ComputeStereoInfo(
     {
         if (IsXor(pIn->swizzleMode))
         {
-            const UINT_32        blkSizeLog2       = GetBlockSizeLog2(pIn->swizzleMode);
-            const UINT_32        numPipeBits       = GetPipeXorBits(blkSizeLog2);
-            const UINT_32        numBankBits       = GetBankXorBits(blkSizeLog2);
-            const UINT_32        bppLog2           = Log2(pIn->bpp >> 3);
-            const UINT_32        maxYCoordBlock256 = Log2(Block256_2d[bppLog2].h) - 1;
-            const ADDR_EQUATION *pEqToCheck        = &m_equationTable[eqIndex];
+            const UINT_32                         blkSizeLog2       = GetBlockSizeLog2(pIn->swizzleMode);
+            const UINT_32                         numPipeBits       = GetPipeXorBits(blkSizeLog2);
+            const UINT_32                         numBankBits       = GetBankXorBits(blkSizeLog2);
+            const UINT_32                         bppLog2           = Log2(pIn->bpp >> 3);
+            const UINT_32                         maxYCoordBlock256 = Log2(Block256_2d[bppLog2].h) - 1;
+            [[maybe_unused]] const ADDR_EQUATION *pEqToCheck        = &m_equationTable[eqIndex];
 
             ADDR_ASSERT(maxYCoordBlock256 ==
                         GetMaxValidChannelIndex(&pEqToCheck->addr[0], Log2Size256, 1));
@@ -4342,7 +4341,7 @@ ADDR_E_RETURNCODE Gfx9Lib::HwlComputeSurfaceInfoLinear(
                 {
                     for (UINT_32 i = 0; i < pIn->numMipLevels; i++)
                     {
-                        pOut->pMipInfo[i].offset = pitch * elementBytes * i;
+                        pOut->pMipInfo[i].offset = static_cast<UINT_64>(pitch * elementBytes * i);
                         pOut->pMipInfo[i].pitch  = pitch;
                         pOut->pMipInfo[i].height = 1;
                         pOut->pMipInfo[i].depth  = 1;
@@ -5141,7 +5140,7 @@ ADDR_E_RETURNCODE Gfx9Lib::ComputeSurfaceLinearPadding(
         {
             if (pMipInfo != NULL)
             {
-                pMipInfo[i].offset = mipChainWidth * mipChainHeight * elementBytes;
+                pMipInfo[i].offset = static_cast<UINT_64>(mipChainWidth) * mipChainHeight * elementBytes;
                 pMipInfo[i].pitch  = mipChainWidth;
                 pMipInfo[i].height = mipHeight;
                 pMipInfo[i].depth  = mipDepth;
@@ -5211,6 +5210,275 @@ VOID Gfx9Lib::ComputeThinBlockDimension(
             *pHeight >>= q;
         }
     }
+}
+
+/**
+************************************************************************************************************************
+*   Gfx9Lib::HwlCopyMemToSurface
+*
+*   @brief
+*       Copy multiple regions from memory to a non-linear surface.
+*
+*   @return
+*       Error or success.
+************************************************************************************************************************
+*/
+ADDR_E_RETURNCODE Gfx9Lib::HwlCopyMemToSurface(
+    const ADDR2_COPY_MEMSURFACE_INPUT*  pIn,
+    const ADDR2_COPY_MEMSURFACE_REGION* pRegions,
+    UINT_32                             regionCount
+    ) const
+{
+    // Copy memory to tiled surface. We will use the 'swizzler' object to dispatch to a version of the copy routine
+    // optimized for a particular micro-swizzle mode if available.
+    ADDR2_COMPUTE_SURFACE_INFO_INPUT  localIn  = {0};
+    ADDR2_COMPUTE_SURFACE_INFO_OUTPUT localOut = {0};
+    ADDR2_MIP_INFO                    mipInfo[MaxMipLevels] = {{0}};
+    ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
+    ADDR_E_RETURNCODE returnCode = ADDR_OK;
+
+    if (pIn->numSamples > 1)
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+    if (IsBlockVariable(pIn->swizzleMode))
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+
+    if (!IsEquationSupported(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3)))
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+
+    localIn.size         = sizeof(localIn);
+    localIn.flags        = pIn->flags;
+    localIn.swizzleMode  = pIn->swizzleMode;
+    localIn.resourceType = pIn->resourceType;
+    localIn.format       = pIn->format;
+    localIn.bpp          = pIn->bpp;
+    localIn.width        = Max(pIn->unAlignedDims.width,  1u);
+    localIn.height       = Max(pIn->unAlignedDims.height, 1u);
+    localIn.numSlices    = Max(pIn->unAlignedDims.depth,  1u);
+    localIn.numMipLevels = Max(pIn->numMipLevels,         1u);
+    localIn.numSamples   = Max(pIn->numSamples,           1u);
+
+    localOut.size     = sizeof(localOut);
+    localOut.pMipInfo = mipInfo;
+
+    if (returnCode == ADDR_OK)
+    {
+        returnCode = ComputeSurfaceInfo(&localIn, &localOut);
+    }
+
+    const UINT_32 blkSizeLog2 = GetBlockSizeLog2(pIn->swizzleMode);
+    ADDR_EXTENT3D blockExtent = {
+        localOut.blockWidth,
+        localOut.blockHeight,
+        localOut.blockSlices
+    };
+
+    ADDR_EQUATION equation = {};
+    if (returnCode == ADDR_OK)
+    {
+        if (IsBlock256b(pIn->swizzleMode) && IsTex2d(pIn->resourceType))
+        {
+            returnCode = ComputeBlock256Equation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+        else if (IsThin(pIn->resourceType, pIn->swizzleMode))
+        {
+            returnCode = ComputeThinEquation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+        else
+        {
+            returnCode = ComputeThickEquation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+    }
+
+    LutAddresser addresser = LutAddresser();
+    UnalignedCopyMemImgFunc pfnCopyUnaligned = nullptr;
+    if (returnCode == ADDR_OK)
+    {
+        UINT_8 bpeLog2 = Log2(pIn->bpp >> 3);
+        addresser.InitFromEquation(&equation, blockExtent, blkSizeLog2, bpeLog2);
+        pfnCopyUnaligned = addresser.GetCopyMemImgFunc(pIn->copyFlags);
+    }
+
+    if (returnCode == ADDR_OK && pfnCopyUnaligned == nullptr)
+    {
+        ADDR_ASSERT_ALWAYS();
+        returnCode = ADDR_INVALIDPARAMS;
+    }
+
+    if (returnCode == ADDR_OK)
+    {
+        for (UINT_32  regionIdx = 0; regionIdx < regionCount; regionIdx++)
+        {
+            const ADDR2_COPY_MEMSURFACE_REGION* pCurRegion = &pRegions[regionIdx];
+            const ADDR2_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
+            UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
+            if (pIn->numMipLevels > 1)
+            {
+                mipOffset += pMipInfo->mipTailOffset;
+            }
+            UINT_32 yBlks = localOut.pitch / localOut.blockWidth;
+            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+
+            ADDR_COORD3D rawOrigin = {
+                pCurRegion->x,
+                pCurRegion->y,
+                pCurRegion->slice
+            };
+
+            pfnCopyUnaligned(VoidPtrInc(pIn->pMappedSurface, mipOffset),
+                             pCurRegion->pMem,
+                             pCurRegion->memRowPitch,
+                             pCurRegion->memSlicePitch,
+                             yBlks,
+                             zBlks,
+                             rawOrigin,
+                             pCurRegion->copyDims,
+                             pIn->pbXor,
+                             (pCurRegion->mipId >= localOut.firstMipIdInTail),
+                             addresser);
+        }
+        addresser.DoCopyMemImgPostFlushes(pIn->copyFlags);
+    }
+    return returnCode;
+}
+
+/**
+************************************************************************************************************************
+*   Gfx9Lib::HwlCopySurfaceToMem
+*
+*   @brief
+*       Copy multiple regions from a non-linear surface to memory.
+*
+*   @return
+*       Error or success.
+************************************************************************************************************************
+*/
+ADDR_E_RETURNCODE Gfx9Lib::HwlCopySurfaceToMem(
+    const ADDR2_COPY_MEMSURFACE_INPUT*  pIn,
+    const ADDR2_COPY_MEMSURFACE_REGION* pRegions,
+    UINT_32                             regionCount
+    ) const
+{
+    // Copy tiled surface to memory. We will use the 'swizzler' object to dispatch to a version of the copy routine
+    // optimized for a particular micro-swizzle mode if available.
+    ADDR2_COMPUTE_SURFACE_INFO_INPUT  localIn  = {0};
+    ADDR2_COMPUTE_SURFACE_INFO_OUTPUT localOut = {0};
+    ADDR2_MIP_INFO                    mipInfo[MaxMipLevels] = {{0}};
+    ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
+    ADDR_E_RETURNCODE returnCode = ADDR_OK;
+
+    if (pIn->numSamples > 1)
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+    if (IsBlockVariable(pIn->swizzleMode))
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+
+    if (!IsEquationSupported(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3)))
+    {
+        returnCode = ADDR_NOTIMPLEMENTED;
+    }
+
+    localIn.size         = sizeof(localIn);
+    localIn.flags        = pIn->flags;
+    localIn.swizzleMode  = pIn->swizzleMode;
+    localIn.resourceType = pIn->resourceType;
+    localIn.format       = pIn->format;
+    localIn.bpp          = pIn->bpp;
+    localIn.width        = Max(pIn->unAlignedDims.width,  1u);
+    localIn.height       = Max(pIn->unAlignedDims.height, 1u);
+    localIn.numSlices    = Max(pIn->unAlignedDims.depth,  1u);
+    localIn.numMipLevels = Max(pIn->numMipLevels,         1u);
+    localIn.numSamples   = Max(pIn->numSamples,           1u);
+
+    localOut.size     = sizeof(localOut);
+    localOut.pMipInfo = mipInfo;
+
+    if (returnCode == ADDR_OK)
+    {
+        returnCode = ComputeSurfaceInfo(&localIn, &localOut);
+    }
+
+    const UINT_32 blkSizeLog2 = GetBlockSizeLog2(pIn->swizzleMode);
+    ADDR_EXTENT3D blockExtent = {
+        localOut.blockWidth,
+        localOut.blockHeight,
+        localOut.blockSlices
+    };
+
+    ADDR_EQUATION equation = {};
+    if (returnCode == ADDR_OK)
+    {
+        if (IsBlock256b(pIn->swizzleMode) && IsTex2d(pIn->resourceType))
+        {
+            returnCode = ComputeBlock256Equation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+        else if (IsThin(pIn->resourceType, pIn->swizzleMode))
+        {
+            returnCode = ComputeThinEquation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+        else
+        {
+            returnCode = ComputeThickEquation(pIn->resourceType, pIn->swizzleMode, Log2(pIn->bpp >> 3), &equation);
+        }
+    }
+
+    LutAddresser addresser = LutAddresser();
+    UnalignedCopyMemImgFunc pfnCopyUnaligned = nullptr;
+    if (returnCode == ADDR_OK)
+    {
+        UINT_8 bpeLog2 = Log2(pIn->bpp >> 3);
+        addresser.InitFromEquation(&equation, blockExtent, blkSizeLog2, bpeLog2);
+        pfnCopyUnaligned = addresser.GetCopyImgMemFunc(pIn->copyFlags);
+        if (pfnCopyUnaligned == nullptr)
+        {
+            ADDR_ASSERT_ALWAYS();
+            returnCode = ADDR_INVALIDPARAMS;
+        }
+    }
+
+    if (returnCode == ADDR_OK)
+    {
+        addresser.DoCopyImgMemPreFlushes(pIn->copyFlags);
+        for (UINT_32  regionIdx = 0; regionIdx < regionCount; regionIdx++)
+        {
+            const ADDR2_COPY_MEMSURFACE_REGION* pCurRegion = &pRegions[regionIdx];
+            const ADDR2_MIP_INFO* pMipInfo = &mipInfo[pCurRegion->mipId];
+            UINT_64 mipOffset = pIn->singleSubres ? 0 : pMipInfo->macroBlockOffset;
+            if (pIn->numMipLevels > 1)
+            {
+                mipOffset += pMipInfo->mipTailOffset;
+            }
+            UINT_32 yBlks = localOut.pitch / localOut.blockWidth;
+            UINT_32 zBlks = localOut.sliceSize >> (addresser.GetBlockBits() - addresser.GetBlockZBits());
+
+            ADDR_COORD3D rawOrigin = {
+                pCurRegion->x,
+                pCurRegion->y,
+                pCurRegion->slice
+            };
+
+            pfnCopyUnaligned(VoidPtrInc(pIn->pMappedSurface, mipOffset),
+                             pCurRegion->pMem,
+                             pCurRegion->memRowPitch,
+                             pCurRegion->memSlicePitch,
+                             yBlks,
+                             zBlks,
+                             rawOrigin,
+                             pCurRegion->copyDims,
+                             pIn->pbXor,
+                             (pCurRegion->mipId >= localOut.firstMipIdInTail),
+                             addresser);
+        }
+    }
+    return returnCode;
 }
 
 } // V2

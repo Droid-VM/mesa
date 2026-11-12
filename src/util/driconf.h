@@ -53,18 +53,21 @@
 #define DRI_CONF_ENUM(_value,text) { .value = _value, .desc = text },
 
 #define DRI_CONF_RANGE_I(min, max)              \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._int = min },              \
          .end = { ._int = max },                \
       }                                         \
 
 #define DRI_CONF_RANGE_U64(min, max)            \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._uint64 = min },           \
          .end = { ._uint64 = max },             \
       }
 
 #define DRI_CONF_RANGE_F(min, max)              \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._float = min },            \
          .end = { ._float = max },              \
@@ -189,6 +192,10 @@
 
 #define DRI_CONF_FORCE_GLSL_VERSION(def) \
    DRI_CONF_OPT_I(force_glsl_version, def, 0, 999, \
+                  "Force a GLSL version as if it was an explicit #version line")
+
+#define DRI_CONF_DEFAULT_GLSL_VERSION(def) \
+   DRI_CONF_OPT_I(default_glsl_version, def, 0, 999, \
                   "Force a default GLSL version for shaders that lack an explicit #version line")
 
 #define DRI_CONF_ALLOW_EXTRA_PP_TOKENS(def) \
@@ -288,6 +295,11 @@
    DRI_CONF_OPT_I(override_vram_size, -1, -1, 2147483647, \
                   "Override the VRAM size advertised to the application in MiB (-1 = default)")
 
+/* 65536 is the largest size core Mesa can represent (MAX_TEXTURE_LEVELS). */
+#define DRI_CONF_LIMIT_MAX_TEXTURE_SIZE() \
+   DRI_CONF_OPT_I(limit_max_texture_size, 0, 0, 65536, \
+                  "Limit the maximum texture size advertised to the application (0 = no limit)")
+
 #define DRI_CONF_FORCE_GL_MAP_BUFFER_SYNCHRONIZED(def) \
    DRI_CONF_OPT_B(force_gl_map_buffer_synchronized, def, "Override GL_MAP_UNSYNCHRONIZED_BIT.")
 
@@ -329,6 +341,10 @@
 #define DRI_CONF_ZERO_INVALIDATED_BUFFERS(def) \
    DRI_CONF_OPT_B(zero_invalidated_buffers, def, \
                   "Zero memory returned by glMapBufferRange with GL_MAP_INVALIDATE_*_BIT, workaround for games that rely on the undefined contents being zero")
+
+#define DRI_CONF_IGNORE_MAP_INVALIDATE_BUFFER(def) \
+   DRI_CONF_OPT_B(ignore_map_invalidate_buffer, def, \
+                  "Ignore GL_MAP_INVALIDATE_*_BIT when the range is the whole buffer, workaround for games that map a whole buffer as invalidated but only rewrite a part of it")
 
 #define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
    DRI_CONF_OPT_B(limit_trig_input_range, def, \
@@ -380,6 +396,12 @@
 #define DRI_CONF_INTEL_DISABLE_THREADED_CONTEXT(def) \
    DRI_CONF_OPT_B(intel_disable_threaded_context, def, "Disable threaded context")
 
+#define DRI_CONF_INTEL_ENABLE_EFFICIENT_64BIT(def) \
+   DRI_CONF_OPT_B(intel_enable_efficient_64bit, def, "Enable efficient 64bit")
+
+#define DRI_CONF_INTEL_FORCE_PROBE \
+   DRI_CONF_OPT_S_NODEF(intel_force_probe, "Default value of INTEL_FORCE_PROBE.")
+
 /**
  * \brief Image quality-related options
  */
@@ -425,6 +447,15 @@
 #define DRI_CONF_SHADER_SPILLING_RATE(def) \
    DRI_CONF_OPT_I(shader_spilling_rate, def, 0, 100, \
                   "Speed up shader compilation by increasing number of spilled registers after ra_allocate failure")
+
+#define DRI_CONF_INTEL_SAMPLE_D_PERFORMANCE(def) \
+   DRI_CONF_OPT_E(intel_sample_d_performance, def, 0, 3, \
+                  "Specify the value of SAMPLER_STATE::sample_d_performance on GFX35+ platforms", \
+                  DRI_CONF_ENUM(0,"Disable_sample_d_optimization") \
+                  DRI_CONF_ENUM(1,"sample_d_ignore12b") \
+                  DRI_CONF_ENUM(2,"sample_d_ignore16b") \
+                  DRI_CONF_ENUM(3,"sample_d_ignore20b"))
+
 /**
  * \brief Miscellaneous configuration options
  */

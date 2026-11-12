@@ -46,7 +46,6 @@
 #include "program/program.h"
 
 #include "pipe/p_context.h"
-#include "pipe/p_shader_tokens.h"
 #include "cso_cache/cso_context.h"
 #include "util/u_debug.h"
 
@@ -55,6 +54,60 @@
 #include "st_program.h"
 #include "st_texture.h"
 #include "st_util.h"
+
+
+/**
+ * Does the current draw rasterize polygons (and so get polygon-stippled)?
+ *
+ * Polygon stipple only applies to polygon primitives, so points and lines --
+ * whether drawn directly, emitted by a geometry/tessellation shader, or the
+ * result of glPolygonMode(GL_POINT/GL_LINE) -- must not be stippled.  This
+ * mirrors what the draw module's pstipple stage (a tri-only stage) and native
+ * hardware do.
+ */
+static bool
+st_rasterizes_polygons(const struct st_context *st)
+{
+   const struct gl_context *ctx = st->ctx;
+   enum mesa_prim prim;
+
+   /* The rasterized primitive comes from the last primitive-producing stage. */
+   if (ctx->GeometryProgram._Current) {
+      prim = ctx->GeometryProgram._Current->info.gs.output_primitive;
+   } else if (ctx->TessEvalProgram._Current) {
+      const struct shader_info *info = &ctx->TessEvalProgram._Current->info;
+      if (info->tess.point_mode)
+         prim = MESA_PRIM_POINTS;
+      else if (info->tess._primitive_mode == TESS_PRIMITIVE_ISOLINES)
+         prim = MESA_PRIM_LINES;
+      else
+         prim = MESA_PRIM_TRIANGLES;
+   } else {
+      prim = st->state.stipple_input_prim;
+   }
+
+   if (u_reduced_prim(prim) != MESA_PRIM_TRIANGLES)
+      return false;
+
+   /* A polygon drawn as points or lines via glPolygonMode isn't stippled.
+    * Supporting differing front/back modes would require different shader
+    * lowering, and we don't have an example of a workload needing it.
+    */
+   return ctx->Polygon.FrontMode == GL_FILL;
+}
+
+
+/**
+ * Early atom (runs before the fragment shader atom): turn the input primitive
+ * into the reduced primitive the fragment shader sees, so st_update_fp() can
+ * pick the right emulated-polygon-stipple variant.  A no-op unless emulating.
+ */
+void
+st_update_stipple_emulate(struct st_context *st)
+{
+   if (st->emulate_polygon_stipple)
+      st->fp_stipple_polygon = st->ctx->Polygon.StippleFlag && st_rasterizes_polygons(st);
+}
 
 
 static unsigned
@@ -73,6 +126,21 @@ get_texture_index(struct gl_context *ctx, const unsigned unit)
    return index;
 }
 
+static bool
+can_drop_clip_dist(struct st_context *st, const struct gl_program *prog)
+{
+   const struct gl_program *fp = st->ctx->FragmentProgram._Current;
+
+   return !st->screen->caps.clip_planes &&
+          !st->ctx->Transform.ClipPlanesEnabled &&
+          (prog->info.outputs_written & VARYING_BIT_CLIP_DIST0) &&
+          !prog->info.cull_distance_array_size &&
+          !(fp && (fp->info.inputs_read &
+                   (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1))) &&
+          !(prog->sh.LinkedTransformFeedback &&
+            prog->sh.LinkedTransformFeedback->NumOutputs);
+}
+
 static void
 update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_clamp)
 {
@@ -82,7 +150,7 @@ update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_cla
    if (!st->ctx->Texture.NumSamplersWithClamp)
       return;
 
-   gl_clamp[0] = gl_clamp[1] = gl_clamp[2] = 0;
+   gl_clamp[0] = gl_clamp[1] = gl_clamp[2] = gl_clamp[3] = 0;
    GLbitfield samplers_used = prog->SamplersUsed;
    unsigned unit;
    /* same as st_atom_sampler.c */
@@ -104,8 +172,24 @@ update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_cla
             gl_clamp[1] |= BITFIELD64_BIT(unit);
          if (is_wrap_gl_clamp(msamp->Attrib.WrapR))
             gl_clamp[2] |= BITFIELD64_BIT(unit);
+         if ((msamp->Attrib.MinFilter == GL_NEAREST || msamp->Attrib.MinFilter == GL_LINEAR) &&
+             msamp->Attrib.MinFilter == msamp->Attrib.MagFilter && msamp->Attrib.MaxAnisotropy <= 1.0f)
+            gl_clamp[3] |= BITFIELD64_BIT(unit);
       }
    }
+}
+
+bool
+st_fp_lower_flatshade(const struct st_context *st)
+{
+   return !st->screen->caps.flatshade && st->ctx->Light.ShadeModel == GL_FLAT;
+}
+
+bool
+st_fp_lower_two_sided_color(const struct st_context *st)
+{
+   return !st->screen->caps.two_sided_color &&
+          _mesa_vertex_program_two_side_enabled(st->ctx);
 }
 
 /**
@@ -123,6 +207,12 @@ st_update_fp( struct st_context *st )
 
    void *shader;
 
+   st->fp_stipple_sampler = -1;
+
+   /* st_invalidate_state compares against these */
+   st->fp_lower_flatshade = st_fp_lower_flatshade(st);
+   st->fp_lower_two_sided_color = st_fp_lower_two_sided_color(st);
+
    if (st->shader_has_one_variant[MESA_SHADER_FRAGMENT] &&
        !fp->ati_fs && /* ATI_fragment_shader always has multiple variants */
        !fp->ExternalSamplersUsed && /* external samplers need variants */
@@ -136,8 +226,7 @@ st_update_fp( struct st_context *st )
 
       key.st = st->screen->caps.shareable_shaders ? NULL : st;
 
-      key.lower_flatshade = !st->screen->caps.flatshade &&
-                            st->ctx->Light.ShadeModel == GL_FLAT;
+      key.lower_flatshade = st->fp_lower_flatshade;
 
       /* _NEW_COLOR */
       key.lower_alpha_func = COMPARE_FUNC_ALWAYS;
@@ -145,8 +234,7 @@ st_update_fp( struct st_context *st )
          key.lower_alpha_func = st->ctx->Color.AlphaFunc;
 
       /* _NEW_LIGHT_STATE | _NEW_PROGRAM */
-      key.lower_two_sided_color = !st->screen->caps.two_sided_color &&
-         _mesa_vertex_program_two_side_enabled(st->ctx);
+      key.lower_two_sided_color = st->fp_lower_two_sided_color;
 
       /* gl_driver_flags::NewFragClamp */
       key.clamp_color = st->clamp_frag_color_in_shader &&
@@ -189,9 +277,25 @@ st_update_fp( struct st_context *st )
       key.external = st_get_external_sampler_key(st, fp);
       update_gl_clamp(st, st->ctx->FragmentProgram._Current, key.gl_clamp);
 
+
+      /* When the driver can't do polygon stipple itself, we lower it in the
+       * fragment shader, which needs a dedicated variant.  Only the primitives
+       * that rasterize as polygons are stippled; st->fp_stipple_polygon tracks
+       * that for the current draw (see st_draw.c).
+       */
+      key.lower_polygon_stipple = st->fp_stipple_polygon;
+
       simple_mtx_lock(&st->ctx->Shared->Mutex);
-      shader = st_get_fp_variant(st, fp, &key, false, NULL)->base.driver_shader;
+      struct st_fp_variant *fpv =
+         st_get_fp_variant(st, fp, &key, false, NULL);
       simple_mtx_unlock(&st->ctx->Shared->Mutex);
+
+      shader = fpv->base.driver_shader;
+
+      /* Remember where the emulated stipple texture/sampler must be bound (or not) so
+       * the texture and sampler atoms can append it for this draw.
+       */
+      st->fp_stipple_sampler = fpv->stipple_sampler;
    }
 
    _mesa_reference_program(st->ctx, &st->fp, fp);
@@ -211,6 +315,9 @@ st_update_vp( struct st_context *st )
     * ST_NEW_VERTEX_PROGRAM
     */
    struct gl_program *vp = st->ctx->VertexProgram._Current;
+
+   /* st_invalidate_state compares against this */
+   st->vert_color_clamped[MESA_SHADER_VERTEX] = st->ctx->Light._ClampVertexColor;
 
    if (!vp) {
       _mesa_reference_program(st->ctx, &st->vp, NULL);
@@ -252,6 +359,8 @@ st_update_vp( struct st_context *st )
          /* _NEW_TRANSFORM */
          if (!st->screen->caps.clip_planes && st_user_clip_planes_enabled(st->ctx))
             key.lower_ucp = st->ctx->Transform.ClipPlanesEnabled;
+         else
+            key.drop_clip_dist = can_drop_clip_dist(st, vp);
       }
 
       update_gl_clamp(st, st->ctx->VertexProgram._Current, key.gl_clamp);
@@ -272,6 +381,10 @@ static void *
 st_update_common_program(struct st_context *st, struct gl_program *prog,
                          unsigned pipe_shader, struct gl_program **dst)
 {
+   /* st_invalidate_state compares against this */
+   if (pipe_shader == MESA_SHADER_GEOMETRY || pipe_shader == MESA_SHADER_TESS_EVAL)
+      st->vert_color_clamped[pipe_shader] = st->ctx->Light._ClampVertexColor;
+
    if (!prog) {
       _mesa_reference_program(st->ctx, dst, NULL);
       return NULL;
@@ -303,6 +416,9 @@ st_update_common_program(struct st_context *st, struct gl_program *prog,
           (pipe_shader == MESA_SHADER_GEOMETRY ||
              !st->ctx->GeometryProgram._Current))
          key.lower_ucp = st->ctx->Transform.ClipPlanesEnabled;
+      else if (pipe_shader == MESA_SHADER_GEOMETRY ||
+               !st->ctx->GeometryProgram._Current)
+         key.drop_clip_dist = can_drop_clip_dist(st, prog);
 
       if (st->lower_point_size)
          key.export_point_size = !st->ctx->VertexProgram.PointSizeEnabled && !st->ctx->PointSizeIsSet;

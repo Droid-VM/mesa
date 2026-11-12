@@ -14,12 +14,22 @@ export LD_LIBRARY_PATH=$LIBDIR
 
 cd /usr/local/shader-db
 
-for driver in freedreno lima v3d vc4; do
+for driver in freedreno lima vc4; do
     section_start shader-db-${driver} "Running shader-db for $driver"
     env LD_PRELOAD="$LIBDIR/lib${driver}_noop_drm_shim.so" \
         ./run -j"${FDO_CI_CONCURRENT:-4}" ./shaders \
             > "$ARTIFACTSDIR/${driver}-shader-db.txt"
     section_end shader-db-${driver}
+done
+
+# Run shader-db over a number of supported versions for v3d
+for gpu in 7.1 4.2; do
+    section_start "shader-db-v3d-${gpu//.}" "Running shader-db for v3d - ${gpu}"
+    env LD_PRELOAD="$LIBDIR/libv3d_noop_drm_shim.so" \
+        V3D_GPU_ID="${gpu//.}" \
+        ./run -j"${FDO_CI_CONCURRENT:-4}" ./shaders \
+            > "$ARTIFACTSDIR/v3d-${gpu//.}-shader-db.txt"
+    section_end "shader-db-v3d-${gpu//.}"
 done
 
 # Run shader-db over a number of supported GPUs for etnaviv. The shim takes an
