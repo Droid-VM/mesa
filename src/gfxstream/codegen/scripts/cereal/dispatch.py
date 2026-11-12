@@ -306,7 +306,7 @@ void init_vulkan_dispatch_from_device(
         def emit_check_impl(cgen, dispatchVar, feature, featureToCheck, apiName):
             if feature == featureToCheck:
                 cgen.beginIf("!%s->%s" % (dispatchVar, apiName))
-                cgen.stmt("GFXSTREAM_ERROR(\"%s check failed: %s not found\")" % (featureToCheck, apiName))
+                cgen.stmt("fprintf(stderr, \"%s check failed: %s not found\\n\")" % (featureToCheck, apiName))
                 cgen.stmt("good = false")
                 cgen.endIf()
 

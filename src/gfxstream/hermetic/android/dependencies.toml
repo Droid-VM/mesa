@@ -38,9 +38,6 @@ sync = [
 android-aemu-gl-codec = [
     { target_name = "libOpenglCodecCommon" }
 ]
-ui = [
-    { target_name = "libui" }
-]
 
 [static_libraries]
 llvm = [

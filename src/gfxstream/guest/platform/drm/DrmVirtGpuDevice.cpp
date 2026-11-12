@@ -32,13 +32,11 @@
 #define VIRTGPU_PCI_VENDOR_ID 0x1af4
 #define VIRTGPU_PCI_DEVICE_ID 0x1050
 
-// Fence passing
-#define VIRTGPU_PARAM_CREATE_FENCE_PASSING 9
+#define VIRTGPU_PARAM_CREATE_FENCE_PASSING 9  /* Fence passing */
+#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10  /* Host OS handle can be created from guest memory. */
 
-// Host OS handle can be created from guest memory.
-#define VIRTGPU_PARAM_CREATE_GUEST_HANDLE 10
-
-#define PARAM(x) (struct VirtGpuParam){x, #x, 0}
+#define PARAM(x) \
+    (struct VirtGpuParam) { x, #x, 0 }
 
 static inline uint32_t align_up(uint32_t n, uint32_t a) { return ((n + a - 1) / a) * a; }
 
@@ -150,7 +148,8 @@ int32_t DrmVirtGpuDevice::init(int32_t descriptor) {
         PARAM(VIRTGPU_PARAM_RESOURCE_BLOB),        PARAM(VIRTGPU_PARAM_HOST_VISIBLE),
         PARAM(VIRTGPU_PARAM_CROSS_DEVICE),         PARAM(VIRTGPU_PARAM_CONTEXT_INIT),
         PARAM(VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs), PARAM(VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME),
-        PARAM(VIRTGPU_PARAM_CREATE_FENCE_PASSING), PARAM(VIRTGPU_PARAM_CREATE_GUEST_HANDLE),
+        PARAM(VIRTGPU_PARAM_CREATE_FENCE_PASSING),
+        PARAM(VIRTGPU_PARAM_CREATE_GUEST_HANDLE),
     };
 
     int ret = -EINVAL;
@@ -215,15 +214,15 @@ int32_t DrmVirtGpuDevice::init(int32_t descriptor) {
     switch (capset) {
         case kCapsetGfxStreamVulkan:
             get_caps.size = sizeof(struct vulkanCapset);
-            get_caps.addr = (uint64_t)(uintptr_t)&mCaps.vulkanCapset;
+            get_caps.addr = (unsigned long long)&mCaps.vulkanCapset;
             break;
         case kCapsetGfxStreamGles:
             get_caps.size = sizeof(struct glesCapset);
-            get_caps.addr = (uint64_t)(uintptr_t)&mCaps.glesCapset;
+            get_caps.addr = (unsigned long long)&mCaps.glesCapset;
             break;
         case kCapsetGfxStreamComposer:
             get_caps.size = sizeof(struct composerCapset);
-            get_caps.addr = (uint64_t)(uintptr_t)&mCaps.composerCapset;
+            get_caps.addr = (unsigned long long)&mCaps.composerCapset;
             break;
         default:
             get_caps.size = 0;
@@ -258,11 +257,11 @@ int32_t DrmVirtGpuDevice::init(int32_t descriptor) {
 
     if (mCaps.params[kParamExplicitDebugName] && processName) {
         ctx_set_params[init.num_params].param = VIRTGPU_CONTEXT_PARAM_DEBUG_NAME;
-        ctx_set_params[init.num_params].value = (uint64_t)(uintptr_t)processName;
+        ctx_set_params[init.num_params].value = reinterpret_cast<uint64_t>(processName);
         init.num_params++;
     }
 
-    init.ctx_set_params = (uint64_t)(uintptr_t)&ctx_set_params[0];
+    init.ctx_set_params = (unsigned long long)&ctx_set_params[0];
     ret = drmIoctl(mDeviceHandle, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &init);
     if (ret) {
         mesa_loge("DRM_IOCTL_VIRTGPU_CONTEXT_INIT failed with %s, continuing without context...",
@@ -279,9 +278,9 @@ struct VirtGpuCaps DrmVirtGpuDevice::getCaps(void) { return mCaps; }
 int64_t DrmVirtGpuDevice::getDeviceHandle(void) { return mDeviceHandle; }
 
 VirtGpuResourcePtr DrmVirtGpuDevice::createResource(uint32_t width, uint32_t height,
-                                                    uint32_t stride, uint32_t size,
-                                                    uint32_t virglFormat, uint32_t target,
-                                                    uint32_t bind) {
+                                                      uint32_t stride, uint32_t size,
+                                                      uint32_t virglFormat, uint32_t target,
+                                                      uint32_t bind) {
     drm_virtgpu_resource_create create = {
         .target = target,
         .format = virglFormat,
@@ -302,8 +301,8 @@ VirtGpuResourcePtr DrmVirtGpuDevice::createResource(uint32_t width, uint32_t hei
         return nullptr;
     }
 
-    return std::make_shared<DrmVirtGpuResource>(mDeviceHandle, create.bo_handle, create.res_handle,
-                                                static_cast<uint64_t>(create.size));
+    return std::make_shared<DrmVirtGpuResource>(
+        mDeviceHandle, create.bo_handle, create.res_handle, static_cast<uint64_t>(create.size));
 }
 
 VirtGpuResourcePtr DrmVirtGpuDevice::createBlob(const struct VirtGpuCreateBlob& blobCreate) {
@@ -323,8 +322,8 @@ VirtGpuResourcePtr DrmVirtGpuDevice::createBlob(const struct VirtGpuCreateBlob& 
         return nullptr;
     }
 
-    return std::make_shared<DrmVirtGpuResource>(mDeviceHandle, create.bo_handle, create.res_handle,
-                                                blobCreate.size);
+    return std::make_shared<DrmVirtGpuResource>(mDeviceHandle, create.bo_handle,
+                                                  create.res_handle, blobCreate.size);
 }
 
 VirtGpuResourcePtr DrmVirtGpuDevice::importBlob(const struct VirtGpuExternalHandle& handle) {
@@ -347,11 +346,11 @@ VirtGpuResourcePtr DrmVirtGpuDevice::importBlob(const struct VirtGpuExternalHand
     }
 
     return std::make_shared<DrmVirtGpuResource>(mDeviceHandle, blobHandle, info.res_handle,
-                                                static_cast<uint64_t>(info.size));
+                                                  static_cast<uint64_t>(info.size));
 }
 
 int DrmVirtGpuDevice::execBuffer(struct VirtGpuExecBuffer& execbuffer,
-                                 const VirtGpuResource* blob) {
+                                   const VirtGpuResource* blob) {
     int ret;
     struct drm_virtgpu_execbuffer exec = {0};
     uint32_t blobHandle;

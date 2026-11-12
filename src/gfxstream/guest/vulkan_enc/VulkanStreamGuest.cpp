@@ -11,6 +11,7 @@ namespace gfxstream {
 namespace vk {
 
 VulkanStreamGuest::VulkanStreamGuest(gfxstream::guest::IOStream* stream) : mStream(stream) {
+    unsetHandleMapping();
     mFeatureBits = ResourceTracker::get()->getStreamFeatures();
 }
 
@@ -109,6 +110,14 @@ void VulkanStreamGuest::writeLarge(const void* buffer, size_t size) {
 }
 
 void VulkanStreamGuest::clearPool() { mPool.freeAll(); }
+
+void VulkanStreamGuest::setHandleMapping(VulkanHandleMapping* mapping) {
+    mCurrentHandleMapping = mapping;
+}
+
+void VulkanStreamGuest::unsetHandleMapping() { mCurrentHandleMapping = &mDefaultHandleMapping; }
+
+VulkanHandleMapping* VulkanStreamGuest::handleMapping() const { return mCurrentHandleMapping; }
 
 void VulkanStreamGuest::flush() {
     MESA_TRACE_SCOPE("VulkanStreamGuest device write");

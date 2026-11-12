@@ -18,12 +18,8 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkGetImageMemoryRequirements",
     "vkGetImageMemoryRequirements2",
     "vkGetImageDrmFormatModifierPropertiesEXT",
-    "vkGetImageSubresourceLayout",
     "vkBindImageMemory",
     "vkBindImageMemory2",
-    "vkBindImageMemory2KHR",
-    "vkBindBufferMemory2",
-    "vkBindBufferMemory2KHR",
     "vkCreateBuffer",
     "vkDestroyBuffer",
     "vkGetBufferMemoryRequirements",
@@ -50,17 +46,7 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkCreateSamplerYcbcrConversion",
     "vkDestroySamplerYcbcrConversion",
     "vkUpdateDescriptorSetWithTemplate",
-    "vkUpdateDescriptorSetWithTemplateKHR",
-    "vkCmdPushDescriptorSet",
-    "vkCmdPushDescriptorSetKHR",
-    "vkCmdPushDescriptorSetWithTemplate",
-    "vkCmdPushDescriptorSetWithTemplateKHR",
-    "vkCmdPushDescriptorSet2",
-    "vkCmdPushDescriptorSet2KHR",
-    "vkCmdPushDescriptorSetWithTemplate2",
-    "vkCmdPushDescriptorSetWithTemplate2KHR",
     "vkGetPhysicalDeviceFormatProperties2",
-    "vkGetPhysicalDeviceFormatProperties2KHR",
     "vkGetPhysicalDeviceImageFormatProperties2",
     "vkBeginCommandBuffer",
     "vkEndCommandBuffer",
@@ -83,8 +69,6 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkCreateDescriptorSetLayout",
     "vkCmdExecuteCommands",
     "vkCmdBindDescriptorSets",
-    "vkCmdBindDescriptorSets2",
-    "vkCmdBindDescriptorSets2KHR",
     "vkDestroyDescriptorSetLayout",
     "vkAllocateCommandBuffers",
     "vkQueueSignalReleaseImageANDROID",
@@ -102,17 +86,13 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkSetBufferCollectionBufferConstraintsFUCHSIA",
     "vkGetBufferCollectionPropertiesFUCHSIA",
     "vkSetPrivateData",
-    "vkSetPrivateDataEXT",
+    "vkSetPrivateDataKHR",
     "vkGetPrivateData",
-    "vkGetPrivateDataEXT",
+    "vkGetPrivateDataKHR",
     "vkCreatePrivateDataSlot",
     "vkCreatePrivateDataSlotEXT",
     "vkDestroyPrivateDataSlot",
     "vkDestroyPrivateDataSlotEXT",
-    "vkCopyMemoryToImage",
-    "vkCopyMemoryToImageEXT",
-    "vkCopyImageToMemory",
-    "vkCopyImageToMemoryEXT",
 ]
 
 SUCCESS_VAL = {
@@ -133,7 +113,6 @@ NON_AUTOGEN_ENTRYPOINTS = [
     "vkGetDeviceProcAddr",
     "vkEnumeratePhysicalDevices",
     "vkEnumeratePhysicalDeviceGroups",
-    "vkEnumeratePhysicalDeviceGroupsKHR",
     "vkCreateDevice",
     "vkDestroyDevice",
     # Manual alloc/free + vk_*_init/free() call w/ special params
@@ -143,6 +122,7 @@ NON_AUTOGEN_ENTRYPOINTS = [
     "vkAllocateCommandBuffers",
     "vkResetCommandPool",
     "vkFreeCommandBuffers",
+    "vkResetCommandPool",
     # Transform feedback
     "vkCmdBeginTransformFeedbackEXT",
     # Special cases to handle struct translations in the pNext chain
@@ -186,21 +166,25 @@ NON_AUTOGEN_ENTRYPOINTS = [
 ]
 
 # Handles that need to be translated to/from their corresponding gfxstream object types
-HANDLES_TRANSLATE = set()
-
-# Consolidated handle types that need vk.base.device initialized after creation
-HANDLES_POST_CREATE_INIT_DEVICE = {
-    "VkBuffer",
+HANDLES_TRANSLATE = {
+    "VkInstance",
+    "VkPhysicalDevice",
+    "VkDevice",
+    "VkQueue",
+    "VkCommandPool",
+    "VkCommandBuffer",
     "VkFence",
     "VkSemaphore",
+    # TODO: Still need this translation to avoid descriptorSets crash
+    "VkBuffer",
 }
 
 # Types that have a corresponding method for transforming
 # an input list to its internal counterpart
 TYPES_TRANSFORM_LIST_METHOD = {
-    "VkFence": "FilterNoopFences",
-    "VkSemaphore": "FilterNoopSemaphores",
-    "VkSemaphoreSubmitInfo": "FilterNoopSemaphoreSubmitInfos",
+    "VkFence",
+    "VkSemaphore",
+    "VkSemaphoreSubmitInfo",
 }
 
 def is_cmdbuf_dispatch(api):
@@ -244,7 +228,7 @@ def typeNameToObjectType(typeName):
     return "gfxstream_vk_%s" % typeNameToBaseName(typeName)
 
 def transformListFuncName(typeName):
-    return TYPES_TRANSFORM_LIST_METHOD[typeName]
+    return "transform%sList" % (typeName)
 
 def isAllocatorParam(param):
     ALLOCATOR_TYPE_NAME = "VkAllocationCallbacks"
@@ -308,23 +292,21 @@ class VulkanFuncTable(VulkanWrapperGenerator):
         def handleTranslationRequired(typeName):
             return typeName in HANDLE_TYPES and typeName in HANDLES_TRANSLATE
 
-        def paramTranslationRequired(param):
-            if isArrayParam(param) and param.typeName in TYPES_TRANSFORM_LIST_METHOD:
-                return True
-            if isCompoundType(param.typeName):
-                struct = typeInfo.structs[param.typeName]
+        def translationRequired(typeName):
+            if isCompoundType(typeName):
+                struct = typeInfo.structs[typeName]
                 for member in struct.members:
-                    if paramTranslationRequired(member):
+                    if translationRequired(member.typeName):
                         return True
                 return False
             else:
-                return handleTranslationRequired(param.typeName)
+                return handleTranslationRequired(typeName)
 
         def genDestroyGfxstreamObjects():
             destroyParam = getDestroyParam(api)
             if not destroyParam:
                 return
-            if not handleTranslationRequired(destroyParam.typeName):
+            if not translationRequired(destroyParam.typeName):
                 return
             objectName = paramNameToObjectName(destroyParam.paramName)
             allocatorParam = "NULL"
@@ -340,7 +322,7 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             cgen.funcCall(
                 None,
                 "vk_object_free",
-                ["&%s->base" % paramNameToObjectName(deviceParam.paramName), allocatorParam, mesaObjectDestroy]
+                ["&%s->vk" % paramNameToObjectName(deviceParam.paramName), allocatorParam, mesaObjectDestroy]
             )
 
         def genMesaObjectAlloc(allocCallLhs):
@@ -358,7 +340,7 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             cgen.funcCall(
                 allocCallLhs,
                 "(%s *)vk_object_zalloc" % objectType,
-                ["&%s->base" % paramNameToObjectName(deviceParam.paramName), allocatorParam, ("sizeof(%s)" % objectType), typeNameToVkObjectType(createParam.typeName)]
+                ["&%s->vk" % paramNameToObjectName(deviceParam.paramName), allocatorParam, ("sizeof(%s)" % objectType), typeNameToVkObjectType(createParam.typeName)]
             )
 
         # Alloc/create gfxstream_vk_* object
@@ -421,7 +403,7 @@ class VulkanFuncTable(VulkanWrapperGenerator):
                 raise
             if isCompoundType(param.typeName):
                 for member in typeInfo.structs[param.typeName].members:
-                    if paramTranslationRequired(member):
+                    if translationRequired(member.typeName):
                         if handleTranslationRequired(member.typeName) and not isArrayParam(member):
                             # No declarations for non-array handleType
                             continue
@@ -432,7 +414,7 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             nextLoopVar = None
             cgen.stmt("%s = %s" % (outName, inName))
             for member in typeInfo.structs[param.typeName].members:
-                if not paramTranslationRequired(member):
+                if not translationRequired(member.typeName):
                     continue
                 cgen.line("/* %s::%s */" % (param.typeName, member.paramName))
                 nestedOutName = ("%s[%s]" % (internalNestedParamName(member), currLoopVar))
@@ -501,7 +483,7 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             outParams = copy.deepcopy(api.parameters)
             nextLoopVar = getNextLoopVar()
             for param in outParams:
-                if not paramTranslationRequired(param):
+                if not translationRequired(param.typeName):
                     continue
                 elif isArrayParam(param) or isCompoundType(param.typeName):
                     if param.possiblyOutput():
@@ -529,9 +511,9 @@ class VulkanFuncTable(VulkanWrapperGenerator):
 
         def genEncoderOrResourceTrackerCall(declareResources=True):
             if is_cmdbuf_dispatch(api):
-                cgen.stmt("auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(%s)" % api.parameters[0].paramName)
+                cgen.stmt("auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(%s->%s)" % (paramNameToObjectName(api.parameters[0].paramName), INTERNAL_OBJECT_NAME))
             elif is_queue_dispatch(api):
-                cgen.stmt("auto vkEnc = gfxstream::vk::ResourceTracker::getQueueEncoder(%s)" % api.parameters[0].paramName)
+                cgen.stmt("auto vkEnc = gfxstream::vk::ResourceTracker::getQueueEncoder(%s->%s)" % (paramNameToObjectName(api.parameters[0].paramName), INTERNAL_OBJECT_NAME))
             else:
                 cgen.stmt("auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder()")
             callLhs = None
@@ -554,7 +536,6 @@ class VulkanFuncTable(VulkanWrapperGenerator):
 
         def genReturnExpression():
             retTypeName = api.getRetTypeExpr()
-            retVar = api.getRetVarExpr()
             # Set the createParam output, if applicable
             createParam = getCreateParam(api)
             if createParam and handleTranslationRequired(createParam.typeName):
@@ -567,14 +548,6 @@ class VulkanFuncTable(VulkanWrapperGenerator):
                     "%s_to_handle" % typeNameToObjectType(createParam.typeName),
                     [paramNameToObjectName(createParam.paramName)]
                 )
-            elif createParam and createParam.typeName in HANDLES_POST_CREATE_INIT_DEVICE:
-                deviceParam = api.parameters[0]
-                if "VkDevice" == deviceParam.typeName and retVar:
-                    cgen.beginIf("%s == %s" % (SUCCESS_VAL[retTypeName][0], retVar))
-                    gfxstreamDevice = genVkFromHandle(deviceParam, deviceParam.paramName)
-                    gfxstreamObject = genVkFromHandle(createParam, "*%s" % createParam.paramName)
-                    cgen.stmt("%s->base.base.device = &%s->base" % (gfxstreamObject, gfxstreamDevice))
-                    cgen.endIf()
 
             if retTypeName != "void":
                 cgen.stmt("return %s" % api.getRetVarExpr())
@@ -602,10 +575,10 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             # Make encoder/resource-tracker call
             if retVar and createdObject:
                 cgen.beginIf("%s == %s" % (SUCCESS_VAL[retTypeName][0], retVar))
-                genEncoderOrResourceTrackerCall()
-                cgen.endIf()
             else:
-                genEncoderOrResourceTrackerCall()
+                cgen.beginBlock()
+            genEncoderOrResourceTrackerCall()
+            cgen.endBlock()
             # Destroy gfxstream objects
             genDestroyGfxstreamObjects()
             # Set output / return variables

@@ -72,8 +72,7 @@ NON_DISPATCHABLE_HANDLE_TYPES = [
     "VkPrivateDataSlot",
 ]
 
-# The handles that do not use vkCreateX and vkDestroyX functions:
-HANDLES_CREATE_OR_DESTROYED_BY_NON_STANDARD_FUNCTIONS = [
+CUSTOM_HANDLE_CREATE_TYPES = [
     "VkPhysicalDevice",
     "VkQueue",
     "VkPipeline",
@@ -84,25 +83,50 @@ HANDLES_CREATE_OR_DESTROYED_BY_NON_STANDARD_FUNCTIONS = [
 ]
 
 HANDLE_TYPES = list(sorted(list(set(DISPATCHABLE_HANDLE_TYPES +
-                                    NON_DISPATCHABLE_HANDLE_TYPES + HANDLES_CREATE_OR_DESTROYED_BY_NON_STANDARD_FUNCTIONS))))
+                                    NON_DISPATCHABLE_HANDLE_TYPES + CUSTOM_HANDLE_CREATE_TYPES))))
 
-# Maps Vulkan handle types to the methods that create and destroy them:
-HANDLE_INFO = {
-    # Handle types with standard create/destroy methods:
-    ** { h: HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:]) for h in DISPATCHABLE_HANDLE_TYPES },
-    ** { h: HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:]) for h in NON_DISPATCHABLE_HANDLE_TYPES },
+HANDLE_INFO = {}
 
-    # Handle types with non-standard create/destroy methods:
-    "VkCommandBuffer": HandleInfo("VkCommandBuffer", "vkAllocateCommandBuffers", "vkFreeCommandBuffers"),
-    "VkDescriptorSet": HandleInfo("VkDescriptorSet", "vkAllocateDescriptorSets", "vkFreeDescriptorSets"),
-    "VkDeviceMemory": HandleInfo("VkDeviceMemory", "vkAllocateMemory", ["vkFreeMemory", "vkFreeMemorySyncGOOGLE"]),
-    "VkPhysicalDevice": HandleInfo("VkPhysicalDevice", "vkEnumeratePhysicalDevices", None),
-    "VkPipeline": HandleInfo("VkPipeline", ["vkCreateGraphicsPipelines", "vkCreateComputePipelines"], "vkDestroyPipeline"),
-    "VkPrivateDataSlot": HandleInfo("VkPrivateDataSlot", ["vkCreatePrivateDataSlot", "vkCreatePrivateDataSlotEXT"], ["vkDestroyPrivateDataSlot", "vkDestroyPrivateDataSlotEXT"]),
-    "VkPrivateDataSlotEXT": HandleInfo("VkPrivateDataSlotEXT", ["vkCreatePrivateDataSlot", "vkCreatePrivateDataSlotEXT"], ["vkDestroyPrivateDataSlot", "vkDestroyPrivateDataSlotEXT"]),
-    "VkQueue": HandleInfo("VkQueue", ["vkGetDeviceQueue", "vkGetDeviceQueue2"], None),
-    "VkRenderPass": HandleInfo("VkRenderPass", ["vkCreateRenderPass", "vkCreateRenderPass2", "vkCreateRenderPass2KHR"], "vkDestroyRenderPass"),
-}
+for h in HANDLE_TYPES:
+    if h in CUSTOM_HANDLE_CREATE_TYPES:
+        if h == "VkPhysicalDevice":
+            HANDLE_INFO[h] = \
+                HandleInfo(
+                    "VkPhysicalDevice",
+                    "vkEnumeratePhysicalDevices", None)
+        if h == "VkQueue":
+            HANDLE_INFO[h] = \
+                HandleInfo(
+                    "VkQueue",
+                    ["vkGetDeviceQueue", "vkGetDeviceQueue2"],
+                    None)
+        if h == "VkPipeline":
+            HANDLE_INFO[h] = \
+                HandleInfo(
+                    "VkPipeline",
+                    ["vkCreateGraphicsPipelines", "vkCreateComputePipelines"],
+                    "vkDestroyPipeline")
+        if h == "VkDeviceMemory":
+            HANDLE_INFO[h] = \
+                HandleInfo("VkDeviceMemory",
+                           "vkAllocateMemory", ["vkFreeMemory", "vkFreeMemorySyncGOOGLE"])
+        if h == "VkDescriptorSet":
+            HANDLE_INFO[h] = \
+                HandleInfo("VkDescriptorSet", "vkAllocateDescriptorSets",
+                           "vkFreeDescriptorSets")
+        if h == "VkCommandBuffer":
+            HANDLE_INFO[h] = \
+                HandleInfo("VkCommandBuffer", "vkAllocateCommandBuffers",
+                           "vkFreeCommandBuffers")
+        if h == "VkRenderPass":
+            HANDLE_INFO[h] = \
+                HandleInfo(
+                    "VkRenderPass",
+                    ["vkCreateRenderPass", "vkCreateRenderPass2", "vkCreateRenderPass2KHR"],
+                    "vkDestroyRenderPass")
+    else:
+        HANDLE_INFO[h] = \
+            HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:])
 
 EXCLUDED_APIS = [
     "vkEnumeratePhysicalDeviceGroups",
@@ -183,8 +207,6 @@ TRIVIAL_TRANSFORMED_TYPES = [
 NON_TRIVIAL_TRANSFORMED_TYPES = [
     "VkExternalMemoryProperties",
     "VkImageCreateInfo",
-    "VkMemoryToImageCopy",
-    "VkImageToMemoryCopy",
 ]
 
 TRANSFORMED_TYPES = TRIVIAL_TRANSFORMED_TYPES + NON_TRIVIAL_TRANSFORMED_TYPES
@@ -204,7 +226,7 @@ STRUCT_MEMBER_STREAM_FEATURE = {
 STRUCT_ENV_STR = {
     "VkGraphicsPipelineCreateInfo": {
         "hasTessellation": "(arrayany pStages 0 stageCount (lambda ((s VkPipelineShaderStageCreateInfo)) (or (eq (getfield s stage) VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) (eq (getfield s stage) VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT))))",
-        "hasRasterization" : "(or (if (eq 0 pRasterizationState) 1 (not (getfield pRasterizationState rasterizerDiscardEnable))) (if (eq 0 pDynamicState) 0 (arrayany (getfield pDynamicState pDynamicStates) 0 (getfield pDynamicState dynamicStateCount) (lambda ((s VkDynamicState)) (eq s VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE)))))"
+        "hasRasterization" : "(or (if (eq 0 pRasterizationState) 0 (not (getfield pRasterizationState rasterizerDiscardEnable))) (if (eq 0 pDynamicState) 0 (arrayany (getfield pDynamicState pDynamicStates) 0 (getfield pDynamicState dynamicStateCount) (lambda ((s VkDynamicState)) (eq s VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE)))))"
     },
 }
 
@@ -262,19 +284,6 @@ STRUCT_MEMBER_IGNORE_OPTIONAL = {
     "vkCmdBindVertexBuffers.local_pBuffers",
     "vkCmdClearColorImage.pColor",
     "vkCmdClearColorImage.local_pColor",
-    # Vulkan 1.4.367
-    "VkDeviceQueueCreateInfo.pQueuePriorities",
-}
-
-# vk.xml removed optional from some of the existing fields. For backward
-# compatibility we need to keep treating those as optional, so that the
-# null-check placeholder (the 8-byte pointer value written before the pointed-to
-# data) stays in the encoded stream.
-STRUCT_MEMBER_KEEP_OPTIONAL = {
-    # Vulkan 1.4.366
-    "VkTimelineSemaphoreSubmitInfo.pWaitSemaphoreValues",
-    "VkTimelineSemaphoreSubmitInfo.pSignalSemaphoreValues",
-    "VkBindDescriptorSetsInfo.pDynamicOffsets",
 }
 
 # Holds information about a Vulkan type instance (i.e., not a type definition).
@@ -392,10 +401,7 @@ class VulkanType(object):
     # Good for inferring which things need to be marshaled in
     # versus marshaled out for Vulkan API calls
     def possiblyOutput(self,):
-        return self.pointerIndirectionLevels > 0 and (
-            (not self.isConst)
-            or (self.typeName in ["VkCopyImageToMemoryInfo", "VkCopyImageToMemoryInfoEXT"])
-        )
+        return self.pointerIndirectionLevels > 0 and (not self.isConst)
 
     def isVoidWithNoSize(self,):
         return self.typeName == "void" and self.pointerIndirectionLevels == 0
@@ -529,31 +535,20 @@ class VulkanType(object):
 
         return None
     def isOptionalPointer(self) -> bool:
-        return (self.isOptional or self.isKeepOptional()) and \
-               (not self.isIgnoreOptional()) and \
+        return self.isOptional and \
+               (not self.isForceOptional()) and\
                self.pointerIndirectionLevels > 0 and \
                (not self.isNextPointer())
 
-    def isIgnoreOptional(self) -> bool:
+    def isForceOptional(self) -> bool:
         """
-        Returns true if we should not generate a placeholder for null.
+        Returns true if we should generate a placeholder for null.
 
         Vulkan updates change certain pointers from non-optional to
         optional. We want to keep our encoder/decoder backward compatible.
-        Thus we should not generate a placeholder for such APIs.
+        Thus we should generate a placeholder for such APIs.
         """
         return self.getFullName() in STRUCT_MEMBER_IGNORE_OPTIONAL
-
-    def isKeepOptional(self) -> bool:
-        """
-        Returns true if we should generate a placeholder for null even though
-        the spec no longer marks the pointer as optional.
-
-        Vulkan updates change certain pointers from optional to
-        non-optional. We want to keep our encoder/decoder backward compatible.
-        Thus we should keep generating a placeholder for such APIs.
-        """
-        return self.getFullName() in STRUCT_MEMBER_KEEP_OPTIONAL
 
     def getFullName(self) -> str:
         if self.parent is None:

@@ -267,14 +267,6 @@ class COutputGenerator(OutputGenerator):
             # for the alias.
             body = 'typedef ' + alias + ' ' + groupName + ';\n'
             self.appendSection(section, body)
-        else:
-            body = 'typedef enum ' + groupName + ' {\n'
-            for elem in groupElem.findall('enum'):
-                if self.isEnumRequired(elem):
-                    (_, strVal) = self.enumToValue(elem, True)
-                    body += '    ' + elem.get('name') + ' = ' + strVal + ',\n'
-            body += '} ' + groupName + ';\n'
-            self.appendSection(section, body)
 
     def genEnum(self, enuminfo, name, alias):
         """Generate the C declaration for a constant (a single <enum> value).

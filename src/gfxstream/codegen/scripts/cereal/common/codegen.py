@@ -990,7 +990,7 @@ class VulkanWrapperGenerator(object):
         },
     }
 
-    def emitForEachStructExtension(self, cgen, retType, triggerVar, forEachFunc, autoBreak=True, defaultEmit=None, nullEmit=None, rootTypeVar=None, structFilter=None):
+    def emitForEachStructExtension(self, cgen, retType, triggerVar, forEachFunc, autoBreak=True, defaultEmit=None, nullEmit=None, rootTypeVar=None):
         def readStructType(structTypeName, structVarName, cgen):
             cgen.stmt("uint32_t %s = (uint32_t)%s(%s)" % \
                 (structTypeName, "goldfish_vk_struct_type", structVarName))
@@ -1020,9 +1020,6 @@ class VulkanWrapperGenerator(object):
         currFeature = None
 
         for ext in self.extensionStructTypes.values():
-            if structFilter is not None and not structFilter(ext):
-                continue
-
             if not currFeature:
                 cgen.leftline("#ifdef %s" % ext.feature)
                 currFeature = ext.feature

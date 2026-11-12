@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 from copy import copy
-import re
 
 from .common.codegen import CodeGen
 from .common.vulkantypes import \
@@ -52,10 +51,7 @@ class VulkanCountingCodegen(VulkanTypeIterator):
             self.cgen.makeCTypeDecl(vulkanType, useParamName=False))
 
     def genCount(self, sizeExpr):
-        if self.countVar.startswith("&"):
-            self.cgen.stmt("%s += %s" % (self.countVar[1:], sizeExpr))
-        else:
-            self.cgen.stmt("*%s += %s" % (self.countVar, sizeExpr))
+        self.cgen.stmt("*%s += %s" % (self.countVar, sizeExpr))
 
     def genPrimitiveStreamCall(self, vulkanType):
         self.genCount(str(self.cgen.countPrimitive(
@@ -64,18 +60,44 @@ class VulkanCountingCodegen(VulkanTypeIterator):
 
     def genHandleMappingCall(self, vulkanType, access, lenAccess):
 
-        if lenAccess is None or lenAccess == "1":
+        if lenAccess is None:
             lenAccess = "1"
             handle64Bytes = "8"
         else:
             handle64Bytes = "%s * 8" % lenAccess
 
+        handle64Var = self.cgen.var()
         if lenAccess != "1":
             self.cgen.beginIf(lenAccess)
+            # self.cgen.stmt("uint64_t* %s" % handle64Var)
+            # self.cgen.stmt(
+                # "%s->alloc((void**)&%s, %s * 8)" % \
+                # (self.streamVarName, handle64Var, lenAccess))
+            handle64VarAccess = handle64Var
+            handle64VarType = \
+                makeVulkanTypeSimple(False, "uint64_t", 1, paramName=handle64Var)
+        else:
+            self.cgen.stmt("uint64_t %s" % handle64Var)
+            self.cgen.stmt("(void)%s" % handle64Var)
+            handle64VarAccess = "&%s" % handle64Var
+            handle64VarType = \
+                makeVulkanTypeSimple(False, "uint64_t", 0, paramName=handle64Var)
 
         if self.handleMapOverwrites:
-            self.genCount("8" if lenAccess == "1" else "8 * %s" % lenAccess)
+            # self.cgen.stmt(
+                # "static_assert(8 == sizeof(%s), \"handle map overwrite requres %s to be 8 bytes long\")" % \
+                        # (vulkanType.typeName, vulkanType.typeName))
+            # self.cgen.stmt(
+                # "%s->handleMapping()->mapHandles_%s((%s*)%s, %s)" %
+                # (self.streamVarName, vulkanType.typeName, vulkanType.typeName,
+                # access, lenAccess))
+            self.genCount("8 * %s" % lenAccess)
         else:
+            # self.cgen.stmt(
+                # "%s->handleMapping()->mapHandles_%s_u64(%s, %s, %s)" %
+                # (self.streamVarName, vulkanType.typeName,
+                # access,
+                # handle64VarAccess, lenAccess))
             self.genCount(handle64Bytes)
 
         if lenAccess != "1":
@@ -103,6 +125,7 @@ class VulkanCountingCodegen(VulkanTypeIterator):
 
         needConsistencyCheck = False
 
+        self.cgen.line("// WARNING PTR CHECK")
         checkAccess = self.exprAccessor(vulkanType)
         addrExpr = "&" + checkAccess
         sizeExpr = self.cgen.sizeofExpr(vulkanType)
@@ -124,7 +147,7 @@ class VulkanCountingCodegen(VulkanTypeIterator):
         if needConsistencyCheck and featureExpr is None:
             self.cgen.beginIf("!(%s)" % checkName)
             self.cgen.stmt(
-                "GFXSTREAM_ERROR(\"fatal: %s inconsistent between guest and host\")" % (access))
+                "fprintf(stderr, \"fatal: %s inconsistent between guest and host\\n\")" % (access))
             self.cgen.endIf()
 
 
@@ -457,36 +480,6 @@ class VulkanCountingCodegen(VulkanTypeIterator):
 
         self.cgen.endIf()
 
-def coalesce_counts(code):
-    lines = code.split("\n")
-    out = []
-    i = 0
-    pattern = re.compile(r'^(\s*)(\*?count)\s*\+=\s*(.+);$')
-    while i < len(lines):
-        m = pattern.match(lines[i])
-        if not m:
-            out.append(lines[i])
-            i += 1
-            continue
-        indent, lhs, rhs = m.group(1), m.group(2), m.group(3)
-        if rhs == "8" or re.match(r'^sizeof\([^)]+\)$', rhs):
-            run_len = 1
-            while i + run_len < len(lines):
-                m2 = pattern.match(lines[i + run_len])
-                if m2 and m2.group(1) == indent and m2.group(2) == lhs and m2.group(3) == rhs:
-                    run_len += 1
-                else:
-                    break
-            if run_len > 1:
-                out.append("%s%s += %d * %s;" % (indent, lhs, run_len, rhs))
-            else:
-                out.append(lines[i])
-            i += run_len
-        else:
-            out.append(lines[i])
-            i += 1
-    return "\n".join(out)
-
 class VulkanCounting(VulkanWrapperGenerator):
 
     def __init__(self, module, typeInfo):
@@ -577,7 +570,10 @@ class VulkanCounting(VulkanWrapperGenerator):
             def structCountingDef(cgen):
                 self.countingCodegen.cgen = cgen
                 self.countingCodegen.currentStructInfo = structInfo
-                prefixCode = cgen.swapCode()
+                cgen.stmt("(void)%s" % self.featureBitsVar)
+                cgen.stmt("(void)%s" % self.rootTypeVar)
+                cgen.stmt("(void)%s" % self.countVars[0])
+                cgen.stmt("(void)%s" % self.countVars[1])
 
                 if category == "struct":
                     # marshal 'let' parameters first
@@ -589,18 +585,14 @@ class VulkanCounting(VulkanWrapperGenerator):
                 if category == "union":
                     iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
 
-                bodyCode = coalesce_counts(cgen.swapCode())
-                cgen.code = prefixCode
-                for varName in [self.featureBitsVar, self.rootTypeVar, self.countVars[0], self.countVars[1]]:
-                    if not re.search(r'(?<![.>])\b' + re.escape(varName) + r'\b', bodyCode):
-                        cgen.stmt("(void)%s" % varName)
-                cgen.code += bodyCode
-
             def structCountingDefNoFilter(cgen):
                 self.countingCodegen.cgen = cgen
                 self.countingCodegen.currentStructInfo = structInfo
                 self.countingCodegen.doFiltering = False
-                prefixCode = cgen.swapCode()
+                cgen.stmt("(void)%s" % self.featureBitsVar)
+                cgen.stmt("(void)%s" % self.rootTypeVar)
+                cgen.stmt("(void)%s" % self.countVars[0])
+                cgen.stmt("(void)%s" % self.countVars[1])
 
                 if category == "struct":
                     # marshal 'let' parameters first
@@ -613,13 +605,6 @@ class VulkanCounting(VulkanWrapperGenerator):
                     iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
 
                 self.countingCodegen.doFiltering = True
-
-                bodyCode = coalesce_counts(cgen.swapCode())
-                cgen.code = prefixCode
-                for varName in [self.featureBitsVar, self.rootTypeVar, self.countVars[0], self.countVars[1]]:
-                    if not re.search(r'(?<![.>])\b' + re.escape(varName) + r'\b', bodyCode):
-                        cgen.stmt("(void)%s" % varName)
-                cgen.code += bodyCode
 
             self.module.appendHeader(
                 self.codegen.makeFuncDecl(countingPrototype))

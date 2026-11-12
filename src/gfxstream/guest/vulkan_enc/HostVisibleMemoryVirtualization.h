@@ -6,12 +6,10 @@
 
 #include <vulkan/vulkan.h>
 
-#include <unordered_map>
-
 #include "VirtGpu.h"
 #include "goldfish_address_space.h"
+#include "util/u_mm.h"
 #include "util/detect_os.h"
-#include "util/vma.h"
 
 constexpr uint64_t kMegaByte = 1048576;
 
@@ -55,8 +53,7 @@ class CoherentMemory {
     VkDeviceMemory mMemory;
 
     uint8_t* mBaseAddr = nullptr;
-    struct util_vma_heap mHeap;
-    std::unordered_map<uint64_t, uint64_t> mAllocations;
+    struct mem_block* mHeap = nullptr;
 };
 
 using CoherentMemoryPtr = std::shared_ptr<CoherentMemory>;

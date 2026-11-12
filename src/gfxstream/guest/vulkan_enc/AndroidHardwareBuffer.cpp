@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "AndroidHardwareBuffer.h"
-
 #include "util/detect_os.h"
 
+#if DETECT_OS_ANDROID || DETECT_OS_LINUX
 #include <drm_fourcc.h>
 #define DRM_FORMAT_YVU420_ANDROID fourcc_code('9', '9', '9', '7')
 #define DRM_FORMAT_D16_UNORM fourcc_code('9', '9', '9', '6')
@@ -14,15 +14,16 @@
 #define DRM_FORMAT_D32_FLOAT fourcc_code('9', '9', '9', '3')
 #define DRM_FORMAT_D32_FLOAT_S8_UINT fourcc_code('9', '9', '9', '2')
 #define DRM_FORMAT_S8_UINT fourcc_code('9', '9', '9', '1')
+#endif
 
 #if defined(ANDROID)
 
 #include <assert.h>
 
 #include "gfxstream/guest/GfxStreamGralloc.h"
-#include "util/log.h"
 #include "vk_format_info.h"
 #include "vk_util.h"
+#include "util/log.h"
 
 namespace gfxstream {
 namespace vk {
@@ -62,354 +63,265 @@ uint64_t getAndroidHardwareBufferUsageFromVkUsage(const VkImageCreateFlags vk_cr
     return ahw_usage;
 }
 
-namespace {
-
-struct ResolvedFormat {
-    VkFormat vk_format = VK_FORMAT_UNDEFINED;
-    uint64_t external_drm_format = DRM_FORMAT_INVALID;
-};
-
-ResolvedFormat resolveAhbFormat(int ahbFormat) {
-    ResolvedFormat resolved;
-    switch (ahbFormat) {
-        case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
-            resolved.vk_format = VK_FORMAT_B8G8R8A8_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_ARGB8888;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R8_UNORM:
-            resolved.vk_format = VK_FORMAT_R8_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_R8;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
-            resolved.vk_format = VK_FORMAT_R8G8B8A8_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_ABGR8888;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
-            resolved.vk_format = VK_FORMAT_R8G8B8A8_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_XBGR8888;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R8G8B8_UNORM:
-            resolved.vk_format = VK_FORMAT_R8G8B8_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_BGR888;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM:
-            resolved.vk_format = VK_FORMAT_R5G6B5_UNORM_PACK16;
-            resolved.external_drm_format = DRM_FORMAT_RGB565;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT:
-            resolved.vk_format = VK_FORMAT_R16G16B16A16_SFLOAT;
-            resolved.external_drm_format = DRM_FORMAT_ABGR16161616F;
-            break;
-        case AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM:
-            resolved.vk_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-            resolved.external_drm_format = DRM_FORMAT_ABGR2101010;
-            break;
-        case AHARDWAREBUFFER_FORMAT_D16_UNORM:
-            resolved.vk_format = VK_FORMAT_D16_UNORM;
-            resolved.external_drm_format = DRM_FORMAT_D16_UNORM;
-            break;
-        case AHARDWAREBUFFER_FORMAT_D24_UNORM:
-            resolved.vk_format = VK_FORMAT_X8_D24_UNORM_PACK32;
-            resolved.external_drm_format = DRM_FORMAT_D24_UNORM;
-            break;
-        case AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT:
-            resolved.vk_format = VK_FORMAT_D24_UNORM_S8_UINT;
-            resolved.external_drm_format = DRM_FORMAT_D24_UNORM_S8_UINT;
-            break;
-        case AHARDWAREBUFFER_FORMAT_D32_FLOAT:
-            resolved.vk_format = VK_FORMAT_D32_SFLOAT;
-            resolved.external_drm_format = DRM_FORMAT_D32_FLOAT;
-            break;
-        case AHARDWAREBUFFER_FORMAT_D32_FLOAT_S8_UINT:
-            resolved.vk_format = VK_FORMAT_D32_SFLOAT_S8_UINT;
-            resolved.external_drm_format = DRM_FORMAT_D32_FLOAT_S8_UINT;
-            break;
-        case AHARDWAREBUFFER_FORMAT_S8_UINT:
-            resolved.vk_format = VK_FORMAT_S8_UINT;
-            resolved.external_drm_format = DRM_FORMAT_S8_UINT;
-            break;
-#if __ANDROID_API__ >= 30
-        case AHARDWAREBUFFER_FORMAT_YCbCr_P010:
-#endif
-#if __ANDROID_API__ >= 35
-        case AHARDWAREBUFFER_FORMAT_YCbCr_P210:
-#endif
-            resolved.vk_format = VK_FORMAT_UNDEFINED;
-            resolved.external_drm_format = DRM_FORMAT_INVALID;
-            break;
-        default:
-            resolved.vk_format = VK_FORMAT_UNDEFINED;
-            resolved.external_drm_format = DRM_FORMAT_INVALID;
-            mesa_loge("Unhandled AHB format:%u", ahbFormat);
-            break;
-    }
-    return resolved;
-}
-
-VkComponentMapping resolveYcbcrComponentMapping(uint32_t drmFormat) {
-    VkComponentMapping components = {
-        .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-        .a = VK_COMPONENT_SWIZZLE_IDENTITY,
-    };
-
-    // The host renderer is not aware of the plane ordering for YUV formats used
-    // in the guest and simply knows that the format "layout" is one of:
-    //
-    //  * VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16
-    //  * VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
-    //  * VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM
-    //
-    // With this, the guest needs to adjust the component swizzle based on plane
-    // ordering to ensure that the channels are interpreted correctly.
-    //
-    // From the Vulkan spec's "Sampler Y'CBCR Conversion" section:
-    //
-    //  * Y comes from the G-channel (after swizzle)
-    //  * U (CB) comes from the B-channel (after swizzle)
-    //  * V (CR) comes from the R-channel (after swizzle)
-    //
-    // See
-    // https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-sampler-YCbCr-conversion
-    //
-    // To match the above, the guest needs to swizzle such that:
-    //
-    //  * Y ends up in the G-channel
-    //  * U (CB) ends up in the B-channel
-    //  * V (CR) ends up in the R-channel
-    switch (drmFormat) {
-        case DRM_FORMAT_NV12:
-            // NV12 is a Y-plane followed by a interleaved UV-plane and is
-            // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM on the host.
-            break;
-        case DRM_FORMAT_P010:
-            // P010 is a Y-plane followed by a interleaved UV-plane and is
-            // VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 on the host.
-            break;
-        case DRM_FORMAT_P210:
-            // P210 is a Y-plane followed by a interleaved UV-plane and is
-            // VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16 on the host.
-            break;
-        case DRM_FORMAT_YUV420:
-            // YUV420 is a Y-plane, then a U-plane, and then a V-plane and is
-            // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
-            break;
-        case DRM_FORMAT_NV21:
-            // NV21 is a Y-plane followed by a interleaved VU-plane and is
-            // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM on the host.
-        case DRM_FORMAT_YVU420:
-            // YVU420 is a Y-plane, then a V-plane, and then a U-plane and is
-            // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
-        case DRM_FORMAT_YVU420_ANDROID:
-            // DRM_FORMAT_YVU420_ANDROID is the same as DRM_FORMAT_YVU420 with
-            // Android's extra alignement requirements.
-            components.r = VK_COMPONENT_SWIZZLE_B;
-            components.b = VK_COMPONENT_SWIZZLE_R;
-            break;
-
-        default:
-            mesa_loge("Unhandled YUV drm format:%u", drmFormat);
-            break;
-    }
-    return components;
-}
-
-int32_t resolveAhbDataspace(int32_t ahbDataspace) {
-    // Some of the dataspace enums are not composites built from the bitwise-or of the
-    // model, transfer, and range. Replace those enums with their corresponding composite
-    // enums:
-    switch (ahbDataspace) {
-        case GFXSTREAM_AHB_DATASPACE_UNKNOWN: {
-            return GFXSTREAM_AHB_DATASPACE_V0_SRGB;
-        }
-        case GFXSTREAM_AHB_DATASPACE_BT601_525: {
-            return GFXSTREAM_AHB_DATASPACE_V0_BT601_525;
-        }
-        case GFXSTREAM_AHB_DATASPACE_BT601_625: {
-            return GFXSTREAM_AHB_DATASPACE_V0_BT601_625;
-        }
-        case GFXSTREAM_AHB_DATASPACE_BT709: {
-            return GFXSTREAM_AHB_DATASPACE_V0_BT709;
-        }
-        case GFXSTREAM_AHB_DATASPACE_JFIF: {
-            return GFXSTREAM_AHB_DATASPACE_V0_JFIF;
-        }
-        case GFXSTREAM_AHB_DATASPACE_SRGB: {
-            return GFXSTREAM_AHB_DATASPACE_V0_SRGB;
-        }
-        case GFXSTREAM_AHB_DATASPACE_SRGB_LINEAR: {
-            return GFXSTREAM_AHB_DATASPACE_V0_SRGB_LINEAR;
-        }
-        default: {
-            return ahbDataspace;
-        }
-    }
-}
-
-VkSamplerYcbcrModelConversion resolveYcbcrModel(int32_t ahbDataspace) {
-    const int32_t dataspace = resolveAhbDataspace(ahbDataspace);
-    const int32_t model = dataspace & GFXSTREAM_AHB_DATASPACE_STANDARD_MASK;
-    switch (model) {
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_525:
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_525_UNADJUSTED:
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_625:
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_625_UNADJUSTED: {
-            return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
-        }
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT709: {
-            return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
-        }
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT2020:
-        case GFXSTREAM_AHB_DATASPACE_STANDARD_BT2020_CONSTANT_LUMINANCE: {
-            return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020;
-        }
-        default: {
-            mesa_logw("Unhandled AHB dataspace model: %d. Assuming YCBCR_709", model);
-            return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
-        }
-    }
-}
-
-VkSamplerYcbcrRange resolveYcbcrRange(int32_t ahbDataspace) {
-    const int32_t dataspace = resolveAhbDataspace(ahbDataspace);
-    const int32_t range = dataspace & GFXSTREAM_AHB_DATASPACE_RANGE_MASK;
-    switch (range) {
-        case GFXSTREAM_AHB_DATASPACE_RANGE_FULL: {
-            return VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
-        }
-        case GFXSTREAM_AHB_DATASPACE_RANGE_LIMITED: {
-            return VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
-        }
-        default: {
-            mesa_logw("Unhandled AHB dataspace range: %d. Assuming full.", range);
-            return VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
-        }
-    }
-}
-
-void populateAndroidHardwareBufferFormatProperties(
-    gfxstream::Gralloc* grallocHelper, const AHardwareBuffer* buffer,
-    VkAndroidHardwareBufferFormatPropertiesANDROID* ahbProps,
-    VkAndroidHardwareBufferFormatProperties2ANDROID* ahbProps2) {
-    if (ahbProps == nullptr && ahbProps2 == nullptr) {
-        return;
-    }
-
-    const auto format = grallocHelper->getFormat(buffer);
-    const ResolvedFormat resolvedFormat = resolveAhbFormat(format);
-    if (ahbProps != nullptr) {
-        ahbProps->format = resolvedFormat.vk_format;
-        ahbProps->externalFormat = resolvedFormat.external_drm_format;
-    }
-    if (ahbProps2 != nullptr) {
-        ahbProps2->format = resolvedFormat.vk_format;
-        ahbProps2->externalFormat = resolvedFormat.external_drm_format;
-    }
-
-    // The formatFeatures member must include
-    // VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT and at least one of
-    // VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT or
-    // VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT, and should include
-    // VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT and
-    // VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT.
-
-    // org.skia.skqp.SkQPRunner#UnitTest_VulkanHardwareBuffer* requires the following:
-    // VK_FORMAT_FEATURE_TRANSFER_SRC_BIT
-    // VK_FORMAT_FEATURE_TRANSFER_DST_BIT
-    // VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-    if (ahbProps != nullptr) {
-        ahbProps->formatFeatures =
-            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT |
-            VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
-            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-    }
-    if (ahbProps2 != nullptr) {
-        ahbProps2->formatFeatures =
-            VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
-            VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT |
-            VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
-            VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-    }
-
-    // "Implementations may not always be able to determine the color model,
-    // numerical range, or chroma offsets of the image contents, so the values in
-    // VkAndroidHardwareBufferFormatPropertiesANDROID are only suggestions.
-    // Applications should treat these values as sensible defaults to use in the
-    // absence of more reliable information obtained through some other means."
-
-    if (ahbProps != nullptr) {
-        ahbProps->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps->samplerYcbcrConversionComponents.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-        ahbProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
-        ahbProps->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
-        ahbProps->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-        ahbProps->suggestedYChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-    }
-    if (ahbProps2 != nullptr) {
-        ahbProps2->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps2->samplerYcbcrConversionComponents.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps2->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        ahbProps2->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-        ahbProps2->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
-        ahbProps2->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
-        ahbProps2->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-        ahbProps2->suggestedYChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-    }
-
-    if (android_format_is_yuv(format)) {
-        uint32_t drmFormat = grallocHelper->getFormatDrmFourcc(buffer);
-        if (ahbProps != nullptr) {
-            ahbProps->externalFormat = static_cast<uint64_t>(drmFormat);
-        }
-        if (ahbProps2 != nullptr) {
-            ahbProps2->externalFormat = static_cast<uint64_t>(drmFormat);
-        }
-        if (drmFormat) {
-            VkComponentMapping components = resolveYcbcrComponentMapping(drmFormat);
-            if (ahbProps != nullptr) {
-                ahbProps->samplerYcbcrConversionComponents = components;
-            }
-            if (ahbProps2 != nullptr) {
-                ahbProps2->samplerYcbcrConversionComponents = components;
-            }
-        }
-
-        int32_t dataspace = grallocHelper->getDataspace(buffer);
-
-        VkSamplerYcbcrModelConversion suggestedYcbcrModel = resolveYcbcrModel(dataspace);
-        if (ahbProps != nullptr) {
-            ahbProps->suggestedYcbcrModel = suggestedYcbcrModel;
-        }
-        if (ahbProps2 != nullptr) {
-            ahbProps2->suggestedYcbcrModel = suggestedYcbcrModel;
-        }
-
-        VkSamplerYcbcrRange suggestedYcbcrRange = resolveYcbcrRange(dataspace);
-        if (ahbProps != nullptr) {
-            ahbProps->suggestedYcbcrRange = suggestedYcbcrRange;
-        }
-        if (ahbProps2 != nullptr) {
-            ahbProps2->suggestedYcbcrRange = suggestedYcbcrRange;
-        }
-    }
-}
-
-}  // namespace
-
 VkResult getAndroidHardwareBufferPropertiesANDROID(
     gfxstream::Gralloc* grallocHelper, const AHardwareBuffer* buffer,
     VkAndroidHardwareBufferPropertiesANDROID* pProperties) {
     VkAndroidHardwareBufferFormatPropertiesANDROID* ahbFormatProps =
         vk_find_struct(pProperties, ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID);
-    VkAndroidHardwareBufferFormatProperties2ANDROID* ahbFormatProps2 =
-        vk_find_struct(pProperties, ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID);
-    populateAndroidHardwareBufferFormatProperties(grallocHelper, buffer, ahbFormatProps,
-                                                  ahbFormatProps2);
+
+    const auto format = grallocHelper->getFormat(buffer);
+    if (ahbFormatProps) {
+        switch (format) {
+            case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_B8G8R8A8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_ARGB8888;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_R8;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R8G8B8A8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_ABGR8888;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R8G8B8A8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_XBGR8888;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R8G8B8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R8G8B8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_BGR888;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R5G6B5_UNORM_PACK16;
+                ahbFormatProps->externalFormat = DRM_FORMAT_RGB565;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT:
+                ahbFormatProps->format = VK_FORMAT_R16G16B16A16_SFLOAT;
+                ahbFormatProps->externalFormat = DRM_FORMAT_ABGR16161616F;
+                break;
+            case AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM:
+                ahbFormatProps->format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+                ahbFormatProps->externalFormat = DRM_FORMAT_ABGR2101010;
+                break;
+            case AHARDWAREBUFFER_FORMAT_D16_UNORM:
+                ahbFormatProps->format = VK_FORMAT_D16_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_D16_UNORM;
+                break;
+            case AHARDWAREBUFFER_FORMAT_D24_UNORM:
+                ahbFormatProps->format = VK_FORMAT_X8_D24_UNORM_PACK32;
+                ahbFormatProps->externalFormat = DRM_FORMAT_D24_UNORM;
+                break;
+            case AHARDWAREBUFFER_FORMAT_D24_UNORM_S8_UINT:
+                ahbFormatProps->format = VK_FORMAT_D24_UNORM_S8_UINT;
+                ahbFormatProps->externalFormat = DRM_FORMAT_D24_UNORM_S8_UINT;
+                break;
+            case AHARDWAREBUFFER_FORMAT_D32_FLOAT:
+                ahbFormatProps->format = VK_FORMAT_D32_SFLOAT;
+                ahbFormatProps->externalFormat = DRM_FORMAT_D32_FLOAT;
+                break;
+            case AHARDWAREBUFFER_FORMAT_D32_FLOAT_S8_UINT:
+                ahbFormatProps->format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+                ahbFormatProps->externalFormat = DRM_FORMAT_D32_FLOAT_S8_UINT;
+                break;
+            case AHARDWAREBUFFER_FORMAT_S8_UINT:
+                ahbFormatProps->format = VK_FORMAT_S8_UINT;
+                ahbFormatProps->externalFormat = DRM_FORMAT_S8_UINT;
+                break;
+#if __ANDROID_API__ >= 30
+            case AHARDWAREBUFFER_FORMAT_YCbCr_P010:
+#endif
+#if __ANDROID_API__ >= 35
+            case AHARDWAREBUFFER_FORMAT_YCbCr_P210:
+#endif
+                ahbFormatProps->format = VK_FORMAT_UNDEFINED;
+                ahbFormatProps->externalFormat = DRM_FORMAT_INVALID;
+                break;
+            default:
+                ahbFormatProps->format = VK_FORMAT_UNDEFINED;
+                ahbFormatProps->externalFormat = DRM_FORMAT_INVALID;
+                mesa_loge("Unhandled AHB format:%u", format);
+                break;
+
+        }
+
+        // The formatFeatures member must include
+        // VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT and at least one of
+        // VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT or
+        // VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT, and should include
+        // VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT and
+        // VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT.
+
+        // org.skia.skqp.SkQPRunner#UnitTest_VulkanHardwareBuffer* requires the following:
+        // VK_FORMAT_FEATURE_TRANSFER_SRC_BIT
+        // VK_FORMAT_FEATURE_TRANSFER_DST_BIT
+        // VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+        ahbFormatProps->formatFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT |
+            VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+
+        // "Implementations may not always be able to determine the color model,
+        // numerical range, or chroma offsets of the image contents, so the values in
+        // VkAndroidHardwareBufferFormatPropertiesANDROID are only suggestions.
+        // Applications should treat these values as sensible defaults to use in the
+        // absence of more reliable information obtained through some other means."
+
+        ahbFormatProps->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ahbFormatProps->samplerYcbcrConversionComponents.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ahbFormatProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ahbFormatProps->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+        ahbFormatProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
+        ahbFormatProps->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+        ahbFormatProps->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+        ahbFormatProps->suggestedYChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+
+#if DETECT_OS_ANDROID || DETECT_OS_LINUX
+        if (android_format_is_yuv(format)) {
+            uint32_t drmFormat = grallocHelper->getFormatDrmFourcc(buffer);
+            ahbFormatProps->externalFormat = static_cast<uint64_t>(drmFormat);
+            if (drmFormat) {
+                // The host renderer is not aware of the plane ordering for YUV formats used
+                // in the guest and simply knows that the format "layout" is one of:
+                //
+                //  * VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16
+                //  * VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
+                //  * VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM
+                //
+                // With this, the guest needs to adjust the component swizzle based on plane
+                // ordering to ensure that the channels are interpreted correctly.
+                //
+                // From the Vulkan spec's "Sampler Y'CBCR Conversion" section:
+                //
+                //  * Y comes from the G-channel (after swizzle)
+                //  * U (CB) comes from the B-channel (after swizzle)
+                //  * V (CR) comes from the R-channel (after swizzle)
+                //
+                // See
+                // https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-sampler-YCbCr-conversion
+                //
+                // To match the above, the guest needs to swizzle such that:
+                //
+                //  * Y ends up in the G-channel
+                //  * U (CB) ends up in the B-channel
+                //  * V (CB) ends up in the R-channel
+                switch (drmFormat) {
+                    case DRM_FORMAT_NV12:
+                        // NV12 is a Y-plane followed by a interleaved UV-plane and is
+                        // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM on the host.
+                        break;
+                    case DRM_FORMAT_P010:
+                        // P010 is a Y-plane followed by a interleaved UV-plane and is
+                        // VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 on the host.
+                        break;
+                    case DRM_FORMAT_P210:
+                        // P210 is a Y-plane followed by a interleaved UV-plane and is
+                        // VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16 on the host.
+                        break;
+                    case DRM_FORMAT_YUV420:
+                        // YUV420 is a Y-plane, then a U-plane, and then a V-plane and is
+                        // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
+                        break;
+                    case DRM_FORMAT_NV21:
+                        // NV21 is a Y-plane followed by a interleaved VU-plane and is
+                        // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM on the host.
+                    case DRM_FORMAT_YVU420:
+                        // YVU420 is a Y-plane, then a V-plane, and then a U-plane and is
+                        // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
+                    case DRM_FORMAT_YVU420_ANDROID:
+                        // DRM_FORMAT_YVU420_ANDROID is the same as DRM_FORMAT_YVU420 with
+                        // Android's extra alignement requirements.
+                        ahbFormatProps->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_B;
+                        ahbFormatProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_R;
+                        break;
+
+                    default:
+                        mesa_loge("Unhandled YUV drm format:%u", drmFormat);
+                        break;
+                }
+            }
+
+            int32_t dataspace = grallocHelper->getDataspace(buffer);
+
+            // Some of the dataspace enums are not composites built from the bitwise-or of the model,
+            // transfer, and range. Replace those enums with their corresponding composite enums:
+            switch (dataspace) {
+                case GFXSTREAM_AHB_DATASPACE_UNKNOWN: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_JFIF;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_BT601_525: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_BT601_525;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_BT601_625: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_BT601_625;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_BT709: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_BT709;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_JFIF: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_JFIF;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_SRGB: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_SRGB;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_SRGB_LINEAR: {
+                    dataspace = GFXSTREAM_AHB_DATASPACE_V0_SRGB_LINEAR;
+                    break;
+                }
+            }
+
+            const int32_t model = dataspace & GFXSTREAM_AHB_DATASPACE_STANDARD_MASK;
+            switch (model) {
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_525:
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_525_UNADJUSTED:
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_625:
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT601_625_UNADJUSTED: {
+                    ahbFormatProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT709: {
+                    ahbFormatProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT2020:
+                case GFXSTREAM_AHB_DATASPACE_STANDARD_BT2020_CONSTANT_LUMINANCE: {
+                    ahbFormatProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020;
+                    break;
+                }
+                default: {
+                    mesa_logw("Unhandled AHB dataspace model: %d. Assuming YCBCR_601", model);
+                    ahbFormatProps->suggestedYcbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+                    break;
+                }
+            }
+
+            const int32_t range = dataspace & GFXSTREAM_AHB_DATASPACE_RANGE_MASK;
+            switch (range) {
+                case GFXSTREAM_AHB_DATASPACE_RANGE_FULL: {
+                    ahbFormatProps->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
+                    break;
+                }
+                case GFXSTREAM_AHB_DATASPACE_RANGE_LIMITED: {
+                    ahbFormatProps->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+                    break;
+                }
+                default: {
+                    mesa_logw("Unhandled AHB dataspace range: %d. Assuming full.", range);
+                    ahbFormatProps->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
+                    break;
+                }
+            }
+        }
+#endif
+
+    }
 
     uint32_t colorBufferHandle = grallocHelper->getHostHandle(buffer);
     if (!colorBufferHandle) {

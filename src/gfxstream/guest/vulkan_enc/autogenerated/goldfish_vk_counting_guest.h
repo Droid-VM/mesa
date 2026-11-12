@@ -1289,33 +1289,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceSparseImageFormatInfo2,
                       count_VkPhysicalDeviceSparseImageFormatInfo2KHR)
 
 #endif
-#ifdef VK_KHR_device_group
-DEFINE_ALIAS_FUNCTION(count_VkMemoryAllocateFlagsInfo, count_VkMemoryAllocateFlagsInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupRenderPassBeginInfo,
-                      count_VkDeviceGroupRenderPassBeginInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupCommandBufferBeginInfo,
-                      count_VkDeviceGroupCommandBufferBeginInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupSubmitInfo, count_VkDeviceGroupSubmitInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupBindSparseInfo, count_VkDeviceGroupBindSparseInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkBindBufferMemoryDeviceGroupInfo,
-                      count_VkBindBufferMemoryDeviceGroupInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkBindImageMemoryDeviceGroupInfo,
-                      count_VkBindImageMemoryDeviceGroupInfoKHR)
-
-#endif
-#ifdef VK_KHR_device_group_creation
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceGroupProperties,
-                      count_VkPhysicalDeviceGroupPropertiesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupDeviceCreateInfo, count_VkDeviceGroupDeviceCreateInfoKHR)
-
-#endif
 #ifdef VK_KHR_external_memory_capabilities
 DEFINE_ALIAS_FUNCTION(count_VkExternalMemoryProperties, count_VkExternalMemoryPropertiesKHR)
 
@@ -1362,22 +1335,12 @@ void count_VkSemaphoreGetFdInfoKHR(uint32_t featureBits, VkStructureType rootTyp
                                    const VkSemaphoreGetFdInfoKHR* toCount, size_t* count);
 
 #endif
-#ifdef VK_KHR_push_descriptor
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevicePushDescriptorProperties,
-                      count_VkPhysicalDevicePushDescriptorPropertiesKHR)
-
-#endif
 #ifdef VK_KHR_shader_float16_int8
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderFloat16Int8Features,
                       count_VkPhysicalDeviceShaderFloat16Int8FeaturesKHR)
 
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderFloat16Int8Features,
                       count_VkPhysicalDeviceFloat16Int8FeaturesKHR)
-
-#endif
-#ifdef VK_KHR_16bit_storage
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevice16BitStorageFeatures,
-                      count_VkPhysicalDevice16BitStorageFeaturesKHR)
 
 #endif
 #ifdef VK_KHR_incremental_present
@@ -1464,14 +1427,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPipelineTessellationDomainOriginStateCreateInfo,
                       count_VkPipelineTessellationDomainOriginStateCreateInfoKHR)
 
 #endif
-#ifdef VK_KHR_variable_pointers
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVariablePointersFeatures,
-                      count_VkPhysicalDeviceVariablePointerFeaturesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVariablePointersFeatures,
-                      count_VkPhysicalDeviceVariablePointersFeaturesKHR)
-
-#endif
 #ifdef VK_KHR_dedicated_allocation
 DEFINE_ALIAS_FUNCTION(count_VkMemoryDedicatedRequirements, count_VkMemoryDedicatedRequirementsKHR)
 
@@ -1533,16 +1488,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures,
                       count_VkPhysicalDeviceShaderSubgroupExtendedTypesFeaturesKHR)
 
 #endif
-#ifdef VK_KHR_8bit_storage
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevice8BitStorageFeatures,
-                      count_VkPhysicalDevice8BitStorageFeaturesKHR)
-
-#endif
-#ifdef VK_KHR_shader_atomic_int64
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderAtomicInt64Features,
-                      count_VkPhysicalDeviceShaderAtomicInt64FeaturesKHR)
-
-#endif
 #ifdef VK_KHR_global_priority
 DEFINE_ALIAS_FUNCTION(count_VkDeviceQueueGlobalPriorityCreateInfo,
                       count_VkDeviceQueueGlobalPriorityCreateInfoKHR)
@@ -1554,42 +1499,6 @@ DEFINE_ALIAS_FUNCTION(count_VkQueueFamilyGlobalPriorityProperties,
                       count_VkQueueFamilyGlobalPriorityPropertiesKHR)
 
 #endif
-#ifdef VK_KHR_driver_properties
-DEFINE_ALIAS_FUNCTION(count_VkConformanceVersion, count_VkConformanceVersionKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDriverProperties,
-                      count_VkPhysicalDeviceDriverPropertiesKHR)
-
-#endif
-#ifdef VK_KHR_shader_float_controls
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceFloatControlsProperties,
-                      count_VkPhysicalDeviceFloatControlsPropertiesKHR)
-
-#endif
-#ifdef VK_KHR_depth_stencil_resolve
-DEFINE_ALIAS_FUNCTION(count_VkSubpassDescriptionDepthStencilResolve,
-                      count_VkSubpassDescriptionDepthStencilResolveKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDepthStencilResolveProperties,
-                      count_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
-
-#endif
-#ifdef VK_KHR_timeline_semaphore
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTimelineSemaphoreFeatures,
-                      count_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTimelineSemaphoreProperties,
-                      count_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkSemaphoreTypeCreateInfo, count_VkSemaphoreTypeCreateInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkTimelineSemaphoreSubmitInfo, count_VkTimelineSemaphoreSubmitInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkSemaphoreWaitInfo, count_VkSemaphoreWaitInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkSemaphoreSignalInfo, count_VkSemaphoreSignalInfoKHR)
-
-#endif
 #ifdef VK_KHR_vulkan_memory_model
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVulkanMemoryModelFeatures,
                       count_VkPhysicalDeviceVulkanMemoryModelFeaturesKHR)
@@ -1598,33 +1507,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVulkanMemoryModelFeatures,
 #ifdef VK_KHR_shader_terminate_invocation
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderTerminateInvocationFeatures,
                       count_VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR)
-
-#endif
-#ifdef VK_KHR_dynamic_rendering_local_read
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
-                      count_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkRenderingAttachmentLocationInfo,
-                      count_VkRenderingAttachmentLocationInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkRenderingInputAttachmentIndexInfo,
-                      count_VkRenderingInputAttachmentIndexInfoKHR)
-
-#endif
-#ifdef VK_KHR_separate_depth_stencil_layouts
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures,
-                      count_VkPhysicalDeviceSeparateDepthStencilLayoutsFeaturesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkAttachmentReferenceStencilLayout,
-                      count_VkAttachmentReferenceStencilLayoutKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkAttachmentDescriptionStencilLayout,
-                      count_VkAttachmentDescriptionStencilLayoutKHR)
-
-#endif
-#ifdef VK_KHR_uniform_buffer_standard_layout
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceUniformBufferStandardLayoutFeatures,
-                      count_VkPhysicalDeviceUniformBufferStandardLayoutFeaturesKHR)
 
 #endif
 #ifdef VK_KHR_buffer_device_address
@@ -1671,24 +1553,12 @@ void count_VkPipelineExecutableInternalRepresentationKHR(
     const VkPipelineExecutableInternalRepresentationKHR* toCount, size_t* count);
 
 #endif
-#ifdef VK_KHR_map_memory2
-DEFINE_ALIAS_FUNCTION(count_VkMemoryMapInfo, count_VkMemoryMapInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkMemoryUnmapInfo, count_VkMemoryUnmapInfoKHR)
-
-#endif
 #ifdef VK_KHR_shader_integer_dot_product
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderIntegerDotProductFeatures,
                       count_VkPhysicalDeviceShaderIntegerDotProductFeaturesKHR)
 
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderIntegerDotProductProperties,
                       count_VkPhysicalDeviceShaderIntegerDotProductPropertiesKHR)
-
-#endif
-#ifdef VK_KHR_pipeline_library
-void count_VkPipelineLibraryCreateInfoKHR(uint32_t featureBits, VkStructureType rootType,
-                                          const VkPipelineLibraryCreateInfoKHR* toCount,
-                                          size_t* count);
 
 #endif
 #ifdef VK_KHR_synchronization2
@@ -1757,11 +1627,6 @@ DEFINE_ALIAS_FUNCTION(count_VkDeviceImageMemoryRequirements,
                       count_VkDeviceImageMemoryRequirementsKHR)
 
 #endif
-#ifdef VK_KHR_shader_subgroup_rotate
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderSubgroupRotateFeatures,
-                      count_VkPhysicalDeviceShaderSubgroupRotateFeaturesKHR)
-
-#endif
 #ifdef VK_KHR_maintenance5
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceMaintenance5Features,
                       count_VkPhysicalDeviceMaintenance5FeaturesKHR)
@@ -1783,30 +1648,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPipelineCreateFlags2CreateInfo,
 DEFINE_ALIAS_FUNCTION(count_VkBufferUsageFlags2CreateInfo, count_VkBufferUsageFlags2CreateInfoKHR)
 
 #endif
-#ifdef VK_KHR_vertex_attribute_divisor
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVertexAttributeDivisorProperties,
-                      count_VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkVertexInputBindingDivisorDescription,
-                      count_VkVertexInputBindingDivisorDescriptionKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPipelineVertexInputDivisorStateCreateInfo,
-                      count_VkPipelineVertexInputDivisorStateCreateInfoKHR)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVertexAttributeDivisorFeatures,
-                      count_VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR)
-
-#endif
-#ifdef VK_KHR_shader_float_controls2
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderFloatControls2Features,
-                      count_VkPhysicalDeviceShaderFloatControls2FeaturesKHR)
-
-#endif
-#ifdef VK_KHR_index_type_uint8
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceIndexTypeUint8Features,
-                      count_VkPhysicalDeviceIndexTypeUint8FeaturesKHR)
-
-#endif
 #ifdef VK_KHR_line_rasterization
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceLineRasterizationFeatures,
                       count_VkPhysicalDeviceLineRasterizationFeaturesKHR)
@@ -1816,11 +1657,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceLineRasterizationProperties,
 
 DEFINE_ALIAS_FUNCTION(count_VkPipelineRasterizationLineStateCreateInfo,
                       count_VkPipelineRasterizationLineStateCreateInfoKHR)
-
-#endif
-#ifdef VK_KHR_shader_expect_assume
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderExpectAssumeFeatures,
-                      count_VkPhysicalDeviceShaderExpectAssumeFeaturesKHR)
 
 #endif
 #ifdef VK_KHR_maintenance6
@@ -1931,16 +1767,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTextureCompressionASTCHDRFeatures,
                       count_VkPhysicalDeviceTextureCompressionASTCHDRFeaturesEXT)
 
 #endif
-#ifdef VK_EXT_pipeline_robustness
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevicePipelineRobustnessFeatures,
-                      count_VkPhysicalDevicePipelineRobustnessFeaturesEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevicePipelineRobustnessProperties,
-                      count_VkPhysicalDevicePipelineRobustnessPropertiesEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkPipelineRobustnessCreateInfo, count_VkPipelineRobustnessCreateInfoEXT)
-
-#endif
 #ifdef VK_EXT_depth_clip_enable
 void count_VkPhysicalDeviceDepthClipEnableFeaturesEXT(
     uint32_t featureBits, VkStructureType rootType,
@@ -1949,14 +1775,6 @@ void count_VkPhysicalDeviceDepthClipEnableFeaturesEXT(
 void count_VkPipelineRasterizationDepthClipStateCreateInfoEXT(
     uint32_t featureBits, VkStructureType rootType,
     const VkPipelineRasterizationDepthClipStateCreateInfoEXT* toCount, size_t* count);
-
-#endif
-#ifdef VK_EXT_sampler_filter_minmax
-DEFINE_ALIAS_FUNCTION(count_VkSamplerReductionModeCreateInfo,
-                      count_VkSamplerReductionModeCreateInfoEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceSamplerFilterMinmaxProperties,
-                      count_VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT)
 
 #endif
 #ifdef VK_EXT_inline_uniform_block
@@ -2019,23 +1837,6 @@ void count_VkDrmFormatModifierProperties2EXT(uint32_t featureBits, VkStructureTy
 void count_VkDrmFormatModifierPropertiesList2EXT(
     uint32_t featureBits, VkStructureType rootType,
     const VkDrmFormatModifierPropertiesList2EXT* toCount, size_t* count);
-
-#endif
-#ifdef VK_EXT_descriptor_indexing
-DEFINE_ALIAS_FUNCTION(count_VkDescriptorSetLayoutBindingFlagsCreateInfo,
-                      count_VkDescriptorSetLayoutBindingFlagsCreateInfoEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDescriptorIndexingFeatures,
-                      count_VkPhysicalDeviceDescriptorIndexingFeaturesEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDescriptorIndexingProperties,
-                      count_VkPhysicalDeviceDescriptorIndexingPropertiesEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkDescriptorSetVariableDescriptorCountAllocateInfo,
-                      count_VkDescriptorSetVariableDescriptorCountAllocateInfoEXT)
-
-DEFINE_ALIAS_FUNCTION(count_VkDescriptorSetVariableDescriptorCountLayoutSupport,
-                      count_VkDescriptorSetVariableDescriptorCountLayoutSupportEXT)
 
 #endif
 #ifdef VK_EXT_vertex_attribute_divisor
@@ -2104,10 +1905,6 @@ void count_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceToolProperties, count_VkPhysicalDeviceToolPropertiesEXT)
 
 #endif
-#ifdef VK_EXT_separate_stencil_usage
-DEFINE_ALIAS_FUNCTION(count_VkImageStencilUsageCreateInfo, count_VkImageStencilUsageCreateInfoEXT)
-
-#endif
 #ifdef VK_EXT_provoking_vertex
 void count_VkPhysicalDeviceProvokingVertexFeaturesEXT(
     uint32_t featureBits, VkStructureType rootType,
@@ -2131,11 +1928,6 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceLineRasterizationProperties,
 
 DEFINE_ALIAS_FUNCTION(count_VkPipelineRasterizationLineStateCreateInfo,
                       count_VkPipelineRasterizationLineStateCreateInfoEXT)
-
-#endif
-#ifdef VK_EXT_host_query_reset
-DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceHostQueryResetFeatures,
-                      count_VkPhysicalDeviceHostQueryResetFeaturesEXT)
 
 #endif
 #ifdef VK_EXT_index_type_uint8
@@ -2357,12 +2149,6 @@ void count_VkDebugMetadataGuestThreadNameGOOGLE(uint32_t featureBits, VkStructur
 void count_VkDebugMetadataGuestThreadIdGOOGLE(uint32_t featureBits, VkStructureType rootType,
                                               const VkDebugMetadataGuestThreadIdGOOGLE* toCount,
                                               size_t* count);
-
-void count_VkGuestCapabilitiesGOOGLE(uint32_t featureBits, VkStructureType rootType,
-                                     const VkGuestCapabilitiesGOOGLE* toCount, size_t* count);
-
-void count_VkHostPointerResolveGOOGLE(uint32_t featureBits, VkStructureType rootType,
-                                      const VkHostPointerResolveGOOGLE* toCount, size_t* count);
 
 void count_VkDebugMetadataGOOGLE(uint32_t featureBits, VkStructureType rootType,
                                  const VkDebugMetadataGOOGLE* toCount, size_t* count);

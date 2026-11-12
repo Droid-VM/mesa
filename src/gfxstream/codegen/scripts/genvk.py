@@ -231,18 +231,6 @@ if __name__ == '__main__':
                     for child in entry:
                         originalEntry.append(child)
 
-        for entry in treeGfxstreamRoot.findall('enums'):
-            treeRoot.append(entry)
-
     # Load the XML tree into the registry object
     reg.loadElementTree(tree)
     reg.apiGen()
-
-    if args.target != 'cereal' and options.filename is not None:
-        if "GFXSTREAM_NO_CLANG_FMT" not in os.environ:
-            import shutil
-            import subprocess
-            clang_format_command = shutil.which('clang-format')
-            if clang_format_command is not None:
-                filepath = os.path.join(options.directory, options.filename)
-                subprocess.call([clang_format_command, "-i", "--style=file", filepath])

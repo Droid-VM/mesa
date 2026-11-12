@@ -82,9 +82,10 @@ class VulkanExtensionStructs(VulkanWrapperGenerator):
             cgen.stmt("return sizeof(%s)" % ext.name)
 
         def forEachExtensionReturnSizeProtectedByFeature(ext, _, cgen):
-            # This will only be called with extensions that are protected by stream features,
-            # so there is no need to check if streamFeature is None.
             streamFeature = ext.getProtectStreamFeature()
+            if streamFeature is None:
+                cgen.stmt("return sizeof(%s)" % ext.name)
+                return
             cgen.beginIf("%s & %s" % ("streamFeatures", streamFeature))
             cgen.stmt("return sizeof(%s)" % ext.name)
             cgen.endIf()
@@ -120,9 +121,5 @@ class VulkanExtensionStructs(VulkanWrapperGenerator):
                     self.extensionStructSizeRetType,
                     STRUCT_EXTENSION_PARAM,
                     forEachExtensionReturnSizeProtectedByFeature, autoBreak=False,
-                    defaultEmit=lambda cgen: cgen.funcCallRet(
-                        None,
-                        EXTENSION_SIZE_API_NAME,
-                        [self.rootTypeParam.paramName, STRUCT_EXTENSION_PARAM.paramName]),
-                    rootTypeVar=self.rootTypeParam,
-                    structFilter=lambda ext: ext.getProtectStreamFeature() is not None)))
+                    defaultEmit=(defaultAbortEmit if self.variant == "host" else None),
+                    rootTypeVar=self.rootTypeParam)))

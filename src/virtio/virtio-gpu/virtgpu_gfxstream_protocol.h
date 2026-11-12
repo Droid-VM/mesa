@@ -108,7 +108,6 @@ struct vulkanCapset {
     uint32_t vulkanBatchedDescriptorSetUpdate;
     uint32_t hasTraceAsyncCommand;
     uint32_t hasSetMetadataCommand;
-    uint32_t hasGuestCapabilities;
 };
 
 struct magmaCapset {

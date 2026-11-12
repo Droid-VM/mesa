@@ -4,7 +4,6 @@
  */
 
 #include "ANativeWindowAndroid.h"
-
 #include "util/detect_os.h"
 
 #if DETECT_OS_ANDROID

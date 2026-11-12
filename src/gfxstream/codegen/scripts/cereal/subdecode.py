@@ -71,16 +71,16 @@ def emit_unmarshal(typeInfo, param, cgen, output=False, destroy=False, noUnbox=F
         if None == lenAccess or "1" == lenAccess:
             cgen.stmt("boxed_%s_preserve = %s" %
                       (param.paramName, param.paramName))
-            cgen.stmt("%s = unbox_%s(Boxed<%s>(%s))" %
-                      (param.paramName, param.typeName, param.typeName, param.paramName))
+            cgen.stmt("%s = unbox_%s(%s)" %
+                      (param.paramName, param.typeName, param.paramName))
         else:
             if lenAccessGuard is not None:
                 self.cgen.beginIf(lenAccessGuard)
             cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
             cgen.stmt("boxed_%s_preserve[i] = %s[i]" %
                       (param.paramName, param.paramName))
-            cgen.stmt("((%s*)(%s))[i] = unbox_%s(Boxed<%s>(%s[i]))" % (param.typeName,
-                                                            param.paramName, param.typeName, param.typeName, param.paramName))
+            cgen.stmt("((%s*)(%s))[i] = unbox_%s(%s[i])" % (param.typeName,
+                                                            param.paramName, param.typeName, param.paramName))
             cgen.endFor()
             if lenAccessGuard is not None:
                 self.cgen.endIf()
@@ -138,10 +138,10 @@ def emit_dispatch_unmarshal(typeInfo, param, cgen, globalWrapped):
             "",
             direction="read",
             dynAlloc=True))
-        cgen.stmt("auto unboxed_%s = unbox_%s(Boxed<%s>(%s))" %
-                  (param.paramName, param.typeName, param.typeName, param.paramName))
-        cgen.stmt("auto vk = dispatch_%s(Boxed<%s>(%s))" %
-                  (param.typeName, param.typeName, param.paramName))
+        cgen.stmt("auto unboxed_%s = unbox_%s(%s)" %
+                  (param.paramName, param.typeName, param.paramName))
+        cgen.stmt("auto vk = dispatch_%s(%s)" %
+                  (param.typeName, param.paramName))
         cgen.stmt("// End manual dispatchable handle unboxing for %s" %
                   param.paramName)
 
@@ -198,7 +198,7 @@ def emit_call_log(api, cgen):
         paramLogFormat += "0x%llx "
     for p in paramsToRead:
         paramLogArgs.append("(unsigned long long)%s" % (p.paramName))
-    # cgen.stmt("GFXSTREAM_ERROR(\"substream %%p: call %s %s\", readStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
+    # cgen.stmt("fprintf(stderr, \"substream %%p: call %s %s\\n\", readStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
     # cgen.endIf()
 
 
@@ -286,7 +286,7 @@ def emit_dispatch_call(api, cgen):
 
 
 def emit_global_state_wrapped_call(api, cgen, context=False):
-    customParams = ["pool", SNAPSHOT_API_CALL_HANDLE_VARNAME, "Boxed<VkCommandBuffer>::fromRaw(boxed_dispatchHandle)"] + \
+    customParams = ["pool", SNAPSHOT_API_CALL_HANDLE_VARNAME, "(VkCommandBuffer)(boxed_dispatchHandle)"] + \
         list(map(lambda p: p.paramName, api.parameters[1:]))
     if context:
         customParams += ["context"];
@@ -325,10 +325,6 @@ custom_decodes = {
     "vkResetCommandBuffer": emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier": emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier2": emit_global_state_wrapped_decoding,
-    "vkCmdPipelineBarrier2KHR": emit_global_state_wrapped_decoding,
-    "vkCmdWaitEvents": emit_global_state_wrapped_decoding,
-    "vkCmdWaitEvents2": emit_global_state_wrapped_decoding,
-    "vkCmdWaitEvents2KHR": emit_global_state_wrapped_decoding,
     "vkCmdBindPipeline": emit_global_state_wrapped_decoding,
     "vkCmdBindDescriptorSets": emit_global_state_wrapped_decoding,
     "vkCmdCopyQueryPoolResults": emit_global_state_wrapped_decoding,
@@ -339,8 +335,6 @@ custom_decodes = {
     "vkCmdBeginRenderPass" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2KHR" : emit_global_state_wrapped_decoding,
-    "vkCmdBeginRendering" : emit_global_state_wrapped_decoding,
-    "vkCmdBeginRenderingKHR" : emit_global_state_wrapped_decoding,
     "vkCmdSetEvent" : emit_global_state_wrapped_decoding,
     "vkCmdResetEvent" : emit_global_state_wrapped_decoding,
 }
