@@ -2378,8 +2378,8 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
     };
 
     // Overwrite all of the properties with gfxstream driver info.
-    vk_foreach_struct(ext, pProperties) {
-        switch (ext->sType) {
+    vk_foreach_struct(sType, ext, pProperties) {
+        switch (sType) {
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
                 overwrite_id_props(reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(ext));
                 break;
