@@ -7,6 +7,11 @@
 #include "util/perf/cpu_trace.h"
 #include "c11/threads.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include "util/os_time.h"
+#endif
+
 #include "vdrm.h"
 
 #ifdef _WIN32
@@ -244,6 +249,33 @@ fence_before(uint32_t a, uint32_t b)
 void
 vdrm_host_sync(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req)
 {
+#ifdef _WIN32
+   if (!fence_before(vdev->shmem->seqno, req->seqno))
+      return;
+
+   /* Yield briefly for the common case. On a longer wait, park this thread
+    * so a vCPU polling the shared page cannot starve the host GPU worker.
+    */
+   int64_t spin_end = os_time_get_nano() + 150000;
+   do {
+      thrd_yield();
+      if (!fence_before(vdev->shmem->seqno, req->seqno))
+         return;
+   } while (os_time_get_nano() < spin_end);
+
+   HANDLE timer = CreateWaitableTimerExW(NULL, NULL,
+                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_MODIFY_STATE | SYNCHRONIZE);
+   if (timer) {
+      LARGE_INTEGER delay = { .QuadPart = -1000 }; /* 100 us */
+      while (fence_before(vdev->shmem->seqno, req->seqno)) {
+         if (!SetWaitableTimerEx(timer, &delay, 0, NULL, NULL, NULL, 0) ||
+             WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
+            break;
+      }
+      CloseHandle(timer);
+   }
+#endif
    while (fence_before(vdev->shmem->seqno, req->seqno))
       thrd_yield();
 }
